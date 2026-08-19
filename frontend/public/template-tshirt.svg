@@ -1,0 +1,7 @@
+<svg width="600" height="760" viewBox="0 0 600 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="600" height="760" rx="28" fill="#F8F7FC"/>
+  <path d="M202 150L298 104L398 150L510 224L452 344L410 316V650H190V316L148 344L90 224L202 150Z" fill="white" stroke="#D7D2E8" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M238 132C238 171 265 196 300 196C335 196 362 171 362 132" stroke="#D7D2E8" stroke-width="8"/>
+  <rect x="217" y="260" width="166" height="224" rx="12" fill="#EEEAFE" stroke="#9A83F0" stroke-width="4" stroke-dasharray="10 8"/>
+  <text x="300" y="375" text-anchor="middle" fill="#7457D8" font-family="Arial, sans-serif" font-size="25">印花区域</text>
+</svg>
