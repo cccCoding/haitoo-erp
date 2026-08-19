@@ -58,6 +58,7 @@ class PodTaskCreate(BaseModel):
     ratio: Literal["1:1", "3:4"] = "1:1"
     quality: Literal["1K", "2K"] = "1K"
     print_url: str | None = None
+    print_urls: list[str] = Field(default_factory=list, max_length=1000)
     creative_requirement: str | None = Field(default=None, max_length=1000)
 
 

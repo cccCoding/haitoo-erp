@@ -9,7 +9,7 @@ const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]
 const activeShop = ref(null), loading = ref(false), error = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
 const showGroupDialog = ref(false), showTemplateDialog = ref(false), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), editingTemplate = ref(null);
-const creativeAsset = ref(null), creativeAssetPreview = ref(''), creativeRequirement = ref(''), creativePlacement = ref('居中印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
+const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeRequirement = ref(''), creativePlacement = ref('居中印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
 const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'points', icon: '◉', label: '积分中心' }];
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
 const pageTitle = computed(() => nav.find(x => x.key === page.value)?.label || '');
@@ -46,13 +46,20 @@ catch {
 finally {
     loading.value = false;
 } }
-function onCreativeAssetChange(event) { const file = event.target.files?.[0] || null; creativeAsset.value = file; creativeAssetPreview.value = file ? URL.createObjectURL(file) : ''; }
-async function uploadCreativeAsset() { if (!creativeAsset.value)
-    return undefined; const form = new FormData(); form.append('file', creativeAsset.value); const { data } = await api.post('/uploads/creative-asset', form, { headers: headers.value }); return data.url; }
+function onCreativeAssetChange(event) {
+    const files = Array.from(event.target.files || []);
+    const available = 1000 - creativeAssets.value.length;
+    files.slice(0, available).forEach(file => creativeAssets.value.push({ id: `${file.name}-${file.lastModified}-${crypto.randomUUID()}`, file, preview: URL.createObjectURL(file) }));
+    event.target.value = '';
+}
+function removeCreativeAsset(id) { const asset = creativeAssets.value.find(item => item.id === id); if (asset)
+    URL.revokeObjectURL(asset.preview); creativeAssets.value = creativeAssets.value.filter(item => item.id !== id); }
+function clearCreativeAssets() { creativeAssets.value.forEach(item => URL.revokeObjectURL(item.preview)); creativeAssets.value = []; showCreativeAssetsDialog.value = false; }
+async function uploadCreativeAssets() { return Promise.all(creativeAssets.value.map(async (asset) => { const form = new FormData(); form.append('file', asset.file); const { data } = await api.post('/uploads/creative-asset', form, { headers: headers.value }); return data.url; })); }
 async function createTask() { if (!activeShop.value || !selectedTemplateId.value)
     return; try {
-    const print_url = await uploadCreativeAsset();
-    await api.post('/tasks', { shop_id: activeShop.value, template_id: selectedTemplateId.value, placement: creativePlacement.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url, creative_requirement: creativeRequirement.value.trim() || null }, { headers: headers.value });
+    const print_urls = await uploadCreativeAssets();
+    await api.post('/tasks', { shop_id: activeShop.value, template_id: selectedTemplateId.value, placement: creativePlacement.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() || null }, { headers: headers.value });
     await refresh();
     page.value = 'tasks';
 }
@@ -527,6 +534,15 @@ else {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "requirement-label" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+            value: (__VLS_ctx.creativeRequirement),
+            maxlength: "1000",
+            placeholder: "例如：保留花朵细节，色彩清晰自然，印花完整贴合布料",
+        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "pod-grid" },
         });
@@ -534,16 +550,17 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "upload floral" },
-            ...{ class: ({ hasAsset: __VLS_ctx.creativeAssetPreview }) },
+            ...{ class: ({ hasAsset: __VLS_ctx.creativeAssets.length }) },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
             ...{ onChange: (__VLS_ctx.onCreativeAssetChange) },
             type: "file",
+            multiple: true,
             accept: "image/png,image/jpeg,image/webp",
         });
-        if (__VLS_ctx.creativeAssetPreview) {
+        if (__VLS_ctx.creativeAssets.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                src: (__VLS_ctx.creativeAssetPreview),
+                src: (__VLS_ctx.creativeAssets[0].preview),
                 alt: "印花素材预览",
             });
         }
@@ -551,6 +568,45 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        }
+        if (__VLS_ctx.creativeAssets.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!(__VLS_ctx.creativeAssets.length))
+                            return;
+                        __VLS_ctx.showCreativeAssetsDialog = true;
+                    } },
+                type: "button",
+                ...{ class: "asset-count" },
+            });
+            (__VLS_ctx.creativeAssets.length);
+        }
+        if (__VLS_ctx.creativeAssets.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!(__VLS_ctx.creativeAssets.length))
+                            return;
+                        __VLS_ctx.showCreativeAssetsDialog = true;
+                    } },
+                ...{ class: "manage-assets" },
+            });
+            (__VLS_ctx.creativeAssets.length);
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
@@ -610,15 +666,6 @@ else {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
-            ...{ class: "requirement-label" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
-            value: (__VLS_ctx.creativeRequirement),
-            maxlength: "1000",
-            placeholder: "例如：保留花朵细节，色彩清晰自然，印花完整贴合布料",
-        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.aside, __VLS_intrinsicElements.aside)({
             ...{ class: "estimate" },
         });
@@ -822,6 +869,91 @@ else {
         }
     }
 }
+if (__VLS_ctx.showCreativeAssetsDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showCreativeAssetsDialog))
+                    return;
+                __VLS_ctx.showCreativeAssetsDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card asset-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showCreativeAssetsDialog))
+                    return;
+                __VLS_ctx.showCreativeAssetsDialog = false;
+            } },
+        ...{ class: "modal-close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "asset-summary" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    (__VLS_ctx.creativeAssets.length);
+    (__VLS_ctx.creativeAssets.length);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "add-assets" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        ...{ onChange: (__VLS_ctx.onCreativeAssetChange) },
+        type: "file",
+        multiple: true,
+        accept: "image/png,image/jpeg,image/webp",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "asset-dialog-heading" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    (__VLS_ctx.creativeAssets.length);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.clearCreativeAssets) },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "asset-status" },
+    });
+    (__VLS_ctx.creativeAssets.length);
+    (__VLS_ctx.creativeAssets.length);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "asset-list" },
+    });
+    for (const [asset] of __VLS_getVForSourceType((__VLS_ctx.creativeAssets))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+            key: (asset.id),
+            ...{ class: "asset-row" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+            src: (asset.preview),
+            alt: (asset.file.name),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+        (asset.file.name);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        ((asset.file.size / 1024).toFixed(1));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.showCreativeAssetsDialog))
+                        return;
+                    __VLS_ctx.removeCreativeAsset(asset.id);
+                } },
+            ...{ class: "asset-delete" },
+            title: "删除",
+        });
+    }
+    if (!__VLS_ctx.creativeAssets.length) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "asset-empty" },
+        });
+    }
+}
 if (__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
@@ -982,9 +1114,12 @@ if (__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['active']} */ ;
 /** @type {__VLS_StyleScopedClasses['pod-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['pod-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['requirement-label']} */ ;
 /** @type {__VLS_StyleScopedClasses['pod-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['upload']} */ ;
 /** @type {__VLS_StyleScopedClasses['floral']} */ ;
+/** @type {__VLS_StyleScopedClasses['asset-count']} */ ;
+/** @type {__VLS_StyleScopedClasses['manage-assets']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['template-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings']} */ ;
@@ -993,7 +1128,6 @@ if (__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
-/** @type {__VLS_StyleScopedClasses['requirement-label']} */ ;
 /** @type {__VLS_StyleScopedClasses['estimate']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['full']} */ ;
@@ -1024,6 +1158,18 @@ if (__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['ledger']} */ ;
 /** @type {__VLS_StyleScopedClasses['ledger-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['asset-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['asset-summary']} */ ;
+/** @type {__VLS_StyleScopedClasses['add-assets']} */ ;
+/** @type {__VLS_StyleScopedClasses['asset-dialog-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['asset-status']} */ ;
+/** @type {__VLS_StyleScopedClasses['asset-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['asset-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['asset-delete']} */ ;
+/** @type {__VLS_StyleScopedClasses['asset-empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
@@ -1067,7 +1213,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             newTemplateImage: newTemplateImage,
             newTemplateImagePreview: newTemplateImagePreview,
             editingTemplate: editingTemplate,
-            creativeAssetPreview: creativeAssetPreview,
+            creativeAssets: creativeAssets,
+            showCreativeAssetsDialog: showCreativeAssetsDialog,
             creativeRequirement: creativeRequirement,
             creativePlacement: creativePlacement,
             creativeRatio: creativeRatio,
@@ -1079,6 +1226,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             selectedTemplate: selectedTemplate,
             login: login,
             onCreativeAssetChange: onCreativeAssetChange,
+            removeCreativeAsset: removeCreativeAsset,
+            clearCreativeAssets: clearCreativeAssets,
             createTask: createTask,
             createGroup: createGroup,
             openTemplateDialog: openTemplateDialog,
