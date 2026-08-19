@@ -8,7 +8,7 @@ const password = ref('ChangeMe123!');
 const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), drafts = ref([]), points = ref(null);
 const activeShop = ref(null), loading = ref(false), error = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
-const showGroupDialog = ref(false), showTemplateDialog = ref(false), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), editingTemplate = ref(null);
+const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFormTab = ref('basic'), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), newPackageWeight = ref(null), newPackageLength = ref(null), newPackageWidth = ref(null), newPackageHeight = ref(null), newSkuSizeOptions = ref([]), editingTemplate = ref(null);
 const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeRequirement = ref(''), creativePlacement = ref('居中印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
 const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'points', icon: '◉', label: '积分中心' }];
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
@@ -76,18 +76,26 @@ async function createGroup() { if (!newGroupName.value.trim())
 catch (e) {
     error.value = e.response?.data?.detail || '创建分类失败';
 } }
-function openTemplateDialog(template) { editingTemplate.value = template || null; newTemplateName.value = template?.name || ''; newTemplateDescription.value = template?.description || ''; newTemplateGroupId.value = template?.group_id || null; newTemplateImage.value = null; newTemplateImagePreview.value = imageUrl(template?.cover_url); showTemplateDialog.value = true; }
+function openTemplateDialog(template) { editingTemplate.value = template || null; templateFormTab.value = 'basic'; newTemplateName.value = template?.name || ''; newTemplateDescription.value = template?.description || ''; newTemplateGroupId.value = template?.group_id || null; newTemplateImage.value = null; newTemplateImagePreview.value = imageUrl(template?.cover_url); newPackageWeight.value = template?.package_weight ?? null; newPackageLength.value = template?.package_length ?? null; newPackageWidth.value = template?.package_width ?? null; newPackageHeight.value = template?.package_height ?? null; newSkuSizeOptions.value = template?.sku_specifications?.size?.options || []; showTemplateDialog.value = true; }
+function addSkuSize() { newSkuSizeOptions.value.push(''); }
 function onCoverChange(event) { const file = event.target.files?.[0] || null; newTemplateImage.value = file; newTemplateImagePreview.value = file ? URL.createObjectURL(file) : imageUrl(editingTemplate.value?.cover_url); }
 async function uploadCover() { if (!newTemplateImage.value)
     return undefined; const form = new FormData(); form.append('file', newTemplateImage.value); const { data } = await api.post('/uploads/template-cover', form, { headers: headers.value }); return data.url; }
-async function createTemplate() { if (!newTemplateName.value.trim())
-    return; try {
-    const cover_url = await uploadCover();
-    const payload = { name: newTemplateName.value.trim(), description: newTemplateDescription.value.trim() || null, group_id: newTemplateGroupId.value, cover_url };
+async function createTemplate() { if (!newTemplateName.value.trim()) {
+    templateFormTab.value = 'basic';
+    return;
+} if ([newPackageWeight.value, newPackageLength.value, newPackageWidth.value, newPackageHeight.value].some(value => value === null || value <= 0)) {
+    templateFormTab.value = 'logistics';
+    return;
+} try {
+    const cover_url = (await uploadCover()) ?? editingTemplate.value?.cover_url ?? null;
+    const sizeOptions = newSkuSizeOptions.value.map(value => value.trim()).filter(Boolean);
+    const sku_specifications = { size: { name: '尺码', options: sizeOptions } };
+    const payload = { name: newTemplateName.value.trim(), description: newTemplateDescription.value.trim() || null, group_id: newTemplateGroupId.value, cover_url, package_weight: newPackageWeight.value, package_length: newPackageLength.value, package_width: newPackageWidth.value, package_height: newPackageHeight.value, sku_specifications, color_count: 1, sku_count: Math.max(1, sizeOptions.length) };
     if (editingTemplate.value)
         await api.put(`/templates/${editingTemplate.value.id}`, payload, { headers: headers.value });
     else
-        await api.post('/templates', { ...payload, color_count: 1, sku_count: 1, print_areas: [{ name: '居中印花' }] }, { headers: headers.value });
+        await api.post('/templates', { ...payload, print_areas: [{ name: '居中印花' }] }, { headers: headers.value });
     showTemplateDialog.value = false;
     await refresh();
 }
@@ -363,20 +371,6 @@ else {
                             return;
                         if (!(__VLS_ctx.user?.role === 'company_admin'))
                             return;
-                        __VLS_ctx.showGroupDialog = true;
-                    } },
-                ...{ class: "ghost" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
-                            return;
-                        if (!!(__VLS_ctx.page === 'dashboard'))
-                            return;
-                        if (!(__VLS_ctx.page === 'templates'))
-                            return;
-                        if (!(__VLS_ctx.user?.role === 'company_admin'))
-                            return;
                         __VLS_ctx.openTemplateDialog();
                     } },
                 ...{ class: "primary" },
@@ -388,7 +382,26 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
             ...{ class: "groups" },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "groups-heading" },
+        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+        if (__VLS_ctx.user?.role === 'company_admin') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!(__VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        __VLS_ctx.showGroupDialog = true;
+                    } },
+                ...{ class: "add-group" },
+            });
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
                     if (!!(!__VLS_ctx.token))
@@ -954,13 +967,12 @@ if (__VLS_ctx.showCreativeAssetsDialog) {
         });
     }
 }
-if (__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog) {
+if (__VLS_ctx.showGroupDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
-                if (!(__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog))
+                if (!(__VLS_ctx.showGroupDialog))
                     return;
                 __VLS_ctx.showGroupDialog = false;
-                __VLS_ctx.showTemplateDialog = false;
             } },
         ...{ class: "modal-backdrop" },
     });
@@ -980,7 +992,7 @@ if (__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog) {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
-                    if (!(__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog))
+                    if (!(__VLS_ctx.showGroupDialog))
                         return;
                     if (!(__VLS_ctx.showGroupDialog))
                         return;
@@ -993,17 +1005,70 @@ if (__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog) {
             ...{ class: "primary" },
         });
     }
-    else {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "modal-card template-form" },
+}
+if (__VLS_ctx.showTemplateDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTemplateDialog))
+                    return;
+                __VLS_ctx.showTemplateDialog = false;
+            } },
+        ...{ class: "drawer-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "template-drawer" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    (__VLS_ctx.editingTemplate ? '编辑产品模板' : '新增产品模板');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTemplateDialog))
+                    return;
+                __VLS_ctx.showTemplateDialog = false;
+            } },
+        ...{ class: "drawer-close" },
+        'aria-label': "关闭",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
+        ...{ class: "drawer-tabs" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTemplateDialog))
+                    return;
+                __VLS_ctx.templateFormTab = 'basic';
+            } },
+        ...{ class: ({ active: __VLS_ctx.templateFormTab === 'basic' }) },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTemplateDialog))
+                    return;
+                __VLS_ctx.templateFormTab = 'sku';
+            } },
+        ...{ class: ({ active: __VLS_ctx.templateFormTab === 'sku' }) },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTemplateDialog))
+                    return;
+                __VLS_ctx.templateFormTab = 'logistics';
+            } },
+        ...{ class: ({ active: __VLS_ctx.templateFormTab === 'logistics' }) },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "drawer-content" },
+    });
+    if (__VLS_ctx.templateFormTab === 'basic') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "drawer-form" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-        (__VLS_ctx.editingTemplate ? '编辑产品模板' : '新增产品模板');
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        (__VLS_ctx.editingTemplate ? '更新模板信息后会立即应用。' : '上传图片并填写描述，创建后可直接用于 AI创作。');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-            ...{ class: "template-name-input" },
             placeholder: "例如：宽松短袖上衣",
         });
         (__VLS_ctx.newTemplateName);
@@ -1044,25 +1109,122 @@ if (__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog) {
             });
             (group.name);
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "modal-actions" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (...[$event]) => {
-                    if (!(__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog))
-                        return;
-                    if (!!(__VLS_ctx.showGroupDialog))
-                        return;
-                    __VLS_ctx.showTemplateDialog = false;
-                } },
-            ...{ class: "ghost" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (__VLS_ctx.createTemplate) },
-            ...{ class: "primary" },
-        });
-        (__VLS_ctx.editingTemplate ? '保存修改' : '确认新增');
     }
+    else if (__VLS_ctx.templateFormTab === 'sku') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "sku-form" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "sku-size-grid" },
+        });
+        for (const [_, index] of __VLS_getVForSourceType((__VLS_ctx.newSkuSizeOptions))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                key: (index),
+                ...{ class: "sku-size-row" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                maxlength: "50",
+                placeholder: "例如：M",
+            });
+            (__VLS_ctx.newSkuSizeOptions[index]);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (__VLS_ctx.newSkuSizeOptions[index].length);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showTemplateDialog))
+                            return;
+                        if (!!(__VLS_ctx.templateFormTab === 'basic'))
+                            return;
+                        if (!(__VLS_ctx.templateFormTab === 'sku'))
+                            return;
+                        __VLS_ctx.newSkuSizeOptions.splice(index, 1);
+                    } },
+                title: "删除尺码",
+            });
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.addSkuSize) },
+            ...{ class: "sku-add-option" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
+            ...{ class: "sku-total" },
+        });
+        (Math.max(1, __VLS_ctx.newSkuSizeOptions.filter(value => value.trim()).length));
+    }
+    else {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "drawer-form logistics-form" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            title: "用于运费及配送计算",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "unit-input" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            type: "number",
+            min: "0.001",
+            step: "0.001",
+            placeholder: "请输入重量",
+        });
+        (__VLS_ctx.newPackageWeight);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "dimension-inputs" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            type: "number",
+            min: "0.1",
+            step: "0.1",
+            placeholder: "长",
+        });
+        (__VLS_ctx.newPackageLength);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            type: "number",
+            min: "0.1",
+            step: "0.1",
+            placeholder: "宽",
+        });
+        (__VLS_ctx.newPackageWidth);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            type: "number",
+            min: "0.1",
+            step: "0.1",
+            placeholder: "高",
+        });
+        (__VLS_ctx.newPackageHeight);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTemplateDialog))
+                    return;
+                __VLS_ctx.showTemplateDialog = false;
+            } },
+        ...{ class: "ghost" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.createTemplate) },
+        ...{ class: "primary" },
+    });
+    (__VLS_ctx.editingTemplate ? '保存修改' : '确认新增');
 }
 /** @type {__VLS_StyleScopedClasses['login-shell']} */ ;
 /** @type {__VLS_StyleScopedClasses['login-card']} */ ;
@@ -1096,10 +1258,11 @@ if (__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['toolbar']} */ ;
 /** @type {__VLS_StyleScopedClasses['toolbar-actions']} */ ;
-/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['template-layout']} */ ;
 /** @type {__VLS_StyleScopedClasses['groups']} */ ;
+/** @type {__VLS_StyleScopedClasses['groups-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['add-group']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['template-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['template-card']} */ ;
@@ -1175,11 +1338,22 @@ if (__VLS_ctx.showGroupDialog || __VLS_ctx.showTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
-/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
-/** @type {__VLS_StyleScopedClasses['template-form']} */ ;
-/** @type {__VLS_StyleScopedClasses['template-name-input']} */ ;
+/** @type {__VLS_StyleScopedClasses['drawer-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['template-drawer']} */ ;
+/** @type {__VLS_StyleScopedClasses['drawer-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['drawer-tabs']} */ ;
+/** @type {__VLS_StyleScopedClasses['drawer-content']} */ ;
+/** @type {__VLS_StyleScopedClasses['drawer-form']} */ ;
 /** @type {__VLS_StyleScopedClasses['template-upload-preview']} */ ;
-/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['sku-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['sku-size-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['sku-size-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['sku-add-option']} */ ;
+/** @type {__VLS_StyleScopedClasses['sku-total']} */ ;
+/** @type {__VLS_StyleScopedClasses['drawer-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['logistics-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['unit-input']} */ ;
+/** @type {__VLS_StyleScopedClasses['dimension-inputs']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 var __VLS_dollars;
@@ -1206,12 +1380,18 @@ const __VLS_self = (await import('vue')).defineComponent({
             selectedTemplateId: selectedTemplateId,
             showGroupDialog: showGroupDialog,
             showTemplateDialog: showTemplateDialog,
+            templateFormTab: templateFormTab,
             newGroupName: newGroupName,
             newTemplateName: newTemplateName,
             newTemplateDescription: newTemplateDescription,
             newTemplateGroupId: newTemplateGroupId,
             newTemplateImage: newTemplateImage,
             newTemplateImagePreview: newTemplateImagePreview,
+            newPackageWeight: newPackageWeight,
+            newPackageLength: newPackageLength,
+            newPackageWidth: newPackageWidth,
+            newPackageHeight: newPackageHeight,
+            newSkuSizeOptions: newSkuSizeOptions,
             editingTemplate: editingTemplate,
             creativeAssets: creativeAssets,
             showCreativeAssetsDialog: showCreativeAssetsDialog,
@@ -1231,6 +1411,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             createTask: createTask,
             createGroup: createGroup,
             openTemplateDialog: openTemplateDialog,
+            addSkuSize: addSkuSize,
             onCoverChange: onCoverChange,
             createTemplate: createTemplate,
             deleteTemplate: deleteTemplate,

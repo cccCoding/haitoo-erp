@@ -35,6 +35,11 @@ class TemplateCreate(BaseModel):
     group_id: int | None = None
     cover_url: str | None = None
     description: str | None = Field(default=None, max_length=500)
+    package_weight: float | None = Field(default=None, gt=0)
+    package_length: float | None = Field(default=None, gt=0)
+    package_width: float | None = Field(default=None, gt=0)
+    package_height: float | None = Field(default=None, gt=0)
+    sku_specifications: dict | None = None
     color_count: int = 1
     sku_count: int = 1
     print_areas: list[dict] = []
@@ -45,6 +50,11 @@ class TemplateUpdate(BaseModel):
     group_id: int | None = None
     cover_url: str | None = None
     description: str | None = Field(default=None, max_length=500)
+    package_weight: float | None = Field(default=None, gt=0)
+    package_length: float | None = Field(default=None, gt=0)
+    package_width: float | None = Field(default=None, gt=0)
+    package_height: float | None = Field(default=None, gt=0)
+    sku_specifications: dict | None = None
 
 
 class TemplateGroupCreate(BaseModel):

@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
@@ -75,6 +75,11 @@ class ProductTemplate(Base):
     name: Mapped[str] = mapped_column(String(120))
     cover_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    package_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    package_length: Mapped[float | None] = mapped_column(Float, nullable=True)
+    package_width: Mapped[float | None] = mapped_column(Float, nullable=True)
+    package_height: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sku_specifications: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     is_platform: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(30), default="published")
     color_count: Mapped[int] = mapped_column(Integer, default=1)

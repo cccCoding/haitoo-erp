@@ -54,9 +54,14 @@ def seed(db: Session) -> None:
 def ensure_schema() -> None:
     """轻量兼容迁移，后续会替换为 Alembic 正式迁移。"""
     columns = {column["name"] for column in inspect(engine).get_columns("product_templates")}
-    if "description" not in columns:
-        with engine.begin() as connection:
+    with engine.begin() as connection:
+        if "description" not in columns:
             connection.execute(text("ALTER TABLE product_templates ADD COLUMN description TEXT"))
+        for column in ("package_weight", "package_length", "package_width", "package_height"):
+            if column not in columns:
+                connection.execute(text(f"ALTER TABLE product_templates ADD COLUMN {column} FLOAT"))
+        if "sku_specifications" not in columns:
+            connection.execute(text("ALTER TABLE product_templates ADD COLUMN sku_specifications JSON"))
 
 
 @asynccontextmanager
