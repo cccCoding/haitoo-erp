@@ -148,3 +148,15 @@ class AIProviderSetting(Base):
     model: Mapped[str] = mapped_column(String(120))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class NonAIPointRule(Base):
+    """由平台管理员维护的非 AI 操作积分消耗规则。"""
+    __tablename__ = "non_ai_point_rules"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    operation_code: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    points: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

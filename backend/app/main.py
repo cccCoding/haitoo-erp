@@ -12,8 +12,8 @@ from sqlalchemy import delete, func, inspect, or_, select, text
 from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
-from .models import AIProviderSetting, Company, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
-from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, LedgerOut, LoginInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
+from .models import AIProviderSetting, Company, NonAIPointRule, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
+from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, LedgerOut, LoginInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate
 from .credentials import decrypt_secret, encrypt_secret
@@ -49,6 +49,13 @@ def seed(db: Session) -> None:
         db.add(AIProviderSetting(provider="seedream", display_name="Seedream", model="doubao-seedream-4-0-250828", enabled=True, is_default=True))
     if not db.get(AIProviderSetting, "qwen"):
         db.add(AIProviderSetting(provider="qwen", display_name="千问图像编辑", model="qwen-image-edit", enabled=True, is_default=False))
+    for operation_code, display_name, points, description in (
+        ("product_draft_create", "创建商品草稿", 0, "从已选定的创作结果创建商品草稿"),
+        ("product_publish", "发布商品", 0, "将商品发布到已授权店铺"),
+        ("shop_sync", "同步店铺", 0, "从妙手同步店铺信息"),
+    ):
+        if not db.scalar(select(NonAIPointRule.id).where(NonAIPointRule.operation_code == operation_code)):
+            db.add(NonAIPointRule(operation_code=operation_code, display_name=display_name, points=points, description=description))
 
     # 开发演示数据清理：仅移除没有历史任务引用的旧模板，避免破坏既有任务。
     db.execute(
@@ -385,6 +392,41 @@ def list_tasks(shop_id: int | None = None, user: User = Depends(current_user), d
 @app.get("/admin/ai-providers")
 def list_ai_providers(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
     return db.scalars(select(AIProviderSetting).order_by(AIProviderSetting.provider)).all()
+
+
+@app.get("/admin/non-ai-point-rules")
+def list_non_ai_point_rules(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
+    return db.scalars(select(NonAIPointRule).order_by(NonAIPointRule.id.desc())).all()
+
+
+@app.post("/admin/non-ai-point-rules")
+def create_non_ai_point_rule(payload: NonAIPointRuleCreate, user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
+    operation_code = payload.operation_code.strip().lower()
+    if db.scalar(select(NonAIPointRule.id).where(NonAIPointRule.operation_code == operation_code)):
+        raise HTTPException(400, "操作代码已存在")
+    rule = NonAIPointRule(operation_code=operation_code, display_name=payload.display_name.strip(), points=payload.points, enabled=payload.enabled, description=payload.description.strip() if payload.description else None)
+    db.add(rule); db.commit(); db.refresh(rule)
+    return rule
+
+
+@app.put("/admin/non-ai-point-rules/{rule_id}")
+def update_non_ai_point_rule(rule_id: int, payload: NonAIPointRuleUpdate, user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
+    rule = db.get(NonAIPointRule, rule_id)
+    if not rule:
+        raise HTTPException(404, "积分消耗配置不存在")
+    rule.display_name = payload.display_name.strip(); rule.points = payload.points; rule.enabled = payload.enabled
+    rule.description = payload.description.strip() if payload.description else None
+    db.commit(); db.refresh(rule)
+    return rule
+
+
+@app.delete("/admin/non-ai-point-rules/{rule_id}")
+def delete_non_ai_point_rule(rule_id: int, user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
+    rule = db.get(NonAIPointRule, rule_id)
+    if not rule:
+        raise HTTPException(404, "积分消耗配置不存在")
+    db.delete(rule); db.commit()
+    return {"deleted": True}
 
 
 @app.get("/admin/overview")

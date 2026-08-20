@@ -3,24 +3,28 @@ import axios from 'axios';
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8001' });
 const token = ref(localStorage.getItem('haitoo_admin_token') || '');
 const email = ref('owner@haitoo-demo.com'), password = ref('ChangeMe123!');
-const user = ref(null), overview = ref(null), providers = ref([]), companies = ref([]), ledger = ref([]);
+const user = ref(null), overview = ref(null), providers = ref([]), companies = ref([]), ledger = ref([]), nonAiPointRules = ref([]);
 const loading = ref(false), saving = ref(''), error = ref('');
 const activePage = ref('overview');
 const showCompanyForm = ref(false), selectedCompanyId = ref(null);
 const showMiaoshouForm = ref(false), miaoshouCompany = ref(null);
+const showRuleForm = ref(false), editingRule = ref(null);
+const pointConfigTab = ref('non-ai');
 const companyForm = ref({ name: '', admin_name: '', admin_email: '', admin_password: '', initial_points: 0 });
 const rechargeForm = ref({ company_id: null, amount: null, note: '' });
 const miaoshouForm = ref({ app_id: '', app_secret: '' });
+const ruleForm = ref({ operation_code: '', display_name: '', points: 0, enabled: true, description: '' });
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
 async function loadAdmin() {
     const h = { headers: headers.value };
-    const [me, stats, models, companyRows] = await Promise.all([api.get('/me', h), api.get('/admin/overview', h), api.get('/admin/ai-providers', h), api.get('/admin/companies', h)]);
+    const [me, stats, models, companyRows, rules] = await Promise.all([api.get('/me', h), api.get('/admin/overview', h), api.get('/admin/ai-providers', h), api.get('/admin/companies', h), api.get('/admin/non-ai-point-rules', h)]);
     if (me.data.user.role !== 'super_admin')
         throw new Error('该账号不是超级管理员');
     user.value = me.data.user;
     overview.value = stats.data;
     providers.value = models.data;
     companies.value = companyRows.data;
+    nonAiPointRules.value = rules.data;
 }
 async function login() {
     try {
@@ -106,7 +110,39 @@ catch (e) {
 finally {
     saving.value = '';
 } }
-function logout() { localStorage.removeItem('haitoo_admin_token'); token.value = ''; user.value = null; overview.value = null; providers.value = []; companies.value = []; ledger.value = []; }
+function openRuleForm(rule) { editingRule.value = rule || null; ruleForm.value = { operation_code: rule?.operation_code || '', display_name: rule?.display_name || '', points: rule?.points ?? 0, enabled: rule?.enabled ?? true, description: rule?.description || '' }; showRuleForm.value = true; }
+async function saveRule() { if (!ruleForm.value.display_name.trim() || (!editingRule.value && !ruleForm.value.operation_code.trim()))
+    return; try {
+    saving.value = 'rule';
+    error.value = '';
+    const payload = { ...ruleForm.value, operation_code: ruleForm.value.operation_code.trim(), display_name: ruleForm.value.display_name.trim(), description: ruleForm.value.description.trim() || null };
+    if (editingRule.value)
+        await api.put(`/admin/non-ai-point-rules/${editingRule.value.id}`, payload, { headers: headers.value });
+    else
+        await api.post('/admin/non-ai-point-rules', payload, { headers: headers.value });
+    showRuleForm.value = false;
+    await loadAdmin();
+}
+catch (e) {
+    error.value = e.response?.data?.detail || '保存积分消耗配置失败';
+}
+finally {
+    saving.value = '';
+} }
+async function deleteRule(rule) { if (!confirm(`确定删除「${rule.display_name}」吗？`))
+    return; try {
+    saving.value = `delete-${rule.id}`;
+    error.value = '';
+    await api.delete(`/admin/non-ai-point-rules/${rule.id}`, { headers: headers.value });
+    await loadAdmin();
+}
+catch (e) {
+    error.value = e.response?.data?.detail || '删除积分消耗配置失败';
+}
+finally {
+    saving.value = '';
+} }
+function logout() { localStorage.removeItem('haitoo_admin_token'); token.value = ''; user.value = null; overview.value = null; providers.value = []; companies.value = []; ledger.value = []; nonAiPointRules.value = []; }
 onMounted(() => token.value && loadAdmin().catch(logout));
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
@@ -187,6 +223,14 @@ else {
             } },
         ...{ class: ({ active: __VLS_ctx.activePage === 'models' }) },
     });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!!(!__VLS_ctx.token))
+                    return;
+                __VLS_ctx.activePage = 'non-ai-points';
+            } },
+        ...{ class: ({ active: __VLS_ctx.activePage === 'non-ai-points' }) },
+    });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "operator" },
     });
@@ -205,7 +249,7 @@ else {
         ...{ class: "eyebrow" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h1, __VLS_intrinsicElements.h1)({});
-    (__VLS_ctx.activePage === 'overview' ? '平台概览' : __VLS_ctx.activePage === 'companies' ? '公司管理' : '模型管理');
+    (__VLS_ctx.activePage === 'overview' ? '平台概览' : __VLS_ctx.activePage === 'companies' ? '公司管理' : __VLS_ctx.activePage === 'models' ? '模型管理' : '积分配置');
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.loadAdmin) },
         ...{ class: "refresh" },
@@ -405,6 +449,150 @@ else {
             }
         }
     }
+    else if (__VLS_ctx.activePage === 'non-ai-points') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "panel point-config" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "point-config-tabs" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!!(!__VLS_ctx.token))
+                        return;
+                    if (!!(__VLS_ctx.activePage === 'overview'))
+                        return;
+                    if (!!(__VLS_ctx.activePage === 'companies'))
+                        return;
+                    if (!(__VLS_ctx.activePage === 'non-ai-points'))
+                        return;
+                    __VLS_ctx.pointConfigTab = 'ai';
+                } },
+            ...{ class: ({ active: __VLS_ctx.pointConfigTab === 'ai' }) },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!!(!__VLS_ctx.token))
+                        return;
+                    if (!!(__VLS_ctx.activePage === 'overview'))
+                        return;
+                    if (!!(__VLS_ctx.activePage === 'companies'))
+                        return;
+                    if (!(__VLS_ctx.activePage === 'non-ai-points'))
+                        return;
+                    __VLS_ctx.pointConfigTab = 'non-ai';
+                } },
+            ...{ class: ({ active: __VLS_ctx.pointConfigTab === 'non-ai' }) },
+        });
+        if (__VLS_ctx.pointConfigTab === 'ai') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "heading" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
+        }
+        else {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "heading heading-actions" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.activePage === 'overview'))
+                            return;
+                        if (!!(__VLS_ctx.activePage === 'companies'))
+                            return;
+                        if (!(__VLS_ctx.activePage === 'non-ai-points'))
+                            return;
+                        if (!!(__VLS_ctx.pointConfigTab === 'ai'))
+                            return;
+                        __VLS_ctx.openRuleForm();
+                    } },
+                ...{ class: "primary compact" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "rule-table" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "rule-head" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            for (const [rule] of __VLS_getVForSourceType((__VLS_ctx.nonAiPointRules))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    key: (rule.id),
+                    ...{ class: "rule-row" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+                (rule.display_name);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+                (rule.operation_code);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+                (rule.points);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: (rule.enabled ? 'ok' : 'bad') },
+                });
+                (rule.enabled ? '启用' : '停用');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "rule-description" },
+                });
+                (rule.description || '—');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "company-actions" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(!__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.activePage === 'overview'))
+                                return;
+                            if (!!(__VLS_ctx.activePage === 'companies'))
+                                return;
+                            if (!(__VLS_ctx.activePage === 'non-ai-points'))
+                                return;
+                            if (!!(__VLS_ctx.pointConfigTab === 'ai'))
+                                return;
+                            __VLS_ctx.openRuleForm(rule);
+                        } },
+                    ...{ class: "secondary" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(!__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.activePage === 'overview'))
+                                return;
+                            if (!!(__VLS_ctx.activePage === 'companies'))
+                                return;
+                            if (!(__VLS_ctx.activePage === 'non-ai-points'))
+                                return;
+                            if (!!(__VLS_ctx.pointConfigTab === 'ai'))
+                                return;
+                            __VLS_ctx.deleteRule(rule);
+                        } },
+                    ...{ class: "secondary delete" },
+                    disabled: (__VLS_ctx.saving === `delete-${rule.id}`),
+                });
+            }
+            if (!__VLS_ctx.nonAiPointRules.length) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                    ...{ class: "empty" },
+                });
+            }
+        }
+    }
     else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
             ...{ class: "panel" },
@@ -454,6 +642,8 @@ else {
                             return;
                         if (!!(__VLS_ctx.activePage === 'companies'))
                             return;
+                        if (!!(__VLS_ctx.activePage === 'non-ai-points'))
+                            return;
                         __VLS_ctx.setDefault(provider);
                     } },
                 ...{ class: "secondary" },
@@ -466,6 +656,8 @@ else {
                         if (!!(__VLS_ctx.activePage === 'overview'))
                             return;
                         if (!!(__VLS_ctx.activePage === 'companies'))
+                            return;
+                        if (!!(__VLS_ctx.activePage === 'non-ai-points'))
                             return;
                         __VLS_ctx.saveProvider(provider);
                     } },
@@ -597,6 +789,70 @@ if (__VLS_ctx.showMiaoshouForm) {
     });
     (__VLS_ctx.saving === 'miaoshou' ? '保存中…' : '安全保存');
 }
+if (__VLS_ctx.showRuleForm) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showRuleForm))
+                    return;
+                __VLS_ctx.showRuleForm = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showRuleForm))
+                    return;
+                __VLS_ctx.showRuleForm = false;
+            } },
+        ...{ class: "close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    (__VLS_ctx.editingRule ? '编辑' : '新增');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "120",
+        placeholder: "例如：发布商品",
+    });
+    (__VLS_ctx.ruleForm.display_name);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "80",
+        disabled: (!!__VLS_ctx.editingRule),
+        placeholder: "例如：product_publish",
+    });
+    (__VLS_ctx.ruleForm.operation_code);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "0",
+        max: "1000000",
+    });
+    (__VLS_ctx.ruleForm.points);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "255",
+        placeholder: "选填",
+    });
+    (__VLS_ctx.ruleForm.description);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "modal-switch" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "checkbox",
+    });
+    (__VLS_ctx.ruleForm.enabled);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveRule) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.saving === 'rule'),
+    });
+    (__VLS_ctx.saving === 'rule' ? '保存中…' : '保存配置');
+}
 /** @type {__VLS_StyleScopedClasses['login-page']} */ ;
 /** @type {__VLS_StyleScopedClasses['login-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['mark']} */ ;
@@ -636,6 +892,24 @@ if (__VLS_ctx.showMiaoshouForm) {
 /** @type {__VLS_StyleScopedClasses['ledger-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
+/** @type {__VLS_StyleScopedClasses['point-config']} */ ;
+/** @type {__VLS_StyleScopedClasses['point-config-tabs']} */ ;
+/** @type {__VLS_StyleScopedClasses['heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['heading-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['compact']} */ ;
+/** @type {__VLS_StyleScopedClasses['rule-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['rule-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['rule-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['rule-description']} */ ;
+/** @type {__VLS_StyleScopedClasses['company-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['delete']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['provider']} */ ;
 /** @type {__VLS_StyleScopedClasses['provider-title']} */ ;
@@ -655,6 +929,11 @@ if (__VLS_ctx.showMiaoshouForm) {
 /** @type {__VLS_StyleScopedClasses['modal']} */ ;
 /** @type {__VLS_StyleScopedClasses['close']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal']} */ ;
+/** @type {__VLS_StyleScopedClasses['close']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-switch']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
@@ -667,6 +946,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             providers: providers,
             companies: companies,
             ledger: ledger,
+            nonAiPointRules: nonAiPointRules,
             loading: loading,
             saving: saving,
             error: error,
@@ -675,9 +955,13 @@ const __VLS_self = (await import('vue')).defineComponent({
             selectedCompanyId: selectedCompanyId,
             showMiaoshouForm: showMiaoshouForm,
             miaoshouCompany: miaoshouCompany,
+            showRuleForm: showRuleForm,
+            editingRule: editingRule,
+            pointConfigTab: pointConfigTab,
             companyForm: companyForm,
             rechargeForm: rechargeForm,
             miaoshouForm: miaoshouForm,
+            ruleForm: ruleForm,
             loadAdmin: loadAdmin,
             login: login,
             saveProvider: saveProvider,
@@ -687,6 +971,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             loadLedger: loadLedger,
             openMiaoshou: openMiaoshou,
             saveMiaoshou: saveMiaoshou,
+            openRuleForm: openRuleForm,
+            saveRule: saveRule,
+            deleteRule: deleteRule,
             logout: logout,
         };
     },

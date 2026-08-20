@@ -89,6 +89,21 @@ class AIProviderSettingUpdate(BaseModel):
     is_default: bool = False
 
 
+class NonAIPointRuleCreate(BaseModel):
+    operation_code: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_]*$")
+    display_name: str = Field(min_length=1, max_length=120)
+    points: int = Field(ge=0, le=1000000)
+    enabled: bool = True
+    description: str | None = Field(default=None, max_length=255)
+
+
+class NonAIPointRuleUpdate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=120)
+    points: int = Field(ge=0, le=1000000)
+    enabled: bool = True
+    description: str | None = Field(default=None, max_length=255)
+
+
 class AdminCompanyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     admin_name: str = Field(min_length=1, max_length=80)
