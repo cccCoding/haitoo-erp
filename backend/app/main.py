@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
 from .models import AIProviderSetting, Company, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
-from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, LedgerOut, LoginInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, PodTaskCreate, RechargeInput, SelectResult, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
+from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, LedgerOut, LoginInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate
 from .credentials import decrypt_secret, encrypt_secret
@@ -35,13 +35,14 @@ def seed(db: Session) -> None:
 
     ensure_demo_user("owner@haitoo-demo.com", "平台超级管理员", Role.SUPER_ADMIN)
     ensure_demo_user("admin@haitoo-demo.com", "演示公司管理员", Role.COMPANY_ADMIN, company.id)
-    member = ensure_demo_user("operator@haitoo-demo.com", "陈宁", Role.MEMBER, company.id)
-    shop = db.scalar(select(Shop).where(Shop.company_id == company.id, Shop.name == "MY TikTok Shop"))
-    if not shop:
-        shop = Shop(company_id=company.id, name="MY TikTok Shop", region="MY", auth_status="not_connected")
-        db.add(shop); db.flush()
-    if not db.scalar(select(UserShop).where(UserShop.user_id == member.id, UserShop.shop_id == shop.id)):
-        db.add(UserShop(user_id=member.id, shop_id=shop.id))
+    ensure_demo_user("operator@haitoo-demo.com", "陈宁", Role.MEMBER, company.id)
+    # 仅清理无业务记录的早期内置演示店铺；实际店铺统一由妙手同步创建。
+    builtin_shop = db.scalar(select(Shop).where(
+        Shop.company_id == company.id, Shop.name == "MY TikTok Shop", Shop.external_shop_id.is_(None)
+    ))
+    if builtin_shop and not db.scalar(select(PodTask.id).where(PodTask.shop_id == builtin_shop.id).limit(1)) and not db.scalar(select(ProductDraft.id).where(ProductDraft.shop_id == builtin_shop.id).limit(1)):
+        db.execute(delete(UserShop).where(UserShop.shop_id == builtin_shop.id))
+        db.delete(builtin_shop)
     if not db.get(PointAccount, company.id):
         db.add(PointAccount(company_id=company.id, available=1280, frozen=120))
     if not db.get(AIProviderSetting, "seedream"):
@@ -87,6 +88,10 @@ def ensure_schema() -> None:
             connection.execute(text("ALTER TABLE companies ADD COLUMN miaoshou_app_id VARCHAR(255)"))
         if "miaoshou_secret_encrypted" not in company_columns:
             connection.execute(text("ALTER TABLE companies ADD COLUMN miaoshou_secret_encrypted TEXT"))
+        shop_columns = {column["name"] for column in inspect(engine).get_columns("shops")}
+        for column, definition in (("nickname", "VARCHAR(120)"), ("platform", "VARCHAR(40)"), ("auth_expires_at", "VARCHAR(50)")):
+            if column not in shop_columns:
+                connection.execute(text(f"ALTER TABLE shops ADD COLUMN {column} {definition}"))
         # 项目标准：MySQL 所有关系仅保存 ID，不建立数据库外键。兼容清理旧库。
         if connection.dialect.name == "mysql":
             inspector = inspect(connection)
@@ -158,6 +163,45 @@ def list_shops(user: User = Depends(current_user), db: Session = Depends(get_db)
     return db.scalars(select(Shop).where(Shop.id.in_(allowed_shop_ids(db, user))).order_by(Shop.id)).all()
 
 
+@app.get("/shops/manage")
+def list_managed_shops(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
+    """公司管理员查看全部店铺及其被分配的普通成员。"""
+    shops = db.scalars(select(Shop).where(Shop.company_id == user.company_id).order_by(Shop.id)).all()
+    assignments = db.execute(
+        select(UserShop.shop_id, User)
+        .join(User, User.id == UserShop.user_id)
+        .where(UserShop.shop_id.in_([shop.id for shop in shops]), User.company_id == user.company_id, User.role == Role.MEMBER)
+        .order_by(User.name, User.id)
+    ).all() if shops else []
+    members_by_shop: dict[int, list[UserOut]] = {shop.id: [] for shop in shops}
+    for shop_id, member in assignments:
+        members_by_shop[shop_id].append(UserOut.model_validate(member))
+    return [{
+        "id": shop.id, "name": shop.name, "region": shop.region, "auth_status": shop.auth_status,
+        "external_shop_id": shop.external_shop_id, "nickname": shop.nickname, "platform": shop.platform,
+        "auth_expires_at": shop.auth_expires_at,
+        "manager_users": members_by_shop[shop.id],
+    } for shop in shops]
+
+
+@app.put("/shops/{shop_id}/managers")
+def update_shop_managers(shop_id: int, payload: ShopManagerUpdate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
+    """为一个店铺分配多个普通成员；公司管理员天然拥有全部店铺权限，无需分配。"""
+    shop = db.get(Shop, shop_id)
+    if not shop or shop.company_id != user.company_id:
+        raise HTTPException(404, "店铺不存在")
+    member_ids = set(payload.member_ids)
+    members = db.scalars(select(User).where(
+        User.id.in_(member_ids), User.company_id == user.company_id, User.role == Role.MEMBER
+    )).all() if member_ids else []
+    if len(members) != len(member_ids):
+        raise HTTPException(400, "只能分配本公司的普通成员")
+    db.execute(delete(UserShop).where(UserShop.shop_id == shop.id))
+    db.add_all([UserShop(user_id=member.id, shop_id=shop.id) for member in members])
+    db.commit()
+    return {"shop_id": shop.id, "member_ids": sorted(member_ids)}
+
+
 @app.get("/members", response_model=list[UserOut])
 def list_members(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
     return db.scalars(
@@ -225,7 +269,26 @@ async def list_miaoshou_shops(payload: MiaoshouShopQuery, user: User = Depends(r
         raise HTTPException(502, f"妙手店铺接口调用失败：{exc}") from exc
     if result.get("code") != "success" and result.get("result") != "success":
         raise HTTPException(400, result.get("message") or result.get("code") or "妙手店铺接口返回失败")
-    return result.get("data") or {"shopList": []}
+    data = result.get("data") or {"shopList": []}
+    synced_count = 0
+    for item in data.get("shopList") or []:
+        external_shop_id = str(item.get("shopId") or "").strip()
+        if not external_shop_id:
+            continue
+        shop = db.scalar(select(Shop).where(Shop.company_id == user.company_id, Shop.external_shop_id == external_shop_id))
+        if not shop:
+            shop = Shop(company_id=user.company_id, external_shop_id=external_shop_id, name=external_shop_id)
+            db.add(shop)
+        shop.name = str(item.get("platformShopName") or item.get("shopNick") or external_shop_id).strip()[:120]
+        shop.nickname = str(item.get("shopNick") or "").strip()[:120] or None
+        shop.platform = str(item.get("platform") or "").strip()[:40] or None
+        shop.region = str(item.get("siteName") or item.get("site") or "MY").strip()[:20]
+        shop.auth_status = str(item.get("status") or "unknown").strip()[:30]
+        shop.auth_expires_at = str(item.get("gmtExpire") or "").strip()[:50] or None
+        synced_count += 1
+    db.commit()
+    data["synced_count"] = synced_count
+    return data
 
 
 @app.get("/template-groups")

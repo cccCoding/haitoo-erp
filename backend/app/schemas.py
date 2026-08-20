@@ -26,10 +26,19 @@ class ShopOut(BaseModel):
     id: int
     name: str
     region: str
+    external_shop_id: str | None
+    nickname: str | None
+    platform: str | None
     auth_status: str
+    auth_expires_at: str | None
 
     class Config:
         from_attributes = True
+
+
+class ShopManagerUpdate(BaseModel):
+    """店铺普通成员管理员列表；提交的列表会完整覆盖原有分配。"""
+    member_ids: list[int] = Field(default_factory=list, max_length=100)
 
 
 class TemplateCreate(BaseModel):

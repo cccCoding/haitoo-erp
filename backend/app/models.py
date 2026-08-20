@@ -48,7 +48,10 @@ class Shop(Base):
     name: Mapped[str] = mapped_column(String(120))
     region: Mapped[str] = mapped_column(String(20), default="MY")
     external_shop_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    nickname: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    platform: Mapped[str | None] = mapped_column(String(40), nullable=True)
     auth_status: Mapped[str] = mapped_column(String(30), default="not_connected")
+    auth_expires_at: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
 
 class UserShop(Base):
