@@ -15,6 +15,17 @@ const rechargeForm = ref({ company_id: null, amount: null, note: '' });
 const miaoshouForm = ref({ app_id: '', app_secret: '' });
 const ruleForm = ref({ operation_code: '', display_name: '', points: 0, enabled: true, description: '' });
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
+// 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
+const nativeToLocaleString = Date.prototype.toLocaleString;
+const nativeToLocaleDateString = Date.prototype.toLocaleDateString;
+Date.prototype.toLocaleString = function (...args) {
+    const [locales, options] = args;
+    return nativeToLocaleString.call(this, locales ?? 'zh-CN', { ...options, timeZone: 'Asia/Shanghai' });
+};
+Date.prototype.toLocaleDateString = function (...args) {
+    const [locales, options] = args;
+    return nativeToLocaleDateString.call(this, locales ?? 'zh-CN', { ...options, timeZone: 'Asia/Shanghai' });
+};
 async function loadAdmin() {
     const h = { headers: headers.value };
     const [me, stats, models, companyRows, rules] = await Promise.all([api.get('/me', h), api.get('/admin/overview', h), api.get('/admin/ai-providers', h), api.get('/admin/companies', h), api.get('/admin/non-ai-point-rules', h)]);
@@ -422,6 +433,7 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             for (const [row] of __VLS_getVForSourceType((__VLS_ctx.ledger))) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                     key: (row.id),
@@ -434,6 +446,8 @@ else {
                 (row.entry_type);
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
                 (row.note);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (row.actor_name);
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({
                     ...{ class: (row.amount > 0 ? 'ok' : 'bad') },
                 });

@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_serializer
 from .models import Role, TaskStatus
 
 
@@ -20,6 +20,10 @@ class UserOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+    @field_serializer("created_at", return_type=int)
+    def serialize_created_at(self, value: datetime) -> int:
+        return int(value.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
 
 class ShopOut(BaseModel):
@@ -148,6 +152,8 @@ class MiaoshouShopQuery(BaseModel):
 
 class LedgerOut(BaseModel):
     id: int
+    actor_id: int | None
+    actor_name: str
     entry_type: str
     amount: int
     balance_after: int
@@ -156,3 +162,7 @@ class LedgerOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+    @field_serializer("created_at", return_type=int)
+    def serialize_created_at(self, value: datetime) -> int:
+        return int(value.replace(tzinfo=timezone.utc).timestamp() * 1000)

@@ -3,6 +3,8 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from uuid import uuid4
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
@@ -65,13 +67,14 @@ def seed(db: Session) -> None:
         )
     )
     db.execute(delete(TemplateGroup).where(TemplateGroup.name.in_(["杯壶", "数码配件", "M05L"])))
-    group = db.scalar(select(TemplateGroup).where(TemplateGroup.company_id == company.id, TemplateGroup.name == "服装"))
-    if not group:
-        group = TemplateGroup(company_id=company.id, name="服装")
-        db.add(group); db.flush()
-    template = db.scalar(select(ProductTemplate).where(ProductTemplate.is_platform.is_(True), ProductTemplate.name == "白色 T恤正面"))
-    if not template:
-        db.add(ProductTemplate(company_id=None, group_id=group.id, name="白色 T恤正面", is_platform=True, color_count=1, sku_count=1, print_areas=[{"name":"居中印花"}]))
+    # 不再提供平台预置模板；历史上自动生成的默认模板在未被任务引用时予以清理。
+    db.execute(
+        delete(ProductTemplate).where(
+            ProductTemplate.is_platform.is_(True),
+            ProductTemplate.name == "白色 T恤正面",
+            ProductTemplate.id.not_in(select(PodTask.template_id)),
+        )
+    )
     db.commit()
 
 
@@ -135,6 +138,34 @@ def allowed_shop_ids(db: Session, user: User) -> set[int]:
     if user.role == Role.COMPANY_ADMIN:
         return set(db.scalars(select(Shop.id).where(Shop.company_id == user.company_id)).all())
     return set(db.scalars(select(UserShop.shop_id).where(UserShop.user_id == user.id)).all())
+
+
+def serialize_ledger(rows: list[PointLedger], db: Session) -> list[LedgerOut]:
+    """积分流水保留操作人 ID，同时返回便于展示的操作人名称。"""
+    actor_ids = {row.actor_id for row in rows if row.actor_id is not None}
+    actor_names = {
+        actor.id: actor.name
+        for actor in db.scalars(select(User).where(User.id.in_(actor_ids))).all()
+    } if actor_ids else {}
+    return [LedgerOut(
+        id=row.id, actor_id=row.actor_id, actor_name=actor_names.get(row.actor_id, "系统"),
+        entry_type=row.entry_type, amount=row.amount, balance_after=row.balance_after,
+        note=row.note, created_at=row.created_at,
+    ) for row in rows]
+
+
+def timestamp_ms(value: datetime) -> int:
+    """将数据库中按 UTC 保存的时间统一序列化为 Unix 毫秒时间戳。"""
+    return int(value.replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def serialize_record(record) -> dict:
+    """序列化 ORM 记录，确保所有 datetime 字段均返回 Unix 毫秒时间戳。"""
+    return {
+        column.name: timestamp_ms(value) if isinstance(value := getattr(record, column.name), datetime)
+        else value.value if isinstance(value, Enum) else value
+        for column in record.__table__.columns
+    }
 
 
 def ensure_shop(db: Session, user: User, shop_id: int) -> Shop:
@@ -386,17 +417,17 @@ def list_tasks(shop_id: int | None = None, user: User = Depends(current_user), d
     stmt = select(PodTask).where(PodTask.shop_id.in_(allowed_shop_ids(db, user)))
     if shop_id:
         ensure_shop(db, user, shop_id); stmt = stmt.where(PodTask.shop_id == shop_id)
-    return db.scalars(stmt.order_by(PodTask.id.desc())).all()
+    return [serialize_record(task) for task in db.scalars(stmt.order_by(PodTask.id.desc())).all()]
 
 
 @app.get("/admin/ai-providers")
 def list_ai_providers(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
-    return db.scalars(select(AIProviderSetting).order_by(AIProviderSetting.provider)).all()
+    return [serialize_record(setting) for setting in db.scalars(select(AIProviderSetting).order_by(AIProviderSetting.provider)).all()]
 
 
 @app.get("/admin/non-ai-point-rules")
 def list_non_ai_point_rules(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
-    return db.scalars(select(NonAIPointRule).order_by(NonAIPointRule.id.desc())).all()
+    return [serialize_record(rule) for rule in db.scalars(select(NonAIPointRule).order_by(NonAIPointRule.id.desc())).all()]
 
 
 @app.post("/admin/non-ai-point-rules")
@@ -406,7 +437,7 @@ def create_non_ai_point_rule(payload: NonAIPointRuleCreate, user: User = Depends
         raise HTTPException(400, "操作代码已存在")
     rule = NonAIPointRule(operation_code=operation_code, display_name=payload.display_name.strip(), points=payload.points, enabled=payload.enabled, description=payload.description.strip() if payload.description else None)
     db.add(rule); db.commit(); db.refresh(rule)
-    return rule
+    return serialize_record(rule)
 
 
 @app.put("/admin/non-ai-point-rules/{rule_id}")
@@ -417,7 +448,7 @@ def update_non_ai_point_rule(rule_id: int, payload: NonAIPointRuleUpdate, user: 
     rule.display_name = payload.display_name.strip(); rule.points = payload.points; rule.enabled = payload.enabled
     rule.description = payload.description.strip() if payload.description else None
     db.commit(); db.refresh(rule)
-    return rule
+    return serialize_record(rule)
 
 
 @app.delete("/admin/non-ai-point-rules/{rule_id}")
@@ -457,7 +488,7 @@ def list_admin_companies(user: User = Depends(require_roles(Role.SUPER_ADMIN)), 
             "name": company.name,
             "is_active": company.is_active,
             "miaoshou_configured": bool(company.miaoshou_app_id and company.miaoshou_secret_encrypted),
-            "created_at": company.created_at,
+            "created_at": timestamp_ms(company.created_at),
             "admin_users": [UserOut.model_validate(item) for item in db.scalars(select(User).where(User.company_id == company.id, User.role == Role.COMPANY_ADMIN).order_by(User.id)).all()],
             "points": {"available": account.available if account else 0, "frozen": account.frozen if account else 0},
         })
@@ -498,7 +529,7 @@ def list_admin_point_ledger(company_id: int, limit: int = 100, user: User = Depe
     if not db.get(Company, company_id):
         raise HTTPException(404, "公司不存在")
     rows = db.scalars(select(PointLedger).where(PointLedger.company_id == company_id).order_by(PointLedger.id.desc()).limit(min(max(limit, 1), 500))).all()
-    return [LedgerOut.model_validate(row) for row in rows]
+    return serialize_ledger(rows, db)
 
 
 @app.put("/admin/ai-providers/{provider}")
@@ -515,7 +546,7 @@ def update_ai_provider(provider: str, payload: AIProviderSettingUpdate, user: Us
     if setting.is_default is False and not db.scalar(select(AIProviderSetting).where(AIProviderSetting.is_default.is_(True), AIProviderSetting.provider != provider)) and payload.enabled:
         setting.is_default = True
     db.commit(); db.refresh(setting)
-    return setting
+    return serialize_record(setting)
 
 
 def settle_failed_task(task_id: int, reason: str) -> None:
@@ -576,7 +607,7 @@ def create_task(payload: PodTaskCreate, background_tasks: BackgroundTasks, user:
     db.add(PointLedger(company_id=shop.company_id, actor_id=user.id, task_id=task.id, entry_type="ai_freeze", amount=-estimated, balance_after=account.available, note="AI 创作预冻结"))
     db.commit(); db.refresh(task)
     background_tasks.add_task(run_generation, task.id)
-    return task
+    return serialize_record(task)
 
 
 @app.post("/tasks/{task_id}/select")
@@ -593,7 +624,7 @@ def select_result(task_id: int, payload: SelectResult, user: User = Depends(curr
     account.frozen -= task.estimated_points; account.available += task.estimated_points - actual
     task.selected_result_url = payload.result_url; task.actual_points = actual; task.status = TaskStatus.COMPLETED
     db.add(PointLedger(company_id=task.company_id, actor_id=user.id, task_id=task.id, entry_type="ai_settlement", amount=task.estimated_points - actual, balance_after=account.available, note="AI 任务按实际用量结算"))
-    db.commit(); db.refresh(task); return task
+    db.commit(); db.refresh(task); return serialize_record(task)
 
 
 @app.post("/tasks/{task_id}/draft")
@@ -603,7 +634,7 @@ def create_draft(task_id: int, user: User = Depends(current_user), db: Session =
         raise HTTPException(400, "请先完成任务并选择产品图")
     template = db.get(ProductTemplate, task.template_id)
     draft = ProductDraft(company_id=task.company_id, shop_id=task.shop_id, source_task_id=task.id, title=f"{template.name} POD 商品", image_urls=[task.selected_result_url])
-    db.add(draft); db.commit(); db.refresh(draft); return draft
+    db.add(draft); db.commit(); db.refresh(draft); return serialize_record(draft)
 
 
 @app.get("/drafts")
@@ -611,7 +642,7 @@ def list_drafts(shop_id: int | None = None, user: User = Depends(current_user), 
     stmt = select(ProductDraft).where(ProductDraft.shop_id.in_(allowed_shop_ids(db, user)))
     if shop_id:
         ensure_shop(db, user, shop_id); stmt = stmt.where(ProductDraft.shop_id == shop_id)
-    return db.scalars(stmt.order_by(ProductDraft.id.desc())).all()
+    return [serialize_record(draft) for draft in db.scalars(stmt.order_by(ProductDraft.id.desc())).all()]
 
 
 @app.get("/points")
@@ -620,7 +651,7 @@ def points(user: User = Depends(current_user), db: Session = Depends(get_db)):
         return {"available": 0, "frozen": 0, "ledger": []}
     account = db.get(PointAccount, user.company_id)
     rows = db.scalars(select(PointLedger).where(PointLedger.company_id == user.company_id).order_by(PointLedger.id.desc()).limit(50)).all()
-    return {"available": account.available, "frozen": account.frozen, "ledger": [LedgerOut.model_validate(row) for row in rows]}
+    return {"available": account.available, "frozen": account.frozen, "ledger": serialize_ledger(rows, db)}
 
 
 @app.post("/points/recharge")

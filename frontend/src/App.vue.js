@@ -20,6 +20,17 @@ const pageTitle = computed(() => nav.find(x => x.key === page.value)?.label || '
 const filteredTemplates = computed(() => templates.value.filter(t => (!activeGroupId.value || t.group_id === activeGroupId.value) && t.name.toLowerCase().includes(templateQuery.value.trim().toLowerCase())));
 const estimatedCreativePoints = computed(() => creativeQuality.value === '2K' ? 20 : 12);
 const selectedTemplate = computed(() => templates.value.find(t => t.id === selectedTemplateId.value));
+// 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
+const nativeToLocaleString = Date.prototype.toLocaleString;
+const nativeToLocaleDateString = Date.prototype.toLocaleDateString;
+Date.prototype.toLocaleString = function (...args) {
+    const [locales, options] = args;
+    return nativeToLocaleString.call(this, locales ?? 'zh-CN', { ...options, timeZone: 'Asia/Shanghai' });
+};
+Date.prototype.toLocaleDateString = function (...args) {
+    const [locales, options] = args;
+    return nativeToLocaleDateString.call(this, locales ?? 'zh-CN', { ...options, timeZone: 'Asia/Shanghai' });
+};
 async function refresh() {
     const h = { headers: headers.value };
     const [me, s, t, g, task, d, p] = await Promise.all([api.get('/me', h), api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', h), api.get('/drafts', h), api.get('/points', h)]);
@@ -1145,6 +1156,10 @@ else {
             (new Date(row.created_at).toLocaleString());
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (row.note);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "ledger-actor" },
+            });
+            (row.actor_name);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({
                 ...{ class: (row.amount > 0 ? 'positive' : 'negative') },
             });
@@ -1714,6 +1729,7 @@ if (__VLS_ctx.showTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['ledger']} */ ;
 /** @type {__VLS_StyleScopedClasses['ledger-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['ledger-actor']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['asset-dialog']} */ ;
