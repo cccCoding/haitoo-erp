@@ -6,7 +6,7 @@ const email = ref('owner@haitoo-demo.com'), password = ref('ChangeMe123!');
 const user = ref(null), overview = ref(null), providers = ref([]), companies = ref([]), ledger = ref([]), nonAiPointRules = ref([]);
 const loading = ref(false), saving = ref(''), error = ref('');
 const activePage = ref('overview');
-const showCompanyForm = ref(false), selectedCompanyId = ref(null);
+const showCompanyForm = ref(false), showRechargeForm = ref(false), showRechargeHistory = ref(false), rechargeCompany = ref(null), ledgerCompany = ref(null), selectedCompanyId = ref(null);
 const showMiaoshouForm = ref(false), miaoshouCompany = ref(null);
 const showRuleForm = ref(false), editingRule = ref(null);
 const pointConfigTab = ref('non-ai');
@@ -90,14 +90,16 @@ catch (e) {
 finally {
     saving.value = '';
 } }
+function openRecharge(company) { error.value = ''; rechargeCompany.value = company; rechargeForm.value = { company_id: company.id, amount: null, note: '' }; showRechargeForm.value = true; }
 async function recharge() { if (!rechargeForm.value.company_id || !rechargeForm.value.amount || !rechargeForm.value.note.trim())
     return; try {
     saving.value = 'recharge';
     error.value = '';
     await api.post('/points/recharge', { ...rechargeForm.value, note: rechargeForm.value.note.trim() }, { headers: headers.value });
-    rechargeForm.value = { company_id: rechargeForm.value.company_id, amount: null, note: '' };
+    showRechargeForm.value = false;
+    rechargeCompany.value = null;
+    rechargeForm.value = { company_id: null, amount: null, note: '' };
     await loadAdmin();
-    await loadLedger(rechargeForm.value.company_id);
 }
 catch (e) {
     error.value = e.response?.data?.detail || '充值失败';
@@ -106,6 +108,15 @@ finally {
     saving.value = '';
 } }
 async function loadLedger(companyId) { selectedCompanyId.value = companyId; rechargeForm.value.company_id = companyId; ledger.value = (await api.get('/admin/points/ledger', { params: { company_id: companyId }, headers: headers.value })).data; }
+async function openRechargeHistory(company) { try {
+    error.value = '';
+    ledgerCompany.value = company;
+    await loadLedger(company.id);
+    showRechargeHistory.value = true;
+}
+catch (e) {
+    error.value = e.response?.data?.detail || '加载充值记录失败';
+} }
 function openMiaoshou(company) { miaoshouCompany.value = company; miaoshouForm.value = { app_id: '', app_secret: '' }; showMiaoshouForm.value = true; }
 async function saveMiaoshou() { if (!miaoshouCompany.value || !miaoshouForm.value.app_id.trim() || !miaoshouForm.value.app_secret.trim())
     return; try {
@@ -260,7 +271,7 @@ else {
         ...{ class: "eyebrow" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h1, __VLS_intrinsicElements.h1)({});
-    (__VLS_ctx.activePage === 'overview' ? '平台概览' : __VLS_ctx.activePage === 'companies' ? '公司管理' : __VLS_ctx.activePage === 'models' ? '模型管理' : '积分配置');
+    (__VLS_ctx.activePage === 'overview' ? '平台概览' : __VLS_ctx.activePage === 'companies' ? '公司管理' : __VLS_ctx.activePage === 'models' ? '模型管理' : '积分消耗配置');
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.loadAdmin) },
         ...{ class: "refresh" },
@@ -332,17 +343,18 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         for (const [company] of __VLS_getVForSourceType((__VLS_ctx.companies))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 key: (company.id),
                 ...{ class: "company-row" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (company.id);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
             (company.name);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-            (company.id);
-            (new Date(company.created_at).toLocaleDateString());
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             for (const [admin] of __VLS_getVForSourceType((company.admin_users))) {
                 (admin.id);
@@ -362,6 +374,8 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
             (company.points.available);
             (company.points.frozen);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (new Date(company.created_at).toLocaleDateString());
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "company-actions" },
             });
@@ -385,82 +399,22 @@ else {
                             return;
                         if (!(__VLS_ctx.activePage === 'companies'))
                             return;
-                        __VLS_ctx.loadLedger(company.id);
+                        __VLS_ctx.openRecharge(company);
                     } },
                 ...{ class: "secondary" },
             });
-        }
-        if (__VLS_ctx.selectedCompanyId) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-                ...{ class: "panel points-panel" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "heading" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-            (__VLS_ctx.companies.find(c => c.id === __VLS_ctx.selectedCompanyId)?.name);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "recharge-form" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-                type: "number",
-                min: "1",
-                placeholder: "请输入积分",
-            });
-            (__VLS_ctx.rechargeForm.amount);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-                maxlength: "255",
-                placeholder: "例如：2026 年 8 月运营额度",
-            });
-            (__VLS_ctx.rechargeForm.note);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (__VLS_ctx.recharge) },
-                ...{ class: "primary compact" },
-                disabled: (__VLS_ctx.saving === 'recharge'),
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.activePage === 'overview'))
+                            return;
+                        if (!(__VLS_ctx.activePage === 'companies'))
+                            return;
+                        __VLS_ctx.openRechargeHistory(company);
+                    } },
+                ...{ class: "secondary" },
             });
-            (__VLS_ctx.saving === 'recharge' ? '充值中…' : '确认充值');
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "ledger" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "ledger-head" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            for (const [row] of __VLS_getVForSourceType((__VLS_ctx.ledger))) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                    key: (row.id),
-                    ...{ class: "ledger-row" },
-                });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-                (new Date(row.created_at).toLocaleString());
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-                (row.entry_type);
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-                (row.note);
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-                (row.actor_name);
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({
-                    ...{ class: (row.amount > 0 ? 'ok' : 'bad') },
-                });
-                (row.amount > 0 ? '+' : '');
-                (row.amount);
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-                (row.balance_after);
-            }
-            if (!__VLS_ctx.ledger.length) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
-                    ...{ class: "empty" },
-                });
-            }
         }
     }
     else if (__VLS_ctx.activePage === 'non-ai-points') {
@@ -762,6 +716,115 @@ if (__VLS_ctx.showCompanyForm) {
     });
     (__VLS_ctx.saving === 'company' ? '开通中…' : '确认开通');
 }
+if (__VLS_ctx.showRechargeForm) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showRechargeForm))
+                    return;
+                __VLS_ctx.showRechargeForm = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showRechargeForm))
+                    return;
+                __VLS_ctx.showRechargeForm = false;
+            } },
+        ...{ class: "close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.rechargeCompany?.name);
+    if (__VLS_ctx.error) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "error" },
+        });
+        (__VLS_ctx.error);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "1",
+        placeholder: "请输入积分",
+    });
+    (__VLS_ctx.rechargeForm.amount);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "255",
+        placeholder: "例如：2026 年 8 月运营额度",
+    });
+    (__VLS_ctx.rechargeForm.note);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.recharge) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.saving === 'recharge'),
+    });
+    (__VLS_ctx.saving === 'recharge' ? '充值中…' : '确认充值');
+}
+if (__VLS_ctx.showRechargeHistory) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showRechargeHistory))
+                    return;
+                __VLS_ctx.showRechargeHistory = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal recharge-history" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showRechargeHistory))
+                    return;
+                __VLS_ctx.showRechargeHistory = false;
+            } },
+        ...{ class: "close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.ledgerCompany?.name);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "recharge-records" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "recharge-record-head" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    for (const [row] of __VLS_getVForSourceType((__VLS_ctx.ledger.filter(item => item.entry_type === 'initial_recharge' || item.entry_type === 'manual_recharge')))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+            key: (row.id),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (new Date(row.created_at).toLocaleString());
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (__VLS_ctx.ledgerCompany?.name);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (row.entry_type === 'initial_recharge' ? '开通初始积分' : '人工充值');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (row.note);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (row.actor_name);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({
+            ...{ class: "ok" },
+        });
+        (row.amount);
+    }
+    if (!__VLS_ctx.ledger.some(item => item.entry_type === 'initial_recharge' || item.entry_type === 'manual_recharge')) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "empty" },
+        });
+    }
+}
 if (__VLS_ctx.showMiaoshouForm) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
@@ -895,16 +958,7 @@ if (__VLS_ctx.showRuleForm) {
 /** @type {__VLS_StyleScopedClasses['company-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['points-panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['heading']} */ ;
-/** @type {__VLS_StyleScopedClasses['recharge-form']} */ ;
-/** @type {__VLS_StyleScopedClasses['primary']} */ ;
-/** @type {__VLS_StyleScopedClasses['compact']} */ ;
-/** @type {__VLS_StyleScopedClasses['ledger']} */ ;
-/** @type {__VLS_StyleScopedClasses['ledger-head']} */ ;
-/** @type {__VLS_StyleScopedClasses['ledger-row']} */ ;
-/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['point-config']} */ ;
 /** @type {__VLS_StyleScopedClasses['point-config-tabs']} */ ;
@@ -942,6 +996,19 @@ if (__VLS_ctx.showRuleForm) {
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal']} */ ;
 /** @type {__VLS_StyleScopedClasses['close']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal']} */ ;
+/** @type {__VLS_StyleScopedClasses['recharge-history']} */ ;
+/** @type {__VLS_StyleScopedClasses['close']} */ ;
+/** @type {__VLS_StyleScopedClasses['recharge-records']} */ ;
+/** @type {__VLS_StyleScopedClasses['recharge-record-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['ok']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal']} */ ;
+/** @type {__VLS_StyleScopedClasses['close']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal']} */ ;
@@ -966,7 +1033,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             error: error,
             activePage: activePage,
             showCompanyForm: showCompanyForm,
-            selectedCompanyId: selectedCompanyId,
+            showRechargeForm: showRechargeForm,
+            showRechargeHistory: showRechargeHistory,
+            rechargeCompany: rechargeCompany,
+            ledgerCompany: ledgerCompany,
             showMiaoshouForm: showMiaoshouForm,
             miaoshouCompany: miaoshouCompany,
             showRuleForm: showRuleForm,
@@ -981,8 +1051,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             saveProvider: saveProvider,
             setDefault: setDefault,
             createCompany: createCompany,
+            openRecharge: openRecharge,
             recharge: recharge,
-            loadLedger: loadLedger,
+            openRechargeHistory: openRechargeHistory,
             openMiaoshou: openMiaoshou,
             saveMiaoshou: saveMiaoshou,
             openRuleForm: openRuleForm,
