@@ -26,7 +26,12 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://haitoo:haitoo_dev@mysql:3306/haitoo
       SECRET_KEY: change-me-before-production
-      CORS_ORIGINS: http://localhost:5173
+      CORS_ORIGINS: http://localhost:5173,http://localhost:5174
+      # 在部署环境中通过密钥管理服务或 CI 注入，勿提交真实密钥。
+      SEEDREAM_API_KEY: ${SEEDREAM_API_KEY:-}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      # 须是模型服务可访问的公网 HTTPS 域名，例如 https://pod.example.com
+      PUBLIC_MEDIA_BASE_URL: ${PUBLIC_MEDIA_BASE_URL:-}
     ports:
       - "8001:8000"
     volumes:
@@ -43,6 +48,18 @@ services:
       VITE_API_URL: http://localhost:8001
     volumes:
       - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - api
+
+  admin-web:
+    build: ./frontend-admin
+    ports:
+      - "5174:5174"
+    environment:
+      VITE_API_URL: http://localhost:8001
+    volumes:
+      - ./frontend-admin:/app
       - /app/node_modules
     depends_on:
       - api

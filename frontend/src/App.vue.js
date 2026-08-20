@@ -5,13 +5,16 @@ const token = ref(localStorage.getItem('haitoo_token') || '');
 const page = ref('dashboard');
 const email = ref('operator@haitoo-demo.com');
 const password = ref('ChangeMe123!');
-const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), drafts = ref([]), points = ref(null);
+const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), drafts = ref([]), points = ref(null), members = ref([]);
 const activeShop = ref(null), loading = ref(false), error = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
 const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFormTab = ref('basic'), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), newPackageWeight = ref(null), newPackageLength = ref(null), newPackageWidth = ref(null), newPackageHeight = ref(null), newSkuSizeOptions = ref([]), editingTemplate = ref(null);
+const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', email: '', password: '', is_active: true }), memberSaving = ref(false);
+const miaoshouShops = ref([]), shopLoading = ref(false), shopError = ref('');
 const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeRequirement = ref(''), creativePlacement = ref('居中印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
-const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'points', icon: '◉', label: '积分中心' }];
+const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'points', icon: '◉', label: '积分中心' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }];
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
+const visibleNav = computed(() => nav.filter(item => !item.adminOnly || user.value?.role === 'company_admin'));
 const pageTitle = computed(() => nav.find(x => x.key === page.value)?.label || '');
 const filteredTemplates = computed(() => templates.value.filter(t => (!activeGroupId.value || t.group_id === activeGroupId.value) && t.name.toLowerCase().includes(templateQuery.value.trim().toLowerCase())));
 const estimatedCreativePoints = computed(() => creativeQuality.value === '2K' ? 20 : 12);
@@ -27,6 +30,7 @@ async function refresh() {
     tasks.value = task.data;
     drafts.value = d.data;
     points.value = p.data;
+    members.value = user.value.role === 'company_admin' ? (await api.get('/members', h)).data : [];
     if (!activeShop.value && shops.value[0])
         activeShop.value = shops.value[0].id;
     if (!selectedTemplateId.value && templates.value[0])
@@ -119,6 +123,46 @@ function hasTemplateCover(template) { return Boolean(template?.cover_url || temp
 function useTemplate(template) { selectedTemplateId.value = template.id; page.value = 'pod'; }
 async function selectTask(task) { await api.post(`/tasks/${task.id}/select`, { result_url: task.result_urls[0] }, { headers: headers.value }); await refresh(); }
 async function makeDraft(task) { await api.post(`/tasks/${task.id}/draft`, {}, { headers: headers.value }); await refresh(); page.value = 'drafts'; }
+function openMemberDialog(member) { editingMember.value = member || null; memberForm.value = { name: member?.name || '', email: member?.email || '', password: '', is_active: member?.is_active ?? true }; showMemberDialog.value = true; }
+async function saveMember() { if (!memberForm.value.name.trim() || !memberForm.value.email.trim() || (!editingMember.value && memberForm.value.password.length < 8))
+    return; try {
+    memberSaving.value = true;
+    error.value = '';
+    const payload = { name: memberForm.value.name.trim(), email: memberForm.value.email.trim() };
+    if (memberForm.value.password)
+        payload.password = memberForm.value.password;
+    if (editingMember.value)
+        await api.put(`/members/${editingMember.value.id}`, payload, { headers: headers.value });
+    else
+        await api.post('/members', payload, { headers: headers.value });
+    showMemberDialog.value = false;
+    await refresh();
+}
+catch (e) {
+    error.value = e.response?.data?.detail || '保存成员失败';
+}
+finally {
+    memberSaving.value = false;
+} }
+async function toggleMember(member) { try {
+    await api.put(`/members/${member.id}`, { is_active: !member.is_active }, { headers: headers.value });
+    await refresh();
+}
+catch (e) {
+    error.value = e.response?.data?.detail || '更新成员状态失败';
+} }
+async function loadMiaoshouShops() { try {
+    shopLoading.value = true;
+    shopError.value = '';
+    const { data } = await api.post('/miaoshou/shops', {}, { headers: headers.value });
+    miaoshouShops.value = data.shopList || [];
+}
+catch (e) {
+    shopError.value = e.response?.data?.detail || '获取妙手店铺失败';
+}
+finally {
+    shopLoading.value = false;
+} }
 function logout() { localStorage.removeItem('haitoo_token'); token.value = ''; user.value = null; }
 onMounted(() => token.value && refresh().catch(logout));
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
@@ -175,7 +219,7 @@ else {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({});
-    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.nav))) {
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.visibleNav))) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
                     if (!!(!__VLS_ctx.token))
@@ -830,6 +874,183 @@ else {
             });
         }
     }
+    else if (__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "page" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "section-heading" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!!(!__VLS_ctx.token))
+                        return;
+                    if (!!(__VLS_ctx.page === 'dashboard'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'templates'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'pod'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'tasks'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'drafts'))
+                        return;
+                    if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                        return;
+                    __VLS_ctx.openMemberDialog();
+                } },
+            ...{ class: "primary" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "draft-table" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "thead" },
+            ...{ style: {} },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                key: (member.id),
+                ...{ class: "trow" },
+                ...{ style: {} },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            (member.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (member.email);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "chip" },
+                ...{ class: (member.is_active ? 'blue' : 'orange') },
+            });
+            (member.is_active ? '启用中' : '已停用');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (new Date(member.created_at).toLocaleDateString());
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        __VLS_ctx.openMemberDialog(member);
+                    } },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        __VLS_ctx.toggleMember(member);
+                    } },
+                ...{ class: (member.is_active ? 'negative' : 'positive') },
+            });
+            (member.is_active ? '停用' : '启用');
+        }
+        if (!__VLS_ctx.members.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
+        }
+    }
+    else if (__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "page" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "section-heading" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.loadMiaoshouShops) },
+            ...{ class: "primary" },
+            disabled: (__VLS_ctx.shopLoading),
+        });
+        (__VLS_ctx.shopLoading ? '获取中…' : '↻ 获取妙手店铺');
+        if (__VLS_ctx.shopError) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "error" },
+            });
+            (__VLS_ctx.shopError);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "draft-table" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "thead" },
+            ...{ style: {} },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.miaoshouShops))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                key: (shop.shopId),
+                ...{ class: "trow" },
+                ...{ style: {} },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (shop.shopId);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            (shop.platformShopName || '—');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (shop.shopNick || '—');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (shop.platform || '—');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (shop.siteName || shop.site || '—');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "chip" },
+                ...{ class: (shop.status ? 'blue' : 'orange') },
+            });
+            (shop.status || '未知');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (shop.gmtExpire || '—');
+        }
+        if (!__VLS_ctx.miaoshouShops.length && !__VLS_ctx.shopLoading) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
+        }
+    }
     else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
             ...{ class: "page" },
@@ -1006,6 +1227,59 @@ if (__VLS_ctx.showGroupDialog) {
         });
     }
 }
+if (__VLS_ctx.showMemberDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMemberDialog))
+                    return;
+                __VLS_ctx.showMemberDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    (__VLS_ctx.editingMember ? '编辑成员' : '新增成员');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.editingMember ? '留空密码即可保持原密码不变。' : '新成员将作为普通成员加入当前公司。');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "80",
+        placeholder: "请输入姓名",
+    });
+    (__VLS_ctx.memberForm.name);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "email",
+        placeholder: "name@example.com",
+    });
+    (__VLS_ctx.memberForm.email);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "password",
+        minlength: "8",
+        placeholder: (__VLS_ctx.editingMember ? '留空则不修改' : '至少 8 个字符'),
+    });
+    (__VLS_ctx.memberForm.password);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMemberDialog))
+                    return;
+                __VLS_ctx.showMemberDialog = false;
+            } },
+        ...{ class: "ghost" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveMember) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.memberSaving),
+    });
+    (__VLS_ctx.memberSaving ? '保存中…' : '保存');
+}
 if (__VLS_ctx.showTemplateDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
@@ -1114,12 +1388,9 @@ if (__VLS_ctx.showTemplateDialog) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "sku-form" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "sku-size-grid" },
         });
@@ -1313,6 +1584,23 @@ if (__VLS_ctx.showTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['orange']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['page']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['points-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['balance']} */ ;
 /** @type {__VLS_StyleScopedClasses['balance']} */ ;
@@ -1333,6 +1621,11 @@ if (__VLS_ctx.showTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['asset-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['asset-delete']} */ ;
 /** @type {__VLS_StyleScopedClasses['asset-empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
@@ -1372,6 +1665,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             tasks: tasks,
             drafts: drafts,
             points: points,
+            members: members,
             activeShop: activeShop,
             loading: loading,
             error: error,
@@ -1393,13 +1687,20 @@ const __VLS_self = (await import('vue')).defineComponent({
             newPackageHeight: newPackageHeight,
             newSkuSizeOptions: newSkuSizeOptions,
             editingTemplate: editingTemplate,
+            showMemberDialog: showMemberDialog,
+            editingMember: editingMember,
+            memberForm: memberForm,
+            memberSaving: memberSaving,
+            miaoshouShops: miaoshouShops,
+            shopLoading: shopLoading,
+            shopError: shopError,
             creativeAssets: creativeAssets,
             showCreativeAssetsDialog: showCreativeAssetsDialog,
             creativeRequirement: creativeRequirement,
             creativePlacement: creativePlacement,
             creativeRatio: creativeRatio,
             creativeQuality: creativeQuality,
-            nav: nav,
+            visibleNav: visibleNav,
             pageTitle: pageTitle,
             filteredTemplates: filteredTemplates,
             estimatedCreativePoints: estimatedCreativePoints,
@@ -1420,6 +1721,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             useTemplate: useTemplate,
             selectTask: selectTask,
             makeDraft: makeDraft,
+            openMemberDialog: openMemberDialog,
+            saveMember: saveMember,
+            toggleMember: toggleMember,
+            loadMiaoshouShops: loadMiaoshouShops,
             logout: logout,
         };
     },

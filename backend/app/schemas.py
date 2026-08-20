@@ -15,6 +15,8 @@ class UserOut(BaseModel):
     email: EmailStr
     role: Role
     company_id: int | None
+    is_active: bool
+    created_at: datetime
 
     class Config:
         from_attributes = True
@@ -72,6 +74,25 @@ class PodTaskCreate(BaseModel):
     creative_requirement: str | None = Field(default=None, max_length=1000)
 
 
+class AIProviderSettingUpdate(BaseModel):
+    model: str = Field(min_length=1, max_length=120)
+    enabled: bool
+    is_default: bool = False
+
+
+class AdminCompanyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    admin_name: str = Field(min_length=1, max_length=80)
+    admin_email: EmailStr
+    admin_password: str = Field(min_length=8, max_length=128)
+    initial_points: int = Field(default=0, ge=0)
+
+
+class MiaoshouAccountUpdate(BaseModel):
+    app_id: str = Field(min_length=1, max_length=255)
+    app_secret: str = Field(min_length=1, max_length=500)
+
+
 class SelectResult(BaseModel):
     result_url: str
 
@@ -80,6 +101,25 @@ class RechargeInput(BaseModel):
     company_id: int
     amount: int = Field(gt=0)
     note: str = Field(min_length=1, max_length=255)
+
+
+class MemberCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+
+
+class MemberUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    email: EmailStr | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=128)
+    is_active: bool | None = None
+
+
+class MiaoshouShopQuery(BaseModel):
+    site: str | None = Field(default=None, max_length=20)
+    page_no: int = Field(default=1, ge=1, alias="pageNo")
+    page_size: int = Field(default=100, ge=1, le=100, alias="pageSize")
 
 
 class LedgerOut(BaseModel):
