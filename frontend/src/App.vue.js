@@ -12,7 +12,7 @@ const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFor
 const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', email: '', password: '', is_active: true }), memberSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
-const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeRequirement = ref(''), creativePlacement = ref('居中印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
+const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativePlacement = ref('居中印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
 const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'points', icon: '◉', label: '积分中心' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }];
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
 const visibleNav = computed(() => nav.filter(item => !item.adminOnly || user.value?.role === 'company_admin'));
@@ -74,14 +74,20 @@ function onCreativeAssetChange(event) {
     const files = Array.from(event.target.files || []);
     const available = 1000 - creativeAssets.value.length;
     files.slice(0, available).forEach(file => creativeAssets.value.push({ id: `${file.name}-${file.lastModified}-${crypto.randomUUID()}`, file, preview: URL.createObjectURL(file) }));
+    if (files.length)
+        creativeAssetError.value = '';
     event.target.value = '';
 }
 function removeCreativeAsset(id) { const asset = creativeAssets.value.find(item => item.id === id); if (asset)
     URL.revokeObjectURL(asset.preview); creativeAssets.value = creativeAssets.value.filter(item => item.id !== id); }
 function clearCreativeAssets() { creativeAssets.value.forEach(item => URL.revokeObjectURL(item.preview)); creativeAssets.value = []; showCreativeAssetsDialog.value = false; }
 async function uploadCreativeAssets() { return Promise.all(creativeAssets.value.map(async (asset) => { const form = new FormData(); form.append('file', asset.file); const { data } = await api.post('/uploads/creative-asset', form, { headers: headers.value }); return data.url; })); }
-async function createTask() { if (!creativeShopId.value || !selectedTemplateId.value)
+async function createTask() { if (!creativeAssets.value.length) {
+    creativeAssetError.value = '请先上传至少一张印花图，再开始印花贴合。';
+    return;
+} if (!creativeShopId.value || !selectedTemplateId.value)
     return; try {
+    creativeAssetError.value = '';
     const print_urls = await uploadCreativeAssets();
     await api.post('/tasks', { shop_id: creativeShopId.value, template_id: selectedTemplateId.value, placement: creativePlacement.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() || null }, { headers: headers.value });
     await refresh();
@@ -629,7 +635,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "upload floral" },
-            ...{ class: ({ hasAsset: __VLS_ctx.creativeAssets.length }) },
+            ...{ class: ({ hasAsset: __VLS_ctx.creativeAssets.length, invalid: __VLS_ctx.creativeAssetError }) },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
             ...{ onChange: (__VLS_ctx.onCreativeAssetChange) },
@@ -667,6 +673,13 @@ else {
                 ...{ class: "asset-count" },
             });
             (__VLS_ctx.creativeAssets.length);
+        }
+        if (__VLS_ctx.creativeAssetError) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "creative-asset-error" },
+                role: "alert",
+            });
+            (__VLS_ctx.creativeAssetError);
         }
         if (__VLS_ctx.creativeAssets.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
@@ -1672,6 +1685,7 @@ if (__VLS_ctx.showTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['upload']} */ ;
 /** @type {__VLS_StyleScopedClasses['floral']} */ ;
 /** @type {__VLS_StyleScopedClasses['asset-count']} */ ;
+/** @type {__VLS_StyleScopedClasses['creative-asset-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['manage-assets']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['template-preview']} */ ;
@@ -1828,6 +1842,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             shopManagersSaving: shopManagersSaving,
             creativeAssets: creativeAssets,
             showCreativeAssetsDialog: showCreativeAssetsDialog,
+            creativeAssetError: creativeAssetError,
             creativeRequirement: creativeRequirement,
             creativePlacement: creativePlacement,
             creativeRatio: creativeRatio,
