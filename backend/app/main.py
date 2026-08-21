@@ -17,7 +17,7 @@ from .database import Base, engine, get_db
 from .models import AIProviderSetting, Company, MaterialAsset, NonAIPointRule, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
 from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, DraftCreate, LedgerOut, LoginInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
-from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate
+from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, provider_credential_env
 from .credentials import decrypt_secret, encrypt_secret
 import httpx
 
@@ -51,6 +51,8 @@ def seed(db: Session) -> None:
         db.add(AIProviderSetting(provider="seedream", display_name="Seedream", model="doubao-seedream-4-0-250828", enabled=True, is_default=True))
     if not db.get(AIProviderSetting, "qwen"):
         db.add(AIProviderSetting(provider="qwen", display_name="千问图像编辑", model="qwen-image-edit", enabled=True, is_default=False))
+    if not db.get(AIProviderSetting, "gemini"):
+        db.add(AIProviderSetting(provider="gemini", display_name="Gemini 图像生成", model="gemini-2.5-flash-image", enabled=True, is_default=False))
     for operation_code, display_name, points, description in (
         ("product_draft_create", "创建商品草稿", 0, "从已选定的创作结果创建商品草稿"),
         ("product_publish", "发布商品", 0, "将商品发布到已授权店铺"),
@@ -436,7 +438,10 @@ def list_material_assets(user: User = Depends(current_user), db: Session = Depen
 
 @app.get("/admin/ai-providers")
 def list_ai_providers(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
-    return [serialize_record(setting) for setting in db.scalars(select(AIProviderSetting).order_by(AIProviderSetting.provider)).all()]
+    return [
+        {**serialize_record(setting), "credential_env": provider_credential_env(setting.provider)}
+        for setting in db.scalars(select(AIProviderSetting).order_by(AIProviderSetting.provider)).all()
+    ]
 
 
 @app.get("/admin/non-ai-point-rules")
@@ -486,6 +491,7 @@ def admin_overview(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Se
         "credential_status": {
             "seedream": bool(settings.seedream_api_key),
             "qwen": bool(settings.qwen_api_key),
+            "gemini": bool(settings.gemini_api_key),
             "public_media_base_url": bool(settings.public_media_base_url),
         },
     }

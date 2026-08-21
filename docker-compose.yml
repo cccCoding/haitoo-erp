@@ -30,6 +30,7 @@ services:
       # 在部署环境中通过密钥管理服务或 CI 注入，勿提交真实密钥。
       SEEDREAM_API_KEY: ${SEEDREAM_API_KEY:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       # 须是模型服务可访问的公网 HTTPS 域名，例如 https://pod.example.com
       PUBLIC_MEDIA_BASE_URL: ${PUBLIC_MEDIA_BASE_URL:-}
     ports:

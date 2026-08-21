@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     seedream_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     qwen_api_key: str | None = None
     qwen_base_url: str = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+    gemini_api_key: str | None = None
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     public_media_base_url: str | None = None
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

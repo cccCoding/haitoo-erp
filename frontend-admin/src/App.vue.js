@@ -596,7 +596,7 @@ else {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.em, __VLS_intrinsicElements.em)({});
             }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-            (provider.provider === 'seedream' ? 'SEEDREAM_API_KEY' : 'QWEN_API_KEY');
+            (provider.credential_env || '未定义环境变量');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({
                 ...{ class: (__VLS_ctx.overview?.credential_status?.[provider.provider] ? 'ok' : 'bad') },
             });

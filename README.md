@@ -30,11 +30,12 @@ API 文档：`http://localhost:8001/docs`。
 
 ## 印花贴合模型配置
 
-超级管理员登录后可在“AI 模型管理”中启用 Seedream、千问图像编辑并切换默认模型；每个新任务会记录其实际使用的提供方和模型版本。密钥只由后端读取：
+超级管理员登录后可在“AI 模型管理”中启用 Seedream、千问图像编辑、Gemini 图像生成并切换默认模型；每个新任务会记录其实际使用的提供方和模型版本。Gemini 默认模型为 `gemini-2.5-flash-image`，输入的模板图和印花图会由后端转为 Gemini 所需的内嵌图片，生成结果会保存至本地媒体库。密钥只由后端读取：
 
 ```bash
 export SEEDREAM_API_KEY='...'
 export QWEN_API_KEY='...'
+export GEMINI_API_KEY='...'
 export PUBLIC_MEDIA_BASE_URL='https://pod.example.com'
 ```
 
