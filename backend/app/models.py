@@ -133,6 +133,8 @@ class ProductDraft(Base):
     title: Mapped[str] = mapped_column(String(180))
     status: Mapped[str] = mapped_column(String(30), default="pending_publish")
     image_urls: Mapped[dict] = mapped_column(JSON, default=list)
+    # 每个图片 × 模板尺码对应一条 SKU 明细：{image_url, size, sku}。
+    sku_items: Mapped[dict] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

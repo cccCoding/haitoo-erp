@@ -2,6 +2,9 @@ from contextlib import asynccontextmanager
 import hashlib
 import hmac
 import json
+import re
+import secrets
+import string
 import time
 from datetime import datetime, timezone
 from enum import Enum
@@ -92,6 +95,9 @@ def ensure_schema() -> None:
                 connection.execute(text(f"ALTER TABLE product_templates ADD COLUMN {column} FLOAT"))
         if "sku_specifications" not in columns:
             connection.execute(text("ALTER TABLE product_templates ADD COLUMN sku_specifications JSON"))
+        draft_columns = {column["name"] for column in inspect(engine).get_columns("product_drafts")}
+        if "sku_items" not in draft_columns:
+            connection.execute(text("ALTER TABLE product_drafts ADD COLUMN sku_items JSON"))
         task_columns = {column["name"] for column in inspect(engine).get_columns("pod_tasks")}
         for column, definition in (("provider", "VARCHAR(40)"), ("provider_model", "VARCHAR(120)"), ("failure_reason", "VARCHAR(500)")):
             if column not in task_columns:
@@ -437,6 +443,41 @@ def get_company_template(db: Session, user: User, template_id: int) -> ProductTe
     return template
 
 
+def build_draft_sku_items(template: ProductTemplate, user: User, image_urls: list[str]) -> list[dict]:
+    """按「图片 × 尺码」生成草稿 SKU；SKU 格式为 M05L + 用户代码 + 6 位随机字符串。"""
+    if not user.user_code:
+        raise HTTPException(400, "请先在账号设置中填写两位用户代码，再创建商品草稿")
+    sizes = (template.sku_specifications or {}).get("size", {}).get("options", [])
+    sizes = [str(size).strip() for size in sizes if str(size).strip()] or [None]
+    alphabet = string.ascii_uppercase + string.digits
+    sku_items, generated_skus = [], set()
+    for image_url in image_urls:
+        for size in sizes:
+            random_part = "".join(secrets.choice(alphabet) for _ in range(6))
+            while random_part in generated_skus:
+                random_part = "".join(secrets.choice(alphabet) for _ in range(6))
+            generated_skus.add(random_part)
+            sku_items.append({"image_url": image_url, "size": size, "sku": f"M05L{user.user_code.upper()}{random_part}"})
+    return sku_items
+
+
+def validate_draft_sku_items(template: ProductTemplate, user: User, image_urls: list[str], sku_items: list) -> list[dict]:
+    """验证前端预览的 SKU，保证保存内容和弹窗中展示的列表一致。"""
+    if not sku_items:
+        return build_draft_sku_items(template, user, image_urls)
+    if not user.user_code:
+        raise HTTPException(400, "请先在账号设置中填写两位用户代码，再创建商品草稿")
+    sizes = (template.sku_specifications or {}).get("size", {}).get("options", [])
+    sizes = [str(size).strip() for size in sizes if str(size).strip()] or [None]
+    expected_pairs = {(image_url, size) for image_url in image_urls for size in sizes}
+    submitted_items = [item.model_dump() for item in sku_items]
+    submitted_pairs = {(item["image_url"], item["size"]) for item in submitted_items}
+    sku_pattern = re.compile(rf"^M05L{re.escape(user.user_code.upper())}[A-Z0-9]{{6}}$")
+    if len(submitted_items) != len(expected_pairs) or submitted_pairs != expected_pairs or len({item["sku"] for item in submitted_items}) != len(submitted_items) or any(not sku_pattern.fullmatch(item["sku"]) for item in submitted_items):
+        raise HTTPException(400, "SKU 列表已失效，请重新选择产品模板")
+    return submitted_items
+
+
 @app.put("/templates/{template_id}")
 def update_template(template_id: int, payload: TemplateUpdate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
     template = get_company_template(db, user, template_id)
@@ -754,7 +795,7 @@ def create_draft(task_id: int, payload: DraftCreate, user: User = Depends(curren
         raise HTTPException(400, "请先完成任务并选择产品图")
     shop = ensure_shop(db, user, payload.shop_id)
     template = db.get(ProductTemplate, task.template_id)
-    draft = ProductDraft(company_id=task.company_id, shop_id=shop.id, source_task_id=task.id, title=f"{template.name} POD 商品", image_urls=[task.selected_result_url])
+    draft = ProductDraft(company_id=task.company_id, shop_id=shop.id, source_task_id=task.id, title=f"{template.name} POD 商品", image_urls=[task.selected_result_url], sku_items=build_draft_sku_items(template, user, [task.selected_result_url]))
     db.add(draft); db.commit(); db.refresh(draft); return serialize_record(draft)
 
 
@@ -772,12 +813,14 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
     template = get_company_template(db, user, payload.template_id)
     source_task_ids = {asset.source_task_id for asset in assets}
     source_task_id = source_task_ids.pop() if len(source_task_ids) == 1 else None
+    image_urls = [asset.url for asset in assets]
     draft = ProductDraft(
         company_id=user.company_id,
         shop_id=shop.id,
         source_task_id=source_task_id,
         title=f"{template.name} POD 商品",
-        image_urls=[asset.url for asset in assets],
+        image_urls=image_urls,
+        sku_items=validate_draft_sku_items(template, user, image_urls, payload.sku_items),
     )
     db.add(draft); db.commit(); db.refresh(draft)
     return serialize_record(draft)

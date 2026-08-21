@@ -15,6 +15,7 @@ const showMyAccountDialog = ref(false), myUserCode = ref(''), myAccountSaving = 
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
 const materialUploading = ref(false), materialUploadError = ref('');
 const selectedMaterialAssetIds = ref([]), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftShopId = ref(null), materialDraftSaving = ref(false), materialDraftError = ref('');
+const materialDraftSkuPreviewItems = ref([]);
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditShopId = ref(null), draftEditSaving = ref(false), draftEditError = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
 const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativePlacement = ref('居中印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
@@ -25,6 +26,13 @@ const pageTitle = computed(() => nav.find(x => x.key === page.value)?.label || '
 const filteredTemplates = computed(() => templates.value.filter(t => (!activeGroupId.value || t.group_id === activeGroupId.value) && t.name.toLowerCase().includes(templateQuery.value.trim().toLowerCase())));
 const estimatedCreativePoints = computed(() => creativeQuality.value === '2K' ? 20 : 12);
 const selectedTemplate = computed(() => templates.value.find(t => t.id === selectedTemplateId.value));
+const selectedMaterialAssets = computed(() => materialAssets.value.filter(asset => selectedMaterialAssetIds.value.includes(asset.id)));
+const materialDraftTemplate = computed(() => templates.value.find(template => template.id === materialDraftTemplateId.value));
+const materialDraftSizes = computed(() => {
+    const options = materialDraftTemplate.value?.sku_specifications?.size?.options || [];
+    return options.map((size) => String(size).trim()).filter(Boolean);
+});
+const materialDraftSkuCount = computed(() => selectedMaterialAssets.value.length * Math.max(1, materialDraftSizes.value.length));
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
 const nativeToLocaleString = Date.prototype.toLocaleString;
 const nativeToLocaleDateString = Date.prototype.toLocaleDateString;
@@ -152,7 +160,14 @@ function templateCoverUrl(template) { if (template?.cover_url)
 function hasTemplateCover(template) { return Boolean(template?.cover_url || template?.name === '白色 T恤正面'); }
 function useTemplate(template) { selectedTemplateId.value = template.id; page.value = 'pod'; }
 function toggleMaterialAsset(assetId) { selectedMaterialAssetIds.value = selectedMaterialAssetIds.value.includes(assetId) ? selectedMaterialAssetIds.value.filter(id => id !== assetId) : [...selectedMaterialAssetIds.value, assetId]; }
-function openMaterialDraftDialog() { materialDraftError.value = ''; materialDraftTemplateId.value = null; materialDraftShopId.value = null; showMaterialDraftDialog.value = true; }
+function randomSkuSuffix() { const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; return Array.from(crypto.getRandomValues(new Uint8Array(6)), value => alphabet[value % alphabet.length]).join(''); }
+function refreshMaterialDraftSkuPreview() {
+    const sizes = materialDraftSizes.value.length ? materialDraftSizes.value : [null];
+    materialDraftSkuPreviewItems.value = materialDraftTemplate.value
+        ? selectedMaterialAssets.value.flatMap(asset => sizes.map((size) => ({ image_url: asset.url, size, sku: `M05L${user.value?.user_code?.toUpperCase() || '??'}${randomSkuSuffix()}` })))
+        : [];
+}
+function openMaterialDraftDialog() { materialDraftError.value = ''; materialDraftTemplateId.value = null; materialDraftShopId.value = null; materialDraftSkuPreviewItems.value = []; showMaterialDraftDialog.value = true; }
 async function createDraftFromMaterialAssets() {
     if (!selectedMaterialAssetIds.value.length)
         return;
@@ -167,7 +182,7 @@ async function createDraftFromMaterialAssets() {
     try {
         materialDraftSaving.value = true;
         materialDraftError.value = '';
-        await api.post('/drafts/from-material-assets', { material_asset_ids: selectedMaterialAssetIds.value, template_id: materialDraftTemplateId.value, shop_id: materialDraftShopId.value }, { headers: headers.value });
+        await api.post('/drafts/from-material-assets', { material_asset_ids: selectedMaterialAssetIds.value, template_id: materialDraftTemplateId.value, shop_id: materialDraftShopId.value, sku_items: materialDraftSkuPreviewItems.value }, { headers: headers.value });
         selectedMaterialAssetIds.value = [];
         showMaterialDraftDialog.value = false;
         await refresh();
@@ -1172,6 +1187,7 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
             (draft.title);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (draft.sku_items?.length || 1);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (draft.source_task_id ? `#${draft.source_task_id}` : '素材库');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
@@ -1624,20 +1640,6 @@ if (__VLS_ctx.showMaterialDraftDialog) {
     (__VLS_ctx.selectedMaterialAssetIds.length);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-        value: (__VLS_ctx.materialDraftTemplateId),
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-        value: (null),
-    });
-    for (const [template] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-            key: (template.id),
-            value: (template.id),
-        });
-        (template.name);
-    }
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
         value: (__VLS_ctx.materialDraftShopId),
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
@@ -1650,6 +1652,63 @@ if (__VLS_ctx.showMaterialDraftDialog) {
         });
         (shop.region);
         (shop.name);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (__VLS_ctx.refreshMaterialDraftSkuPreview) },
+        value: (__VLS_ctx.materialDraftTemplateId),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (null),
+    });
+    for (const [template] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (template.id),
+            value: (template.id),
+        });
+        (template.name);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "material-draft-preview" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "material-draft-preview-heading" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    (__VLS_ctx.selectedMaterialAssets.length);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "material-draft-preview-images" },
+    });
+    for (const [asset] of __VLS_getVForSourceType((__VLS_ctx.selectedMaterialAssets))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+            key: (asset.id),
+            src: (__VLS_ctx.imageUrl(asset.url)),
+            alt: (asset.name),
+        });
+    }
+    if (__VLS_ctx.materialDraftTemplate) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "material-draft-sku-summary" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        (__VLS_ctx.materialDraftSizes.length ? __VLS_ctx.materialDraftSizes.join('、') : '默认规格');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        (__VLS_ctx.materialDraftSkuCount);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "material-draft-sku-list" },
+        });
+        for (const [item] of __VLS_getVForSourceType((__VLS_ctx.materialDraftSkuPreviewItems))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                key: (item.sku),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (item.size || '默认规格');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
+            (item.sku);
+        }
     }
     if (__VLS_ctx.materialDraftError) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
@@ -2279,6 +2338,11 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-dialog']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-preview']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-preview-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-preview-images']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-sku-summary']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-sku-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
@@ -2388,6 +2452,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             materialDraftShopId: materialDraftShopId,
             materialDraftSaving: materialDraftSaving,
             materialDraftError: materialDraftError,
+            materialDraftSkuPreviewItems: materialDraftSkuPreviewItems,
             showDraftEditDialog: showDraftEditDialog,
             editingDraft: editingDraft,
             draftEditTitle: draftEditTitle,
@@ -2410,6 +2475,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             filteredTemplates: filteredTemplates,
             estimatedCreativePoints: estimatedCreativePoints,
             selectedTemplate: selectedTemplate,
+            selectedMaterialAssets: selectedMaterialAssets,
+            materialDraftTemplate: materialDraftTemplate,
+            materialDraftSizes: materialDraftSizes,
+            materialDraftSkuCount: materialDraftSkuCount,
             login: login,
             onCreativeAssetChange: onCreativeAssetChange,
             removeCreativeAsset: removeCreativeAsset,
@@ -2426,6 +2495,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             hasTemplateCover: hasTemplateCover,
             useTemplate: useTemplate,
             toggleMaterialAsset: toggleMaterialAsset,
+            refreshMaterialDraftSkuPreview: refreshMaterialDraftSkuPreview,
             openMaterialDraftDialog: openMaterialDraftDialog,
             createDraftFromMaterialAssets: createDraftFromMaterialAssets,
             openDraftEditDialog: openDraftEditDialog,

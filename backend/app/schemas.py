@@ -129,9 +129,16 @@ class DraftCreate(BaseModel):
     shop_id: int
 
 
+class DraftSkuItem(BaseModel):
+    image_url: str = Field(min_length=1, max_length=500)
+    size: str | None = Field(default=None, max_length=50)
+    sku: str = Field(min_length=1, max_length=32)
+
+
 class MaterialDraftCreate(DraftCreate):
     template_id: int
     material_asset_ids: list[int] = Field(min_length=1, max_length=100)
+    sku_items: list[DraftSkuItem] = Field(default_factory=list, max_length=1000)
 
 
 class DraftUpdate(BaseModel):
