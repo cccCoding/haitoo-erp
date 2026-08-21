@@ -14,8 +14,8 @@ from sqlalchemy import delete, func, inspect, or_, select, text
 from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
-from .models import AIProviderSetting, Company, NonAIPointRule, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
-from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, LedgerOut, LoginInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
+from .models import AIProviderSetting, Company, MaterialAsset, NonAIPointRule, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
+from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, DraftCreate, LedgerOut, LoginInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate
 from .credentials import decrypt_secret, encrypt_secret
@@ -93,6 +93,8 @@ def ensure_schema() -> None:
         for column, definition in (("provider", "VARCHAR(40)"), ("provider_model", "VARCHAR(120)"), ("failure_reason", "VARCHAR(500)")):
             if column not in task_columns:
                 connection.execute(text(f"ALTER TABLE pod_tasks ADD COLUMN {column} {definition}"))
+        if connection.dialect.name == "mysql" and not next(column for column in inspect(engine).get_columns("pod_tasks") if column["name"] == "shop_id")["nullable"]:
+            connection.execute(text("ALTER TABLE pod_tasks MODIFY COLUMN shop_id INTEGER NULL"))
         company_columns = {column["name"] for column in inspect(engine).get_columns("companies")}
         if "miaoshou_app_id" not in company_columns:
             connection.execute(text("ALTER TABLE companies ADD COLUMN miaoshou_app_id VARCHAR(255)"))
@@ -173,6 +175,10 @@ def ensure_shop(db: Session, user: User, shop_id: int) -> Shop:
     if not shop or shop_id not in allowed_shop_ids(db, user):
         raise HTTPException(403, "没有该店铺的访问权限")
     return shop
+
+
+def can_access_task(task: PodTask | None, user: User) -> bool:
+    return bool(task and (user.role == Role.SUPER_ADMIN or task.company_id == user.company_id))
 
 
 @app.get("/health")
@@ -413,11 +419,19 @@ async def upload_creative_asset(file: UploadFile = File(...), user: User = Depen
 
 
 @app.get("/tasks")
-def list_tasks(shop_id: int | None = None, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    stmt = select(PodTask).where(PodTask.shop_id.in_(allowed_shop_ids(db, user)))
-    if shop_id:
-        ensure_shop(db, user, shop_id); stmt = stmt.where(PodTask.shop_id == shop_id)
+def list_tasks(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    stmt = select(PodTask)
+    if user.role != Role.SUPER_ADMIN:
+        stmt = stmt.where(PodTask.company_id == user.company_id)
     return [serialize_record(task) for task in db.scalars(stmt.order_by(PodTask.id.desc())).all()]
+
+
+@app.get("/material-assets")
+def list_material_assets(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    stmt = select(MaterialAsset)
+    if user.role != Role.SUPER_ADMIN:
+        stmt = stmt.where(MaterialAsset.company_id == user.company_id)
+    return [serialize_record(asset) for asset in db.scalars(stmt.order_by(MaterialAsset.id.desc())).all()]
 
 
 @app.get("/admin/ai-providers")
@@ -586,7 +600,6 @@ async def run_generation(task_id: int) -> None:
 
 @app.post("/tasks")
 def create_task(payload: PodTaskCreate, background_tasks: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    shop = ensure_shop(db, user, payload.shop_id)
     template = db.get(ProductTemplate, payload.template_id)
     if not template or not (template.is_platform or template.company_id == user.company_id):
         raise HTTPException(404, "产品模板不存在")
@@ -602,9 +615,9 @@ def create_task(payload: PodTaskCreate, background_tasks: BackgroundTasks, user:
     if not account or account.available < estimated:
         raise HTTPException(400, "可用积分不足，无法创建 AI 任务")
     account.available -= estimated; account.frozen += estimated
-    task = PodTask(company_id=shop.company_id, shop_id=shop.id, template_id=template.id, created_by=user.id, status=TaskStatus.QUEUED, parameters=payload.model_dump(), estimated_points=estimated, result_urls=[], provider=provider.provider, provider_model=provider.model)
+    task = PodTask(company_id=user.company_id, template_id=template.id, created_by=user.id, status=TaskStatus.QUEUED, parameters=payload.model_dump(), estimated_points=estimated, result_urls=[], provider=provider.provider, provider_model=provider.model)
     db.add(task); db.flush()
-    db.add(PointLedger(company_id=shop.company_id, actor_id=user.id, task_id=task.id, entry_type="ai_freeze", amount=-estimated, balance_after=account.available, note="AI 创作预冻结"))
+    db.add(PointLedger(company_id=user.company_id, actor_id=user.id, task_id=task.id, entry_type="ai_freeze", amount=-estimated, balance_after=account.available, note="AI 创作预冻结"))
     db.commit(); db.refresh(task)
     background_tasks.add_task(run_generation, task.id)
     return serialize_record(task)
@@ -613,7 +626,7 @@ def create_task(payload: PodTaskCreate, background_tasks: BackgroundTasks, user:
 @app.post("/tasks/{task_id}/select")
 def select_result(task_id: int, payload: SelectResult, user: User = Depends(current_user), db: Session = Depends(get_db)):
     task = db.get(PodTask, task_id)
-    if not task or task.shop_id not in allowed_shop_ids(db, user):
+    if not can_access_task(task, user):
         raise HTTPException(404, "任务不存在")
     if payload.result_url not in task.result_urls:
         raise HTTPException(400, "请选择该任务的生成结果")
@@ -627,13 +640,31 @@ def select_result(task_id: int, payload: SelectResult, user: User = Depends(curr
     db.commit(); db.refresh(task); return serialize_record(task)
 
 
-@app.post("/tasks/{task_id}/draft")
-def create_draft(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+@app.post("/tasks/{task_id}/claim-materials")
+def claim_task_materials(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     task = db.get(PodTask, task_id)
-    if not task or task.shop_id not in allowed_shop_ids(db, user) or task.status != TaskStatus.COMPLETED:
+    if not can_access_task(task, user):
+        raise HTTPException(404, "任务不存在")
+    if task.status not in (TaskStatus.AWAITING_SELECTION, TaskStatus.COMPLETED) or not task.result_urls:
+        raise HTTPException(400, "任务尚未生成可领取的图片")
+    existing_urls = set(db.scalars(select(MaterialAsset.url).where(MaterialAsset.company_id == task.company_id, MaterialAsset.source_task_id == task.id)).all())
+    claimed_count = 0
+    for index, url in enumerate(task.result_urls, start=1):
+        if url not in existing_urls:
+            db.add(MaterialAsset(company_id=task.company_id, source_task_id=task.id, url=url, name=f"AI 创作 #{task.id} · 结果 {index}", claimed_by=user.id))
+            claimed_count += 1
+    db.commit()
+    return {"claimed": claimed_count, "message": "已领取到素材库"}
+
+
+@app.post("/tasks/{task_id}/draft")
+def create_draft(task_id: int, payload: DraftCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    task = db.get(PodTask, task_id)
+    if not can_access_task(task, user) or task.status != TaskStatus.COMPLETED:
         raise HTTPException(400, "请先完成任务并选择产品图")
+    shop = ensure_shop(db, user, payload.shop_id)
     template = db.get(ProductTemplate, task.template_id)
-    draft = ProductDraft(company_id=task.company_id, shop_id=task.shop_id, source_task_id=task.id, title=f"{template.name} POD 商品", image_urls=[task.selected_result_url])
+    draft = ProductDraft(company_id=task.company_id, shop_id=shop.id, source_task_id=task.id, title=f"{template.name} POD 商品", image_urls=[task.selected_result_url])
     db.add(draft); db.commit(); db.refresh(draft); return serialize_record(draft)
 
 

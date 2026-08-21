@@ -94,7 +94,8 @@ class PodTask(Base):
     __tablename__ = "pod_tasks"
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
-    shop_id: Mapped[int] = mapped_column(index=True)
+    # AI 创作不再依赖店铺；创建商品草稿时才选择投放店铺。
+    shop_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
     template_id: Mapped[int] = mapped_column()
     created_by: Mapped[int] = mapped_column()
     status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.QUEUED)
@@ -106,6 +107,18 @@ class PodTask(Base):
     provider: Mapped[str | None] = mapped_column(String(40), nullable=True)
     provider_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class MaterialAsset(Base):
+    """公司级素材库中已领取的 AI 生成图片。"""
+    __tablename__ = "material_assets"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    source_task_id: Mapped[int] = mapped_column(index=True)
+    url: Mapped[str] = mapped_column(String(500))
+    name: Mapped[str] = mapped_column(String(180))
+    claimed_by: Mapped[int] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

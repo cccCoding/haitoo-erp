@@ -5,15 +5,15 @@ const token = ref(localStorage.getItem('haitoo_token') || '');
 const page = ref('dashboard');
 const email = ref('operator@haitoo-demo.com');
 const password = ref('ChangeMe123!');
-const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), drafts = ref([]), points = ref(null), members = ref([]);
-const creativeShopId = ref(null), loading = ref(false), error = ref('');
+const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), materialAssets = ref([]), drafts = ref([]), points = ref(null), members = ref([]);
+const draftShopIdByTask = ref({}), loading = ref(false), error = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
 const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFormTab = ref('basic'), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), newPackageWeight = ref(null), newPackageLength = ref(null), newPackageWidth = ref(null), newPackageHeight = ref(null), newSkuSizeOptions = ref([]), editingTemplate = ref(null);
 const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', email: '', password: '', is_active: true }), memberSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
 const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativePlacement = ref('居中印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
-const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'points', icon: '◉', label: '积分中心' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }];
+const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'materials', icon: '◈', label: '素材库' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'points', icon: '◉', label: '积分中心' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }];
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
 const visibleNav = computed(() => nav.filter(item => !item.adminOnly || user.value?.role === 'company_admin'));
 const pageTitle = computed(() => nav.find(x => x.key === page.value)?.label || '');
@@ -33,13 +33,14 @@ Date.prototype.toLocaleDateString = function (...args) {
 };
 async function refresh() {
     const h = { headers: headers.value };
-    const [me, s, t, g, task, d, p] = await Promise.all([api.get('/me', h), api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', h), api.get('/drafts', h), api.get('/points', h)]);
+    const [me, s, t, g, task, material, d, p] = await Promise.all([api.get('/me', h), api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', h), api.get('/material-assets', h), api.get('/drafts', h), api.get('/points', h)]);
     user.value = me.data.user;
     company.value = me.data.company;
     shops.value = s.data;
     templates.value = t.data;
     templateGroups.value = g.data;
     tasks.value = task.data;
+    materialAssets.value = material.data;
     drafts.value = d.data;
     points.value = p.data;
     if (user.value.role === 'company_admin') {
@@ -51,8 +52,6 @@ async function refresh() {
         members.value = [];
         managedShops.value = [];
     }
-    if (!creativeShopId.value && shops.value[0])
-        creativeShopId.value = shops.value[0].id;
     if (!selectedTemplateId.value && templates.value[0])
         selectedTemplateId.value = templates.value[0].id;
 }
@@ -85,11 +84,11 @@ async function uploadCreativeAssets() { return Promise.all(creativeAssets.value.
 async function createTask() { if (!creativeAssets.value.length) {
     creativeAssetError.value = '请先上传至少一张印花图，再开始印花贴合。';
     return;
-} if (!creativeShopId.value || !selectedTemplateId.value)
+} if (!selectedTemplateId.value)
     return; try {
     creativeAssetError.value = '';
     const print_urls = await uploadCreativeAssets();
-    await api.post('/tasks', { shop_id: creativeShopId.value, template_id: selectedTemplateId.value, placement: creativePlacement.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() || null }, { headers: headers.value });
+    await api.post('/tasks', { template_id: selectedTemplateId.value, placement: creativePlacement.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() || null }, { headers: headers.value });
     await refresh();
     page.value = 'tasks';
 }
@@ -148,7 +147,27 @@ function templateCoverUrl(template) { if (template?.cover_url)
 function hasTemplateCover(template) { return Boolean(template?.cover_url || template?.name === '白色 T恤正面'); }
 function useTemplate(template) { selectedTemplateId.value = template.id; page.value = 'pod'; }
 async function selectTask(task) { await api.post(`/tasks/${task.id}/select`, { result_url: task.result_urls[0] }, { headers: headers.value }); await refresh(); }
-async function makeDraft(task) { await api.post(`/tasks/${task.id}/draft`, {}, { headers: headers.value }); await refresh(); page.value = 'drafts'; }
+async function claimMaterials(task) { try {
+    const { data } = await api.post(`/tasks/${task.id}/claim-materials`, {}, { headers: headers.value });
+    await refresh();
+    page.value = 'materials';
+    if (!data.claimed)
+        error.value = '该任务的图片已在素材库中';
+}
+catch (e) {
+    error.value = e.response?.data?.detail || '领取素材失败';
+} }
+async function makeDraft(task) { const shopId = draftShopIdByTask.value[task.id]; if (!shopId) {
+    error.value = '请选择要创建商品草稿的店铺';
+    return;
+} try {
+    await api.post(`/tasks/${task.id}/draft`, { shop_id: shopId }, { headers: headers.value });
+    await refresh();
+    page.value = 'drafts';
+}
+catch (e) {
+    error.value = e.response?.data?.detail || '创建商品草稿失败';
+} }
 function openMemberDialog(member) { editingMember.value = member || null; memberForm.value = { name: member?.name || '', email: member?.email || '', password: '', is_active: member?.is_active ?? true }; showMemberDialog.value = true; }
 async function saveMember() { if (!memberForm.value.name.trim() || !memberForm.value.email.trim() || (!editingMember.value && memberForm.value.password.length < 8))
     return; try {
@@ -736,21 +755,6 @@ else {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.creativeShopId),
-        });
-        for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.shops))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                key: (shop.id),
-                value: (shop.id),
-            });
-            (shop.region);
-            (shop.name);
-        }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
-            ...{ class: "parameter-field" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
             value: (__VLS_ctx.creativePlacement),
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
@@ -826,7 +830,9 @@ else {
                     alt: "生成结果",
                 });
             }
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "task-actions" },
+            });
             if (task.status === 'awaiting_selection') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
@@ -847,7 +853,7 @@ else {
                     ...{ class: "primary" },
                 });
             }
-            else if (task.status === 'completed') {
+            if (['awaiting_selection', 'completed'].includes(task.status)) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!!(!__VLS_ctx.token))
@@ -860,7 +866,39 @@ else {
                                 return;
                             if (!(__VLS_ctx.page === 'tasks'))
                                 return;
-                            if (!!(task.status === 'awaiting_selection'))
+                            if (!(['awaiting_selection', 'completed'].includes(task.status)))
+                                return;
+                            __VLS_ctx.claimMaterials(task);
+                        } },
+                    ...{ class: "secondary" },
+                });
+            }
+            if (task.status === 'completed') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                    value: (__VLS_ctx.draftShopIdByTask[task.id]),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    value: (null),
+                });
+                for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.shops))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                        key: (shop.id),
+                        value: (shop.id),
+                    });
+                    (shop.region);
+                    (shop.name);
+                }
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(!__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!(__VLS_ctx.page === 'tasks'))
                                 return;
                             if (!(task.status === 'completed'))
                                 return;
@@ -869,6 +907,41 @@ else {
                     ...{ class: "primary" },
                 });
             }
+        }
+    }
+    else if (__VLS_ctx.page === 'materials') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "page" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "section-heading" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "material-grid" },
+        });
+        for (const [asset] of __VLS_getVForSourceType((__VLS_ctx.materialAssets))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+                key: (asset.id),
+                ...{ class: "material-card" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                src: (__VLS_ctx.imageUrl(asset.url)),
+                alt: (asset.name),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            (asset.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (asset.source_task_id);
+            (new Date(asset.created_at).toLocaleDateString());
+        }
+        if (!__VLS_ctx.materialAssets.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
         }
     }
     else if (__VLS_ctx.page === 'drafts') {
@@ -946,6 +1019,8 @@ else {
                         return;
                     if (!!(__VLS_ctx.page === 'tasks'))
                         return;
+                    if (!!(__VLS_ctx.page === 'materials'))
+                        return;
                     if (!!(__VLS_ctx.page === 'drafts'))
                         return;
                     if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
@@ -999,6 +1074,8 @@ else {
                             return;
                         if (!!(__VLS_ctx.page === 'tasks'))
                             return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
                         if (!!(__VLS_ctx.page === 'drafts'))
                             return;
                         if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
@@ -1017,6 +1094,8 @@ else {
                         if (!!(__VLS_ctx.page === 'pod'))
                             return;
                         if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
                             return;
                         if (!!(__VLS_ctx.page === 'drafts'))
                             return;
@@ -1110,6 +1189,8 @@ else {
                         if (!!(__VLS_ctx.page === 'pod'))
                             return;
                         if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
                             return;
                         if (!!(__VLS_ctx.page === 'drafts'))
                             return;
@@ -1695,7 +1776,6 @@ if (__VLS_ctx.showTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
-/** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['estimate']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['full']} */ ;
@@ -1705,8 +1785,15 @@ if (__VLS_ctx.showTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['blue']} */ ;
 /** @type {__VLS_StyleScopedClasses['result-images']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['page']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -1805,10 +1892,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             templates: templates,
             templateGroups: templateGroups,
             tasks: tasks,
+            materialAssets: materialAssets,
             drafts: drafts,
             points: points,
             members: members,
-            creativeShopId: creativeShopId,
+            draftShopIdByTask: draftShopIdByTask,
             loading: loading,
             error: error,
             templateQuery: templateQuery,
@@ -1863,10 +1951,12 @@ const __VLS_self = (await import('vue')).defineComponent({
             onCoverChange: onCoverChange,
             createTemplate: createTemplate,
             deleteTemplate: deleteTemplate,
+            imageUrl: imageUrl,
             templateCoverUrl: templateCoverUrl,
             hasTemplateCover: hasTemplateCover,
             useTemplate: useTemplate,
             selectTask: selectTask,
+            claimMaterials: claimMaterials,
             makeDraft: makeDraft,
             openMemberDialog: openMemberDialog,
             saveMember: saveMember,

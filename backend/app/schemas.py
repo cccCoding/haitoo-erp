@@ -77,7 +77,6 @@ class TemplateGroupCreate(BaseModel):
 
 
 class PodTaskCreate(BaseModel):
-    shop_id: int
     template_id: int
     placement: Literal["居中印花", "满版印花"] = "居中印花"
     ratio: Literal["1:1", "3:4"] = "1:1"
@@ -123,6 +122,10 @@ class MiaoshouAccountUpdate(BaseModel):
 
 class SelectResult(BaseModel):
     result_url: str
+
+
+class DraftCreate(BaseModel):
+    shop_id: int
 
 
 class RechargeInput(BaseModel):
