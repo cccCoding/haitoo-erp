@@ -7,6 +7,7 @@ const token = ref(localStorage.getItem('haitoo_admin_token') || '')
 const email = ref('owner@haitoo-demo.com'), password = ref('ChangeMe123!')
 const user = ref<any>(null), overview = ref<any>(null), providers = ref<any[]>([]), companies = ref<any[]>([]), ledger = ref<any[]>([]), nonAiPointRules = ref<any[]>([])
 const loading = ref(false), saving = ref(''), error = ref('')
+const toast = ref('')
 const activePage = ref<'overview' | 'companies' | 'models' | 'non-ai-points'>('overview')
 const showCompanyForm = ref(false), showRechargeForm = ref(false), showRechargeHistory = ref(false), rechargeCompany = ref<any>(null), ledgerCompany = ref<any>(null), selectedCompanyId = ref<number | null>(null)
 const showMiaoshouForm = ref(false), miaoshouCompany = ref<any>(null)
@@ -68,7 +69,19 @@ async function saveMiaoshou() { if (!miaoshouCompany.value || !miaoshouForm.valu
 function openRuleForm(rule?: any) { editingRule.value = rule || null; ruleForm.value = { operation_code: rule?.operation_code || '', display_name: rule?.display_name || '', points: rule?.points ?? 0, enabled: rule?.enabled ?? true, description: rule?.description || '' }; showRuleForm.value = true }
 async function saveRule() { if (!ruleForm.value.display_name.trim() || (!editingRule.value && !ruleForm.value.operation_code.trim())) return; try { saving.value = 'rule'; error.value = ''; const payload = { ...ruleForm.value, operation_code: ruleForm.value.operation_code.trim(), display_name: ruleForm.value.display_name.trim(), description: ruleForm.value.description.trim() || null }; if (editingRule.value) await api.put(`/admin/non-ai-point-rules/${editingRule.value.id}`, payload, { headers: headers.value }); else await api.post('/admin/non-ai-point-rules', payload, { headers: headers.value }); showRuleForm.value = false; await loadAdmin() } catch (e: any) { error.value = e.response?.data?.detail || '保存积分消耗配置失败' } finally { saving.value = '' } }
 async function deleteRule(rule: any) { if (!confirm(`确定删除「${rule.display_name}」吗？`)) return; try { saving.value = `delete-${rule.id}`; error.value = ''; await api.delete(`/admin/non-ai-point-rules/${rule.id}`, { headers: headers.value }); await loadAdmin() } catch (e: any) { error.value = e.response?.data?.detail || '删除积分消耗配置失败' } finally { saving.value = '' } }
+let toastTimer: ReturnType<typeof setTimeout> | undefined
+function showToast(message: string) { toast.value = message; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = '' }, 3000) }
 function logout() { localStorage.removeItem('haitoo_admin_token'); token.value = ''; user.value = null; overview.value = null; providers.value = []; companies.value = []; ledger.value = []; nonAiPointRules.value = [] }
+api.interceptors.response.use(
+  response => response,
+  requestError => {
+    if (requestError.response?.data?.detail === '登录已失效') {
+      logout()
+      showToast('登录已失效，请重新登录')
+    }
+    return Promise.reject(requestError)
+  },
+)
 onMounted(() => token.value && loadAdmin().catch(logout))
 </script>
 
@@ -92,4 +105,5 @@ onMounted(() => token.value && loadAdmin().catch(logout))
   <div v-if="showRechargeHistory" class="modal-backdrop" @click.self="showRechargeHistory=false"><section class="modal recharge-history"><button class="close" @click="showRechargeHistory=false">×</button><h2>充值记录</h2><p>{{ledgerCompany?.name}} 的初始积分和人工充值记录。</p><div class="recharge-records"><div class="recharge-record-head"><span>时间</span><span>公司名称</span><span>充值类型</span><span>备注</span><span>操作人</span><span>充值积分</span></div><article v-for="row in ledger.filter(item => item.entry_type === 'initial_recharge' || item.entry_type === 'manual_recharge')" :key="row.id"><span>{{new Date(row.created_at).toLocaleString()}}</span><span>{{ledgerCompany?.name}}</span><span>{{row.entry_type === 'initial_recharge' ? '开通初始积分' : '人工充值'}}</span><span>{{row.note}}</span><span>{{row.actor_name}}</span><strong class="ok">+{{row.amount}}</strong></article><p v-if="!ledger.some(item => item.entry_type === 'initial_recharge' || item.entry_type === 'manual_recharge')" class="empty">暂无充值记录。</p></div></section></div>
   <div v-if="showMiaoshouForm" class="modal-backdrop" @click.self="showMiaoshouForm=false"><section class="modal"><button class="close" @click="showMiaoshouForm=false">×</button><h2>配置妙手 API Key</h2><p>{{miaoshouCompany?.name}} 的 App ID 和 App Secret 会加密保存，店铺同步和商品上架均使用此 API Key。</p><label>App ID<input v-model="miaoshouForm.app_id" maxlength="255" /></label><label>App Secret<input v-model="miaoshouForm.app_secret" type="password" maxlength="500" /></label><button class="primary" :disabled="saving==='miaoshou'" @click="saveMiaoshou">{{saving==='miaoshou'?'保存中…':'安全保存'}}</button></section></div>
   <div v-if="showRuleForm" class="modal-backdrop" @click.self="showRuleForm=false"><section class="modal"><button class="close" @click="showRuleForm=false">×</button><h2>{{editingRule?'编辑':'新增'}}非 AI 积分配置</h2><p>操作代码用于业务调用；创建后保持不变，避免影响已有对接。</p><label>操作名称<input v-model="ruleForm.display_name" maxlength="120" placeholder="例如：发布商品" /></label><label>操作代码<input v-model="ruleForm.operation_code" maxlength="80" :disabled="!!editingRule" placeholder="例如：product_publish" /><small>仅小写字母、数字和下划线，且以字母开头</small></label><label>单次消耗积分<input v-model.number="ruleForm.points" type="number" min="0" max="1000000" /></label><label>说明<input v-model="ruleForm.description" maxlength="255" placeholder="选填" /></label><label class="modal-switch"><input v-model="ruleForm.enabled" type="checkbox" /> 启用该配置</label><button class="primary" :disabled="saving==='rule'" @click="saveRule">{{saving==='rule'?'保存中…':'保存配置'}}</button></section></div>
+  <div v-if="toast" class="toast" role="alert" style="position:fixed;top:24px;left:50%;z-index:1000;transform:translateX(-50%);padding:12px 18px;border-radius:10px;background:#1e4a92;color:#fff;box-shadow:0 10px 28px #1e4a9240;font-size:14px">{{ toast }}</div>
 </template>

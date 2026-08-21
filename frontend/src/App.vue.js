@@ -7,6 +7,7 @@ const email = ref('operator@haitoo-demo.com');
 const password = ref('ChangeMe123!');
 const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), materialAssets = ref([]), drafts = ref([]), points = ref(null), members = ref([]);
 const draftShopIdByTask = ref({}), loading = ref(false), error = ref('');
+const toast = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
 const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFormTab = ref('basic'), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), newPackageWeight = ref(null), newPackageLength = ref(null), newPackageWidth = ref(null), newPackageHeight = ref(null), newSkuSizeOptions = ref([]), editingTemplate = ref(null);
 const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', email: '', password: '', is_active: true }), memberSaving = ref(false);
@@ -222,7 +223,17 @@ catch (e) {
 finally {
     shopManagersSaving.value = false;
 } }
+let toastTimer;
+function showToast(message) { toast.value = message; if (toastTimer)
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = ''; }, 3000); }
 function logout() { localStorage.removeItem('haitoo_token'); token.value = ''; user.value = null; }
+api.interceptors.response.use(response => response, requestError => {
+    if (requestError.response?.data?.detail === '登录已失效') {
+        logout();
+        showToast('登录已失效，请重新登录');
+    }
+    return Promise.reject(requestError);
+});
 onMounted(() => token.value && refresh().catch(logout));
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
@@ -1710,6 +1721,14 @@ if (__VLS_ctx.showTemplateDialog) {
     });
     (__VLS_ctx.editingTemplate ? '保存修改' : '确认新增');
 }
+if (__VLS_ctx.toast) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "toast" },
+        role: "alert",
+        ...{ style: {} },
+    });
+    (__VLS_ctx.toast);
+}
 /** @type {__VLS_StyleScopedClasses['login-shell']} */ ;
 /** @type {__VLS_StyleScopedClasses['login-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['brand-mark']} */ ;
@@ -1878,6 +1897,7 @@ if (__VLS_ctx.showTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['dimension-inputs']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['toast']} */ ;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
@@ -1899,6 +1919,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             draftShopIdByTask: draftShopIdByTask,
             loading: loading,
             error: error,
+            toast: toast,
             templateQuery: templateQuery,
             activeGroupId: activeGroupId,
             selectedTemplateId: selectedTemplateId,

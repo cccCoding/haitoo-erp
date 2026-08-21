@@ -5,6 +5,7 @@ const token = ref(localStorage.getItem('haitoo_admin_token') || '');
 const email = ref('owner@haitoo-demo.com'), password = ref('ChangeMe123!');
 const user = ref(null), overview = ref(null), providers = ref([]), companies = ref([]), ledger = ref([]), nonAiPointRules = ref([]);
 const loading = ref(false), saving = ref(''), error = ref('');
+const toast = ref('');
 const activePage = ref('overview');
 const showCompanyForm = ref(false), showRechargeForm = ref(false), showRechargeHistory = ref(false), rechargeCompany = ref(null), ledgerCompany = ref(null), selectedCompanyId = ref(null);
 const showMiaoshouForm = ref(false), miaoshouCompany = ref(null);
@@ -164,7 +165,17 @@ catch (e) {
 finally {
     saving.value = '';
 } }
+let toastTimer;
+function showToast(message) { toast.value = message; if (toastTimer)
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = ''; }, 3000); }
 function logout() { localStorage.removeItem('haitoo_admin_token'); token.value = ''; user.value = null; overview.value = null; providers.value = []; companies.value = []; ledger.value = []; nonAiPointRules.value = []; }
+api.interceptors.response.use(response => response, requestError => {
+    if (requestError.response?.data?.detail === '登录已失效') {
+        logout();
+        showToast('登录已失效，请重新登录');
+    }
+    return Promise.reject(requestError);
+});
 onMounted(() => token.value && loadAdmin().catch(logout));
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
@@ -930,6 +941,14 @@ if (__VLS_ctx.showRuleForm) {
     });
     (__VLS_ctx.saving === 'rule' ? '保存中…' : '保存配置');
 }
+if (__VLS_ctx.toast) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "toast" },
+        role: "alert",
+        ...{ style: {} },
+    });
+    (__VLS_ctx.toast);
+}
 /** @type {__VLS_StyleScopedClasses['login-page']} */ ;
 /** @type {__VLS_StyleScopedClasses['login-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['mark']} */ ;
@@ -1015,6 +1034,7 @@ if (__VLS_ctx.showRuleForm) {
 /** @type {__VLS_StyleScopedClasses['close']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-switch']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['toast']} */ ;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
@@ -1031,6 +1051,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             loading: loading,
             saving: saving,
             error: error,
+            toast: toast,
             activePage: activePage,
             showCompanyForm: showCompanyForm,
             showRechargeForm: showRechargeForm,
