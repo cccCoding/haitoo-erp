@@ -31,10 +31,12 @@ class Company(Base):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("company_id", "user_code", name="uq_users_company_user_code"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(80))
+    user_code: Mapped[str | None] = mapped_column(String(2), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[Role] = mapped_column(Enum(Role), default=Role.MEMBER)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -111,11 +113,11 @@ class PodTask(Base):
 
 
 class MaterialAsset(Base):
-    """公司级素材库中已领取的 AI 生成图片。"""
+    """公司级素材库中的 AI 领取或本地上传图片。"""
     __tablename__ = "material_assets"
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
-    source_task_id: Mapped[int] = mapped_column(index=True)
+    source_task_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
     url: Mapped[str] = mapped_column(String(500))
     name: Mapped[str] = mapped_column(String(180))
     claimed_by: Mapped[int] = mapped_column()
@@ -127,7 +129,7 @@ class ProductDraft(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     shop_id: Mapped[int] = mapped_column(index=True)
-    source_task_id: Mapped[int] = mapped_column()
+    source_task_id: Mapped[int | None] = mapped_column(nullable=True)
     title: Mapped[str] = mapped_column(String(180))
     status: Mapped[str] = mapped_column(String(30), default="pending_publish")
     image_urls: Mapped[dict] = mapped_column(JSON, default=list)

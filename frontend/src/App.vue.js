@@ -10,8 +10,12 @@ const draftShopIdByTask = ref({}), loading = ref(false), error = ref('');
 const toast = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
 const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFormTab = ref('basic'), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), newPackageWeight = ref(null), newPackageLength = ref(null), newPackageWidth = ref(null), newPackageHeight = ref(null), newSkuSizeOptions = ref([]), editingTemplate = ref(null);
-const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', email: '', password: '', is_active: true }), memberSaving = ref(false);
+const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', user_code: '', email: '', password: '', is_active: true }), memberSaving = ref(false);
+const showMyAccountDialog = ref(false), myUserCode = ref(''), myAccountSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
+const materialUploading = ref(false), materialUploadError = ref('');
+const selectedMaterialAssetIds = ref([]), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftShopId = ref(null), materialDraftSaving = ref(false), materialDraftError = ref('');
+const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditShopId = ref(null), draftEditSaving = ref(false), draftEditError = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
 const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativePlacement = ref('居中印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
 const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'materials', icon: '◈', label: '素材库' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'points', icon: '◉', label: '积分中心' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }];
@@ -147,6 +151,59 @@ function templateCoverUrl(template) { if (template?.cover_url)
     return imageUrl(template.cover_url); return template?.name === '白色 T恤正面' ? '/template-white-tshirt-front.png' : '/template-tshirt.svg'; }
 function hasTemplateCover(template) { return Boolean(template?.cover_url || template?.name === '白色 T恤正面'); }
 function useTemplate(template) { selectedTemplateId.value = template.id; page.value = 'pod'; }
+function toggleMaterialAsset(assetId) { selectedMaterialAssetIds.value = selectedMaterialAssetIds.value.includes(assetId) ? selectedMaterialAssetIds.value.filter(id => id !== assetId) : [...selectedMaterialAssetIds.value, assetId]; }
+function openMaterialDraftDialog() { materialDraftError.value = ''; materialDraftTemplateId.value = null; materialDraftShopId.value = null; showMaterialDraftDialog.value = true; }
+async function createDraftFromMaterialAssets() {
+    if (!selectedMaterialAssetIds.value.length)
+        return;
+    if (!materialDraftTemplateId.value) {
+        materialDraftError.value = '请选择产品模板';
+        return;
+    }
+    if (!materialDraftShopId.value) {
+        materialDraftError.value = '请选择投放店铺';
+        return;
+    }
+    try {
+        materialDraftSaving.value = true;
+        materialDraftError.value = '';
+        await api.post('/drafts/from-material-assets', { material_asset_ids: selectedMaterialAssetIds.value, template_id: materialDraftTemplateId.value, shop_id: materialDraftShopId.value }, { headers: headers.value });
+        selectedMaterialAssetIds.value = [];
+        showMaterialDraftDialog.value = false;
+        await refresh();
+        page.value = 'drafts';
+    }
+    catch (e) {
+        materialDraftError.value = e.response?.data?.detail || '创建商品草稿失败，请稍后重试';
+    }
+    finally {
+        materialDraftSaving.value = false;
+    }
+}
+function openDraftEditDialog(draft) { editingDraft.value = draft; draftEditTitle.value = draft.title; draftEditShopId.value = draft.shop_id; draftEditError.value = ''; showDraftEditDialog.value = true; }
+async function saveDraftEdit() {
+    if (!editingDraft.value || !draftEditTitle.value.trim()) {
+        draftEditError.value = '请输入商品标题';
+        return;
+    }
+    if (!draftEditShopId.value) {
+        draftEditError.value = '请选择投放店铺';
+        return;
+    }
+    try {
+        draftEditSaving.value = true;
+        draftEditError.value = '';
+        await api.put(`/drafts/${editingDraft.value.id}`, { title: draftEditTitle.value.trim(), shop_id: draftEditShopId.value }, { headers: headers.value });
+        showDraftEditDialog.value = false;
+        await refresh();
+    }
+    catch (e) {
+        draftEditError.value = e.response?.data?.detail || '保存商品草稿失败，请稍后重试';
+    }
+    finally {
+        draftEditSaving.value = false;
+    }
+}
 async function selectTask(task) { await api.post(`/tasks/${task.id}/select`, { result_url: task.result_urls[0] }, { headers: headers.value }); await refresh(); }
 async function claimMaterials(task) { try {
     const { data } = await api.post(`/tasks/${task.id}/claim-materials`, {}, { headers: headers.value });
@@ -158,6 +215,27 @@ async function claimMaterials(task) { try {
 catch (e) {
     error.value = e.response?.data?.detail || '领取素材失败';
 } }
+async function uploadMaterialAssets(event) {
+    const input = event.target;
+    const files = Array.from(input.files || []);
+    input.value = '';
+    if (!files.length)
+        return;
+    try {
+        materialUploading.value = true;
+        materialUploadError.value = '';
+        const form = new FormData();
+        files.forEach(file => form.append('files', file));
+        await api.post('/material-assets/upload', form, { headers: headers.value });
+        await refresh();
+    }
+    catch (e) {
+        materialUploadError.value = e.response?.data?.detail || '上传素材失败，请稍后重试';
+    }
+    finally {
+        materialUploading.value = false;
+    }
+}
 async function makeDraft(task) { const shopId = draftShopIdByTask.value[task.id]; if (!shopId) {
     error.value = '请选择要创建商品草稿的店铺';
     return;
@@ -169,12 +247,32 @@ async function makeDraft(task) { const shopId = draftShopIdByTask.value[task.id]
 catch (e) {
     error.value = e.response?.data?.detail || '创建商品草稿失败';
 } }
-function openMemberDialog(member) { editingMember.value = member || null; memberForm.value = { name: member?.name || '', email: member?.email || '', password: '', is_active: member?.is_active ?? true }; showMemberDialog.value = true; }
+function openMemberDialog(member) { editingMember.value = member || null; memberForm.value = { name: member?.name || '', user_code: member?.user_code || '', email: member?.email || '', password: '', is_active: member?.is_active ?? true }; showMemberDialog.value = true; }
+function openMyAccountDialog() { myUserCode.value = user.value?.user_code || ''; showMyAccountDialog.value = true; }
+async function saveMyUserCode() { const userCode = myUserCode.value.trim(); if (userCode && [...userCode].length !== 2) {
+    showToast('用户代码必须恰好为两个字符');
+    return;
+} try {
+    myAccountSaving.value = true;
+    const { data } = await api.patch('/me', { user_code: userCode || null }, { headers: headers.value });
+    user.value = data;
+    showMyAccountDialog.value = false;
+    showToast('用户代码已保存');
+}
+catch (e) {
+    showToast(e.response?.data?.detail || '保存用户代码失败');
+}
+finally {
+    myAccountSaving.value = false;
+} }
 async function saveMember() { if (!memberForm.value.name.trim() || !memberForm.value.email.trim() || (!editingMember.value && memberForm.value.password.length < 8))
-    return; try {
+    return; const userCode = memberForm.value.user_code.trim(); if (userCode && [...userCode].length !== 2) {
+    showToast('用户代码必须恰好为两个字符');
+    return;
+} try {
     memberSaving.value = true;
     error.value = '';
-    const payload = { name: memberForm.value.name.trim(), email: memberForm.value.email.trim() };
+    const payload = { name: memberForm.value.name.trim(), user_code: userCode || null, email: memberForm.value.email.trim() };
     if (memberForm.value.password)
         payload.password = memberForm.value.password;
     if (editingMember.value)
@@ -183,9 +281,12 @@ async function saveMember() { if (!memberForm.value.name.trim() || !memberForm.v
         await api.post('/members', payload, { headers: headers.value });
     showMemberDialog.value = false;
     await refresh();
+    showToast('成员已保存');
 }
 catch (e) {
-    error.value = e.response?.data?.detail || '保存成员失败';
+    const message = e.response?.data?.detail || '保存成员失败';
+    error.value = message;
+    showToast(message);
 }
 finally {
     memberSaving.value = false;
@@ -337,11 +438,13 @@ else {
                 __VLS_ctx.page = 'points';
             } },
     });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-        ...{ class: "member" },
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.openMyAccountDialog) },
+        ...{ class: "member account-button" },
     });
     (__VLS_ctx.user?.name);
     (__VLS_ctx.user?.role === 'company_admin' ? '管理员' : '运营成员');
+    (__VLS_ctx.user?.user_code ? ` · ${__VLS_ctx.user.user_code}` : '');
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.logout) },
         ...{ class: "ghost" },
@@ -930,14 +1033,83 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "primary material-upload-button" },
+            ...{ class: ({ disabled: __VLS_ctx.materialUploading }) },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            ...{ onChange: (__VLS_ctx.uploadMaterialAssets) },
+            type: "file",
+            multiple: true,
+            accept: "image/png,image/jpeg,image/webp",
+            disabled: (__VLS_ctx.materialUploading),
+        });
+        (__VLS_ctx.materialUploading ? '上传中…' : '＋ 上传本地素材');
+        if (__VLS_ctx.materialUploadError) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "error material-upload-error" },
+            });
+            (__VLS_ctx.materialUploadError);
+        }
+        if (__VLS_ctx.selectedMaterialAssetIds.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+                ...{ class: "material-draft-bar" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            (__VLS_ctx.selectedMaterialAssetIds.length);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.openMaterialDraftDialog) },
+                ...{ class: "primary" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!(__VLS_ctx.selectedMaterialAssetIds.length))
+                            return;
+                        __VLS_ctx.selectedMaterialAssetIds = [];
+                    } },
+                ...{ class: "ghost" },
+            });
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "material-grid" },
         });
         for (const [asset] of __VLS_getVForSourceType((__VLS_ctx.materialAssets))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!(__VLS_ctx.page === 'materials'))
+                            return;
+                        __VLS_ctx.toggleMaterialAsset(asset.id);
+                    } },
                 key: (asset.id),
                 ...{ class: "material-card" },
+                ...{ class: ({ selected: __VLS_ctx.selectedMaterialAssetIds.includes(asset.id) }) },
             });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "material-select-mark" },
+            });
+            (__VLS_ctx.selectedMaterialAssetIds.includes(asset.id) ? '✓' : '');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
                 src: (__VLS_ctx.imageUrl(asset.url)),
                 alt: (asset.name),
@@ -946,7 +1118,7 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
             (asset.name);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-            (asset.source_task_id);
+            (asset.source_task_id ? `来源任务 #${asset.source_task_id}` : '本地上传');
             (new Date(asset.created_at).toLocaleDateString());
         }
         if (!__VLS_ctx.materialAssets.length) {
@@ -987,19 +1159,44 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "draft-title" },
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                src: (draft.image_urls[0]),
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "draft-thumbnails" },
             });
+            for (const [url] of __VLS_getVForSourceType((draft.image_urls))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                    key: (url),
+                    src: (__VLS_ctx.imageUrl(url)),
+                    alt: (draft.title),
+                });
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
             (draft.title);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (draft.source_task_id);
+            (draft.source_task_id ? `#${draft.source_task_id}` : '素材库');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "chip orange" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        __VLS_ctx.openDraftEditDialog(draft);
+                    } },
+            });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({});
         }
         if (!__VLS_ctx.drafts.length) {
@@ -1053,6 +1250,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 key: (member.id),
@@ -1062,6 +1260,8 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
             (member.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (member.user_code || '—');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (member.email);
@@ -1360,6 +1560,198 @@ if (__VLS_ctx.showCreativeAssetsDialog) {
         });
     }
 }
+if (__VLS_ctx.showMyAccountDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMyAccountDialog))
+                    return;
+                __VLS_ctx.showMyAccountDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "2",
+        placeholder: "例如：CN",
+    });
+    (__VLS_ctx.myUserCode);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMyAccountDialog))
+                    return;
+                __VLS_ctx.showMyAccountDialog = false;
+            } },
+        ...{ class: "ghost" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveMyUserCode) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.myAccountSaving),
+    });
+    (__VLS_ctx.myAccountSaving ? '保存中…' : '保存');
+}
+if (__VLS_ctx.showMaterialDraftDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMaterialDraftDialog))
+                    return;
+                __VLS_ctx.showMaterialDraftDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card material-draft-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMaterialDraftDialog))
+                    return;
+                __VLS_ctx.showMaterialDraftDialog = false;
+            } },
+        ...{ class: "modal-close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.selectedMaterialAssetIds.length);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.materialDraftTemplateId),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (null),
+    });
+    for (const [template] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (template.id),
+            value: (template.id),
+        });
+        (template.name);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.materialDraftShopId),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (null),
+    });
+    for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.shops))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (shop.id),
+            value: (shop.id),
+        });
+        (shop.region);
+        (shop.name);
+    }
+    if (__VLS_ctx.materialDraftError) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "error material-draft-error" },
+        });
+        (__VLS_ctx.materialDraftError);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMaterialDraftDialog))
+                    return;
+                __VLS_ctx.showMaterialDraftDialog = false;
+            } },
+        ...{ class: "ghost" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.createDraftFromMaterialAssets) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.materialDraftSaving),
+    });
+    (__VLS_ctx.materialDraftSaving ? '创建中…' : '确认创建');
+}
+if (__VLS_ctx.showDraftEditDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showDraftEditDialog))
+                    return;
+                __VLS_ctx.showDraftEditDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card material-draft-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showDraftEditDialog))
+                    return;
+                __VLS_ctx.showDraftEditDialog = false;
+            } },
+        ...{ class: "modal-close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "draft-edit-preview" },
+    });
+    for (const [url] of __VLS_getVForSourceType((__VLS_ctx.editingDraft?.image_urls))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+            key: (url),
+            src: (__VLS_ctx.imageUrl(url)),
+            alt: (__VLS_ctx.editingDraft?.title || '商品素材'),
+        });
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "180",
+        placeholder: "请输入商品标题",
+    });
+    (__VLS_ctx.draftEditTitle);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.draftEditShopId),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (null),
+    });
+    for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.shops))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (shop.id),
+            value: (shop.id),
+        });
+        (shop.region);
+        (shop.name);
+    }
+    if (__VLS_ctx.draftEditError) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "error material-draft-error" },
+        });
+        (__VLS_ctx.draftEditError);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showDraftEditDialog))
+                    return;
+                __VLS_ctx.showDraftEditDialog = false;
+            } },
+        ...{ class: "ghost" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveDraftEdit) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.draftEditSaving),
+    });
+    (__VLS_ctx.draftEditSaving ? '保存中…' : '保存修改');
+}
 if (__VLS_ctx.showGroupDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
@@ -1421,6 +1813,12 @@ if (__VLS_ctx.showMemberDialog) {
         placeholder: "请输入姓名",
     });
     (__VLS_ctx.memberForm.name);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "2",
+        placeholder: "例如：CN",
+    });
+    (__VLS_ctx.memberForm.user_code);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
         type: "email",
@@ -1744,6 +2142,7 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['context']} */ ;
 /** @type {__VLS_StyleScopedClasses['points-pill']} */ ;
 /** @type {__VLS_StyleScopedClasses['member']} */ ;
+/** @type {__VLS_StyleScopedClasses['account-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['hero']} */ ;
@@ -1810,8 +2209,16 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-upload-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-upload-error']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-bar']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-select-mark']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
@@ -1820,6 +2227,7 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-thumbnails']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['orange']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
@@ -1862,6 +2270,30 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['asset-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['asset-delete']} */ ;
 /** @type {__VLS_StyleScopedClasses['asset-empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-error']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-edit-preview']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-error']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
@@ -1942,9 +2374,26 @@ const __VLS_self = (await import('vue')).defineComponent({
             editingMember: editingMember,
             memberForm: memberForm,
             memberSaving: memberSaving,
+            showMyAccountDialog: showMyAccountDialog,
+            myUserCode: myUserCode,
+            myAccountSaving: myAccountSaving,
             managedShops: managedShops,
             shopLoading: shopLoading,
             shopError: shopError,
+            materialUploading: materialUploading,
+            materialUploadError: materialUploadError,
+            selectedMaterialAssetIds: selectedMaterialAssetIds,
+            showMaterialDraftDialog: showMaterialDraftDialog,
+            materialDraftTemplateId: materialDraftTemplateId,
+            materialDraftShopId: materialDraftShopId,
+            materialDraftSaving: materialDraftSaving,
+            materialDraftError: materialDraftError,
+            showDraftEditDialog: showDraftEditDialog,
+            editingDraft: editingDraft,
+            draftEditTitle: draftEditTitle,
+            draftEditShopId: draftEditShopId,
+            draftEditSaving: draftEditSaving,
+            draftEditError: draftEditError,
             showShopManagersDialog: showShopManagersDialog,
             managingShop: managingShop,
             selectedManagerIds: selectedManagerIds,
@@ -1976,10 +2425,18 @@ const __VLS_self = (await import('vue')).defineComponent({
             templateCoverUrl: templateCoverUrl,
             hasTemplateCover: hasTemplateCover,
             useTemplate: useTemplate,
+            toggleMaterialAsset: toggleMaterialAsset,
+            openMaterialDraftDialog: openMaterialDraftDialog,
+            createDraftFromMaterialAssets: createDraftFromMaterialAssets,
+            openDraftEditDialog: openDraftEditDialog,
+            saveDraftEdit: saveDraftEdit,
             selectTask: selectTask,
             claimMaterials: claimMaterials,
+            uploadMaterialAssets: uploadMaterialAssets,
             makeDraft: makeDraft,
             openMemberDialog: openMemberDialog,
+            openMyAccountDialog: openMyAccountDialog,
+            saveMyUserCode: saveMyUserCode,
             saveMember: saveMember,
             toggleMember: toggleMember,
             loadMiaoshouShops: loadMiaoshouShops,

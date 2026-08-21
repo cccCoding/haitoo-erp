@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Literal
-from pydantic import BaseModel, EmailStr, Field, field_serializer
+from pydantic import BaseModel, EmailStr, Field, field_serializer, field_validator
 from .models import Role, TaskStatus
 
 
@@ -12,6 +12,7 @@ class LoginInput(BaseModel):
 class UserOut(BaseModel):
     id: int
     name: str
+    user_code: str | None
     email: EmailStr
     role: Role
     company_id: int | None
@@ -128,6 +129,16 @@ class DraftCreate(BaseModel):
     shop_id: int
 
 
+class MaterialDraftCreate(DraftCreate):
+    template_id: int
+    material_asset_ids: list[int] = Field(min_length=1, max_length=100)
+
+
+class DraftUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=180)
+    shop_id: int
+
+
 class RechargeInput(BaseModel):
     company_id: int
     amount: int = Field(gt=0)
@@ -136,15 +147,52 @@ class RechargeInput(BaseModel):
 
 class MemberCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    user_code: str | None = Field(default=None, min_length=2, max_length=2)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("user_code")
+    @classmethod
+    def validate_user_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if len(value) != 2:
+            raise ValueError("用户代码必须恰好为两个字符")
+        return value
 
 
 class MemberUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
+    user_code: str | None = Field(default=None, min_length=2, max_length=2)
     email: EmailStr | None = None
     password: str | None = Field(default=None, min_length=8, max_length=128)
     is_active: bool | None = None
+
+    @field_validator("user_code")
+    @classmethod
+    def validate_user_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if len(value) != 2:
+            raise ValueError("用户代码必须恰好为两个字符")
+        return value
+
+
+class MyUserCodeUpdate(BaseModel):
+    """当前登录账号仅可更新自己的用户代码。"""
+    user_code: str | None = Field(..., min_length=2, max_length=2)
+
+    @field_validator("user_code")
+    @classmethod
+    def validate_user_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if len(value) != 2:
+            raise ValueError("用户代码必须恰好为两个字符")
+        return value
 
 
 class MiaoshouShopQuery(BaseModel):

@@ -11,11 +11,12 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Uplo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete, func, inspect, or_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
 from .models import AIProviderSetting, Company, MaterialAsset, NonAIPointRule, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
-from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, DraftCreate, LedgerOut, LoginInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
+from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, DraftCreate, DraftUpdate, LedgerOut, LoginInput, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, provider_credential_env
 from .credentials import decrypt_secret, encrypt_secret
@@ -102,10 +103,29 @@ def ensure_schema() -> None:
             connection.execute(text("ALTER TABLE companies ADD COLUMN miaoshou_app_id VARCHAR(255)"))
         if "miaoshou_secret_encrypted" not in company_columns:
             connection.execute(text("ALTER TABLE companies ADD COLUMN miaoshou_secret_encrypted TEXT"))
+        user_columns = {column["name"] for column in inspect(engine).get_columns("users")}
+        if "user_code" not in user_columns:
+            connection.execute(text("ALTER TABLE users ADD COLUMN user_code VARCHAR(2)"))
+        user_indexes = inspect(connection).get_indexes("users")
+        user_constraints = inspect(connection).get_unique_constraints("users")
+        has_user_code_unique_index = any(
+            index.get("name") == "uq_users_company_user_code" or (
+                index.get("unique") and index.get("column_names") == ["company_id", "user_code"]
+            )
+            for index in [*user_indexes, *user_constraints]
+        )
+        if not has_user_code_unique_index:
+            connection.execute(text("CREATE UNIQUE INDEX uq_users_company_user_code ON users (company_id, user_code)"))
         shop_columns = {column["name"] for column in inspect(engine).get_columns("shops")}
         for column, definition in (("nickname", "VARCHAR(120)"), ("platform", "VARCHAR(40)"), ("auth_expires_at", "VARCHAR(50)")):
             if column not in shop_columns:
                 connection.execute(text(f"ALTER TABLE shops ADD COLUMN {column} {definition}"))
+        material_columns = {column["name"]: column for column in inspect(engine).get_columns("material_assets")}
+        if connection.dialect.name == "mysql" and not material_columns["source_task_id"]["nullable"]:
+            connection.execute(text("ALTER TABLE material_assets MODIFY COLUMN source_task_id INTEGER NULL"))
+        draft_columns = {column["name"]: column for column in inspect(engine).get_columns("product_drafts")}
+        if connection.dialect.name == "mysql" and not draft_columns["source_task_id"]["nullable"]:
+            connection.execute(text("ALTER TABLE product_drafts MODIFY COLUMN source_task_id INTEGER NULL"))
         # 项目标准：MySQL 所有关系仅保存 ID，不建立数据库外键。兼容清理旧库。
         if connection.dialect.name == "mysql":
             inspector = inspect(connection)
@@ -183,6 +203,26 @@ def can_access_task(task: PodTask | None, user: User) -> bool:
     return bool(task and (user.role == Role.SUPER_ADMIN or task.company_id == user.company_id))
 
 
+def user_code_in_use(db: Session, company_id: int | None, user_code: str, excluding_user_id: int | None = None) -> bool:
+    """用户代码在公司内唯一；平台账号则在平台账号范围内唯一。"""
+    statement = select(User.id).where(User.user_code == user_code)
+    statement = statement.where(User.company_id.is_(None)) if company_id is None else statement.where(User.company_id == company_id)
+    if excluding_user_id is not None:
+        statement = statement.where(User.id != excluding_user_id)
+    return db.scalar(statement) is not None
+
+
+def commit_user_code_change(db: Session) -> None:
+    """以唯一索引作为并发写入时的最终兜底，并保留可直接展示的提示。"""
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if "user_code" in str(exc.orig).lower() or "uq_users_company_user_code" in str(exc.orig).lower():
+            raise HTTPException(400, "该用户代码已被使用") from exc
+        raise
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -202,6 +242,17 @@ def login(payload: LoginInput, db: Session = Depends(get_db)):
 def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
     company = db.get(Company, user.company_id) if user.company_id else None
     return {"user": UserOut.model_validate(user), "company": {"id": company.id, "name": company.name} if company else None}
+
+
+@app.patch("/me", response_model=UserOut)
+def update_my_user_code(payload: MyUserCodeUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """当前账号只能设置自己的用户代码。"""
+    if payload.user_code and user_code_in_use(db, user.company_id, payload.user_code, user.id):
+        raise HTTPException(400, "该用户代码已被使用")
+    user.user_code = payload.user_code
+    commit_user_code_change(db)
+    db.refresh(user)
+    return user
 
 
 @app.get("/shops", response_model=list[ShopOut])
@@ -260,8 +311,10 @@ def create_member(payload: MemberCreate, user: User = Depends(require_roles(Role
     email = str(payload.email).lower()
     if db.scalar(select(User.id).where(User.email == email)):
         raise HTTPException(400, "该邮箱已被使用")
-    member = User(company_id=user.company_id, email=email, name=payload.name.strip(), password_hash=hash_password(payload.password), role=Role.MEMBER)
-    db.add(member); db.commit(); db.refresh(member)
+    if payload.user_code and user_code_in_use(db, user.company_id, payload.user_code):
+        raise HTTPException(400, "该用户代码已被使用")
+    member = User(company_id=user.company_id, email=email, name=payload.name.strip(), user_code=payload.user_code, password_hash=hash_password(payload.password), role=Role.MEMBER)
+    db.add(member); commit_user_code_change(db); db.refresh(member)
     return member
 
 
@@ -278,11 +331,15 @@ def update_member(member_id: int, payload: MemberUpdate, user: User = Depends(re
         member.email = email
     if payload.name is not None:
         member.name = payload.name.strip()
+    if "user_code" in payload.model_fields_set:
+        if payload.user_code and user_code_in_use(db, user.company_id, payload.user_code, member.id):
+            raise HTTPException(400, "该用户代码已被使用")
+        member.user_code = payload.user_code
     if payload.password is not None:
         member.password_hash = hash_password(payload.password)
     if payload.is_active is not None:
         member.is_active = payload.is_active
-    db.commit(); db.refresh(member)
+    commit_user_code_change(db); db.refresh(member)
     return member
 
 
@@ -418,6 +475,33 @@ async def save_image_upload(file: UploadFile, company_id: int | None, prefix: st
 @app.post("/uploads/creative-asset")
 async def upload_creative_asset(file: UploadFile = File(...), user: User = Depends(current_user)):
     return await save_image_upload(file, user.company_id, "creative")
+
+
+@app.post("/material-assets/upload")
+async def upload_material_assets(files: list[UploadFile] = File(...), user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """上传一张或多张本地图片到当前公司的素材库。"""
+    if not files:
+        raise HTTPException(400, "请至少选择一张图片")
+    if len(files) > 100:
+        raise HTTPException(400, "单次最多上传 100 张图片")
+
+    assets: list[MaterialAsset] = []
+    for file in files:
+        uploaded = await save_image_upload(file, user.company_id, "material")
+        name = Path(file.filename or "本地素材").name.rsplit(".", 1)[0] or "本地素材"
+        asset = MaterialAsset(
+            company_id=user.company_id,
+            source_task_id=None,
+            url=uploaded["url"],
+            name=name[:180],
+            claimed_by=user.id,
+        )
+        db.add(asset)
+        assets.append(asset)
+    db.commit()
+    for asset in assets:
+        db.refresh(asset)
+    return [serialize_record(asset) for asset in assets]
 
 
 @app.get("/tasks")
@@ -672,6 +756,43 @@ def create_draft(task_id: int, payload: DraftCreate, user: User = Depends(curren
     template = db.get(ProductTemplate, task.template_id)
     draft = ProductDraft(company_id=task.company_id, shop_id=shop.id, source_task_id=task.id, title=f"{template.name} POD 商品", image_urls=[task.selected_result_url])
     db.add(draft); db.commit(); db.refresh(draft); return serialize_record(draft)
+
+
+@app.post("/drafts/from-material-assets")
+def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """用素材库中选定的一张或多张图片创建商品草稿。"""
+    asset_ids = list(dict.fromkeys(payload.material_asset_ids))
+    assets = db.scalars(select(MaterialAsset).where(
+        MaterialAsset.company_id == user.company_id,
+        MaterialAsset.id.in_(asset_ids),
+    )).all()
+    if len(assets) != len(asset_ids):
+        raise HTTPException(400, "包含不存在或无权使用的素材")
+    shop = ensure_shop(db, user, payload.shop_id)
+    template = get_company_template(db, user, payload.template_id)
+    source_task_ids = {asset.source_task_id for asset in assets}
+    source_task_id = source_task_ids.pop() if len(source_task_ids) == 1 else None
+    draft = ProductDraft(
+        company_id=user.company_id,
+        shop_id=shop.id,
+        source_task_id=source_task_id,
+        title=f"{template.name} POD 商品",
+        image_urls=[asset.url for asset in assets],
+    )
+    db.add(draft); db.commit(); db.refresh(draft)
+    return serialize_record(draft)
+
+
+@app.put("/drafts/{draft_id}")
+def update_draft(draft_id: int, payload: DraftUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    draft = db.get(ProductDraft, draft_id)
+    if not draft or draft.shop_id not in allowed_shop_ids(db, user):
+        raise HTTPException(404, "商品草稿不存在")
+    shop = ensure_shop(db, user, payload.shop_id)
+    draft.title = payload.title.strip()
+    draft.shop_id = shop.id
+    db.commit(); db.refresh(draft)
+    return serialize_record(draft)
 
 
 @app.get("/drafts")
