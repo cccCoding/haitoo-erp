@@ -195,3 +195,33 @@ async def generate(provider: str, request: GenerationRequest) -> list[str]:
         raise ProviderError("不支持的模型提供方")
     async with httpx.AsyncClient(timeout=120) as client:
         return await adapter.generate(request, get_settings(), client)
+
+
+async def generate_draft_title(title_constraint: str, image_url: str) -> str:
+    """使用 DeepSeek 根据模板标题约束和商品首图生成一个可直接编辑的标题。"""
+    settings = get_settings()
+    if not settings.deepseek_api_key:
+        raise ProviderError("未配置 DEEPSEEK_API_KEY")
+    image_reference = _public_url(image_url)
+    prompt = (
+        "你是跨境电商商品标题助手。请严格遵守以下标题约束，结合商品首图生成一个中文商品标题。"
+        "只输出标题本身，不要解释、不要引号、不要 Markdown；标题不超过 180 个字符。\n"
+        f"标题约束：{title_constraint}\n"
+        f"商品首图：{image_reference}"
+    )
+    async with httpx.AsyncClient(timeout=45) as client:
+        response = await client.post(
+            f"{settings.deepseek_base_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
+            json={
+                "model": settings.deepseek_title_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.4,
+                "max_tokens": 180,
+            },
+        )
+    _raise_for_provider_error("deepseek", response)
+    title = str(response.json().get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+    if not title:
+        raise ProviderError("DeepSeek 未返回标题")
+    return title[:180]

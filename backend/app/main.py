@@ -19,9 +19,9 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
 from .models import AIProviderSetting, Company, MaterialAsset, NonAIPointRule, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
-from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, DraftCreate, DraftUpdate, LedgerOut, LoginInput, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
+from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, DraftCreate, DraftTitleGenerate, DraftUpdate, LedgerOut, LoginInput, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
-from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, provider_credential_env
+from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, generate_draft_title, provider_credential_env
 from .credentials import decrypt_secret, encrypt_secret
 import httpx
 
@@ -65,22 +65,7 @@ def seed(db: Session) -> None:
         if not db.scalar(select(NonAIPointRule.id).where(NonAIPointRule.operation_code == operation_code)):
             db.add(NonAIPointRule(operation_code=operation_code, display_name=display_name, points=points, description=description))
 
-    # 开发演示数据清理：仅移除没有历史任务引用的旧模板，避免破坏既有任务。
-    db.execute(
-        delete(ProductTemplate).where(
-            ProductTemplate.name.in_(["白色马克杯正面", "M05L"]),
-            ProductTemplate.id.not_in(select(PodTask.template_id)),
-        )
-    )
-    db.execute(delete(TemplateGroup).where(TemplateGroup.name.in_(["杯壶", "数码配件", "M05L"])))
-    # 不再提供平台预置模板；历史上自动生成的默认模板在未被任务引用时予以清理。
-    db.execute(
-        delete(ProductTemplate).where(
-            ProductTemplate.is_platform.is_(True),
-            ProductTemplate.name == "白色 T恤正面",
-            ProductTemplate.id.not_in(select(PodTask.template_id)),
-        )
-    )
+    # 启动时只补齐必要的演示配置，绝不删除用户的模板、分类或历史数据。
     db.commit()
 
 
@@ -90,6 +75,12 @@ def ensure_schema() -> None:
     with engine.begin() as connection:
         if "description" not in columns:
             connection.execute(text("ALTER TABLE product_templates ADD COLUMN description TEXT"))
+        if "title_template" not in columns:
+            connection.execute(text("ALTER TABLE product_templates ADD COLUMN title_template VARCHAR(500)"))
+        if "product_description" not in columns:
+            connection.execute(text("ALTER TABLE product_templates ADD COLUMN product_description TEXT"))
+        if "size_chart_url" not in columns:
+            connection.execute(text("ALTER TABLE product_templates ADD COLUMN size_chart_url VARCHAR(500)"))
         for column in ("package_weight", "package_length", "package_width", "package_height"):
             if column not in columns:
                 connection.execute(text(f"ALTER TABLE product_templates ADD COLUMN {column} FLOAT"))
@@ -98,6 +89,38 @@ def ensure_schema() -> None:
         draft_columns = {column["name"] for column in inspect(engine).get_columns("product_drafts")}
         if "sku_items" not in draft_columns:
             connection.execute(text("ALTER TABLE product_drafts ADD COLUMN sku_items JSON"))
+        if "template_id" not in draft_columns:
+            connection.execute(text("ALTER TABLE product_drafts ADD COLUMN template_id INTEGER"))
+        if "miaoshou_collect_box_id" not in draft_columns:
+            connection.execute(text("ALTER TABLE product_drafts ADD COLUMN miaoshou_collect_box_id VARCHAR(120)"))
+        if "product_description" not in draft_columns:
+            connection.execute(text("ALTER TABLE product_drafts ADD COLUMN product_description TEXT"))
+        if "size_chart_url" not in draft_columns:
+            connection.execute(text("ALTER TABLE product_drafts ADD COLUMN size_chart_url VARCHAR(500)"))
+        if "created_by" not in draft_columns:
+            connection.execute(text("ALTER TABLE product_drafts ADD COLUMN created_by INTEGER"))
+        if "updated_by" not in draft_columns:
+            connection.execute(text("ALTER TABLE product_drafts ADD COLUMN updated_by INTEGER"))
+        if "updated_at" not in draft_columns:
+            connection.execute(text("ALTER TABLE product_drafts ADD COLUMN updated_at DATETIME"))
+            connection.execute(text("UPDATE product_drafts SET updated_at = created_at WHERE updated_at IS NULL"))
+        # 历史 AI 任务草稿可从来源任务回填操作人；素材库旧草稿没有可靠来源时保留为空。
+        connection.execute(text("""
+            UPDATE product_drafts
+            SET created_by = (SELECT created_by FROM pod_tasks WHERE pod_tasks.id = product_drafts.source_task_id)
+            WHERE created_by IS NULL AND source_task_id IS NOT NULL
+        """))
+        connection.execute(text("""
+            UPDATE product_drafts
+            SET updated_by = created_by
+            WHERE updated_by IS NULL AND created_by IS NOT NULL
+        """))
+        # 兼容上线前由 AI 任务创建的商品草稿；素材库旧草稿无法可靠推断模板，发布时会提示重新创建。
+        connection.execute(text("""
+            UPDATE product_drafts
+            SET template_id = (SELECT template_id FROM pod_tasks WHERE pod_tasks.id = product_drafts.source_task_id)
+            WHERE template_id IS NULL AND source_task_id IS NOT NULL
+        """))
         task_columns = {column["name"] for column in inspect(engine).get_columns("pod_tasks")}
         for column, definition in (("provider", "VARCHAR(40)"), ("provider_model", "VARCHAR(120)"), ("failure_reason", "VARCHAR(500)")):
             if column not in task_columns:
@@ -363,8 +386,7 @@ async def list_miaoshou_shops(payload: MiaoshouShopQuery, user: User = Depends(r
     app_key = company.miaoshou_app_id
     app_secret = decrypt_secret(company.miaoshou_secret_encrypted)
     body_json = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
-    signature_source = f"{app_secret}{path}{timestamp}{app_key}{body_json}{app_secret}"
-    signature = hmac.new(app_secret.encode(), signature_source.encode(), hashlib.sha256).hexdigest()
+    signature = miaoshou_request_signature(app_secret, path, timestamp, app_key, body_json)
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(
@@ -444,20 +466,17 @@ def get_company_template(db: Session, user: User, template_id: int) -> ProductTe
 
 
 def build_draft_sku_items(template: ProductTemplate, user: User, image_urls: list[str]) -> list[dict]:
-    """按「图片 × 尺码」生成草稿 SKU；SKU 格式为 M05L + 用户代码 + 6 位随机字符串。"""
+    """按「每张图片一条」生成草稿基础 SKU；发布时再拼接模板尺码。"""
     if not user.user_code:
         raise HTTPException(400, "请先在账号设置中填写两位用户代码，再创建商品草稿")
-    sizes = (template.sku_specifications or {}).get("size", {}).get("options", [])
-    sizes = [str(size).strip() for size in sizes if str(size).strip()] or [None]
     alphabet = string.ascii_uppercase + string.digits
     sku_items, generated_skus = [], set()
     for image_url in image_urls:
-        for size in sizes:
+        random_part = "".join(secrets.choice(alphabet) for _ in range(6))
+        while random_part in generated_skus:
             random_part = "".join(secrets.choice(alphabet) for _ in range(6))
-            while random_part in generated_skus:
-                random_part = "".join(secrets.choice(alphabet) for _ in range(6))
-            generated_skus.add(random_part)
-            sku_items.append({"image_url": image_url, "size": size, "sku": f"M05L{user.user_code.upper()}{random_part}"})
+        generated_skus.add(random_part)
+        sku_items.append({"image_url": image_url, "size": None, "sku": f"M05L{user.user_code.upper()}{random_part}"})
     return sku_items
 
 
@@ -467,15 +486,88 @@ def validate_draft_sku_items(template: ProductTemplate, user: User, image_urls: 
         return build_draft_sku_items(template, user, image_urls)
     if not user.user_code:
         raise HTTPException(400, "请先在账号设置中填写两位用户代码，再创建商品草稿")
-    sizes = (template.sku_specifications or {}).get("size", {}).get("options", [])
-    sizes = [str(size).strip() for size in sizes if str(size).strip()] or [None]
-    expected_pairs = {(image_url, size) for image_url in image_urls for size in sizes}
+    expected_pairs = {(image_url, None) for image_url in image_urls}
     submitted_items = [item.model_dump() for item in sku_items]
     submitted_pairs = {(item["image_url"], item["size"]) for item in submitted_items}
     sku_pattern = re.compile(rf"^M05L{re.escape(user.user_code.upper())}[A-Z0-9]{{6}}$")
     if len(submitted_items) != len(expected_pairs) or submitted_pairs != expected_pairs or len({item["sku"] for item in submitted_items}) != len(submitted_items) or any(not sku_pattern.fullmatch(item["sku"]) for item in submitted_items):
         raise HTTPException(400, "SKU 列表已失效，请重新选择产品模板")
     return submitted_items
+
+
+def miaoshou_request_signature(app_secret: str, path: str, timestamp: str, app_key: str, body_json: str) -> str:
+    """妙手开放平台接口统一使用的 HMAC-SHA256 签名。"""
+    source = f"{app_secret}{path}{timestamp}{app_key}{body_json}{app_secret}"
+    return hmac.new(app_secret.encode(), source.encode(), hashlib.sha256).hexdigest()
+
+
+def miaoshou_public_image_url(url: str) -> str:
+    """将本地素材地址转换为妙手服务可下载的公网地址。"""
+    if url.startswith(("http://", "https://")):
+        return url
+    base_url = (get_settings().public_media_base_url or "").rstrip("/")
+    if not base_url:
+        raise HTTPException(400, "当前草稿包含本地图片；请先配置 PUBLIC_MEDIA_BASE_URL 为可被妙手访问的公网地址")
+    return f"{base_url}/{url.lstrip('/')}"
+
+
+def build_common_collect_box_payload(draft: ProductDraft, template: ProductTemplate) -> dict:
+    """按妙手「创建公共采集箱产品」接口组装 POD 草稿。"""
+    image_urls = [miaoshou_public_image_url(url) for url in (draft.image_urls or [])]
+    if not image_urls:
+        raise HTTPException(400, "商品草稿没有可发布的图片")
+    sku_items = draft.sku_items or []
+    if not sku_items:
+        raise HTTPException(400, "商品草稿没有 SKU 信息")
+
+    base_sku_by_image = {}
+    for item in sku_items:
+        base_sku_by_image.setdefault(item.get("image_url"), item["sku"])
+
+    # Color 的属性值使用每张图片的基础 SKU，便于在妙手中识别图片与 SKU 的关系。
+    image_color_keys = {}
+    color_map = {}
+    for local_url in draft.image_urls or []:
+        base_sku = base_sku_by_image.get(local_url)
+        if not base_sku:
+            raise HTTPException(400, "商品草稿的图片缺少基础 SKU")
+        image_color_keys[local_url] = base_sku
+        public_url = miaoshou_public_image_url(local_url)
+        color_map[base_sku] = {"name": base_sku, "imgUrls": [public_url], "imgUrl": public_url}
+
+    size_names = (template.sku_specifications or {}).get("size", {}).get("options", [])
+    size_names = [str(size).strip() for size in size_names if str(size).strip()] or ["Default"]
+    size_map = {name: {"name": name} for name in size_names}
+    sku_map = {}
+    for image_url, color_name in image_color_keys.items():
+        base_sku = base_sku_by_image.get(image_url)
+        if not base_sku:
+            raise HTTPException(400, "商品草稿的图片缺少基础 SKU")
+        for size_name in size_names:
+            platform_sku = base_sku if size_name == "Default" else f"{base_sku}-{size_name}"
+            sku_map[f"{color_name};{size_name}"] = {
+                "itemNum": platform_sku, "price": 0.01, "stock": 999,
+                "weight": template.package_weight or 0.01,
+                "packageLength": template.package_length or 0,
+                "packageWidth": template.package_width or 0,
+                "packageHeight": template.package_height or 0,
+                "oriPrice": 0.01, "oriStock": 999,
+            }
+    first_sku = next(iter(sku_map.values()))["itemNum"]
+    payload = {
+        "title": draft.title, "itemNum": first_sku,
+        "notes": draft.product_description or template.product_description or template.description or "POD 定制商品",
+        "price": 0.01, "stock": 999, "imgUrls": image_urls,
+        "weight": template.package_weight or 0.01,
+        "packageLength": template.package_length or 0,
+        "packageWidth": template.package_width or 0,
+        "packageHeight": template.package_height or 0,
+        "colorPropName": "Color", "colorMap": color_map,
+        "sizePropName": "Size", "sizeMap": size_map, "skuMap": sku_map,
+    }
+    if draft.size_chart_url:
+        payload["sizeChart"] = miaoshou_public_image_url(draft.size_chart_url)
+    return payload
 
 
 @app.put("/templates/{template_id}")
@@ -499,6 +591,11 @@ def delete_template(template_id: int, user: User = Depends(require_roles(Role.CO
 @app.post("/uploads/template-cover")
 async def upload_template_cover(file: UploadFile = File(...), user: User = Depends(require_roles(Role.COMPANY_ADMIN))):
     return await save_image_upload(file, user.company_id, "template")
+
+
+@app.post("/uploads/draft-size-chart")
+async def upload_draft_size_chart(file: UploadFile = File(...), user: User = Depends(current_user)):
+    return await save_image_upload(file, user.company_id, "draft-size-chart")
 
 
 async def save_image_upload(file: UploadFile, company_id: int | None, prefix: str) -> dict:
@@ -795,7 +892,7 @@ def create_draft(task_id: int, payload: DraftCreate, user: User = Depends(curren
         raise HTTPException(400, "请先完成任务并选择产品图")
     shop = ensure_shop(db, user, payload.shop_id)
     template = db.get(ProductTemplate, task.template_id)
-    draft = ProductDraft(company_id=task.company_id, shop_id=shop.id, source_task_id=task.id, title=f"{template.name} POD 商品", image_urls=[task.selected_result_url], sku_items=build_draft_sku_items(template, user, [task.selected_result_url]))
+    draft = ProductDraft(company_id=task.company_id, shop_id=shop.id, template_id=template.id, source_task_id=task.id, title=f"{template.name} POD 商品", image_urls=[task.selected_result_url], sku_items=build_draft_sku_items(template, user, [task.selected_result_url]), created_by=user.id, updated_by=user.id)
     db.add(draft); db.commit(); db.refresh(draft); return serialize_record(draft)
 
 
@@ -817,13 +914,32 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
     draft = ProductDraft(
         company_id=user.company_id,
         shop_id=shop.id,
+        template_id=template.id,
         source_task_id=source_task_id,
-        title=f"{template.name} POD 商品",
+        title=payload.title.strip(),
+        product_description=payload.product_description.strip() if payload.product_description else None,
+        size_chart_url=payload.size_chart_url,
         image_urls=image_urls,
         sku_items=validate_draft_sku_items(template, user, image_urls, payload.sku_items),
+        created_by=user.id,
+        updated_by=user.id,
     )
     db.add(draft); db.commit(); db.refresh(draft)
     return serialize_record(draft)
+
+
+@app.post("/templates/{template_id}/generate-draft-title")
+async def generate_material_draft_title(template_id: int, payload: DraftTitleGenerate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    template = get_company_template(db, user, template_id)
+    if not template.title_template:
+        raise HTTPException(400, "该产品模版尚未填写 AI生成标题约束")
+    asset = db.scalar(select(MaterialAsset).where(MaterialAsset.company_id == user.company_id, MaterialAsset.url == payload.image_url))
+    if not asset:
+        raise HTTPException(400, "请使用当前公司素材库中的首图生成标题")
+    try:
+        return {"title": await generate_draft_title(template.title_template, payload.image_url)}
+    except ProviderError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 @app.put("/drafts/{draft_id}")
@@ -834,8 +950,53 @@ def update_draft(draft_id: int, payload: DraftUpdate, user: User = Depends(curre
     shop = ensure_shop(db, user, payload.shop_id)
     draft.title = payload.title.strip()
     draft.shop_id = shop.id
+    draft.updated_by = user.id
     db.commit(); db.refresh(draft)
     return serialize_record(draft)
+
+
+@app.post("/drafts/{draft_id}/publish-to-miaoshou")
+async def publish_draft_to_miaoshou(draft_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """将商品草稿创建到妙手公共采集箱，避免重复创建。"""
+    draft = db.get(ProductDraft, draft_id)
+    if not draft or draft.shop_id not in allowed_shop_ids(db, user):
+        raise HTTPException(404, "商品草稿不存在")
+    if draft.miaoshou_collect_box_id:
+        return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "already_published": True}
+    company = db.get(Company, draft.company_id)
+    if not company or not company.miaoshou_app_id or not company.miaoshou_secret_encrypted:
+        raise HTTPException(400, "尚未配置妙手账号，请联系平台管理员配置 AppKey 与 AppSecret")
+    template = db.get(ProductTemplate, draft.template_id) if draft.template_id else None
+    if not template:
+        raise HTTPException(400, "该商品草稿缺少产品模板信息，无法生成公共采集箱商品")
+
+    body = build_common_collect_box_payload(draft, template)
+    path = "/open/v1/product/common_collect_box/common_collect_box/add_common_collect_box_detail"
+    timestamp, app_key = str(int(time.time())), company.miaoshou_app_id
+    app_secret = decrypt_secret(company.miaoshou_secret_encrypted)
+    body_json = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+    signature = miaoshou_request_signature(app_secret, path, timestamp, app_key, body_json)
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                f"https://openapi-erp.91miaoshou.com{path}", content=body_json.encode(), headers={
+                    "Content-Type": "application/json", "x-app-key": app_key, "x-timestamp": timestamp, "x-sign": signature,
+                },
+            )
+        response.raise_for_status()
+        result = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, f"妙手公共采集箱接口调用失败：{exc}") from exc
+    if result.get("code") != "success" and result.get("result") != "success":
+        raise HTTPException(400, result.get("message") or result.get("code") or "妙手公共采集箱接口返回失败")
+    collect_box_id = (result.get("data") or {}).get("commonCollectBoxDetailId")
+    if collect_box_id is None:
+        raise HTTPException(502, "妙手公共采集箱接口未返回商品编号")
+    draft.miaoshou_collect_box_id = str(collect_box_id)
+    draft.status = "published_to_miaoshou"
+    draft.updated_by = user.id
+    db.commit()
+    return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "already_published": False}
 
 
 @app.get("/drafts")
@@ -843,7 +1004,16 @@ def list_drafts(shop_id: int | None = None, user: User = Depends(current_user), 
     stmt = select(ProductDraft).where(ProductDraft.shop_id.in_(allowed_shop_ids(db, user)))
     if shop_id:
         ensure_shop(db, user, shop_id); stmt = stmt.where(ProductDraft.shop_id == shop_id)
-    return [serialize_record(draft) for draft in db.scalars(stmt.order_by(ProductDraft.id.desc())).all()]
+    drafts = db.scalars(stmt.order_by(ProductDraft.id.desc())).all()
+    editor_ids = {draft.updated_by for draft in drafts if draft.updated_by is not None}
+    editors = {
+        editor.id: editor.name
+        for editor in db.scalars(select(User).where(User.id.in_(editor_ids))).all()
+    } if editor_ids else {}
+    return [
+        serialize_record(draft) | {"updated_by_name": editors.get(draft.updated_by)}
+        for draft in drafts
+    ]
 
 
 @app.get("/points")

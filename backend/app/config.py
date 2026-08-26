@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     qwen_base_url: str = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
     gemini_api_key: str | None = None
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    # DeepSeek 采用 OpenAI 兼容接口，用于根据模板约束生成商品标题。
+    deepseek_api_key: str | None = None
+    deepseek_base_url: str = "https://api.deepseek.com/v1"
+    deepseek_title_model: str = "deepseek-chat"
     public_media_base_url: str | None = None
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

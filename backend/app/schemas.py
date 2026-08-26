@@ -51,6 +51,9 @@ class TemplateCreate(BaseModel):
     group_id: int | None = None
     cover_url: str | None = None
     description: str | None = Field(default=None, max_length=500)
+    title_template: str | None = Field(default=None, max_length=500)
+    product_description: str | None = Field(default=None, max_length=5000)
+    size_chart_url: str | None = None
     package_weight: float | None = Field(default=None, gt=0)
     package_length: float | None = Field(default=None, gt=0)
     package_width: float | None = Field(default=None, gt=0)
@@ -66,6 +69,9 @@ class TemplateUpdate(BaseModel):
     group_id: int | None = None
     cover_url: str | None = None
     description: str | None = Field(default=None, max_length=500)
+    title_template: str | None = Field(default=None, max_length=500)
+    product_description: str | None = Field(default=None, max_length=5000)
+    size_chart_url: str | None = None
     package_weight: float | None = Field(default=None, gt=0)
     package_length: float | None = Field(default=None, gt=0)
     package_width: float | None = Field(default=None, gt=0)
@@ -139,6 +145,13 @@ class MaterialDraftCreate(DraftCreate):
     template_id: int
     material_asset_ids: list[int] = Field(min_length=1, max_length=100)
     sku_items: list[DraftSkuItem] = Field(default_factory=list, max_length=1000)
+    title: str = Field(min_length=1, max_length=180)
+    product_description: str | None = Field(default=None, max_length=5000)
+    size_chart_url: str | None = Field(default=None, max_length=500)
+
+
+class DraftTitleGenerate(BaseModel):
+    image_url: str = Field(min_length=1, max_length=500)
 
 
 class DraftUpdate(BaseModel):

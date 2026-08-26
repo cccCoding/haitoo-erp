@@ -80,6 +80,9 @@ class ProductTemplate(Base):
     name: Mapped[str] = mapped_column(String(120))
     cover_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title_template: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    product_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    size_chart_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     package_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
     package_length: Mapped[float | None] = mapped_column(Float, nullable=True)
     package_width: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -129,13 +132,22 @@ class ProductDraft(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     shop_id: Mapped[int] = mapped_column(index=True)
+    # 创建公共采集箱产品需要使用模板中的包装与规格信息。
+    template_id: Mapped[int | None] = mapped_column(nullable=True)
     source_task_id: Mapped[int | None] = mapped_column(nullable=True)
     title: Mapped[str] = mapped_column(String(180))
+    product_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    size_chart_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="pending_publish")
     image_urls: Mapped[dict] = mapped_column(JSON, default=list)
     # 每个图片 × 模板尺码对应一条 SKU 明细：{image_url, size, sku}。
     sku_items: Mapped[dict] = mapped_column(JSON, default=list)
+    miaoshou_collect_box_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # 审计字段用于在待发布列表中显示草稿的创建与最后修改信息。
+    created_by: Mapped[int | None] = mapped_column(nullable=True)
+    updated_by: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class PointAccount(Base):

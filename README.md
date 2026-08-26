@@ -36,9 +36,10 @@ API 文档：`http://localhost:8001/docs`。
 export SEEDREAM_API_KEY='...'
 export QWEN_API_KEY='...'
 export GEMINI_API_KEY='...'
+export DEEPSEEK_API_KEY='...'
 export PUBLIC_MEDIA_BASE_URL='https://pod.example.com'
 ```
 
-`PUBLIC_MEDIA_BASE_URL` 必须能让模型服务通过 HTTPS 读取 `/media` 下的模板和印花图。不开通密钥或未配置该地址时，任务会标记为失败并自动退回积分。
+`PUBLIC_MEDIA_BASE_URL` 必须能让模型服务通过 HTTPS 读取 `/media` 下的模板、印花图和商品首图；DeepSeek 的商品标题生成同样依赖该地址。若使用支持视觉输入的 DeepSeek 兼容模型，可通过 `DEEPSEEK_TITLE_MODEL` 覆盖默认模型。
 
 > Docker Compose 中的密码仅用于本地开发。生产环境必须通过密钥管理服务配置数据库密码、JWT 密钥和妙手凭据加密密钥。
