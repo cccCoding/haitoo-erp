@@ -156,7 +156,7 @@ class DraftTitleGenerate(BaseModel):
 
 class DraftUpdate(BaseModel):
     title: str = Field(min_length=1, max_length=180)
-    shop_id: int
+    product_description: str | None = Field(default=None, max_length=5000)
 
 
 class RechargeInput(BaseModel):

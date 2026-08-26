@@ -16,8 +16,10 @@ const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
 const materialUploading = ref(false), materialUploadError = ref('');
 const selectedMaterialAssetIds = ref([]), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChart = ref(null), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false);
 const materialDraftSkuPreviewItems = ref([]);
-const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditShopId = ref(null), draftEditSaving = ref(false), draftEditError = ref('');
+const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('');
 const publishingDraftId = ref(null);
+const draftPageSize = ref(20), currentDraftPage = ref(1);
+const previewImageUrl = ref(''), previewImageAlt = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
 const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2 };
@@ -36,6 +38,13 @@ const materialDraftSizes = computed(() => {
     return options.map((size) => String(size).trim()).filter(Boolean);
 });
 const materialDraftSkuCount = computed(() => selectedMaterialAssets.value.length);
+const draftPageCount = computed(() => Math.max(1, Math.ceil(drafts.value.length / draftPageSize.value)));
+const visibleDraftPage = computed(() => Math.min(currentDraftPage.value, draftPageCount.value));
+const pagedDrafts = computed(() => {
+    const start = (visibleDraftPage.value - 1) * draftPageSize.value;
+    return drafts.value.slice(start, start + draftPageSize.value);
+});
+function changeDraftPageSize() { currentDraftPage.value = 1; }
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
 const nativeToLocaleString = Date.prototype.toLocaleString;
 const nativeToLocaleDateString = Date.prototype.toLocaleDateString;
@@ -247,20 +256,18 @@ async function createDraftFromMaterialAssets() {
         materialDraftSaving.value = false;
     }
 }
-function openDraftEditDialog(draft) { editingDraft.value = draft; draftEditTitle.value = draft.title; draftEditShopId.value = draft.shop_id; draftEditError.value = ''; showDraftEditDialog.value = true; }
+function openDraftEditDialog(draft) { editingDraft.value = draft; draftEditTitle.value = draft.title; draftEditProductDescription.value = draft.product_description || ''; draftEditError.value = ''; showDraftEditDialog.value = true; }
+function draftSkuForImage(draft, imageUrl) { return draft?.sku_items?.find((item) => item.image_url === imageUrl)?.sku || '—'; }
+function openImagePreview(url, alt) { previewImageUrl.value = imageUrl(url); previewImageAlt.value = alt; }
 async function saveDraftEdit() {
     if (!editingDraft.value || !draftEditTitle.value.trim()) {
         draftEditError.value = '请输入商品标题';
         return;
     }
-    if (!draftEditShopId.value) {
-        draftEditError.value = '请选择投放店铺';
-        return;
-    }
     try {
         draftEditSaving.value = true;
         draftEditError.value = '';
-        await api.put(`/drafts/${editingDraft.value.id}`, { title: draftEditTitle.value.trim(), shop_id: draftEditShopId.value }, { headers: headers.value });
+        await api.put(`/drafts/${editingDraft.value.id}`, { title: draftEditTitle.value.trim(), product_description: draftEditProductDescription.value.trim() || null }, { headers: headers.value });
         showDraftEditDialog.value = false;
         await refresh();
     }
@@ -1142,7 +1149,7 @@ else {
             accept: "image/png,image/jpeg,image/webp",
             disabled: (__VLS_ctx.materialUploading),
         });
-        (__VLS_ctx.materialUploading ? '上传中…' : '＋ 上传本地素材');
+        (__VLS_ctx.materialUploading ? '上传中…' : '上传本地素材');
         if (__VLS_ctx.materialUploadError) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "error material-upload-error" },
@@ -1240,6 +1247,23 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!!(!__VLS_ctx.token))
+                        return;
+                    if (!!(__VLS_ctx.page === 'dashboard'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'templates'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'pod'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'tasks'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'materials'))
+                        return;
+                    if (!(__VLS_ctx.page === 'drafts'))
+                        return;
+                    __VLS_ctx.page = 'materials';
+                } },
             ...{ class: "primary" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -1256,25 +1280,47 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        for (const [draft] of __VLS_getVForSourceType((__VLS_ctx.drafts))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        for (const [draft] of __VLS_getVForSourceType((__VLS_ctx.pagedDrafts))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 key: (draft.id),
                 ...{ class: "trow draft-trow" },
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "draft-title" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "draft-thumbnails" },
-            });
-            for (const [url] of __VLS_getVForSourceType((draft.image_urls))) {
+            if (draft.image_urls?.[0]) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(!__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!(draft.image_urls?.[0]))
+                                return;
+                            __VLS_ctx.openImagePreview(draft.image_urls[0], draft.title);
+                        } },
+                    ...{ class: "draft-thumbnail" },
+                    title: "查看大图",
+                });
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                    key: (url),
-                    src: (__VLS_ctx.imageUrl(url)),
+                    src: (__VLS_ctx.imageUrl(draft.image_urls[0])),
                     alt: (draft.title),
                 });
             }
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            else {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            }
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+                ...{ class: "draft-product-title" },
+            });
             (draft.title);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (draft.sku_items?.length || 1);
@@ -1345,6 +1391,80 @@ else {
         if (!__VLS_ctx.drafts.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "empty" },
+            });
+        }
+        else {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
+                ...{ class: "draft-pagination" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.drafts.length);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                ...{ onChange: (__VLS_ctx.changeDraftPageSize) },
+                value: (__VLS_ctx.draftPageSize),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (20),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (50),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (100),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (500),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (1000),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!!(!__VLS_ctx.drafts.length))
+                            return;
+                        __VLS_ctx.currentDraftPage = __VLS_ctx.visibleDraftPage - 1;
+                    } },
+                disabled: (__VLS_ctx.visibleDraftPage === 1),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.visibleDraftPage);
+            (__VLS_ctx.draftPageCount);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!!(!__VLS_ctx.drafts.length))
+                            return;
+                        __VLS_ctx.currentDraftPage = __VLS_ctx.visibleDraftPage + 1;
+                    } },
+                disabled: (__VLS_ctx.visibleDraftPage === __VLS_ctx.draftPageCount),
             });
         }
     }
@@ -1904,16 +2024,6 @@ if (__VLS_ctx.showDraftEditDialog) {
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "draft-edit-preview" },
-    });
-    for (const [url] of __VLS_getVForSourceType((__VLS_ctx.editingDraft?.image_urls))) {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-            key: (url),
-            src: (__VLS_ctx.imageUrl(url)),
-            alt: (__VLS_ctx.editingDraft?.title || '商品素材'),
-        });
-    }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
         maxlength: "180",
@@ -1921,19 +2031,60 @@ if (__VLS_ctx.showDraftEditDialog) {
     });
     (__VLS_ctx.draftEditTitle);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-        value: (__VLS_ctx.draftEditShopId),
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+        value: (__VLS_ctx.draftEditProductDescription),
+        ...{ class: "draft-edit-description" },
+        maxlength: "5000",
+        placeholder: "请输入产品描述",
     });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-        value: (null),
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "draft-edit-section" },
     });
-    for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.shops))) {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-            key: (shop.id),
-            value: (shop.id),
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "draft-edit-preview" },
+    });
+    for (const [url] of __VLS_getVForSourceType((__VLS_ctx.editingDraft?.image_urls))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            key: (url),
+            ...{ class: "draft-edit-image-item" },
         });
-        (shop.region);
-        (shop.name);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
+        (__VLS_ctx.draftSkuForImage(__VLS_ctx.editingDraft, url));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.showDraftEditDialog))
+                        return;
+                    __VLS_ctx.openImagePreview(url, __VLS_ctx.editingDraft?.title || '商品素材');
+                } },
+            title: "放大查看",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+            src: (__VLS_ctx.imageUrl(url)),
+            alt: (__VLS_ctx.editingDraft?.title || '商品素材'),
+        });
+    }
+    if (__VLS_ctx.editingDraft?.size_chart_url) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "draft-edit-section" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.showDraftEditDialog))
+                        return;
+                    if (!(__VLS_ctx.editingDraft?.size_chart_url))
+                        return;
+                    __VLS_ctx.openImagePreview(__VLS_ctx.editingDraft.size_chart_url, '尺码图');
+                } },
+            ...{ class: "draft-edit-size-chart-button" },
+            title: "放大查看",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+            ...{ class: "draft-edit-size-chart" },
+            src: (__VLS_ctx.imageUrl(__VLS_ctx.editingDraft.size_chart_url)),
+            alt: "尺码图",
+        });
     }
     if (__VLS_ctx.draftEditError) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
@@ -2377,6 +2528,32 @@ if (__VLS_ctx.showTemplateDialog) {
     });
     (__VLS_ctx.editingTemplate ? '保存修改' : '确认新增');
 }
+if (__VLS_ctx.previewImageUrl) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.previewImageUrl))
+                    return;
+                __VLS_ctx.previewImageUrl = '';
+            } },
+        ...{ class: "image-preview-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "image-preview-modal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.previewImageUrl))
+                    return;
+                __VLS_ctx.previewImageUrl = '';
+            } },
+        ...{ class: "modal-close" },
+        'aria-label': "关闭大图",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+        src: (__VLS_ctx.previewImageUrl),
+        alt: (__VLS_ctx.previewImageAlt),
+    });
+}
 if (__VLS_ctx.toast) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "toast" },
@@ -2487,12 +2664,13 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['draft-thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-trow']} */ ;
-/** @type {__VLS_StyleScopedClasses['draft-title']} */ ;
-/** @type {__VLS_StyleScopedClasses['draft-thumbnails']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-thumbnail']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-product-title']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['compact-action']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -2557,7 +2735,13 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-dialog']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-edit-description']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-edit-preview']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-edit-image-item']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-edit-size-chart-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-edit-size-chart']} */ ;
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
@@ -2601,6 +2785,9 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['dimension-inputs']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['image-preview-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['image-preview-modal']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
 /** @type {__VLS_StyleScopedClasses['toast']} */ ;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
@@ -2671,10 +2858,14 @@ const __VLS_self = (await import('vue')).defineComponent({
             showDraftEditDialog: showDraftEditDialog,
             editingDraft: editingDraft,
             draftEditTitle: draftEditTitle,
-            draftEditShopId: draftEditShopId,
+            draftEditProductDescription: draftEditProductDescription,
             draftEditSaving: draftEditSaving,
             draftEditError: draftEditError,
             publishingDraftId: publishingDraftId,
+            draftPageSize: draftPageSize,
+            currentDraftPage: currentDraftPage,
+            previewImageUrl: previewImageUrl,
+            previewImageAlt: previewImageAlt,
             showShopManagersDialog: showShopManagersDialog,
             managingShop: managingShop,
             selectedManagerIds: selectedManagerIds,
@@ -2695,6 +2886,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             materialDraftTemplate: materialDraftTemplate,
             materialDraftSizes: materialDraftSizes,
             materialDraftSkuCount: materialDraftSkuCount,
+            draftPageCount: draftPageCount,
+            visibleDraftPage: visibleDraftPage,
+            pagedDrafts: pagedDrafts,
+            changeDraftPageSize: changeDraftPageSize,
             login: login,
             onCreativeAssetChange: onCreativeAssetChange,
             removeCreativeAsset: removeCreativeAsset,
@@ -2718,6 +2913,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             openMaterialDraftDialog: openMaterialDraftDialog,
             createDraftFromMaterialAssets: createDraftFromMaterialAssets,
             openDraftEditDialog: openDraftEditDialog,
+            draftSkuForImage: draftSkuForImage,
+            openImagePreview: openImagePreview,
             saveDraftEdit: saveDraftEdit,
             publishDraftToMiaoshou: publishDraftToMiaoshou,
             selectTask: selectTask,

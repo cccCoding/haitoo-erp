@@ -1000,9 +1000,8 @@ def update_draft(draft_id: int, payload: DraftUpdate, user: User = Depends(curre
     draft = db.get(ProductDraft, draft_id)
     if not draft or draft.company_id != user.company_id or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
         raise HTTPException(404, "商品草稿不存在")
-    shop = ensure_shop(db, user, payload.shop_id)
     draft.title = payload.title.strip()
-    draft.shop_id = shop.id
+    draft.product_description = payload.product_description.strip() if payload.product_description else None
     draft.updated_by = user.id
     db.commit(); db.refresh(draft)
     return serialize_record(draft)
