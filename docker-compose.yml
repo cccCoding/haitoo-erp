@@ -31,8 +31,18 @@ services:
       SEEDREAM_API_KEY: ${SEEDREAM_API_KEY:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      # 须是模型服务可访问的公网 HTTPS 域名，例如 https://pod.example.com
-      PUBLIC_MEDIA_BASE_URL: ${PUBLIC_MEDIA_BASE_URL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_TITLE_MODEL: ${DEEPSEEK_TITLE_MODEL:-deepseek-v4-flash-vision-exp}
+      # Cloudflare R2 S3 API 凭据仅通过部署环境注入，切勿提交到仓库。
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-haitoo-images-prod}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
+      # false 时不复制 Seedream/千问生成结果到 R2；Gemini 的内嵌结果仍需上传 R2。
+      AI_GENERATED_IMAGE_UPLOAD_TO_R2: ${AI_GENERATED_IMAGE_UPLOAD_TO_R2:-true}
     ports:
       - "8001:8000"
     volumes:

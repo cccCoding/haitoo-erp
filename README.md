@@ -37,9 +37,18 @@ export SEEDREAM_API_KEY='...'
 export QWEN_API_KEY='...'
 export GEMINI_API_KEY='...'
 export DEEPSEEK_API_KEY='...'
-export PUBLIC_MEDIA_BASE_URL='https://pod.example.com'
+export R2_ACCOUNT_ID='...'
+export R2_ACCESS_KEY_ID='...'
+export R2_SECRET_ACCESS_KEY='...'
+export R2_BUCKET='haitoo-images-prod'
+export R2_ENDPOINT='https://<account-id>.r2.cloudflarestorage.com'
+export R2_PUBLIC_BASE_URL='https://img.haitoro.com'
+# 是否复制 Seedream/千问的生成结果到 R2；默认 true，建议生产环境保持 true。
+export AI_GENERATED_IMAGE_UPLOAD_TO_R2='true'
 ```
 
-`PUBLIC_MEDIA_BASE_URL` 必须能让模型服务通过 HTTPS 读取 `/media` 下的模板、印花图和商品首图；DeepSeek 的商品标题生成同样依赖该地址。若使用支持视觉输入的 DeepSeek 兼容模型，可通过 `DEEPSEEK_TITLE_MODEL` 覆盖默认模型。
+用户上传的图片会直接上传至 Cloudflare R2，数据库保存完整公网 URL；AI 模型、DeepSeek 标题生成和妙手均通过该地址读取图片。无需配置或持久化本地 `uploads` 目录。默认使用 DeepSeek 图像理解模型 `deepseek-v4-flash-vision-exp`，可通过 `DEEPSEEK_TITLE_MODEL` 覆盖。
+
+R2 不会自动删除对象。可在 Bucket 的 **Settings → Object Lifecycle Rules** 创建生命周期规则：使用前缀 `generated/` 可只清理 AI 生成图，例如设置“创建 90 天后删除”；模板、素材和尺码图使用其他前缀，不受该规则影响。`AI_GENERATED_IMAGE_UPLOAD_TO_R2=false` 时，Seedream/千问结果不再复制到 R2，而直接保存供应商 URL；这些 URL 可能过期，Gemini 因只返回内嵌图片仍必须上传 R2。
 
 > Docker Compose 中的密码仅用于本地开发。生产环境必须通过密钥管理服务配置数据库密码、JWT 密钥和妙手凭据加密密钥。

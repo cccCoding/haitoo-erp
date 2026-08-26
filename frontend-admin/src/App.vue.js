@@ -645,7 +645,7 @@ else {
             });
             (__VLS_ctx.saving === provider.provider ? '保存中…' : '保存');
         }
-        if (!__VLS_ctx.overview?.credential_status?.public_media_base_url) {
+        if (!__VLS_ctx.overview?.credential_status?.r2) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "notice" },
             });

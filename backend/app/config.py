@@ -14,11 +14,20 @@ class Settings(BaseSettings):
     qwen_base_url: str = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
     gemini_api_key: str | None = None
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
-    # DeepSeek 采用 OpenAI 兼容接口，用于根据模板约束生成商品标题。
+    # DeepSeek 图像理解采用 OpenAI 兼容接口，用于根据模板约束和商品首图生成标题。
     deepseek_api_key: str | None = None
-    deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_title_model: str = "deepseek-chat"
-    public_media_base_url: str | None = None
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_title_model: str = "deepseek-v4-flash-vision-exp"
+    # 新图片统一上传 Cloudflare R2；数据库保存 r2_public_base_url 下的完整 URL。
+    r2_account_id: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+    r2_bucket: str | None = None
+    r2_endpoint: str | None = None
+    r2_public_base_url: str | None = None
+    # true 时将 Seedream/千问的临时结果复制到 R2；false 时保留其原始公网 URL。
+    # Gemini 只返回内嵌图片，仍必须上传 R2 才能供后续选图和发布使用。
+    ai_generated_image_upload_to_r2: bool = True
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

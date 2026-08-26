@@ -12,7 +12,6 @@ from pathlib import Path
 from uuid import uuid4
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete, func, inspect, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -23,6 +22,7 @@ from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, DraftCreate, D
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, generate_draft_title, provider_credential_env
 from .credentials import decrypt_secret, encrypt_secret
+from .storage import StorageError, is_public_r2_url, upload_image_bytes_async
 import httpx
 
 
@@ -155,6 +155,8 @@ def ensure_schema() -> None:
         draft_columns = {column["name"]: column for column in inspect(engine).get_columns("product_drafts")}
         if connection.dialect.name == "mysql" and not draft_columns["source_task_id"]["nullable"]:
             connection.execute(text("ALTER TABLE product_drafts MODIFY COLUMN source_task_id INTEGER NULL"))
+        if connection.dialect.name == "mysql" and not draft_columns["shop_id"]["nullable"]:
+            connection.execute(text("ALTER TABLE product_drafts MODIFY COLUMN shop_id INTEGER NULL"))
         # 项目标准：MySQL 所有关系仅保存 ID，不建立数据库外键。兼容清理旧库。
         if connection.dialect.name == "mysql":
             inspector = inspect(connection)
@@ -179,9 +181,6 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="HAITOO POD API", version="0.1.0", lifespan=lifespan)
-upload_dir = Path(__file__).resolve().parent.parent / "uploads"
-upload_dir.mkdir(exist_ok=True)
-app.mount("/media", StaticFiles(directory=upload_dir), name="media")
 app.add_middleware(CORSMiddleware, allow_origins=get_settings().cors_origins.split(","), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 
@@ -502,13 +501,10 @@ def miaoshou_request_signature(app_secret: str, path: str, timestamp: str, app_k
 
 
 def miaoshou_public_image_url(url: str) -> str:
-    """将本地素材地址转换为妙手服务可下载的公网地址。"""
-    if url.startswith(("http://", "https://")):
-        return url
-    base_url = (get_settings().public_media_base_url or "").rstrip("/")
-    if not base_url:
-        raise HTTPException(400, "当前草稿包含本地图片；请先配置 PUBLIC_MEDIA_BASE_URL 为可被妙手访问的公网地址")
-    return f"{base_url}/{url.lstrip('/')}"
+    """妙手可使用任意能被其服务直接下载的公网 HTTP(S) 图片地址。"""
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "草稿图片必须是可被妙手访问的公网 HTTP(S) 地址")
+    return url
 
 
 def build_common_collect_box_payload(draft: ProductDraft, template: ProductTemplate) -> dict:
@@ -604,10 +600,10 @@ async def save_image_upload(file: UploadFile, company_id: int | None, prefix: st
     content = await file.read()
     if len(content) > 5 * 1024 * 1024:
         raise HTTPException(400, "图片不能超过 5MB")
-    suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[file.content_type]
-    filename = f"{prefix}-{company_id or 'platform'}-{uuid4().hex}{suffix}"
-    (upload_dir / filename).write_bytes(content)
-    return {"url": f"/media/{filename}"}
+    try:
+        return {"url": await upload_image_bytes_async(content, file.content_type, company_id, prefix)}
+    except StorageError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @app.post("/uploads/creative-asset")
@@ -656,6 +652,21 @@ def list_material_assets(user: User = Depends(current_user), db: Session = Depen
     if user.role != Role.SUPER_ADMIN:
         stmt = stmt.where(MaterialAsset.company_id == user.company_id)
     return [serialize_record(asset) for asset in db.scalars(stmt.order_by(MaterialAsset.id.desc())).all()]
+
+
+@app.delete("/material-assets/{asset_id}")
+def delete_material_asset(asset_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """从当前公司的素材库移除一张图片。"""
+    stmt = select(MaterialAsset).where(MaterialAsset.id == asset_id)
+    if user.role != Role.SUPER_ADMIN:
+        stmt = stmt.where(MaterialAsset.company_id == user.company_id)
+    asset = db.scalar(stmt)
+    if not asset:
+        raise HTTPException(404, "素材不存在或无权删除")
+
+    db.delete(asset)
+    db.commit()
+    return {"deleted": True}
 
 
 @app.get("/admin/ai-providers")
@@ -714,7 +725,13 @@ def admin_overview(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Se
             "seedream": bool(settings.seedream_api_key),
             "qwen": bool(settings.qwen_api_key),
             "gemini": bool(settings.gemini_api_key),
-            "public_media_base_url": bool(settings.public_media_base_url),
+            "r2": bool(
+                settings.r2_access_key_id
+                and settings.r2_secret_access_key
+                and settings.r2_bucket
+                and (settings.r2_endpoint or settings.r2_account_id)
+                and settings.r2_public_base_url
+            ),
         },
     }
 
@@ -817,13 +834,50 @@ async def run_generation(task_id: int) -> None:
         if not setting or not setting.enabled:
             raise ProviderError("任务所选模型已停用")
         task.status = TaskStatus.RUNNING; db.commit()
-        urls = await generate(task.provider, GenerationRequest(model=task.provider_model, prompt=build_prompt(task.parameters, template.name), template_url=template.cover_url or "", print_urls=task.parameters.get("print_urls") or [], ratio=task.parameters["ratio"], quality=task.parameters["quality"]))
+        urls = await generate(task.provider, GenerationRequest(
+            model=task.provider_model,
+            prompt=build_prompt(task.parameters, template.name),
+            template_url=template.cover_url or "",
+            print_urls=task.parameters.get("print_urls") or [],
+            ratio=task.parameters["ratio"],
+            quality=task.parameters["quality"],
+            company_id=task.company_id,
+            task_id=task.id,
+        ))
+        urls = await persist_generated_images(urls, task.company_id, task.id)
         task.result_urls = urls; task.status = TaskStatus.AWAITING_SELECTION; db.commit()
     except Exception as exc:
         db.rollback()
         settle_failed_task(task_id, str(exc))
     finally:
         db.close()
+
+
+async def persist_generated_images(urls: list[str], company_id: int, task_id: int) -> list[str]:
+    """将模型供应商的临时 URL 复制到 R2，任务结果不依赖第三方 URL 的有效期。"""
+    if not get_settings().ai_generated_image_upload_to_r2:
+        # Gemini 结果已在适配器中上传 R2（接口只返回 base64，无法保存为第三方 URL）。
+        # Seedream/千问则保留其供应商 URL，以节省 R2 存储和写入请求。
+        return urls
+    persisted: list[str] = []
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+        for url in urls:
+            if is_public_r2_url(url):
+                persisted.append(url)
+                continue
+            response = await client.get(url)
+            if response.is_error:
+                raise ProviderError(f"下载模型生成图片失败：{response.status_code}")
+            mime_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+            if mime_type not in {"image/jpeg", "image/png", "image/webp"}:
+                raise ProviderError(f"模型生成图片格式不受支持：{mime_type or '未知'}")
+            if len(response.content) > 20 * 1024 * 1024:
+                raise ProviderError("模型生成图片超过 20MB 上限")
+            try:
+                persisted.append(await upload_image_bytes_async(response.content, mime_type, company_id, f"generated/task-{task_id}"))
+            except StorageError as exc:
+                raise ProviderError(str(exc)) from exc
+    return persisted
 
 
 @app.post("/tasks")
@@ -906,14 +960,13 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
     )).all()
     if len(assets) != len(asset_ids):
         raise HTTPException(400, "包含不存在或无权使用的素材")
-    shop = ensure_shop(db, user, payload.shop_id)
     template = get_company_template(db, user, payload.template_id)
     source_task_ids = {asset.source_task_id for asset in assets}
     source_task_id = source_task_ids.pop() if len(source_task_ids) == 1 else None
     image_urls = [asset.url for asset in assets]
     draft = ProductDraft(
         company_id=user.company_id,
-        shop_id=shop.id,
+        shop_id=None,
         template_id=template.id,
         source_task_id=source_task_id,
         title=payload.title.strip(),
@@ -945,7 +998,7 @@ async def generate_material_draft_title(template_id: int, payload: DraftTitleGen
 @app.put("/drafts/{draft_id}")
 def update_draft(draft_id: int, payload: DraftUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     draft = db.get(ProductDraft, draft_id)
-    if not draft or draft.shop_id not in allowed_shop_ids(db, user):
+    if not draft or draft.company_id != user.company_id or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
         raise HTTPException(404, "商品草稿不存在")
     shop = ensure_shop(db, user, payload.shop_id)
     draft.title = payload.title.strip()
@@ -959,7 +1012,7 @@ def update_draft(draft_id: int, payload: DraftUpdate, user: User = Depends(curre
 async def publish_draft_to_miaoshou(draft_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """将商品草稿创建到妙手公共采集箱，避免重复创建。"""
     draft = db.get(ProductDraft, draft_id)
-    if not draft or draft.shop_id not in allowed_shop_ids(db, user):
+    if not draft or draft.company_id != user.company_id or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
         raise HTTPException(404, "商品草稿不存在")
     if draft.miaoshou_collect_box_id:
         return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "already_published": True}
@@ -1001,7 +1054,10 @@ async def publish_draft_to_miaoshou(draft_id: int, user: User = Depends(current_
 
 @app.get("/drafts")
 def list_drafts(shop_id: int | None = None, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    stmt = select(ProductDraft).where(ProductDraft.shop_id.in_(allowed_shop_ids(db, user)))
+    stmt = select(ProductDraft).where(
+        ProductDraft.company_id == user.company_id,
+        or_(ProductDraft.shop_id.is_(None), ProductDraft.shop_id.in_(allowed_shop_ids(db, user))),
+    )
     if shop_id:
         ensure_shop(db, user, shop_id); stmt = stmt.where(ProductDraft.shop_id == shop_id)
     drafts = db.scalars(stmt.order_by(ProductDraft.id.desc())).all()

@@ -141,7 +141,7 @@ class DraftSkuItem(BaseModel):
     sku: str = Field(min_length=1, max_length=32)
 
 
-class MaterialDraftCreate(DraftCreate):
+class MaterialDraftCreate(BaseModel):
     template_id: int
     material_asset_ids: list[int] = Field(min_length=1, max_length=100)
     sku_items: list[DraftSkuItem] = Field(default_factory=list, max_length=1000)

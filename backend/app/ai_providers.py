@@ -7,13 +7,12 @@
 import base64
 import binascii
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Protocol
-from uuid import uuid4
 
 import httpx
 
 from .config import Settings, get_settings
+from .storage import StorageError, is_public_r2_url, upload_image_bytes_async
 
 
 class ProviderError(Exception):
@@ -28,6 +27,8 @@ class GenerationRequest:
     print_urls: list[str]
     ratio: str
     quality: str
+    company_id: int
+    task_id: int
 
 
 class ImageGenerationProvider(Protocol):
@@ -50,12 +51,9 @@ def build_prompt(parameters: dict, template_name: str) -> str:
 
 
 def _public_url(url: str) -> str:
-    if url.startswith(("http://", "https://")):
+    if is_public_r2_url(url):
         return url
-    base = get_settings().public_media_base_url
-    if not base:
-        raise ProviderError("未配置 PUBLIC_MEDIA_BASE_URL，模型服务无法读取模板和印花图片")
-    return f"{base.rstrip('/')}{url}"
+    raise ProviderError("图片未上传至当前 Cloudflare R2 公网域名，无法提交给模型服务")
 
 
 def _urls_from_response(data: dict[str, Any]) -> list[str]:
@@ -75,13 +73,11 @@ def _urls_from_response(data: dict[str, Any]) -> list[str]:
     return urls
 
 
-def _save_generated_image(data: bytes, mime_type: str) -> str:
-    suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(mime_type, ".png")
-    upload_dir = Path(__file__).resolve().parent.parent / "uploads"
-    upload_dir.mkdir(exist_ok=True)
-    filename = f"generated-{uuid4().hex}{suffix}"
-    (upload_dir / filename).write_bytes(data)
-    return f"/media/{filename}"
+async def _save_generated_image(data: bytes, mime_type: str, company_id: int, task_id: int) -> str:
+    try:
+        return await upload_image_bytes_async(data, mime_type, company_id, f"generated/task-{task_id}")
+    except StorageError as exc:
+        raise ProviderError(str(exc)) from exc
 
 
 class SeedreamProvider:
@@ -123,8 +119,8 @@ class GeminiProvider:
     """Gemini 2.5 Flash Image 适配器。
 
     Gemini 的 generateContent 接口要求输入图片以 inlineData/fileData 提交，且将生成
-    图片作为 inlineData 返回；这里下载公开参考图、转为 base64，并把结果保存到
-    本地媒体目录，以保持业务层始终使用 URL 的约定。
+    图片作为 inlineData 返回；这里下载公开参考图、转为 base64，并将结果上传
+    Cloudflare R2，以保持业务层始终使用稳定公网 URL 的约定。
     """
 
     name = "gemini"
@@ -144,7 +140,7 @@ class GeminiProvider:
             },
         )
         _raise_for_provider_error(self.name, response)
-        return self._generated_image_urls(response.json())
+        return await self._generated_image_urls(response.json(), request.company_id, request.task_id)
 
     async def _input_image_part(self, url: str, client: httpx.AsyncClient) -> dict[str, Any]:
         response = await client.get(url)
@@ -156,7 +152,7 @@ class GeminiProvider:
             raise ProviderError("参考图超过 Gemini 允许的 20MB 上限")
         return {"inlineData": {"mimeType": mime_type, "data": base64.b64encode(response.content).decode("ascii")}}
 
-    def _generated_image_urls(self, data: dict[str, Any]) -> list[str]:
+    async def _generated_image_urls(self, data: dict[str, Any], company_id: int, task_id: int) -> list[str]:
         urls: list[str] = []
         for candidate in data.get("candidates", []):
             for part in candidate.get("content", {}).get("parts", []):
@@ -164,7 +160,7 @@ class GeminiProvider:
                 if not isinstance(inline_data, dict) or not isinstance(inline_data.get("data"), str):
                     continue
                 try:
-                    urls.append(_save_generated_image(base64.b64decode(inline_data["data"]), inline_data.get("mimeType", "image/png")))
+                    urls.append(await _save_generated_image(base64.b64decode(inline_data["data"]), inline_data.get("mimeType", "image/png"), company_id, task_id))
                 except (ValueError, binascii.Error) as exc:
                     raise ProviderError("Gemini 返回了无效的图片数据") from exc
         if not urls:
@@ -198,16 +194,16 @@ async def generate(provider: str, request: GenerationRequest) -> list[str]:
 
 
 async def generate_draft_title(title_constraint: str, image_url: str) -> str:
-    """使用 DeepSeek 根据模板标题约束和商品首图生成一个可直接编辑的标题。"""
+    """使用 DeepSeek 视觉模型根据模板标题约束和商品首图生成标题。"""
     settings = get_settings()
     if not settings.deepseek_api_key:
         raise ProviderError("未配置 DEEPSEEK_API_KEY")
     image_reference = _public_url(image_url)
     prompt = (
-        "你是跨境电商商品标题助手。请严格遵守以下标题约束，结合商品首图生成一个中文商品标题。"
+        "你是跨境电商商品标题助手。请识别商品首图中的商品、款式、颜色、材质、图案和可见细节，"
+        "并严格遵守以下标题约束生成一个中文商品标题。"
         "只输出标题本身，不要解释、不要引号、不要 Markdown；标题不超过 180 个字符。\n"
-        f"标题约束：{title_constraint}\n"
-        f"商品首图：{image_reference}"
+        f"标题约束：{title_constraint}"
     )
     async with httpx.AsyncClient(timeout=45) as client:
         response = await client.post(
@@ -215,9 +211,15 @@ async def generate_draft_title(title_constraint: str, image_url: str) -> str:
             headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
             json={
                 "model": settings.deepseek_title_model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_reference}, "detail": "high"},
+                    ],
+                }],
                 "temperature": 0.4,
-                "max_tokens": 180,
+                "max_tokens": 240,
             },
         )
     _raise_for_provider_error("deepseek", response)

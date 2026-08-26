@@ -14,7 +14,7 @@ const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref
 const showMyAccountDialog = ref(false), myUserCode = ref(''), myAccountSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
 const materialUploading = ref(false), materialUploadError = ref('');
-const selectedMaterialAssetIds = ref([]), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftShopId = ref(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChart = ref(null), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false), materialDraftError = ref('');
+const selectedMaterialAssetIds = ref([]), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChart = ref(null), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false);
 const materialDraftSkuPreviewItems = ref([]);
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditShopId = ref(null), draftEditSaving = ref(false), draftEditError = ref('');
 const publishingDraftId = ref(null);
@@ -187,38 +187,32 @@ async function generateMaterialDraftTitle() {
         return;
     try {
         materialDraftTitleGenerating.value = true;
-        materialDraftError.value = '';
         const { data } = await api.post(`/templates/${materialDraftTemplateId.value}/generate-draft-title`, { image_url: selectedMaterialAssets.value[0].url }, { headers: headers.value });
         materialDraftTitle.value = data.title;
     }
     catch (e) {
-        materialDraftError.value = e.response?.data?.detail || 'AI 生成标题失败，请稍后重试';
+        showToast(e.response?.data?.detail || 'AI 生成标题失败，请稍后重试');
     }
     finally {
         materialDraftTitleGenerating.value = false;
     }
 }
-function openMaterialDraftDialog() { materialDraftError.value = ''; materialDraftTemplateId.value = null; materialDraftShopId.value = null; materialDraftTitle.value = ''; materialDraftProductDescription.value = ''; materialDraftSizeChart.value = null; materialDraftSizeChartPreview.value = ''; materialDraftSkuPreviewItems.value = []; showMaterialDraftDialog.value = true; }
+function openMaterialDraftDialog() { materialDraftTemplateId.value = null; materialDraftTitle.value = ''; materialDraftProductDescription.value = ''; materialDraftSizeChart.value = null; materialDraftSizeChartPreview.value = ''; materialDraftSkuPreviewItems.value = []; showMaterialDraftDialog.value = true; }
 async function createDraftFromMaterialAssets() {
     if (!selectedMaterialAssetIds.value.length)
         return;
     if (!materialDraftTemplateId.value) {
-        materialDraftError.value = '请选择产品模板';
-        return;
-    }
-    if (!materialDraftShopId.value) {
-        materialDraftError.value = '请选择投放店铺';
+        showToast('请选择产品模板');
         return;
     }
     if (!materialDraftTitle.value.trim()) {
-        materialDraftError.value = '请生成或填写商品标题';
+        showToast('请生成或填写商品标题');
         return;
     }
     try {
         materialDraftSaving.value = true;
-        materialDraftError.value = '';
         const size_chart_url = (await uploadMaterialDraftSizeChart()) ?? materialDraftTemplate.value?.size_chart_url ?? null;
-        const { data: draft } = await api.post('/drafts/from-material-assets', { material_asset_ids: selectedMaterialAssetIds.value, template_id: materialDraftTemplateId.value, shop_id: materialDraftShopId.value, title: materialDraftTitle.value.trim(), product_description: materialDraftProductDescription.value.trim() || null, size_chart_url, sku_items: materialDraftSkuPreviewItems.value }, { headers: headers.value });
+        const { data: draft } = await api.post('/drafts/from-material-assets', { material_asset_ids: selectedMaterialAssetIds.value, template_id: materialDraftTemplateId.value, title: materialDraftTitle.value.trim(), product_description: materialDraftProductDescription.value.trim() || null, size_chart_url, sku_items: materialDraftSkuPreviewItems.value }, { headers: headers.value });
         const { data: publishResult } = await api.post(`/drafts/${draft.id}/publish-to-miaoshou`, {}, { headers: headers.value });
         selectedMaterialAssetIds.value = [];
         showMaterialDraftDialog.value = false;
@@ -227,7 +221,7 @@ async function createDraftFromMaterialAssets() {
         showToast(`已创建并上传至妙手公共采集箱（编号：${publishResult.common_collect_box_detail_id}）`);
     }
     catch (e) {
-        materialDraftError.value = e.response?.data?.detail || '创建或上传妙手失败；草稿已保留，可在商品待发布页重试';
+        showToast(e.response?.data?.detail || '创建或上传妙手失败；草稿已保留，可在商品待发布页重试');
     }
     finally {
         materialDraftSaving.value = false;
@@ -303,6 +297,21 @@ async function uploadMaterialAssets(event) {
     }
     finally {
         materialUploading.value = false;
+    }
+}
+async function deleteSelectedMaterialAssets() {
+    const assetIds = [...selectedMaterialAssetIds.value];
+    if (!assetIds.length || !confirm(`确定从素材库删除选中的 ${assetIds.length} 张图片吗？`))
+        return;
+    try {
+        await Promise.all(assetIds.map(assetId => api.delete(`/material-assets/${assetId}`, { headers: headers.value })));
+        materialAssets.value = materialAssets.value.filter(item => !assetIds.includes(item.id));
+        selectedMaterialAssetIds.value = [];
+        showToast(`已删除 ${assetIds.length} 张素材`);
+    }
+    catch (e) {
+        await refresh();
+        showToast(e.response?.data?.detail || '删除素材失败，请稍后重试');
     }
 }
 async function makeDraft(task) { const shopId = draftShopIdByTask.value[task.id]; if (!shopId) {
@@ -1131,6 +1140,10 @@ else {
                 ...{ class: "primary" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.deleteSelectedMaterialAssets) },
+                ...{ class: "negative" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!!(!__VLS_ctx.token))
                             return;
@@ -1734,21 +1747,6 @@ if (__VLS_ctx.showMaterialDraftDialog) {
     (__VLS_ctx.selectedMaterialAssetIds.length);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-        value: (__VLS_ctx.materialDraftShopId),
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-        value: (null),
-    });
-    for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.shops))) {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-            key: (shop.id),
-            value: (shop.id),
-        });
-        (shop.region);
-        (shop.name);
-    }
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
         ...{ onChange: (__VLS_ctx.onMaterialDraftTemplateChange) },
         value: (__VLS_ctx.materialDraftTemplateId),
     });
@@ -1845,12 +1843,6 @@ if (__VLS_ctx.showMaterialDraftDialog) {
                 alt: "尺码图预览",
             });
         }
-    }
-    if (__VLS_ctx.materialDraftError) {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
-            ...{ class: "error material-draft-error" },
-        });
-        (__VLS_ctx.materialDraftError);
     }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "modal-actions" },
@@ -2454,6 +2446,7 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['material-upload-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-bar']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['negative']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-card']} */ ;
@@ -2530,8 +2523,6 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['material-draft-sku-summary']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-sku-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-size-chart']} */ ;
-/** @type {__VLS_StyleScopedClasses['error']} */ ;
-/** @type {__VLS_StyleScopedClasses['material-draft-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -2643,14 +2634,12 @@ const __VLS_self = (await import('vue')).defineComponent({
             selectedMaterialAssetIds: selectedMaterialAssetIds,
             showMaterialDraftDialog: showMaterialDraftDialog,
             materialDraftTemplateId: materialDraftTemplateId,
-            materialDraftShopId: materialDraftShopId,
             materialDraftTitle: materialDraftTitle,
             materialDraftProductDescription: materialDraftProductDescription,
             materialDraftSizeChart: materialDraftSizeChart,
             materialDraftSizeChartPreview: materialDraftSizeChartPreview,
             materialDraftTitleGenerating: materialDraftTitleGenerating,
             materialDraftSaving: materialDraftSaving,
-            materialDraftError: materialDraftError,
             materialDraftSkuPreviewItems: materialDraftSkuPreviewItems,
             showDraftEditDialog: showDraftEditDialog,
             editingDraft: editingDraft,
@@ -2707,6 +2696,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             selectTask: selectTask,
             claimMaterials: claimMaterials,
             uploadMaterialAssets: uploadMaterialAssets,
+            deleteSelectedMaterialAssets: deleteSelectedMaterialAssets,
             makeDraft: makeDraft,
             openMemberDialog: openMemberDialog,
             openMyAccountDialog: openMyAccountDialog,

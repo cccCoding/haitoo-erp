@@ -131,7 +131,8 @@ class ProductDraft(Base):
     __tablename__ = "product_drafts"
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
-    shop_id: Mapped[int] = mapped_column(index=True)
+    # 素材库创建的草稿会直接进入公共采集箱，不需要绑定投放店铺。
+    shop_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
     # 创建公共采集箱产品需要使用模板中的包装与规格信息。
     template_id: Mapped[int | None] = mapped_column(nullable=True)
     source_task_id: Mapped[int | None] = mapped_column(nullable=True)
