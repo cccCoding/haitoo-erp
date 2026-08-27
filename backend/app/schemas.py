@@ -85,7 +85,10 @@ class TemplateGroupCreate(BaseModel):
 
 class PodTaskCreate(BaseModel):
     template_id: int
-    placement: Literal["居中印花", "满版印花"] = "居中印花"
+    # 不传时沿用平台后台配置的默认模型。
+    provider: str | None = Field(default=None, max_length=40)
+    task_type: str = Field(default="替换印花", min_length=1, max_length=80)
+    placement: Literal["居中印花", "满版印花"] = "满版印花"
     ratio: Literal["1:1", "3:4"] = "1:1"
     quality: Literal["1K", "2K"] = "1K"
     print_url: str | None = None

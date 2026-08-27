@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import string
@@ -12,7 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import delete, func, inspect, or_, select, text
+from sqlalchemy import delete, func, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import get_settings
@@ -20,10 +21,13 @@ from .database import Base, engine, get_db
 from .models import AIProviderSetting, Company, MaterialAsset, NonAIPointRule, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
 from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, DraftCreate, DraftTitleGenerate, DraftUpdate, LedgerOut, LoginInput, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
-from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, generate_draft_title, provider_credential_env
+from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, generate_draft_title, provider_credential_env, provider_has_credentials, submit_async_generation, wait_for_async_generation
 from .credentials import decrypt_secret, encrypt_secret
 from .storage import StorageError, is_public_r2_url, upload_image_bytes_async
 import httpx
+
+
+logger = logging.getLogger(__name__)
 
 
 def seed(db: Session) -> None:
@@ -46,17 +50,24 @@ def seed(db: Session) -> None:
     builtin_shop = db.scalar(select(Shop).where(
         Shop.company_id == company.id, Shop.name == "MY TikTok Shop", Shop.external_shop_id.is_(None)
     ))
-    if builtin_shop and not db.scalar(select(PodTask.id).where(PodTask.shop_id == builtin_shop.id).limit(1)) and not db.scalar(select(ProductDraft.id).where(ProductDraft.shop_id == builtin_shop.id).limit(1)):
+    if builtin_shop and not db.scalar(select(ProductDraft.id).where(ProductDraft.shop_id == builtin_shop.id).limit(1)):
         db.execute(delete(UserShop).where(UserShop.shop_id == builtin_shop.id))
         db.delete(builtin_shop)
     if not db.get(PointAccount, company.id):
         db.add(PointAccount(company_id=company.id, available=1280, frozen=120))
     if not db.get(AIProviderSetting, "seedream"):
-        db.add(AIProviderSetting(provider="seedream", display_name="Seedream", model="doubao-seedream-4-0-250828", enabled=True, is_default=True))
+        db.add(AIProviderSetting(provider="seedream", display_name="Seedream", model="doubao-seedream-4-0-250828", enabled=True, is_default=False))
     if not db.get(AIProviderSetting, "qwen"):
         db.add(AIProviderSetting(provider="qwen", display_name="千问图像编辑", model="qwen-image-edit", enabled=True, is_default=False))
     if not db.get(AIProviderSetting, "gemini"):
         db.add(AIProviderSetting(provider="gemini", display_name="Gemini 图像生成", model="gemini-2.5-flash-image", enabled=True, is_default=False))
+    # 印花贴合生产默认使用 Nano Banana Fast；保留其他适配器供后台切换。
+    grsai_setting = db.get(AIProviderSetting, "grsai")
+    if not grsai_setting:
+        db.execute(update(AIProviderSetting).where(AIProviderSetting.is_default.is_(True)).values(is_default=False))
+        db.add(AIProviderSetting(provider="grsai", display_name="Grsai", model="nano-banana-fast", enabled=True, is_default=True))
+    elif grsai_setting.display_name == "Nano Banana Fast":
+        grsai_setting.display_name = "Grsai"
     for operation_code, display_name, points, description in (
         ("product_draft_create", "创建商品草稿", 0, "从已选定的创作结果创建商品草稿"),
         ("product_publish", "发布商品", 0, "将商品发布到已授权店铺"),
@@ -122,11 +133,11 @@ def ensure_schema() -> None:
             WHERE template_id IS NULL AND source_task_id IS NOT NULL
         """))
         task_columns = {column["name"] for column in inspect(engine).get_columns("pod_tasks")}
-        for column, definition in (("provider", "VARCHAR(40)"), ("provider_model", "VARCHAR(120)"), ("failure_reason", "VARCHAR(500)")):
+        for column, definition in (("provider", "VARCHAR(40)"), ("provider_model", "VARCHAR(120)"), ("provider_task_id", "VARCHAR(160)"), ("failure_reason", "VARCHAR(500)")):
             if column not in task_columns:
                 connection.execute(text(f"ALTER TABLE pod_tasks ADD COLUMN {column} {definition}"))
-        if connection.dialect.name == "mysql" and not next(column for column in inspect(engine).get_columns("pod_tasks") if column["name"] == "shop_id")["nullable"]:
-            connection.execute(text("ALTER TABLE pod_tasks MODIFY COLUMN shop_id INTEGER NULL"))
+        if "shop_id" in task_columns:
+            connection.execute(text("ALTER TABLE pod_tasks DROP COLUMN shop_id"))
         company_columns = {column["name"] for column in inspect(engine).get_columns("companies")}
         if "miaoshou_app_id" not in company_columns:
             connection.execute(text("ALTER TABLE companies ADD COLUMN miaoshou_app_id VARCHAR(255)"))
@@ -643,7 +654,12 @@ def list_tasks(user: User = Depends(current_user), db: Session = Depends(get_db)
     stmt = select(PodTask)
     if user.role != Role.SUPER_ADMIN:
         stmt = stmt.where(PodTask.company_id == user.company_id)
-    return [serialize_record(task) for task in db.scalars(stmt.order_by(PodTask.id.desc())).all()]
+    tasks = db.scalars(stmt.order_by(PodTask.id.desc())).all()
+    creator_ids = {task.created_by for task in tasks}
+    creator_names = {member.id: member.name for member in db.scalars(select(User).where(User.id.in_(creator_ids))).all()} if creator_ids else {}
+    template_ids = {task.template_id for task in tasks}
+    template_names = {template.id: template.name for template in db.scalars(select(ProductTemplate).where(ProductTemplate.id.in_(template_ids))).all()} if template_ids else {}
+    return [serialize_record(task) | {"created_by_name": creator_names.get(task.created_by, "历史记录缺失"), "template_name": template_names.get(task.template_id, "历史模板已删除")} for task in tasks]
 
 
 @app.get("/material-assets")
@@ -725,6 +741,7 @@ def admin_overview(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Se
             "seedream": bool(settings.seedream_api_key),
             "qwen": bool(settings.qwen_api_key),
             "gemini": bool(settings.gemini_api_key),
+            "grsai": bool(settings.grsai_api_key),
             "r2": bool(
                 settings.r2_access_key_id
                 and settings.r2_secret_access_key
@@ -817,6 +834,7 @@ def settle_failed_task(task_id: int, reason: str) -> None:
         account = db.get(PointAccount, task.company_id)
         account.frozen -= task.estimated_points; account.available += task.estimated_points
         task.status = TaskStatus.FAILED; task.failure_reason = reason[:500]
+        logger.error("AI 任务 #%s 失败：%s", task_id, task.failure_reason)
         db.add(PointLedger(company_id=task.company_id, actor_id=task.created_by, task_id=task.id, entry_type="ai_refund", amount=task.estimated_points, balance_after=account.available, note="AI 任务失败，已退回预冻结积分"))
         db.commit()
     finally:
@@ -834,7 +852,7 @@ async def run_generation(task_id: int) -> None:
         if not setting or not setting.enabled:
             raise ProviderError("任务所选模型已停用")
         task.status = TaskStatus.RUNNING; db.commit()
-        urls = await generate(task.provider, GenerationRequest(
+        request = GenerationRequest(
             model=task.provider_model,
             prompt=build_prompt(task.parameters, template.name),
             template_url=template.cover_url or "",
@@ -843,10 +861,20 @@ async def run_generation(task_id: int) -> None:
             quality=task.parameters["quality"],
             company_id=task.company_id,
             task_id=task.id,
-        ))
+        )
+        if task.provider == "grsai":
+            initial_result, base_url, headers = await submit_async_generation(task.provider, request)
+            provider_task_id = initial_result.get("id")
+            if not isinstance(provider_task_id, str) or not provider_task_id:
+                raise ProviderError("grsai 异步任务未返回任务 ID")
+            task.provider_task_id = provider_task_id; db.commit()
+            urls = await wait_for_async_generation(task.provider, initial_result, base_url, headers)
+        else:
+            urls = await generate(task.provider, request)
         urls = await persist_generated_images(urls, task.company_id, task.id)
         task.result_urls = urls; task.status = TaskStatus.AWAITING_SELECTION; db.commit()
     except Exception as exc:
+        logger.exception("AI 任务 #%s 生成过程异常", task_id)
         db.rollback()
         settle_failed_task(task_id, str(exc))
     finally:
@@ -889,9 +917,17 @@ def create_task(payload: PodTaskCreate, background_tasks: BackgroundTasks, user:
         raise HTTPException(400, "请至少上传一张印花图")
     if not template.cover_url:
         raise HTTPException(400, "产品模板缺少模板图片，无法进行印花贴合")
-    provider = db.scalar(select(AIProviderSetting).where(AIProviderSetting.is_default.is_(True), AIProviderSetting.enabled.is_(True)))
+    provider = None
+    if payload.provider:
+        provider = db.get(AIProviderSetting, payload.provider)
+        if not provider or not provider.enabled:
+            raise HTTPException(400, "所选 AI 模型不存在或未启用")
+    else:
+        provider = db.scalar(select(AIProviderSetting).where(AIProviderSetting.is_default.is_(True), AIProviderSetting.enabled.is_(True)))
     if not provider:
         raise HTTPException(400, "暂无已启用的默认 AI 模型，请联系超级管理员配置")
+    if not provider_has_credentials(provider.provider):
+        raise HTTPException(400, f"所选 AI 模型尚未配置 {provider_credential_env(provider.provider)}，请联系管理员配置")
     account = db.get(PointAccount, user.company_id)
     estimated = 20 if payload.quality == "2K" else 12
     if not account or account.available < estimated:
@@ -903,6 +939,15 @@ def create_task(payload: PodTaskCreate, background_tasks: BackgroundTasks, user:
     db.commit(); db.refresh(task)
     background_tasks.add_task(run_generation, task.id)
     return serialize_record(task)
+
+
+@app.get("/ai-providers")
+def list_available_ai_providers(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """运营端仅能查看可用模型及默认模型，不暴露任何凭据配置。"""
+    return [
+        {"provider": setting.provider, "display_name": setting.display_name, "model": setting.model, "is_default": setting.is_default}
+        for setting in db.scalars(select(AIProviderSetting).where(AIProviderSetting.enabled.is_(True)).order_by(AIProviderSetting.provider)).all()
+    ]
 
 
 @app.post("/tasks/{task_id}/select")

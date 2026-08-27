@@ -1,11 +1,11 @@
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import axios from 'axios';
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' });
 const token = ref(localStorage.getItem('haitoo_token') || '');
 const page = ref('dashboard');
 const email = ref('operator@haitoo-demo.com');
 const password = ref('ChangeMe123!');
-const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), materialAssets = ref([]), drafts = ref([]), points = ref(null), members = ref([]);
+const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), materialAssets = ref([]), drafts = ref([]), points = ref(null), members = ref([]), aiProviders = ref([]);
 const draftShopIdByTask = ref({}), loading = ref(false), error = ref('');
 const toast = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
@@ -21,9 +21,10 @@ const publishingDraftId = ref(null);
 const draftPageSize = ref(20), currentDraftPage = ref(1);
 const previewImageUrl = ref(''), previewImageAlt = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
+const showTaskDetailDialog = ref(false), viewingTask = ref(null);
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
 const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2 };
-const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativePlacement = ref('居中印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
+const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativeProvider = ref(''), creativePlacement = ref('满版印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
 const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'materials', icon: '◈', label: '素材库' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'points', icon: '◉', label: '积分中心' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }];
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
 const visibleNav = computed(() => nav.filter(item => !item.adminOnly || user.value?.role === 'company_admin'));
@@ -58,7 +59,7 @@ Date.prototype.toLocaleDateString = function (...args) {
 };
 async function refresh() {
     const h = { headers: headers.value };
-    const [me, s, t, g, task, material, d, p] = await Promise.all([api.get('/me', h), api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', h), api.get('/material-assets', h), api.get('/drafts', h), api.get('/points', h)]);
+    const [me, s, t, g, task, material, d, p, providers] = await Promise.all([api.get('/me', h), api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', h), api.get('/material-assets', h), api.get('/drafts', h), api.get('/points', h), api.get('/ai-providers', h)]);
     user.value = me.data.user;
     company.value = me.data.company;
     shops.value = s.data;
@@ -68,6 +69,9 @@ async function refresh() {
     materialAssets.value = material.data;
     drafts.value = d.data;
     points.value = p.data;
+    aiProviders.value = providers.data;
+    if (!creativeProvider.value)
+        creativeProvider.value = aiProviders.value.find(item => item.is_default)?.provider || aiProviders.value[0]?.provider || '';
     if (user.value.role === 'company_admin') {
         const [companyMembers, companyShops] = await Promise.all([api.get('/members', h), api.get('/shops/manage', h)]);
         members.value = companyMembers.data;
@@ -109,11 +113,11 @@ async function uploadCreativeAssets() { return Promise.all(creativeAssets.value.
 async function createTask() { if (!creativeAssets.value.length) {
     creativeAssetError.value = '请先上传至少一张印花图，再开始印花贴合。';
     return;
-} if (!selectedTemplateId.value)
+} if (!selectedTemplateId.value || !creativeProvider.value)
     return; try {
     creativeAssetError.value = '';
     const print_urls = await uploadCreativeAssets();
-    await api.post('/tasks', { template_id: selectedTemplateId.value, placement: creativePlacement.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() || null }, { headers: headers.value });
+    await api.post('/tasks', { template_id: selectedTemplateId.value, provider: creativeProvider.value, placement: creativePlacement.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() || null }, { headers: headers.value });
     await refresh();
     page.value = 'tasks';
 }
@@ -189,6 +193,15 @@ catch (e) {
     error.value = e.response?.data?.detail || '删除模板失败';
 } }
 function imageUrl(url) { return url ? (url.startsWith('/') ? `${api.defaults.baseURL}${url}` : url) : ''; }
+async function copyProviderTaskId(task) { if (!task.provider_task_id)
+    return; try {
+    await navigator.clipboard.writeText(task.provider_task_id);
+    showToast('外部任务 ID 已复制');
+}
+catch {
+    showToast('复制失败，请手动复制');
+} }
+function openTaskDetail(task) { viewingTask.value = task; showTaskDetailDialog.value = true; }
 function templateCoverUrl(template) { if (template?.cover_url)
     return imageUrl(template.cover_url); return template?.name === '白色 T恤正面' ? '/template-white-tshirt-front.png' : '/template-tshirt.svg'; }
 function hasTemplateCover(template) { return Boolean(template?.cover_url || template?.name === '白色 T恤正面'); }
@@ -440,7 +453,21 @@ api.interceptors.response.use(response => response, requestError => {
     }
     return Promise.reject(requestError);
 });
-onMounted(() => token.value && refresh().catch(logout));
+let taskResultPollingTimer;
+async function refreshPendingTaskResults() {
+    if (!token.value || !tasks.value.some(task => ['queued', 'running'].includes(task.status)))
+        return;
+    try {
+        tasks.value = (await api.get('/tasks', { headers: headers.value })).data;
+    }
+    catch { /* 保留上一次任务状态，等待下次轮询。 */ }
+}
+onMounted(() => {
+    if (token.value)
+        refresh().catch(logout);
+    taskResultPollingTimer = setInterval(refreshPendingTaskResults, 5000);
+});
+onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer));
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
 let __VLS_components;
@@ -974,6 +1001,21 @@ else {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.creativeProvider),
+        });
+        for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.aiProviders))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (provider.provider),
+                value: (provider.provider),
+            });
+            (provider.display_name);
+            (provider.model);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "parameter-field" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
             value: (__VLS_ctx.creativePlacement),
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
@@ -1018,39 +1060,91 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "draft-table task-table" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "thead" },
+            ...{ style: {} },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         for (const [task] of __VLS_getVForSourceType((__VLS_ctx.tasks))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 key: (task.id),
-                ...{ class: "result-card" },
+                ...{ class: "trow" },
+                ...{ style: {} },
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "chip blue" },
-            });
-            (task.status);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (task.id);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-            (task.estimated_points);
-            if (task.actual_points) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (task.parameters?.task_type || '替换印花');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (task.template_name || '—');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            (task.provider === 'grsai' ? 'Grsai' : task.provider || '默认模型');
+            if (task.provider_model) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-                (task.actual_points);
+                (task.provider_model);
             }
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "result-images" },
-            });
-            for (const [url] of __VLS_getVForSourceType((task.result_urls))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (new Date(task.created_at).toLocaleString());
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (task.created_by_name || '历史记录缺失');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
+            (task.provider_task_id || '—');
+            if (task.provider_task_id) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                    key: (url),
-                    ...{ class: ({ selected: task.selected_result_url === url }) },
-                });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                    src: (url),
-                    alt: "生成结果",
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(!__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!(task.provider_task_id))
+                                return;
+                            __VLS_ctx.copyProviderTaskId(task);
+                        } },
                 });
             }
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (task.result_urls?.length || 0);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: ({ error: task.failure_reason }) },
+            });
+            (task.failure_reason || '—');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "task-actions" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        __VLS_ctx.openTaskDetail(task);
+                    } },
             });
             if (task.status === 'awaiting_selection') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
@@ -1126,6 +1220,11 @@ else {
                     ...{ class: "primary" },
                 });
             }
+        }
+        if (!__VLS_ctx.tasks.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
         }
     }
     else if (__VLS_ctx.page === 'materials') {
@@ -1737,6 +1836,95 @@ else {
             (row.balance_after);
         }
     }
+}
+if (__VLS_ctx.showTaskDetailDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTaskDetailDialog))
+                    return;
+                __VLS_ctx.showTaskDetailDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card material-draft-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTaskDetailDialog))
+                    return;
+                __VLS_ctx.showTaskDetailDialog = false;
+            } },
+        ...{ class: "modal-close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    (__VLS_ctx.viewingTask?.id);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.viewingTask?.parameters?.task_type || '替换印花');
+    (__VLS_ctx.viewingTask?.template_name || '历史模板已删除');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "draft-edit-section" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "material-draft-preview-images" },
+    });
+    for (const [url] of __VLS_getVForSourceType((__VLS_ctx.viewingTask?.parameters?.print_urls || []))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.showTaskDetailDialog))
+                        return;
+                    __VLS_ctx.openImagePreview(url, '印花图');
+                } },
+            key: (url),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+            src: (__VLS_ctx.imageUrl(url)),
+            alt: "印花图",
+        });
+    }
+    if (!(__VLS_ctx.viewingTask?.parameters?.print_urls?.length)) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "draft-edit-section" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.viewingTask?.parameters?.placement || '—');
+    (__VLS_ctx.viewingTask?.parameters?.ratio || '—');
+    (__VLS_ctx.viewingTask?.parameters?.quality || '—');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.viewingTask?.parameters?.creative_requirement || '未填写');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "draft-edit-section" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.viewingTask?.provider === 'grsai' ? 'Grsai' : __VLS_ctx.viewingTask?.provider || '默认模型');
+    if (__VLS_ctx.viewingTask?.provider_model) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (__VLS_ctx.viewingTask.provider_model);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.viewingTask?.provider_task_id || '—');
+    if (__VLS_ctx.viewingTask?.failure_reason) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "error" },
+        });
+        (__VLS_ctx.viewingTask.failure_reason);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTaskDetailDialog))
+                    return;
+                __VLS_ctx.showTaskDetailDialog = false;
+            } },
+        ...{ class: "primary" },
+    });
 }
 if (__VLS_ctx.showCreativeAssetsDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -2629,19 +2817,21 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['estimate']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['full']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
-/** @type {__VLS_StyleScopedClasses['result-card']} */ ;
-/** @type {__VLS_StyleScopedClasses['chip']} */ ;
-/** @type {__VLS_StyleScopedClasses['blue']} */ ;
-/** @type {__VLS_StyleScopedClasses['result-images']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['trow']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -2698,6 +2888,17 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['ledger']} */ ;
 /** @type {__VLS_StyleScopedClasses['ledger-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['ledger-actor']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-preview-images']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['asset-dialog']} */ ;
@@ -2807,6 +3008,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             drafts: drafts,
             points: points,
             members: members,
+            aiProviders: aiProviders,
             draftShopIdByTask: draftShopIdByTask,
             loading: loading,
             error: error,
@@ -2870,10 +3072,13 @@ const __VLS_self = (await import('vue')).defineComponent({
             managingShop: managingShop,
             selectedManagerIds: selectedManagerIds,
             shopManagersSaving: shopManagersSaving,
+            showTaskDetailDialog: showTaskDetailDialog,
+            viewingTask: viewingTask,
             creativeAssets: creativeAssets,
             showCreativeAssetsDialog: showCreativeAssetsDialog,
             creativeAssetError: creativeAssetError,
             creativeRequirement: creativeRequirement,
+            creativeProvider: creativeProvider,
             creativePlacement: creativePlacement,
             creativeRatio: creativeRatio,
             creativeQuality: creativeQuality,
@@ -2903,6 +3108,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             createTemplate: createTemplate,
             deleteTemplate: deleteTemplate,
             imageUrl: imageUrl,
+            copyProviderTaskId: copyProviderTaskId,
+            openTaskDetail: openTaskDetail,
             templateCoverUrl: templateCoverUrl,
             hasTemplateCover: hasTemplateCover,
             useTemplate: useTemplate,

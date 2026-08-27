@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     qwen_base_url: str = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
     gemini_api_key: str | None = None
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    # Grsai 的 Nano Banana 异步图像生成接口，用于印花贴合。
+    grsai_api_key: str | None = None
+    grsai_base_url: str = "https://grsaiapi.com"
     # DeepSeek 图像理解采用 OpenAI 兼容接口，用于根据模板约束和商品首图生成标题。
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"

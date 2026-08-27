@@ -31,6 +31,8 @@ services:
       SEEDREAM_API_KEY: ${SEEDREAM_API_KEY:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GRSAI_API_KEY: ${GRSAI_API_KEY:-}
+      GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       DEEPSEEK_TITLE_MODEL: ${DEEPSEEK_TITLE_MODEL:-deepseek-v4-flash-vision-exp}

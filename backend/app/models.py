@@ -99,8 +99,6 @@ class PodTask(Base):
     __tablename__ = "pod_tasks"
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
-    # AI 创作不再依赖店铺；创建商品草稿时才选择投放店铺。
-    shop_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
     template_id: Mapped[int] = mapped_column()
     created_by: Mapped[int] = mapped_column()
     status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.QUEUED)
@@ -111,6 +109,8 @@ class PodTask(Base):
     actual_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
     provider: Mapped[str | None] = mapped_column(String(40), nullable=True)
     provider_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # 外部异步 AI 任务的标识，例如 Grsai 返回的 id。
+    provider_task_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
     failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
