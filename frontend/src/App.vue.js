@@ -19,6 +19,8 @@ const materialDraftSkuPreviewItems = ref([]);
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('');
 const publishingDraftId = ref(null);
 const draftPageSize = ref(20), currentDraftPage = ref(1);
+const taskPageSize = ref(20), currentTaskPage = ref(1);
+const ledgerPageSize = ref(20), currentLedgerPage = ref(1);
 const previewImageUrl = ref(''), previewImageAlt = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
 const showTaskDetailDialog = ref(false), viewingTask = ref(null);
@@ -48,6 +50,21 @@ const pagedDrafts = computed(() => {
     return drafts.value.slice(start, start + draftPageSize.value);
 });
 function changeDraftPageSize() { currentDraftPage.value = 1; }
+const taskPageCount = computed(() => Math.max(1, Math.ceil(tasks.value.length / taskPageSize.value)));
+const visibleTaskPage = computed(() => Math.min(currentTaskPage.value, taskPageCount.value));
+const pagedTasks = computed(() => {
+    const start = (visibleTaskPage.value - 1) * taskPageSize.value;
+    return tasks.value.slice(start, start + taskPageSize.value);
+});
+function changeTaskPageSize() { currentTaskPage.value = 1; }
+const ledgerEntries = computed(() => points.value?.ledger || []);
+const ledgerPageCount = computed(() => Math.max(1, Math.ceil(ledgerEntries.value.length / ledgerPageSize.value)));
+const visibleLedgerPage = computed(() => Math.min(currentLedgerPage.value, ledgerPageCount.value));
+const pagedLedgerEntries = computed(() => {
+    const start = (visibleLedgerPage.value - 1) * ledgerPageSize.value;
+    return ledgerEntries.value.slice(start, start + ledgerPageSize.value);
+});
+function changeLedgerPageSize() { currentLedgerPage.value = 1; }
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
 const nativeToLocaleString = Date.prototype.toLocaleString;
 const nativeToLocaleDateString = Date.prototype.toLocaleDateString;
@@ -1174,7 +1191,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        for (const [task] of __VLS_getVForSourceType((__VLS_ctx.tasks))) {
+        for (const [task] of __VLS_getVForSourceType((__VLS_ctx.pagedTasks))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 key: (task.id),
                 ...{ class: "trow" },
@@ -1342,6 +1359,72 @@ else {
         if (!__VLS_ctx.tasks.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "empty" },
+            });
+        }
+        if (__VLS_ctx.tasks.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
+                ...{ class: "draft-pagination" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.tasks.length);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                ...{ onChange: (__VLS_ctx.changeTaskPageSize) },
+                value: (__VLS_ctx.taskPageSize),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (20),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (50),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (100),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (500),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (1000),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!(__VLS_ctx.tasks.length))
+                            return;
+                        __VLS_ctx.currentTaskPage = __VLS_ctx.visibleTaskPage - 1;
+                    } },
+                disabled: (__VLS_ctx.visibleTaskPage === 1),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.visibleTaskPage);
+            (__VLS_ctx.taskPageCount);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!(__VLS_ctx.tasks.length))
+                            return;
+                        __VLS_ctx.currentTaskPage = __VLS_ctx.visibleTaskPage + 1;
+                    } },
+                disabled: (__VLS_ctx.visibleTaskPage === __VLS_ctx.taskPageCount),
             });
         }
     }
@@ -1925,7 +2008,7 @@ else {
             ...{ class: "panel ledger" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
-        for (const [row] of __VLS_getVForSourceType((__VLS_ctx.points?.ledger))) {
+        for (const [row] of __VLS_getVForSourceType((__VLS_ctx.pagedLedgerEntries))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 key: (row.id),
                 ...{ class: "ledger-row" },
@@ -1948,6 +2031,88 @@ else {
             (row.amount);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (row.balance_after);
+        }
+        if (__VLS_ctx.ledgerEntries.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
+                ...{ class: "draft-pagination" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.ledgerEntries.length);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                ...{ onChange: (__VLS_ctx.changeLedgerPageSize) },
+                value: (__VLS_ctx.ledgerPageSize),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (20),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (50),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (100),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (500),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (1000),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        if (!(__VLS_ctx.ledgerEntries.length))
+                            return;
+                        __VLS_ctx.currentLedgerPage = __VLS_ctx.visibleLedgerPage - 1;
+                    } },
+                disabled: (__VLS_ctx.visibleLedgerPage === 1),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.visibleLedgerPage);
+            (__VLS_ctx.ledgerPageCount);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        if (!(__VLS_ctx.ledgerEntries.length))
+                            return;
+                        __VLS_ctx.currentLedgerPage = __VLS_ctx.visibleLedgerPage + 1;
+                    } },
+                disabled: (__VLS_ctx.visibleLedgerPage === __VLS_ctx.ledgerPageCount),
+            });
         }
     }
 }
@@ -3085,6 +3250,7 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -3141,6 +3307,7 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['ledger']} */ ;
 /** @type {__VLS_StyleScopedClasses['ledger-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['ledger-actor']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-dialog']} */ ;
@@ -3335,6 +3502,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             publishingDraftId: publishingDraftId,
             draftPageSize: draftPageSize,
             currentDraftPage: currentDraftPage,
+            taskPageSize: taskPageSize,
+            currentTaskPage: currentTaskPage,
+            ledgerPageSize: ledgerPageSize,
+            currentLedgerPage: currentLedgerPage,
             previewImageUrl: previewImageUrl,
             previewImageAlt: previewImageAlt,
             showShopManagersDialog: showShopManagersDialog,
@@ -3375,6 +3546,15 @@ const __VLS_self = (await import('vue')).defineComponent({
             visibleDraftPage: visibleDraftPage,
             pagedDrafts: pagedDrafts,
             changeDraftPageSize: changeDraftPageSize,
+            taskPageCount: taskPageCount,
+            visibleTaskPage: visibleTaskPage,
+            pagedTasks: pagedTasks,
+            changeTaskPageSize: changeTaskPageSize,
+            ledgerEntries: ledgerEntries,
+            ledgerPageCount: ledgerPageCount,
+            visibleLedgerPage: visibleLedgerPage,
+            pagedLedgerEntries: pagedLedgerEntries,
+            changeLedgerPageSize: changeLedgerPageSize,
             login: login,
             onCreativeAssetChange: onCreativeAssetChange,
             removeCreativeAsset: removeCreativeAsset,
