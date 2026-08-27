@@ -174,8 +174,9 @@ class GrsaiProvider:
 
     name = "grsai"
     credential_env = "GRSAI_API_KEY"
-    _poll_interval_seconds = 2
-    _max_poll_attempts = 120
+    # 供应商任务可能持续较长时间；降低查询频率以避免无意义的外部请求。
+    _poll_interval_seconds = 5 * 60
+    _max_poll_attempts = 144
 
     async def generate(self, request: GenerationRequest, settings: Settings, client: httpx.AsyncClient) -> list[str]:
         result, base_url, headers = await self.submit(request, settings, client)
@@ -282,6 +283,23 @@ async def wait_for_async_generation(provider: str, initial_result: dict[str, Any
         raise ProviderError("当前模型不支持异步任务查询")
     async with httpx.AsyncClient(timeout=120) as client:
         return await adapter.wait_for_result(initial_result, base_url, headers, client)
+
+
+async def resume_async_generation(provider: str, provider_task_id: str) -> list[str]:
+    """重新查询一个已提交的供应商异步任务，不会重新发起图片生成。"""
+    adapter = PROVIDERS.get(provider)
+    if not isinstance(adapter, GrsaiProvider):
+        raise ProviderError("当前模型不支持异步任务查询")
+    settings = get_settings()
+    if not settings.grsai_api_key:
+        raise ProviderError(f"未配置 {adapter.credential_env}")
+    async with httpx.AsyncClient(timeout=120) as client:
+        return await adapter.wait_for_result(
+            {"id": provider_task_id, "status": "running"},
+            settings.grsai_base_url.rstrip("/"),
+            {"Authorization": f"Bearer {settings.grsai_api_key}"},
+            client,
+        )
 
 
 async def generate_draft_title(title_constraint: str, image_url: str) -> str:

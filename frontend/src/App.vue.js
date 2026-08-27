@@ -6,12 +6,12 @@ const page = ref('dashboard');
 const email = ref('operator@haitoo-demo.com');
 const password = ref('ChangeMe123!');
 const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), materialAssets = ref([]), drafts = ref([]), points = ref(null), members = ref([]), aiProviders = ref([]);
-const draftShopIdByTask = ref({}), loading = ref(false), error = ref('');
+const loading = ref(false), error = ref('');
 const toast = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
 const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFormTab = ref('basic'), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateTitleTemplate = ref(''), newTemplateProductDescription = ref(''), newTemplateSizeChart = ref(null), newTemplateSizeChartPreview = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), newPackageWeight = ref(null), newPackageLength = ref(null), newPackageWidth = ref(null), newPackageHeight = ref(null), newSkuSizeOptions = ref([]), editingTemplate = ref(null);
 const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', user_code: '', email: '', password: '', is_active: true }), memberSaving = ref(false);
-const showMyAccountDialog = ref(false), myUserCode = ref(''), myAccountSaving = ref(false);
+const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), myAccountSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
 const materialUploading = ref(false), materialUploadError = ref('');
 const selectedMaterialAssetIds = ref([]), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChart = ref(null), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false);
@@ -22,6 +22,8 @@ const draftPageSize = ref(20), currentDraftPage = ref(1);
 const previewImageUrl = ref(''), previewImageAlt = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
 const showTaskDetailDialog = ref(false), viewingTask = ref(null);
+const taskListRefreshing = ref(false), retryingTaskId = ref(null);
+const showTaskDraftDialog = ref(false), draftingTask = ref(null), taskDraftTitle = ref(''), taskDraftProductDescription = ref(''), taskDraftSizeChart = ref(null), taskDraftSizeChartPreview = ref(''), taskDraftTitleGenerating = ref(false), taskDraftSaving = ref(false), taskDraftSkuPreviewItems = ref([]);
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
 const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2 };
 const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativeProvider = ref(''), creativePlacement = ref('满版印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
@@ -83,6 +85,8 @@ async function refresh() {
     }
     if (!selectedTemplateId.value && templates.value[0])
         selectedTemplateId.value = templates.value[0].id;
+    if (viewingTask.value)
+        viewingTask.value = tasks.value.find(task => task.id === viewingTask.value.id) || null;
 }
 async function login() { try {
     loading.value = true;
@@ -193,6 +197,22 @@ catch (e) {
     error.value = e.response?.data?.detail || '删除模板失败';
 } }
 function imageUrl(url) { return url ? (url.startsWith('/') ? `${api.defaults.baseURL}${url}` : url) : ''; }
+const taskStatusLabel = { queued: '排队中', running: '处理中', awaiting_selection: '待选图', completed: '已完成', failed: '失败' };
+function taskStatusClass(status) { return status === 'awaiting_selection' ? 'purple' : status === 'completed' ? 'blue' : status === 'failed' ? 'orange' : 'purple'; }
+async function refreshTaskList() {
+    try {
+        taskListRefreshing.value = true;
+        tasks.value = (await api.get('/tasks', { headers: headers.value })).data;
+        if (viewingTask.value)
+            viewingTask.value = tasks.value.find(task => task.id === viewingTask.value.id) || null;
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '刷新任务列表失败');
+    }
+    finally {
+        taskListRefreshing.value = false;
+    }
+}
 async function copyProviderTaskId(task) { if (!task.provider_task_id)
     return; try {
     await navigator.clipboard.writeText(task.provider_task_id);
@@ -240,6 +260,71 @@ async function generateMaterialDraftTitle() {
     }
 }
 function openMaterialDraftDialog() { materialDraftTemplateId.value = null; materialDraftTitle.value = ''; materialDraftProductDescription.value = ''; materialDraftSizeChart.value = null; materialDraftSizeChartPreview.value = ''; materialDraftSkuPreviewItems.value = []; showMaterialDraftDialog.value = true; }
+function openTaskDraftDialog(task) {
+    const template = templates.value.find(item => item.id === task.template_id);
+    if (!template || !task.selected_result_url) {
+        showToast('任务缺少产品模板或已选结果图');
+        return;
+    }
+    draftingTask.value = task;
+    taskDraftTitle.value = `${template.name} POD 商品`;
+    taskDraftProductDescription.value = template.product_description || '';
+    taskDraftSizeChart.value = null;
+    taskDraftSizeChartPreview.value = imageUrl(template.size_chart_url);
+    taskDraftSkuPreviewItems.value = [{ image_url: task.selected_result_url, size: null, sku: `M05L${user.value?.user_code?.toUpperCase() || '??'}${randomSkuSuffix()}` }];
+    showTaskDraftDialog.value = true;
+}
+function onTaskDraftSizeChartChange(event) {
+    const file = event.target.files?.[0] || null;
+    taskDraftSizeChart.value = file;
+    const template = templates.value.find(item => item.id === draftingTask.value?.template_id);
+    taskDraftSizeChartPreview.value = file ? URL.createObjectURL(file) : imageUrl(template?.size_chart_url);
+}
+async function uploadTaskDraftSizeChart() {
+    if (!taskDraftSizeChart.value)
+        return undefined;
+    const form = new FormData();
+    form.append('file', taskDraftSizeChart.value);
+    const { data } = await api.post('/uploads/draft-size-chart', form, { headers: headers.value });
+    return data.url;
+}
+async function generateTaskDraftTitle() {
+    if (!draftingTask.value?.template_id || !draftingTask.value?.selected_result_url)
+        return;
+    try {
+        taskDraftTitleGenerating.value = true;
+        const { data } = await api.post(`/templates/${draftingTask.value.template_id}/generate-draft-title`, { image_url: draftingTask.value.selected_result_url }, { headers: headers.value });
+        taskDraftTitle.value = data.title;
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || 'AI 生成标题失败，请稍后重试');
+    }
+    finally {
+        taskDraftTitleGenerating.value = false;
+    }
+}
+async function createTaskDraft() {
+    if (!draftingTask.value || !taskDraftTitle.value.trim()) {
+        showToast('请生成或填写商品标题');
+        return;
+    }
+    try {
+        taskDraftSaving.value = true;
+        const template = templates.value.find(item => item.id === draftingTask.value.template_id);
+        const size_chart_url = (await uploadTaskDraftSizeChart()) ?? template?.size_chart_url ?? null;
+        await api.post(`/tasks/${draftingTask.value.id}/draft`, { title: taskDraftTitle.value.trim(), product_description: taskDraftProductDescription.value.trim() || null, size_chart_url, sku_items: taskDraftSkuPreviewItems.value }, { headers: headers.value });
+        showTaskDraftDialog.value = false;
+        await refresh();
+        page.value = 'drafts';
+        showToast('商品草稿已创建');
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '创建商品草稿失败');
+    }
+    finally {
+        taskDraftSaving.value = false;
+    }
+}
 async function createDraftFromMaterialAssets() {
     if (!selectedMaterialAssetIds.value.length)
         return;
@@ -308,6 +393,20 @@ async function publishDraftToMiaoshou(draft) {
     }
 }
 async function selectTask(task) { await api.post(`/tasks/${task.id}/select`, { result_url: task.result_urls[0] }, { headers: headers.value }); await refresh(); }
+async function retryTaskResult(task) {
+    try {
+        retryingTaskId.value = task.id;
+        await api.post(`/tasks/${task.id}/retry-result`, {}, { headers: headers.value });
+        await refreshTaskList();
+        showToast('已开始重新获取结果');
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '重新获取结果失败');
+    }
+    finally {
+        retryingTaskId.value = null;
+    }
+}
 async function claimMaterials(task) { try {
     const { data } = await api.post(`/tasks/${task.id}/claim-materials`, {}, { headers: headers.value });
     await refresh();
@@ -354,31 +453,23 @@ async function deleteSelectedMaterialAssets() {
         showToast(e.response?.data?.detail || '删除素材失败，请稍后重试');
     }
 }
-async function makeDraft(task) { const shopId = draftShopIdByTask.value[task.id]; if (!shopId) {
-    error.value = '请选择要创建商品草稿的店铺';
-    return;
-} try {
-    await api.post(`/tasks/${task.id}/draft`, { shop_id: shopId }, { headers: headers.value });
-    await refresh();
-    page.value = 'drafts';
-}
-catch (e) {
-    error.value = e.response?.data?.detail || '创建商品草稿失败';
-} }
 function openMemberDialog(member) { editingMember.value = member || null; memberForm.value = { name: member?.name || '', user_code: member?.user_code || '', email: member?.email || '', password: '', is_active: member?.is_active ?? true }; showMemberDialog.value = true; }
-function openMyAccountDialog() { myUserCode.value = user.value?.user_code || ''; showMyAccountDialog.value = true; }
-async function saveMyUserCode() { const userCode = myUserCode.value.trim(); if (userCode && [...userCode].length !== 2) {
+function openMyAccountDialog() { myName.value = user.value?.name || ''; myUserCode.value = user.value?.user_code || ''; showMyAccountDialog.value = true; }
+async function saveMyUserCode() { const name = myName.value.trim(), userCode = myUserCode.value.trim(); if (!name) {
+    showToast('请输入管理员名称');
+    return;
+} if (userCode && [...userCode].length !== 2) {
     showToast('用户代码必须恰好为两个字符');
     return;
 } try {
     myAccountSaving.value = true;
-    const { data } = await api.patch('/me', { user_code: userCode || null }, { headers: headers.value });
+    const { data } = await api.patch('/me', { name, user_code: userCode || null }, { headers: headers.value });
     user.value = data;
     showMyAccountDialog.value = false;
-    showToast('用户代码已保存');
+    showToast('账户设置已保存');
 }
 catch (e) {
-    showToast(e.response?.data?.detail || '保存用户代码失败');
+    showToast(e.response?.data?.detail || '保存账户设置失败');
 }
 finally {
     myAccountSaving.value = false;
@@ -1058,8 +1149,13 @@ else {
             ...{ class: "section-heading" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.refreshTaskList) },
+            ...{ class: "secondary" },
+            disabled: (__VLS_ctx.taskListRefreshing),
+        });
+        (__VLS_ctx.taskListRefreshing ? '刷新中…' : '↻ 刷新列表');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
             ...{ class: "draft-table task-table" },
         });
@@ -1067,6 +1163,7 @@ else {
             ...{ class: "thead" },
             ...{ style: {} },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -1089,18 +1186,22 @@ else {
             (task.parameters?.task_type || '替换印花');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (task.template_name || '—');
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "ai-model-cell" },
+            });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
             (task.provider === 'grsai' ? 'Grsai' : task.provider || '默认模型');
             if (task.provider_model) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
                 (task.provider_model);
             }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (new Date(task.created_at).toLocaleString());
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (task.created_by_name || '历史记录缺失');
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "provider-task-id" },
+            });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
             (task.provider_task_id || '—');
             if (task.provider_task_id) {
@@ -1120,8 +1221,16 @@ else {
                                 return;
                             __VLS_ctx.copyProviderTaskId(task);
                         } },
+                    ...{ class: "copy-icon-button" },
+                    title: "复制外部任务 ID",
+                    'aria-label': "复制外部任务 ID",
                 });
             }
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "chip" },
+                ...{ class: (__VLS_ctx.taskStatusClass(task.status)) },
+            });
+            (__VLS_ctx.taskStatusLabel[task.status] || task.status || '—');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (task.result_urls?.length || 0);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
@@ -1145,7 +1254,30 @@ else {
                             return;
                         __VLS_ctx.openTaskDetail(task);
                     } },
+                ...{ class: "secondary" },
             });
+            if (task.provider === 'grsai' && task.status === 'failed' && task.failure_reason === 'grsai 任务查询超时，请稍后重试') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(!__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!(task.provider === 'grsai' && task.status === 'failed' && task.failure_reason === 'grsai 任务查询超时，请稍后重试'))
+                                return;
+                            __VLS_ctx.retryTaskResult(task);
+                        } },
+                    ...{ class: "secondary" },
+                    disabled: (__VLS_ctx.retryingTaskId === task.id),
+                });
+                (__VLS_ctx.retryingTaskId === task.id ? '获取中…' : '重新获取结果');
+            }
             if (task.status === 'awaiting_selection') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
@@ -1187,20 +1319,6 @@ else {
                 });
             }
             if (task.status === 'completed') {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-                    value: (__VLS_ctx.draftShopIdByTask[task.id]),
-                });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                    value: (null),
-                });
-                for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.shops))) {
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                        key: (shop.id),
-                        value: (shop.id),
-                    });
-                    (shop.region);
-                    (shop.name);
-                }
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!!(!__VLS_ctx.token))
@@ -1215,9 +1333,9 @@ else {
                                 return;
                             if (!(task.status === 'completed'))
                                 return;
-                            __VLS_ctx.makeDraft(task);
+                            __VLS_ctx.openTaskDraftDialog(task);
                         } },
-                    ...{ class: "primary" },
+                    ...{ class: "secondary" },
                 });
             }
         }
@@ -1235,7 +1353,6 @@ else {
             ...{ class: "section-heading" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "primary material-upload-button" },
@@ -1343,7 +1460,6 @@ else {
             ...{ class: "section-heading" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
@@ -1575,7 +1691,6 @@ else {
             ...{ class: "section-heading" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
@@ -1694,7 +1809,6 @@ else {
             ...{ class: "section-heading" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.loadMiaoshouShops) },
@@ -1907,6 +2021,12 @@ if (__VLS_ctx.showTaskDetailDialog) {
         (__VLS_ctx.viewingTask.provider_model);
     }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "chip" },
+        ...{ class: (__VLS_ctx.taskStatusClass(__VLS_ctx.viewingTask?.status)) },
+    });
+    (__VLS_ctx.taskStatusLabel[__VLS_ctx.viewingTask?.status] || __VLS_ctx.viewingTask?.status || '—');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     (__VLS_ctx.viewingTask?.provider_task_id || '—');
     if (__VLS_ctx.viewingTask?.failure_reason) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
@@ -2025,6 +2145,12 @@ if (__VLS_ctx.showMyAccountDialog) {
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "80",
+        placeholder: "请输入管理员名称",
+    });
+    (__VLS_ctx.myName);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
@@ -2189,6 +2315,126 @@ if (__VLS_ctx.showMaterialDraftDialog) {
         disabled: (__VLS_ctx.materialDraftSaving),
     });
     (__VLS_ctx.materialDraftSaving ? '创建中…' : '确认创建');
+}
+if (__VLS_ctx.showTaskDraftDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTaskDraftDialog))
+                    return;
+                __VLS_ctx.showTaskDraftDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card material-draft-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTaskDraftDialog))
+                    return;
+                __VLS_ctx.showTaskDraftDialog = false;
+            } },
+        ...{ class: "modal-close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.draftingTask?.id);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.templates.find(template => template.id === __VLS_ctx.draftingTask?.template_id)?.name || '历史模板已删除'),
+        readonly: true,
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "material-draft-preview" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "material-draft-preview-heading" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "material-draft-preview-images" },
+    });
+    if (__VLS_ctx.draftingTask?.selected_result_url) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+            src: (__VLS_ctx.imageUrl(__VLS_ctx.draftingTask.selected_result_url)),
+            alt: "任务已选结果图",
+        });
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "material-draft-details" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "material-draft-title-row" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "180",
+        placeholder: "请生成或填写商品标题",
+    });
+    (__VLS_ctx.taskDraftTitle);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.generateTaskDraftTitle) },
+        ...{ class: "secondary" },
+        disabled: (__VLS_ctx.taskDraftTitleGenerating),
+    });
+    (__VLS_ctx.taskDraftTitleGenerating ? '生成中…' : 'AI 生成标题');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+        value: (__VLS_ctx.taskDraftProductDescription),
+        maxlength: "5000",
+        placeholder: "默认使用产品模版描述，可按商品修改",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "material-draft-sku-summary" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "material-draft-sku-list" },
+    });
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.taskDraftSkuPreviewItems))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            key: (item.sku),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
+        (item.sku);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "material-draft-size-chart" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        ...{ onChange: (__VLS_ctx.onTaskDraftSizeChartChange) },
+        accept: "image/png,image/jpeg,image/webp",
+        type: "file",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+    (__VLS_ctx.taskDraftSizeChart ? __VLS_ctx.taskDraftSizeChart.name : __VLS_ctx.taskDraftSizeChartPreview ? '默认使用产品模版尺码图，可重新选择一张图片' : '可上传 1 张尺码图，支持 JPG、PNG、WebP，最大 5MB');
+    if (__VLS_ctx.taskDraftSizeChartPreview) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+            src: (__VLS_ctx.taskDraftSizeChartPreview),
+            alt: "尺码图预览",
+        });
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTaskDraftDialog))
+                    return;
+                __VLS_ctx.showTaskDraftDialog = false;
+            } },
+        ...{ class: "ghost" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.createTaskDraft) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.taskDraftSaving),
+    });
+    (__VLS_ctx.taskDraftSaving ? '创建中…' : '确认创建');
 }
 if (__VLS_ctx.showDraftEditDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -2823,14 +3069,21 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['full']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['ai-model-cell']} */ ;
+/** @type {__VLS_StyleScopedClasses['provider-task-id']} */ ;
+/** @type {__VLS_StyleScopedClasses['copy-icon-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-actions']} */ ;
-/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
@@ -2896,6 +3149,7 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['material-draft-preview-images']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -2913,6 +3167,22 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['asset-empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-preview']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-preview-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-preview-images']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-details']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-title-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-sku-summary']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-sku-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-size-chart']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -3000,7 +3270,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             password: password,
             user: user,
             company: company,
-            shops: shops,
             templates: templates,
             templateGroups: templateGroups,
             tasks: tasks,
@@ -3009,7 +3278,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             points: points,
             members: members,
             aiProviders: aiProviders,
-            draftShopIdByTask: draftShopIdByTask,
             loading: loading,
             error: error,
             toast: toast,
@@ -3040,6 +3308,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             memberForm: memberForm,
             memberSaving: memberSaving,
             showMyAccountDialog: showMyAccountDialog,
+            myName: myName,
             myUserCode: myUserCode,
             myAccountSaving: myAccountSaving,
             managedShops: managedShops,
@@ -3074,6 +3343,17 @@ const __VLS_self = (await import('vue')).defineComponent({
             shopManagersSaving: shopManagersSaving,
             showTaskDetailDialog: showTaskDetailDialog,
             viewingTask: viewingTask,
+            taskListRefreshing: taskListRefreshing,
+            retryingTaskId: retryingTaskId,
+            showTaskDraftDialog: showTaskDraftDialog,
+            draftingTask: draftingTask,
+            taskDraftTitle: taskDraftTitle,
+            taskDraftProductDescription: taskDraftProductDescription,
+            taskDraftSizeChart: taskDraftSizeChart,
+            taskDraftSizeChartPreview: taskDraftSizeChartPreview,
+            taskDraftTitleGenerating: taskDraftTitleGenerating,
+            taskDraftSaving: taskDraftSaving,
+            taskDraftSkuPreviewItems: taskDraftSkuPreviewItems,
             creativeAssets: creativeAssets,
             showCreativeAssetsDialog: showCreativeAssetsDialog,
             creativeAssetError: creativeAssetError,
@@ -3108,6 +3388,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             createTemplate: createTemplate,
             deleteTemplate: deleteTemplate,
             imageUrl: imageUrl,
+            taskStatusLabel: taskStatusLabel,
+            taskStatusClass: taskStatusClass,
+            refreshTaskList: refreshTaskList,
             copyProviderTaskId: copyProviderTaskId,
             openTaskDetail: openTaskDetail,
             templateCoverUrl: templateCoverUrl,
@@ -3118,6 +3401,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             onMaterialDraftSizeChartChange: onMaterialDraftSizeChartChange,
             generateMaterialDraftTitle: generateMaterialDraftTitle,
             openMaterialDraftDialog: openMaterialDraftDialog,
+            openTaskDraftDialog: openTaskDraftDialog,
+            onTaskDraftSizeChartChange: onTaskDraftSizeChartChange,
+            generateTaskDraftTitle: generateTaskDraftTitle,
+            createTaskDraft: createTaskDraft,
             createDraftFromMaterialAssets: createDraftFromMaterialAssets,
             openDraftEditDialog: openDraftEditDialog,
             draftSkuForImage: draftSkuForImage,
@@ -3125,10 +3412,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             saveDraftEdit: saveDraftEdit,
             publishDraftToMiaoshou: publishDraftToMiaoshou,
             selectTask: selectTask,
+            retryTaskResult: retryTaskResult,
             claimMaterials: claimMaterials,
             uploadMaterialAssets: uploadMaterialAssets,
             deleteSelectedMaterialAssets: deleteSelectedMaterialAssets,
-            makeDraft: makeDraft,
             openMemberDialog: openMemberDialog,
             openMyAccountDialog: openMyAccountDialog,
             saveMyUserCode: saveMyUserCode,

@@ -134,14 +134,17 @@ class SelectResult(BaseModel):
     result_url: str
 
 
-class DraftCreate(BaseModel):
-    shop_id: int
-
-
 class DraftSkuItem(BaseModel):
     image_url: str = Field(min_length=1, max_length=500)
     size: str | None = Field(default=None, max_length=50)
     sku: str = Field(min_length=1, max_length=32)
+
+
+class TaskDraftCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=180)
+    product_description: str | None = Field(default=None, max_length=5000)
+    size_chart_url: str | None = Field(default=None, max_length=500)
+    sku_items: list[DraftSkuItem] = Field(default_factory=list, max_length=1000)
 
 
 class MaterialDraftCreate(BaseModel):
@@ -204,8 +207,9 @@ class MemberUpdate(BaseModel):
 
 
 class MyUserCodeUpdate(BaseModel):
-    """当前登录账号仅可更新自己的用户代码。"""
-    user_code: str | None = Field(..., min_length=2, max_length=2)
+    """当前登录账号仅可更新自己的名称和用户代码。"""
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    user_code: str | None = Field(default=None, min_length=2, max_length=2)
 
     @field_validator("user_code")
     @classmethod
@@ -216,6 +220,11 @@ class MyUserCodeUpdate(BaseModel):
         if len(value) != 2:
             raise ValueError("用户代码必须恰好为两个字符")
         return value
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        return value.strip() if value else value
 
 
 class MiaoshouShopQuery(BaseModel):

@@ -19,9 +19,9 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
 from .models import AIProviderSetting, Company, MaterialAsset, NonAIPointRule, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
-from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, DraftCreate, DraftTitleGenerate, DraftUpdate, LedgerOut, LoginInput, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
+from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, DraftTitleGenerate, DraftUpdate, LedgerOut, LoginInput, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TaskDraftCreate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
-from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, generate_draft_title, provider_credential_env, provider_has_credentials, submit_async_generation, wait_for_async_generation
+from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, generate_draft_title, provider_credential_env, provider_has_credentials, resume_async_generation, submit_async_generation, wait_for_async_generation
 from .credentials import decrypt_secret, encrypt_secret
 from .storage import StorageError, is_public_r2_url, upload_image_bytes_async
 import httpx
@@ -285,10 +285,13 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
 
 @app.patch("/me", response_model=UserOut)
 def update_my_user_code(payload: MyUserCodeUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """当前账号只能设置自己的用户代码。"""
+    """当前账号只能设置自己的名称和用户代码。"""
     if payload.user_code and user_code_in_use(db, user.company_id, payload.user_code, user.id):
         raise HTTPException(400, "该用户代码已被使用")
-    user.user_code = payload.user_code
+    if payload.name is not None:
+        user.name = payload.name
+    if payload.user_code is not None:
+        user.user_code = payload.user_code
     commit_user_code_change(db)
     db.refresh(user)
     return user
@@ -825,17 +828,19 @@ def update_ai_provider(provider: str, payload: AIProviderSettingUpdate, user: Us
     return serialize_record(setting)
 
 
-def settle_failed_task(task_id: int, reason: str) -> None:
+def settle_failed_task(task_id: int, reason: str, *, refund_points: bool = True) -> None:
     db = next(get_db())
     try:
         task = db.get(PodTask, task_id)
         if not task or task.status != TaskStatus.RUNNING:
             return
         account = db.get(PointAccount, task.company_id)
-        account.frozen -= task.estimated_points; account.available += task.estimated_points
+        if refund_points:
+            account.frozen -= task.estimated_points; account.available += task.estimated_points
         task.status = TaskStatus.FAILED; task.failure_reason = reason[:500]
         logger.error("AI 任务 #%s 失败：%s", task_id, task.failure_reason)
-        db.add(PointLedger(company_id=task.company_id, actor_id=task.created_by, task_id=task.id, entry_type="ai_refund", amount=task.estimated_points, balance_after=account.available, note="AI 任务失败，已退回预冻结积分"))
+        if refund_points:
+            db.add(PointLedger(company_id=task.company_id, actor_id=task.created_by, task_id=task.id, entry_type="ai_refund", amount=task.estimated_points, balance_after=account.available, note="AI 任务失败，已退回预冻结积分"))
         db.commit()
     finally:
         db.close()
@@ -877,6 +882,30 @@ async def run_generation(task_id: int) -> None:
         logger.exception("AI 任务 #%s 生成过程异常", task_id)
         db.rollback()
         settle_failed_task(task_id, str(exc))
+    finally:
+        db.close()
+
+
+async def resume_grsai_result(task_id: int) -> None:
+    """在超时后继续查询同一个 Grsai 外部任务，不重复扣费或提交生成请求。"""
+    db = next(get_db())
+    try:
+        task = db.get(PodTask, task_id)
+        if not task or task.provider != "grsai" or not task.provider_task_id:
+            return
+        task.status = TaskStatus.RUNNING
+        task.failure_reason = None
+        db.commit()
+        urls = await resume_async_generation(task.provider, task.provider_task_id)
+        urls = await persist_generated_images(urls, task.company_id, task.id)
+        task.result_urls = urls
+        task.status = TaskStatus.AWAITING_SELECTION
+        db.commit()
+    except Exception as exc:
+        logger.exception("AI 任务 #%s 重新获取结果时异常", task_id)
+        db.rollback()
+        # 原任务在首次超时时已经退回积分，重查失败不能再次退款。
+        settle_failed_task(task_id, str(exc), refund_points=False)
     finally:
         db.close()
 
@@ -967,6 +996,23 @@ def select_result(task_id: int, payload: SelectResult, user: User = Depends(curr
     db.commit(); db.refresh(task); return serialize_record(task)
 
 
+@app.post("/tasks/{task_id}/retry-result")
+def retry_task_result(task_id: int, background_tasks: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """仅允许重新获取已超时的 Grsai 任务结果，不会重新生成图片。"""
+    task = db.get(PodTask, task_id)
+    if not can_access_task(task, user):
+        raise HTTPException(404, "任务不存在")
+    if task.provider != "grsai" or not task.provider_task_id:
+        raise HTTPException(400, "该任务不支持重新获取结果")
+    if task.status != TaskStatus.FAILED or task.failure_reason != "grsai 任务查询超时，请稍后重试":
+        raise HTTPException(400, "仅查询超时的任务可以重新获取结果")
+    task.status = TaskStatus.QUEUED
+    task.failure_reason = None
+    db.commit(); db.refresh(task)
+    background_tasks.add_task(resume_grsai_result, task.id)
+    return serialize_record(task)
+
+
 @app.post("/tasks/{task_id}/claim-materials")
 def claim_task_materials(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     task = db.get(PodTask, task_id)
@@ -985,13 +1031,27 @@ def claim_task_materials(task_id: int, user: User = Depends(current_user), db: S
 
 
 @app.post("/tasks/{task_id}/draft")
-def create_draft(task_id: int, payload: DraftCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def create_draft(task_id: int, payload: TaskDraftCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     task = db.get(PodTask, task_id)
     if not can_access_task(task, user) or task.status != TaskStatus.COMPLETED:
         raise HTTPException(400, "请先完成任务并选择产品图")
-    shop = ensure_shop(db, user, payload.shop_id)
     template = db.get(ProductTemplate, task.template_id)
-    draft = ProductDraft(company_id=task.company_id, shop_id=shop.id, template_id=template.id, source_task_id=task.id, title=f"{template.name} POD 商品", image_urls=[task.selected_result_url], sku_items=build_draft_sku_items(template, user, [task.selected_result_url]), created_by=user.id, updated_by=user.id)
+    if not template or not task.selected_result_url:
+        raise HTTPException(400, "任务缺少产品模板或已选结果图")
+    image_urls = [task.selected_result_url]
+    draft = ProductDraft(
+        company_id=task.company_id,
+        shop_id=None,
+        template_id=template.id,
+        source_task_id=task.id,
+        title=payload.title.strip(),
+        product_description=payload.product_description.strip() if payload.product_description else None,
+        size_chart_url=payload.size_chart_url,
+        image_urls=image_urls,
+        sku_items=validate_draft_sku_items(template, user, image_urls, payload.sku_items),
+        created_by=user.id,
+        updated_by=user.id,
+    )
     db.add(draft); db.commit(); db.refresh(draft); return serialize_record(draft)
 
 
