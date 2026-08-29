@@ -97,6 +97,8 @@ def ensure_schema() -> None:
                 connection.execute(text(f"ALTER TABLE product_templates ADD COLUMN {column} FLOAT"))
         if "sku_specifications" not in columns:
             connection.execute(text("ALTER TABLE product_templates ADD COLUMN sku_specifications JSON"))
+        if "ai_prompts" not in columns:
+            connection.execute(text("ALTER TABLE product_templates ADD COLUMN ai_prompts JSON"))
         draft_columns = {column["name"] for column in inspect(engine).get_columns("product_drafts")}
         if "sku_items" not in draft_columns:
             connection.execute(text("ALTER TABLE product_drafts ADD COLUMN sku_items JSON"))

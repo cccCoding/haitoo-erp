@@ -46,6 +46,12 @@ class ShopManagerUpdate(BaseModel):
     member_ids: list[int] = Field(default_factory=list, max_length=100)
 
 
+class TemplateAiPrompt(BaseModel):
+    """产品模板中可复用的印花贴合提示词。"""
+    name: str = Field(min_length=1, max_length=80)
+    content: str = Field(min_length=1, max_length=1000)
+
+
 class TemplateCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     group_id: int | None = None
@@ -59,9 +65,9 @@ class TemplateCreate(BaseModel):
     package_width: float | None = Field(default=None, gt=0)
     package_height: float | None = Field(default=None, gt=0)
     sku_specifications: dict | None = None
+    ai_prompts: list[TemplateAiPrompt] = Field(default_factory=list, max_length=50)
     color_count: int = 1
     sku_count: int = 1
-    print_areas: list[dict] = []
 
 
 class TemplateUpdate(BaseModel):
@@ -77,6 +83,7 @@ class TemplateUpdate(BaseModel):
     package_width: float | None = Field(default=None, gt=0)
     package_height: float | None = Field(default=None, gt=0)
     sku_specifications: dict | None = None
+    ai_prompts: list[TemplateAiPrompt] | None = Field(default=None, max_length=50)
 
 
 class TemplateGroupCreate(BaseModel):
@@ -88,12 +95,11 @@ class PodTaskCreate(BaseModel):
     # 不传时沿用平台后台配置的默认模型。
     provider: str | None = Field(default=None, max_length=40)
     task_type: str = Field(default="替换印花", min_length=1, max_length=80)
-    placement: Literal["居中印花", "满版印花"] = "满版印花"
     ratio: Literal["1:1", "3:4"] = "1:1"
     quality: Literal["1K", "2K"] = "1K"
     print_url: str | None = None
     print_urls: list[str] = Field(default_factory=list, max_length=1000)
-    creative_requirement: str | None = Field(default=None, max_length=1000)
+    creative_requirement: str = Field(min_length=1, max_length=1000)
 
 
 class AIProviderSettingUpdate(BaseModel):

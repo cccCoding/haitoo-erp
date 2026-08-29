@@ -9,7 +9,7 @@ const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]
 const loading = ref(false), error = ref('');
 const toast = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
-const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFormTab = ref('basic'), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateTitleTemplate = ref(''), newTemplateProductDescription = ref(''), newTemplateSizeChart = ref(null), newTemplateSizeChartPreview = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), newPackageWeight = ref(null), newPackageLength = ref(null), newPackageWidth = ref(null), newPackageHeight = ref(null), newSkuSizeOptions = ref([]), editingTemplate = ref(null);
+const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFormTab = ref('basic'), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateTitleTemplate = ref(''), newTemplateProductDescription = ref(''), newTemplateSizeChart = ref(null), newTemplateSizeChartPreview = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), newPackageWeight = ref(null), newPackageLength = ref(null), newPackageWidth = ref(null), newPackageHeight = ref(null), newSkuSizeOptions = ref([]), newTemplateAiPrompts = ref([]), editingTemplate = ref(null);
 const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', user_code: '', email: '', password: '', is_active: true }), memberSaving = ref(false);
 const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), myAccountSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
@@ -28,7 +28,7 @@ const taskListRefreshing = ref(false), retryingTaskId = ref(null);
 const showTaskDraftDialog = ref(false), draftingTask = ref(null), taskDraftTitle = ref(''), taskDraftProductDescription = ref(''), taskDraftSizeChart = ref(null), taskDraftSizeChartPreview = ref(''), taskDraftTitleGenerating = ref(false), taskDraftSaving = ref(false), taskDraftSkuPreviewItems = ref([]);
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
 const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2 };
-const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativeProvider = ref(''), creativePlacement = ref('满版印花'), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
+const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativePromptIndex = ref(''), creativeProvider = ref(''), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
 const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'materials', icon: '◈', label: '素材库' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'points', icon: '◉', label: '积分中心' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }];
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
 const visibleNav = computed(() => nav.filter(item => !item.adminOnly || user.value?.role === 'company_admin'));
@@ -134,11 +134,14 @@ async function uploadCreativeAssets() { return Promise.all(creativeAssets.value.
 async function createTask() { if (!creativeAssets.value.length) {
     creativeAssetError.value = '请先上传至少一张印花图，再开始印花贴合。';
     return;
+} if (!creativeRequirement.value.trim()) {
+    showToast('请填写创作要求');
+    return;
 } if (!selectedTemplateId.value || !creativeProvider.value)
     return; try {
     creativeAssetError.value = '';
     const print_urls = await uploadCreativeAssets();
-    await api.post('/tasks', { template_id: selectedTemplateId.value, provider: creativeProvider.value, placement: creativePlacement.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() || null }, { headers: headers.value });
+    await api.post('/tasks', { template_id: selectedTemplateId.value, provider: creativeProvider.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() }, { headers: headers.value });
     await refresh();
     page.value = 'tasks';
 }
@@ -155,8 +158,15 @@ async function createGroup() { if (!newGroupName.value.trim())
 catch (e) {
     error.value = e.response?.data?.detail || '创建分类失败';
 } }
-function openTemplateDialog(template) { editingTemplate.value = template || null; templateFormTab.value = 'basic'; newTemplateName.value = template?.name || ''; newTemplateDescription.value = template?.description || ''; newTemplateTitleTemplate.value = template?.title_template || ''; newTemplateProductDescription.value = template?.product_description || ''; newTemplateSizeChart.value = null; newTemplateSizeChartPreview.value = imageUrl(template?.size_chart_url); newTemplateGroupId.value = template?.group_id || null; newTemplateImage.value = null; newTemplateImagePreview.value = imageUrl(template?.cover_url); newPackageWeight.value = template?.package_weight ?? defaultPackageLogistics.weight; newPackageLength.value = template?.package_length ?? defaultPackageLogistics.length; newPackageWidth.value = template?.package_width ?? defaultPackageLogistics.width; newPackageHeight.value = template?.package_height ?? defaultPackageLogistics.height; newSkuSizeOptions.value = template?.sku_specifications?.size?.options || [...defaultSkuSizes]; showTemplateDialog.value = true; }
+function openTemplateDialog(template) { editingTemplate.value = template || null; templateFormTab.value = 'basic'; newTemplateName.value = template?.name || ''; newTemplateDescription.value = template?.description || ''; newTemplateTitleTemplate.value = template?.title_template || ''; newTemplateProductDescription.value = template?.product_description || ''; newTemplateSizeChart.value = null; newTemplateSizeChartPreview.value = imageUrl(template?.size_chart_url); newTemplateGroupId.value = template?.group_id || null; newTemplateImage.value = null; newTemplateImagePreview.value = imageUrl(template?.cover_url); newPackageWeight.value = template?.package_weight ?? defaultPackageLogistics.weight; newPackageLength.value = template?.package_length ?? defaultPackageLogistics.length; newPackageWidth.value = template?.package_width ?? defaultPackageLogistics.width; newPackageHeight.value = template?.package_height ?? defaultPackageLogistics.height; newSkuSizeOptions.value = template?.sku_specifications?.size?.options || [...defaultSkuSizes]; newTemplateAiPrompts.value = (template?.ai_prompts || []).map((item) => ({ name: item?.name || '', content: item?.content || '' })); showTemplateDialog.value = true; }
 function addSkuSize() { newSkuSizeOptions.value.push(''); }
+function addTemplateAiPrompt() { newTemplateAiPrompts.value.push({ name: '', content: '' }); }
+function removeTemplateAiPrompt(index) { newTemplateAiPrompts.value.splice(index, 1); }
+function selectedTemplateAiPrompts() { return (selectedTemplate.value?.ai_prompts || []).filter((item) => item?.name && item?.content); }
+function applyTemplateAiPrompt() { if (creativePromptIndex.value === '')
+    return; const prompt = selectedTemplateAiPrompts()[Number(creativePromptIndex.value)]; if (prompt)
+    creativeRequirement.value = prompt.content; }
+function onCreativeTemplateChange() { creativePromptIndex.value = ''; creativeRequirement.value = ''; }
 function onCoverChange(event) { const file = event.target.files?.[0] || null; newTemplateImage.value = file; newTemplateImagePreview.value = file ? URL.createObjectURL(file) : imageUrl(editingTemplate.value?.cover_url); }
 function onSizeChartChange(event) { const file = event.target.files?.[0] || null; newTemplateSizeChart.value = file; newTemplateSizeChartPreview.value = file ? URL.createObjectURL(file) : imageUrl(editingTemplate.value?.size_chart_url); }
 async function uploadCover() { if (!newTemplateImage.value)
@@ -187,16 +197,20 @@ async function createTemplate() { if (!editingTemplate.value && !validateNewTemp
     templateFormTab.value = 'logistics';
     showToast('请完整填写物流信息');
     return;
+} const ai_prompts = newTemplateAiPrompts.value.map(item => ({ name: item.name.trim(), content: item.content.trim() })).filter(item => item.name || item.content); if (ai_prompts.some(item => !item.name || !item.content)) {
+    templateFormTab.value = 'ai-prompts';
+    showToast('请完整填写 AI 提示词的名称和内容，或删除空白项');
+    return;
 } try {
     const cover_url = (await uploadCover()) ?? editingTemplate.value?.cover_url ?? null;
     const size_chart_url = (await uploadSizeChart()) ?? editingTemplate.value?.size_chart_url ?? null;
     const sizeOptions = newSkuSizeOptions.value.map(value => value.trim()).filter(Boolean);
     const sku_specifications = { size: { name: '尺码', options: sizeOptions } };
-    const payload = { name: newTemplateName.value.trim(), description: newTemplateDescription.value.trim() || null, title_template: newTemplateTitleTemplate.value.trim() || null, product_description: newTemplateProductDescription.value.trim() || null, size_chart_url, group_id: newTemplateGroupId.value, cover_url, package_weight: newPackageWeight.value, package_length: newPackageLength.value, package_width: newPackageWidth.value, package_height: newPackageHeight.value, sku_specifications, color_count: 1, sku_count: Math.max(1, sizeOptions.length) };
+    const payload = { name: newTemplateName.value.trim(), description: newTemplateDescription.value.trim() || null, title_template: newTemplateTitleTemplate.value.trim() || null, product_description: newTemplateProductDescription.value.trim() || null, size_chart_url, group_id: newTemplateGroupId.value, cover_url, package_weight: newPackageWeight.value, package_length: newPackageLength.value, package_width: newPackageWidth.value, package_height: newPackageHeight.value, sku_specifications, ai_prompts, color_count: 1, sku_count: Math.max(1, sizeOptions.length) };
     if (editingTemplate.value)
         await api.put(`/templates/${editingTemplate.value.id}`, payload, { headers: headers.value });
     else
-        await api.post('/templates', { ...payload, print_areas: [{ name: '居中印花' }] }, { headers: headers.value });
+        await api.post('/templates', payload, { headers: headers.value });
     showTemplateDialog.value = false;
     await refresh();
 }
@@ -757,7 +771,6 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (task.id);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-            (task.parameters.placement);
             (task.parameters.quality);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "chip blue" },
@@ -995,7 +1008,27 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "requirement-label" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        if (__VLS_ctx.selectedTemplateAiPrompts().length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "prompt-picker" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                ...{ onChange: (__VLS_ctx.applyTemplateAiPrompt) },
+                value: (__VLS_ctx.creativePromptIndex),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: "",
+            });
+            for (const [prompt, index] of __VLS_getVForSourceType((__VLS_ctx.selectedTemplateAiPrompts()))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    key: (`${prompt.name}-${index}`),
+                    value: (String(index)),
+                });
+                (prompt.name);
+            }
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
             value: (__VLS_ctx.creativeRequirement),
             maxlength: "1000",
@@ -1076,6 +1109,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (__VLS_ctx.onCreativeTemplateChange) },
             value: (__VLS_ctx.selectedTemplateId),
         });
         for (const [t] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
@@ -1094,7 +1128,6 @@ else {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         (__VLS_ctx.selectedTemplate?.name);
-        (__VLS_ctx.creativePlacement);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
             ...{ class: "settings" },
         });
@@ -1119,15 +1152,6 @@ else {
             (provider.display_name);
             (provider.model);
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
-            ...{ class: "parameter-field" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.creativePlacement),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "parameter-field" },
         });
@@ -2170,7 +2194,6 @@ if (__VLS_ctx.showTaskDetailDialog) {
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    (__VLS_ctx.viewingTask?.parameters?.placement || '—');
     (__VLS_ctx.viewingTask?.parameters?.ratio || '—');
     (__VLS_ctx.viewingTask?.parameters?.quality || '—');
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
@@ -2920,6 +2943,14 @@ if (__VLS_ctx.showTemplateDialog) {
             } },
         ...{ class: ({ active: __VLS_ctx.templateFormTab === 'logistics' }) },
     });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTemplateDialog))
+                    return;
+                __VLS_ctx.templateFormTab = 'ai-prompts';
+            } },
+        ...{ class: ({ active: __VLS_ctx.templateFormTab === 'ai-prompts' }) },
+    });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "drawer-content" },
     });
@@ -3057,6 +3088,57 @@ if (__VLS_ctx.showTemplateDialog) {
             ...{ class: "sku-total" },
         });
         (Math.max(1, __VLS_ctx.newSkuSizeOptions.filter(value => value.trim()).length));
+    }
+    else if (__VLS_ctx.templateFormTab === 'ai-prompts') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "drawer-form ai-prompts-form" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        for (const [prompt, index] of __VLS_getVForSourceType((__VLS_ctx.newTemplateAiPrompts))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+                key: (index),
+                ...{ class: "ai-prompt-editor" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            (index + 1);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showTemplateDialog))
+                            return;
+                        if (!!(__VLS_ctx.templateFormTab === 'basic'))
+                            return;
+                        if (!!(__VLS_ctx.templateFormTab === 'product'))
+                            return;
+                        if (!!(__VLS_ctx.templateFormTab === 'sku'))
+                            return;
+                        if (!(__VLS_ctx.templateFormTab === 'ai-prompts'))
+                            return;
+                        __VLS_ctx.removeTemplateAiPrompt(index);
+                    } },
+                type: "button",
+                ...{ class: "danger" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                maxlength: "80",
+                placeholder: "例如：自然布料贴合",
+            });
+            (prompt.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+                value: (prompt.content),
+                maxlength: "1000",
+                placeholder: "描述印花贴合方式、细节、光影等创作要求",
+            });
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.addTemplateAiPrompt) },
+            type: "button",
+            ...{ class: "secondary ai-prompt-add" },
+        });
     }
     else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -3214,6 +3296,7 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['pod-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['pod-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['requirement-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['prompt-picker']} */ ;
 /** @type {__VLS_StyleScopedClasses['pod-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['upload']} */ ;
 /** @type {__VLS_StyleScopedClasses['floral']} */ ;
@@ -3225,7 +3308,6 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['settings']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-title']} */ ;
 /** @type {__VLS_StyleScopedClasses['parameter-fields']} */ ;
-/** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
@@ -3418,6 +3500,12 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['sku-add-option']} */ ;
 /** @type {__VLS_StyleScopedClasses['sku-total']} */ ;
 /** @type {__VLS_StyleScopedClasses['drawer-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['ai-prompts-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['ai-prompt-editor']} */ ;
+/** @type {__VLS_StyleScopedClasses['danger']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['ai-prompt-add']} */ ;
+/** @type {__VLS_StyleScopedClasses['drawer-form']} */ ;
 /** @type {__VLS_StyleScopedClasses['logistics-form']} */ ;
 /** @type {__VLS_StyleScopedClasses['unit-input']} */ ;
 /** @type {__VLS_StyleScopedClasses['dimension-inputs']} */ ;
@@ -3469,6 +3557,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             newPackageWidth: newPackageWidth,
             newPackageHeight: newPackageHeight,
             newSkuSizeOptions: newSkuSizeOptions,
+            newTemplateAiPrompts: newTemplateAiPrompts,
             editingTemplate: editingTemplate,
             showMemberDialog: showMemberDialog,
             editingMember: editingMember,
@@ -3529,8 +3618,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             showCreativeAssetsDialog: showCreativeAssetsDialog,
             creativeAssetError: creativeAssetError,
             creativeRequirement: creativeRequirement,
+            creativePromptIndex: creativePromptIndex,
             creativeProvider: creativeProvider,
-            creativePlacement: creativePlacement,
             creativeRatio: creativeRatio,
             creativeQuality: creativeQuality,
             visibleNav: visibleNav,
@@ -3563,6 +3652,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             createGroup: createGroup,
             openTemplateDialog: openTemplateDialog,
             addSkuSize: addSkuSize,
+            addTemplateAiPrompt: addTemplateAiPrompt,
+            removeTemplateAiPrompt: removeTemplateAiPrompt,
+            selectedTemplateAiPrompts: selectedTemplateAiPrompts,
+            applyTemplateAiPrompt: applyTemplateAiPrompt,
+            onCreativeTemplateChange: onCreativeTemplateChange,
             onCoverChange: onCoverChange,
             onSizeChartChange: onSizeChartChange,
             createTemplate: createTemplate,

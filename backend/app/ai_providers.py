@@ -42,10 +42,9 @@ class ImageGenerationProvider(Protocol):
 
 
 def build_prompt(parameters: dict, template_name: str) -> str:
-    placement = parameters["placement"]
     requirement = parameters.get("creative_requirement") or ""
     return (
-        f"以产品模板「{template_name}」为主体，将参考印花准确贴合到服装的{placement}区域。"
+        f"以产品模板「{template_name}」为主体，将参考印花自然融入商品图。"
         "必须保留印花中的文字、Logo、颜色与图案细节，不新增品牌标识；仅自然融合布料的褶皱、光影和遮挡。"
         f"输出电商商品主图，比例 {parameters['ratio']}，清晰度 {parameters['quality']}。{requirement}"
     )
