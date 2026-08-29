@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
 from .models import AIProviderSetting, Company, MaterialAsset, NonAIPointRule, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
-from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, DraftTitleGenerate, DraftUpdate, LedgerOut, LoginInput, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, SelectResult, ShopManagerUpdate, ShopOut, TaskDraftCreate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
+from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LedgerOut, LoginInput, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, ShopManagerUpdate, ShopOut, TaskDraftCreate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, generate_draft_title, provider_credential_env, provider_has_credentials, resume_async_generation, submit_async_generation, wait_for_async_generation
 from .credentials import decrypt_secret, encrypt_secret
@@ -106,6 +106,8 @@ def ensure_schema() -> None:
             connection.execute(text("ALTER TABLE product_drafts ADD COLUMN template_id INTEGER"))
         if "miaoshou_collect_box_id" not in draft_columns:
             connection.execute(text("ALTER TABLE product_drafts ADD COLUMN miaoshou_collect_box_id VARCHAR(120)"))
+        if "tiktok_collect_box_id" not in draft_columns:
+            connection.execute(text("ALTER TABLE product_drafts ADD COLUMN tiktok_collect_box_id VARCHAR(120)"))
         if "product_description" not in draft_columns:
             connection.execute(text("ALTER TABLE product_drafts ADD COLUMN product_description TEXT"))
         if "size_chart_url" not in draft_columns:
@@ -582,6 +584,57 @@ def build_common_collect_box_payload(draft: ProductDraft, template: ProductTempl
     return payload
 
 
+async def miaoshou_post(company: Company, path: str, body: dict) -> dict:
+    """调用妙手开放平台，并统一处理鉴权和传输错误。"""
+    timestamp, app_key = str(int(time.time())), company.miaoshou_app_id
+    app_secret = decrypt_secret(company.miaoshou_secret_encrypted)
+    body_json = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+    signature = miaoshou_request_signature(app_secret, path, timestamp, app_key, body_json)
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                f"https://openapi-erp.91miaoshou.com{path}", content=body_json.encode(), headers={
+                    "Content-Type": "application/json", "x-app-key": app_key, "x-timestamp": timestamp, "x-sign": signature,
+                },
+            )
+        response.raise_for_status()
+        return response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, f"妙手接口调用失败：{exc}") from exc
+
+
+async def create_common_collect_box_detail(draft: ProductDraft, company: Company, template: ProductTemplate) -> str:
+    if draft.miaoshou_collect_box_id:
+        return draft.miaoshou_collect_box_id
+    result = await miaoshou_post(company, "/open/v1/product/common_collect_box/common_collect_box/add_common_collect_box_detail", build_common_collect_box_payload(draft, template))
+    if result.get("code") != "success" and result.get("result") != "success":
+        raise HTTPException(400, result.get("message") or result.get("code") or "妙手公共采集箱接口返回失败")
+    collect_box_id = (result.get("data") or {}).get("commonCollectBoxDetailId")
+    if collect_box_id is None:
+        raise HTTPException(502, "妙手公共采集箱接口未返回商品编号")
+    draft.miaoshou_collect_box_id = str(collect_box_id)
+    return draft.miaoshou_collect_box_id
+
+
+async def claim_common_collect_box_to_tiktok(draft: ProductDraft, company: Company) -> str:
+    if draft.tiktok_collect_box_id:
+        return draft.tiktok_collect_box_id
+    if not draft.miaoshou_collect_box_id:
+        raise HTTPException(400, "请先创建公共采集箱商品")
+    result = await miaoshou_post(company, "/open/v1/product/common_collect_box/common_collect_box/claimed", {
+        "detailSerialNumberPlatformList": [{"detailId": int(draft.miaoshou_collect_box_id), "platform": "tiktok", "serialNumber": 1}],
+    })
+    if result.get("code") != "success" and result.get("result") != "success":
+        raise HTTPException(400, result.get("message") or result.get("code") or "妙手 TikTok 认领接口返回失败")
+    mappings = ((result.get("data") or {}).get("platformCollectBoxDetailIdMap") or {})
+    tiktok_mapping = mappings.get("tiktok") or mappings.get("TK") or mappings.get("TikTok") or {}
+    tiktok_detail_id = tiktok_mapping.get(str(draft.miaoshou_collect_box_id)) or tiktok_mapping.get(draft.miaoshou_collect_box_id)
+    if tiktok_detail_id is None:
+        raise HTTPException(502, "妙手 TikTok 认领接口未返回采集箱商品编号")
+    draft.tiktok_collect_box_id = str(tiktok_detail_id)
+    return draft.tiktok_collect_box_id
+
+
 @app.put("/templates/{template_id}")
 def update_template(template_id: int, payload: TemplateUpdate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
     template = get_company_template(db, user, template_id)
@@ -981,23 +1034,6 @@ def list_available_ai_providers(user: User = Depends(current_user), db: Session 
     ]
 
 
-@app.post("/tasks/{task_id}/select")
-def select_result(task_id: int, payload: SelectResult, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    task = db.get(PodTask, task_id)
-    if not can_access_task(task, user):
-        raise HTTPException(404, "任务不存在")
-    if payload.result_url not in task.result_urls:
-        raise HTTPException(400, "请选择该任务的生成结果")
-    if task.status != TaskStatus.AWAITING_SELECTION:
-        raise HTTPException(400, "任务当前不能选图")
-    actual = max(1, task.estimated_points - 2)
-    account = db.get(PointAccount, task.company_id)
-    account.frozen -= task.estimated_points; account.available += task.estimated_points - actual
-    task.selected_result_url = payload.result_url; task.actual_points = actual; task.status = TaskStatus.COMPLETED
-    db.add(PointLedger(company_id=task.company_id, actor_id=user.id, task_id=task.id, entry_type="ai_settlement", amount=task.estimated_points - actual, balance_after=account.available, note="AI 任务按实际用量结算"))
-    db.commit(); db.refresh(task); return serialize_record(task)
-
-
 @app.post("/tasks/{task_id}/retry-result")
 def retry_task_result(task_id: int, background_tasks: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """仅允许重新获取已超时的 Grsai 任务结果，不会重新生成图片。"""
@@ -1016,18 +1052,31 @@ def retry_task_result(task_id: int, background_tasks: BackgroundTasks, user: Use
 
 
 @app.post("/tasks/{task_id}/claim-materials")
-def claim_task_materials(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Depends(current_user), db: Session = Depends(get_db)):
     task = db.get(PodTask, task_id)
     if not can_access_task(task, user):
         raise HTTPException(404, "任务不存在")
     if task.status not in (TaskStatus.AWAITING_SELECTION, TaskStatus.COMPLETED) or not task.result_urls:
         raise HTTPException(400, "任务尚未生成可领取的图片")
+    selected_urls = list(dict.fromkeys(payload.result_urls))
+    if any(url not in task.result_urls for url in selected_urls):
+        raise HTTPException(400, "包含不属于该任务的图片")
     existing_urls = set(db.scalars(select(MaterialAsset.url).where(MaterialAsset.company_id == task.company_id, MaterialAsset.source_task_id == task.id)).all())
     claimed_count = 0
-    for index, url in enumerate(task.result_urls, start=1):
+    for index, url in enumerate(selected_urls, start=1):
         if url not in existing_urls:
             db.add(MaterialAsset(company_id=task.company_id, source_task_id=task.id, url=url, name=f"AI 创作 #{task.id} · 结果 {index}", claimed_by=user.id))
             claimed_count += 1
+    # 首次领取同时完成任务结算，并将第一张领取图作为任务草稿的默认图。
+    if task.status == TaskStatus.AWAITING_SELECTION:
+        actual = max(1, task.estimated_points - 2)
+        account = db.get(PointAccount, task.company_id)
+        account.frozen -= task.estimated_points
+        account.available += task.estimated_points - actual
+        task.selected_result_url = selected_urls[0]
+        task.actual_points = actual
+        task.status = TaskStatus.COMPLETED
+        db.add(PointLedger(company_id=task.company_id, actor_id=user.id, task_id=task.id, entry_type="ai_settlement", amount=task.estimated_points - actual, balance_after=account.available, note="AI 任务按实际用量结算"))
     db.commit()
     return {"claimed": claimed_count, "message": "已领取到素材库"}
 
@@ -1129,33 +1178,33 @@ async def publish_draft_to_miaoshou(draft_id: int, user: User = Depends(current_
     if not template:
         raise HTTPException(400, "该商品草稿缺少产品模板信息，无法生成公共采集箱商品")
 
-    body = build_common_collect_box_payload(draft, template)
-    path = "/open/v1/product/common_collect_box/common_collect_box/add_common_collect_box_detail"
-    timestamp, app_key = str(int(time.time())), company.miaoshou_app_id
-    app_secret = decrypt_secret(company.miaoshou_secret_encrypted)
-    body_json = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
-    signature = miaoshou_request_signature(app_secret, path, timestamp, app_key, body_json)
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                f"https://openapi-erp.91miaoshou.com{path}", content=body_json.encode(), headers={
-                    "Content-Type": "application/json", "x-app-key": app_key, "x-timestamp": timestamp, "x-sign": signature,
-                },
-            )
-        response.raise_for_status()
-        result = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        raise HTTPException(502, f"妙手公共采集箱接口调用失败：{exc}") from exc
-    if result.get("code") != "success" and result.get("result") != "success":
-        raise HTTPException(400, result.get("message") or result.get("code") or "妙手公共采集箱接口返回失败")
-    collect_box_id = (result.get("data") or {}).get("commonCollectBoxDetailId")
-    if collect_box_id is None:
-        raise HTTPException(502, "妙手公共采集箱接口未返回商品编号")
-    draft.miaoshou_collect_box_id = str(collect_box_id)
+    await create_common_collect_box_detail(draft, company, template)
     draft.status = "published_to_miaoshou"
     draft.updated_by = user.id
     db.commit()
     return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "already_published": False}
+
+
+@app.post("/drafts/{draft_id}/claim-to-tiktok")
+async def claim_draft_to_tiktok(draft_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """商品先进入公共草稿箱，再认领到 TikTok 采集箱；任一步失败均可安全重试。"""
+    draft = db.get(ProductDraft, draft_id)
+    if not draft or draft.company_id != user.company_id or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
+        raise HTTPException(404, "商品草稿不存在")
+    if draft.tiktok_collect_box_id:
+        return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "tiktok_collect_box_detail_id": draft.tiktok_collect_box_id, "already_claimed": True}
+    company = db.get(Company, draft.company_id)
+    if not company or not company.miaoshou_app_id or not company.miaoshou_secret_encrypted:
+        raise HTTPException(400, "尚未配置妙手账号，请联系平台管理员配置 AppKey 与 AppSecret")
+    template = db.get(ProductTemplate, draft.template_id) if draft.template_id else None
+    if not template:
+        raise HTTPException(400, "该商品草稿缺少产品模板信息，无法生成公共采集箱商品")
+    await create_common_collect_box_detail(draft, company, template)
+    await claim_common_collect_box_to_tiktok(draft, company)
+    draft.status = "claimed_to_tiktok"
+    draft.updated_by = user.id
+    db.commit()
+    return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "tiktok_collect_box_detail_id": draft.tiktok_collect_box_id, "already_claimed": False}
 
 
 @app.get("/drafts")

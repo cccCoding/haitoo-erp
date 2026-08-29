@@ -145,6 +145,8 @@ class ProductDraft(Base):
     # 每个图片 × 模板尺码对应一条 SKU 明细：{image_url, size, sku}。
     sku_items: Mapped[dict] = mapped_column(JSON, default=list)
     miaoshou_collect_box_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # 公共采集箱商品认领至 TikTok 后的采集箱详情 ID，用于幂等重试。
+    tiktok_collect_box_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # 审计字段用于在待发布列表中显示草稿的创建与最后修改信息。
     created_by: Mapped[int | None] = mapped_column(nullable=True)
     updated_by: Mapped[int | None] = mapped_column(nullable=True)

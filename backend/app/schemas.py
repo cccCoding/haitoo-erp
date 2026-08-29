@@ -136,8 +136,8 @@ class MiaoshouAccountUpdate(BaseModel):
     app_secret: str = Field(min_length=1, max_length=500)
 
 
-class SelectResult(BaseModel):
-    result_url: str
+class ClaimMaterials(BaseModel):
+    result_urls: list[str] = Field(min_length=1, max_length=1000)
 
 
 class DraftSkuItem(BaseModel):

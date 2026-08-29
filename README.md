@@ -1,4 +1,4 @@
-# HAITOO ERP
+# HAITOO AI 工作台
 
 多公司、多成员的 TikTok POD 运营系统 MVP。当前版本包含：
 
