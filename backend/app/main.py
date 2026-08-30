@@ -84,6 +84,10 @@ def ensure_schema() -> None:
     """轻量兼容迁移。关系一致性由应用层维护；MySQL 不使用外键。"""
     columns = {column["name"] for column in inspect(engine).get_columns("product_templates")}
     with engine.begin() as connection:
+        # `print_areas` 已从产品模板定义中移除。旧库中若仍保留 NOT NULL 的
+        # 无默认值列，会导致 ORM 新建模板时 INSERT 失败（MySQL 1364）。
+        if "print_areas" in columns:
+            connection.execute(text("ALTER TABLE product_templates DROP COLUMN print_areas"))
         if "description" not in columns:
             connection.execute(text("ALTER TABLE product_templates ADD COLUMN description TEXT"))
         if "title_template" not in columns:
