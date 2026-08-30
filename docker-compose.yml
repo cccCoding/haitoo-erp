@@ -26,7 +26,8 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://haitoo:haitoo_dev@mysql:3306/haitoo
       SECRET_KEY: change-me-before-production
-      CORS_ORIGINS: http://localhost:5173,http://localhost:5174
+      # 生产隧道启动时，在 .env 中设置为 https://erp.haitoro.com。
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:5174}
       # 在部署环境中通过密钥管理服务或 CI 注入，勿提交真实密钥。
       SEEDREAM_API_KEY: ${SEEDREAM_API_KEY:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
@@ -58,7 +59,8 @@ services:
     ports:
       - "5173:5173"
     environment:
-      VITE_API_URL: http://localhost:8001
+      # Vite 开发服务器启动时读取；公网时改为 https://api.haitoro.com。
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8001}
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -70,11 +72,23 @@ services:
     ports:
       - "5174:5174"
     environment:
-      VITE_API_URL: http://localhost:8001
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8001}
     volumes:
       - ./frontend-admin:/app
       - /app/node_modules
     depends_on:
+      - api
+
+  # 使用 Cloudflare Zero Trust 控制台创建 Tunnel 后，以 token 连接。
+  # 仅在需要公网访问时启动：docker compose --profile tunnel up -d
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    # 未设置 token 时此 profile 启动会失败；不影响普通本地 docker compose up。
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    restart: unless-stopped
+    depends_on:
+      - web
       - api
 
 volumes:

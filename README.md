@@ -28,6 +28,38 @@ API 文档：`http://localhost:8001/docs`。
 
 超级管理员后台是独立前端项目，启动后访问 `http://localhost:5174`，使用 `owner@haitoo-demo.com` 登录。
 
+## 通过 Cloudflare Tunnel 暴露 ERP（无需公网 IP）
+
+这适合当前在本机 Docker 中运行、域名已托管在 Cloudflare 的场景。Tunnel 是本机主动连到 Cloudflare 的出站连接，因此不需要开放路由器端口或配置动态 DNS。
+
+1. 在 Cloudflare Dashboard 中选择 `haitoro.com`，进入 **Zero Trust → Networks → Tunnels**，创建一个 **Cloudflared** tunnel。安装方式选择 Docker，复制其 token（`eyJ...`）。
+2. 在 Zero Trust 的该 Tunnel 中创建两个 **Public Hostname**：
+
+   | Public hostname | Service type | URL |
+   | --- | --- | --- |
+   | `erp.haitoro.com` | HTTP | `http://web:5173` |
+   | `admin.haitoro.com` | HTTP | `http://admin-web:5174` |
+   | `api.haitoro.com` | HTTP | `http://api:8000` |
+
+   不需要在 DNS 页面手动添加记录；保存 Public Hostname 时 Cloudflare 会自动创建指向 Tunnel 的记录。
+3. 将 `.env.example` 中的三项加入本机未提交的 `.env`，并填入实际 token：
+
+   ```dotenv
+   CLOUDFLARE_TUNNEL_TOKEN=eyJ...
+   VITE_API_URL=https://api.haitoro.com
+   CORS_ORIGINS=https://erp.haitoro.com,https://admin.haitoro.com
+   ```
+
+4. 重新创建前端以让 Vite 读取公网 API 地址，并启动 Tunnel：
+
+   ```bash
+   docker compose --profile tunnel up -d --build
+   ```
+
+5. 用手机蜂窝网络访问 `https://erp.haitoro.com` 验证；接口文档可访问 `https://api.haitoro.com/docs`。
+
+不要将 `3306`、`6379` 或 `8001` 配成 Cloudflare Public Hostname。它们无需对外公开。此方式未配置 Cloudflare Access；在正式给他人使用前，至少应为 `erp.haitoro.com` 添加 Access 登录策略，并更换默认 Docker 密码和 `SECRET_KEY`。
+
 ## 印花贴合模型配置
 
 超级管理员登录后可在“AI 模型管理”中启用并切换印花贴合模型。默认生产模型为 Grsai 的 `nano-banana-fast`：后端将模板图与印花图 URL 提交为异步任务，并轮询结果接口直至完成。每个新任务会记录其实际使用的提供方和模型版本。密钥只由后端读取：
