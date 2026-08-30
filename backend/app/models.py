@@ -122,6 +122,7 @@ class MaterialAsset(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     source_task_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
+    template_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
     url: Mapped[str] = mapped_column(String(500))
     name: Mapped[str] = mapped_column(String(180))
     claimed_by: Mapped[int] = mapped_column()

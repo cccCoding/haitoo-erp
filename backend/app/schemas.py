@@ -140,6 +140,11 @@ class ClaimMaterials(BaseModel):
     result_urls: list[str] = Field(min_length=1, max_length=1000)
 
 
+class MaterialAssetsTemplateUpdate(BaseModel):
+    material_asset_ids: list[int] = Field(min_length=1, max_length=100)
+    template_id: int
+
+
 class DraftSkuItem(BaseModel):
     image_url: str = Field(min_length=1, max_length=500)
     size: str | None = Field(default=None, max_length=50)

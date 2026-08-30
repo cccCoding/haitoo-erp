@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from uuid import uuid4
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
 from .models import AIProviderSetting, Company, MaterialAsset, NonAIPointRule, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
-from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LedgerOut, LoginInput, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, ShopManagerUpdate, ShopOut, TaskDraftCreate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
+from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LedgerOut, LoginInput, MaterialAssetsTemplateUpdate, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, ShopManagerUpdate, ShopOut, TaskDraftCreate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, generate_draft_title, provider_credential_env, provider_has_credentials, resume_async_generation, submit_async_generation, wait_for_async_generation
 from .credentials import decrypt_secret, encrypt_secret
@@ -169,6 +169,8 @@ def ensure_schema() -> None:
             if column not in shop_columns:
                 connection.execute(text(f"ALTER TABLE shops ADD COLUMN {column} {definition}"))
         material_columns = {column["name"]: column for column in inspect(engine).get_columns("material_assets")}
+        if "template_id" not in material_columns:
+            connection.execute(text("ALTER TABLE material_assets ADD COLUMN template_id INTEGER"))
         if connection.dialect.name == "mysql" and not material_columns["source_task_id"]["nullable"]:
             connection.execute(text("ALTER TABLE material_assets MODIFY COLUMN source_task_id INTEGER NULL"))
         draft_columns = {column["name"]: column for column in inspect(engine).get_columns("product_drafts")}
@@ -685,12 +687,13 @@ async def upload_creative_asset(file: UploadFile = File(...), user: User = Depen
 
 
 @app.post("/material-assets/upload")
-async def upload_material_assets(files: list[UploadFile] = File(...), user: User = Depends(current_user), db: Session = Depends(get_db)):
+async def upload_material_assets(files: list[UploadFile] = File(...), template_id: int = Form(...), user: User = Depends(current_user), db: Session = Depends(get_db)):
     """上传一张或多张本地图片到当前公司的素材库。"""
     if not files:
         raise HTTPException(400, "请至少选择一张图片")
     if len(files) > 100:
         raise HTTPException(400, "单次最多上传 100 张图片")
+    template = get_company_template(db, user, template_id)
 
     assets: list[MaterialAsset] = []
     for file in files:
@@ -699,6 +702,7 @@ async def upload_material_assets(files: list[UploadFile] = File(...), user: User
         asset = MaterialAsset(
             company_id=user.company_id,
             source_task_id=None,
+            template_id=template.id,
             url=uploaded["url"],
             name=name[:180],
             claimed_by=user.id,
@@ -730,6 +734,19 @@ def list_material_assets(user: User = Depends(current_user), db: Session = Depen
     if user.role != Role.SUPER_ADMIN:
         stmt = stmt.where(MaterialAsset.company_id == user.company_id)
     return [serialize_record(asset) for asset in db.scalars(stmt.order_by(MaterialAsset.id.desc())).all()]
+
+
+@app.put("/material-assets/template")
+def update_material_assets_template(payload: MaterialAssetsTemplateUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    asset_ids = list(dict.fromkeys(payload.material_asset_ids))
+    assets = db.scalars(select(MaterialAsset).where(MaterialAsset.company_id == user.company_id, MaterialAsset.id.in_(asset_ids))).all()
+    if len(assets) != len(asset_ids):
+        raise HTTPException(400, "包含不存在或无权设置的素材")
+    template = get_company_template(db, user, payload.template_id)
+    for asset in assets:
+        asset.template_id = template.id
+    db.commit()
+    return {"updated": len(assets)}
 
 
 @app.delete("/material-assets/{asset_id}")
@@ -1069,7 +1086,7 @@ def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Dep
     claimed_count = 0
     for index, url in enumerate(selected_urls, start=1):
         if url not in existing_urls:
-            db.add(MaterialAsset(company_id=task.company_id, source_task_id=task.id, url=url, name=f"AI 创作 #{task.id} · 结果 {index}", claimed_by=user.id))
+            db.add(MaterialAsset(company_id=task.company_id, source_task_id=task.id, template_id=task.template_id, url=url, name=f"AI 创作 #{task.id} · 结果 {index}", claimed_by=user.id))
             claimed_count += 1
     # 首次领取同时完成任务结算，并将第一张领取图作为任务草稿的默认图。
     if task.status == TaskStatus.AWAITING_SELECTION:

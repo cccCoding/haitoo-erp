@@ -14,11 +14,13 @@ const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref
 const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), myAccountSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
 const materialUploading = ref(false), materialUploadError = ref('');
-const selectedMaterialAssetIds = ref([]), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChart = ref(null), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false);
+const selectedMaterialAssetIds = ref([]), materialTemplateFilterId = ref(null), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChart = ref(null), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false);
+const showMaterialTemplateDialog = ref(false), materialTemplateId = ref(null), materialTemplateSaving = ref(false);
+const pendingMaterialUploadFiles = ref([]), showMaterialUploadDialog = ref(false), materialUploadTemplateId = ref(null);
 const materialDraftSkuPreviewItems = ref([]);
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('');
 const publishingDraftId = ref(null);
-const draftPageSize = ref(20), currentDraftPage = ref(1);
+const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null);
 const taskPageSize = ref(20), currentTaskPage = ref(1);
 const ledgerPageSize = ref(20), currentLedgerPage = ref(1);
 const previewImageUrl = ref(''), previewImageAlt = ref('');
@@ -38,17 +40,23 @@ const filteredTemplates = computed(() => templates.value.filter(t => (!activeGro
 const estimatedCreativePoints = computed(() => creativeQuality.value === '2K' ? 20 : 12);
 const selectedTemplate = computed(() => templates.value.find(t => t.id === selectedTemplateId.value));
 const selectedMaterialAssets = computed(() => materialAssets.value.filter(asset => selectedMaterialAssetIds.value.includes(asset.id)));
+const filteredMaterialAssets = computed(() => materialTemplateFilterId.value ? materialAssets.value.filter(asset => asset.template_id === materialTemplateFilterId.value) : materialAssets.value);
+const selectedMaterialTemplateId = computed(() => {
+    const templateIds = [...new Set(selectedMaterialAssets.value.map(asset => asset.template_id).filter(Boolean))];
+    return templateIds.length === 1 ? templateIds[0] : null;
+});
 const materialDraftTemplate = computed(() => templates.value.find(template => template.id === materialDraftTemplateId.value));
 const materialDraftSizes = computed(() => {
     const options = materialDraftTemplate.value?.sku_specifications?.size?.options || [];
     return options.map((size) => String(size).trim()).filter(Boolean);
 });
 const materialDraftSkuCount = computed(() => selectedMaterialAssets.value.length);
-const draftPageCount = computed(() => Math.max(1, Math.ceil(drafts.value.length / draftPageSize.value)));
+const filteredDrafts = computed(() => draftTemplateFilterId.value ? drafts.value.filter(draft => draft.template_id === draftTemplateFilterId.value) : drafts.value);
+const draftPageCount = computed(() => Math.max(1, Math.ceil(filteredDrafts.value.length / draftPageSize.value)));
 const visibleDraftPage = computed(() => Math.min(currentDraftPage.value, draftPageCount.value));
 const pagedDrafts = computed(() => {
     const start = (visibleDraftPage.value - 1) * draftPageSize.value;
-    return drafts.value.slice(start, start + draftPageSize.value);
+    return filteredDrafts.value.slice(start, start + draftPageSize.value);
 });
 function changeDraftPageSize() { currentDraftPage.value = 1; }
 const taskPageCount = computed(() => Math.max(1, Math.ceil(tasks.value.length / taskPageSize.value)));
@@ -259,6 +267,8 @@ function templateCoverUrl(template) { if (template?.cover_url)
 function hasTemplateCover(template) { return Boolean(template?.cover_url || template?.name === '白色 T恤正面'); }
 function useTemplate(template) { selectedTemplateId.value = template.id; page.value = 'pod'; }
 function toggleMaterialAsset(assetId) { selectedMaterialAssetIds.value = selectedMaterialAssetIds.value.includes(assetId) ? selectedMaterialAssetIds.value.filter(id => id !== assetId) : [...selectedMaterialAssetIds.value, assetId]; }
+function materialTemplateName(asset) { return templates.value.find(template => template.id === asset.template_id)?.name || '未设置模板'; }
+function draftTemplateName(draft) { return templates.value.find(template => template.id === draft.template_id)?.name || '历史模板已删除'; }
 function randomSkuSuffix() { const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; return Array.from(crypto.getRandomValues(new Uint8Array(6)), value => alphabet[value % alphabet.length]).join(''); }
 function refreshMaterialDraftSkuPreview() {
     materialDraftSkuPreviewItems.value = materialDraftTemplate.value
@@ -291,7 +301,8 @@ async function generateMaterialDraftTitle() {
         materialDraftTitleGenerating.value = false;
     }
 }
-function openMaterialDraftDialog() { materialDraftTemplateId.value = null; materialDraftTitle.value = ''; materialDraftProductDescription.value = ''; materialDraftSizeChart.value = null; materialDraftSizeChartPreview.value = ''; materialDraftSkuPreviewItems.value = []; showMaterialDraftDialog.value = true; }
+function openMaterialDraftDialog() { materialDraftTemplateId.value = selectedMaterialTemplateId.value; materialDraftTitle.value = ''; materialDraftProductDescription.value = ''; materialDraftSizeChart.value = null; materialDraftSizeChartPreview.value = ''; materialDraftSkuPreviewItems.value = []; if (materialDraftTemplateId.value)
+    onMaterialDraftTemplateChange(); showMaterialDraftDialog.value = true; }
 function openTaskDraftDialog(task) {
     const template = templates.value.find(item => item.id === task.template_id);
     if (!template || !task.selected_result_url) {
@@ -459,18 +470,30 @@ async function retryTaskResult(task) {
         retryingTaskId.value = null;
     }
 }
-async function uploadMaterialAssets(event) {
+function chooseMaterialUploadFiles(event) {
     const input = event.target;
     const files = Array.from(input.files || []);
     input.value = '';
     if (!files.length)
         return;
+    pendingMaterialUploadFiles.value = files;
+    materialUploadTemplateId.value = null;
+    showMaterialUploadDialog.value = true;
+}
+async function uploadMaterialAssets() {
+    if (!pendingMaterialUploadFiles.value.length || !materialUploadTemplateId.value) {
+        showToast('请选择产品模板');
+        return;
+    }
     try {
         materialUploading.value = true;
         materialUploadError.value = '';
         const form = new FormData();
-        files.forEach(file => form.append('files', file));
+        pendingMaterialUploadFiles.value.forEach(file => form.append('files', file));
+        form.append('template_id', String(materialUploadTemplateId.value));
         await api.post('/material-assets/upload', form, { headers: headers.value });
+        showMaterialUploadDialog.value = false;
+        pendingMaterialUploadFiles.value = [];
         await refresh();
     }
     catch (e) {
@@ -478,6 +501,27 @@ async function uploadMaterialAssets(event) {
     }
     finally {
         materialUploading.value = false;
+    }
+}
+function openMaterialTemplateDialog() { if (!selectedMaterialAssetIds.value.length)
+    return; materialTemplateId.value = selectedMaterialTemplateId.value; showMaterialTemplateDialog.value = true; }
+async function setMaterialTemplate() {
+    if (!materialTemplateId.value) {
+        showToast('请选择产品模板');
+        return;
+    }
+    try {
+        materialTemplateSaving.value = true;
+        const { data } = await api.put('/material-assets/template', { material_asset_ids: selectedMaterialAssetIds.value, template_id: materialTemplateId.value }, { headers: headers.value });
+        showMaterialTemplateDialog.value = false;
+        await refresh();
+        showToast(`已为 ${data.updated} 张素材设置模板`);
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '设置模板失败，请稍后重试');
+    }
+    finally {
+        materialTemplateSaving.value = false;
     }
 }
 async function deleteSelectedMaterialAssets() {
@@ -758,11 +802,18 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (task.id);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-            (task.parameters.quality);
+            (task.parameters?.task_type || '替换印花');
+            (new Date(task.created_at).toLocaleString());
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "chip blue" },
+                ...{ class: "chip" },
+                ...{ class: (__VLS_ctx.taskStatusClass(task.status)) },
             });
-            (task.status === 'awaiting_selection' ? '待领取' : '处理中');
+            (__VLS_ctx.taskStatusLabel[task.status] || task.status || '—');
+        }
+        if (!__VLS_ctx.tasks.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
             ...{ class: "panel" },
@@ -1484,11 +1535,27 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "material-template-filter" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.materialTemplateFilterId),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: (null),
+        });
+        for (const [template] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (template.id),
+                value: (template.id),
+            });
+            (template.name);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "primary material-upload-button" },
             ...{ class: ({ disabled: __VLS_ctx.materialUploading }) },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-            ...{ onChange: (__VLS_ctx.uploadMaterialAssets) },
+            ...{ onChange: (__VLS_ctx.chooseMaterialUploadFiles) },
             type: "file",
             multiple: true,
             accept: "image/png,image/jpeg,image/webp",
@@ -1507,6 +1574,10 @@ else {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (__VLS_ctx.selectedMaterialAssetIds.length);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.openMaterialTemplateDialog) },
+                ...{ class: "secondary" },
+            });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (__VLS_ctx.openMaterialDraftDialog) },
                 ...{ class: "primary" },
@@ -1539,7 +1610,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "material-grid" },
         });
-        for (const [asset] of __VLS_getVForSourceType((__VLS_ctx.materialAssets))) {
+        for (const [asset] of __VLS_getVForSourceType((__VLS_ctx.filteredMaterialAssets))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!!(!__VLS_ctx.token))
@@ -1572,13 +1643,16 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
             (asset.name);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (__VLS_ctx.materialTemplateName(asset));
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
             (asset.source_task_id ? `来源任务 #${asset.source_task_id}` : '本地上传');
             (new Date(asset.created_at).toLocaleDateString());
         }
-        if (!__VLS_ctx.materialAssets.length) {
+        if (!__VLS_ctx.filteredMaterialAssets.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "empty" },
             });
+            (__VLS_ctx.materialAssets.length ? '没有符合该模板的素材。' : '暂无素材。可上传本地图片，或在任务中心领取生成图片。');
         }
     }
     else if (__VLS_ctx.page === 'drafts') {
@@ -1590,6 +1664,39 @@ else {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "draft-template-filter" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (...[$event]) => {
+                    if (!!(!__VLS_ctx.token))
+                        return;
+                    if (!!(__VLS_ctx.page === 'dashboard'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'templates'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'pod'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'tasks'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'materials'))
+                        return;
+                    if (!(__VLS_ctx.page === 'drafts'))
+                        return;
+                    __VLS_ctx.currentDraftPage = 1;
+                } },
+            value: (__VLS_ctx.draftTemplateFilterId),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: (null),
+        });
+        for (const [template] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (template.id),
+                value: (template.id),
+            });
+            (template.name);
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
                     if (!!(!__VLS_ctx.token))
@@ -1616,6 +1723,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "thead draft-thead" },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -1662,6 +1770,8 @@ else {
             else {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             }
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.draftTemplateName(draft));
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
                 ...{ class: "draft-product-title" },
             });
@@ -1732,17 +1842,18 @@ else {
                 (draft.tiktok_collect_box_id);
             }
         }
-        if (!__VLS_ctx.drafts.length) {
+        if (!__VLS_ctx.filteredDrafts.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "empty" },
             });
+            (__VLS_ctx.drafts.length ? '没有符合该模板的商品草稿。' : '暂无商品草稿，请先在任务中心领取素材，或上传本地素材。');
         }
         else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
                 ...{ class: "draft-pagination" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (__VLS_ctx.drafts.length);
+            (__VLS_ctx.filteredDrafts.length);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
                 ...{ onChange: (__VLS_ctx.changeDraftPageSize) },
@@ -1779,7 +1890,7 @@ else {
                             return;
                         if (!(__VLS_ctx.page === 'drafts'))
                             return;
-                        if (!!(!__VLS_ctx.drafts.length))
+                        if (!!(!__VLS_ctx.filteredDrafts.length))
                             return;
                         __VLS_ctx.currentDraftPage = __VLS_ctx.visibleDraftPage - 1;
                     } },
@@ -1804,7 +1915,7 @@ else {
                             return;
                         if (!(__VLS_ctx.page === 'drafts'))
                             return;
-                        if (!!(!__VLS_ctx.drafts.length))
+                        if (!!(!__VLS_ctx.filteredDrafts.length))
                             return;
                         __VLS_ctx.currentDraftPage = __VLS_ctx.visibleDraftPage + 1;
                     } },
@@ -3328,6 +3439,118 @@ if (__VLS_ctx.toast) {
     });
     (__VLS_ctx.toast);
 }
+if (__VLS_ctx.showMaterialUploadDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMaterialUploadDialog))
+                    return;
+                __VLS_ctx.showMaterialUploadDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card material-template-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMaterialUploadDialog))
+                    return;
+                __VLS_ctx.showMaterialUploadDialog = false;
+            } },
+        ...{ class: "modal-close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.pendingMaterialUploadFiles.length);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.materialUploadTemplateId),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (null),
+        disabled: true,
+    });
+    for (const [template] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (template.id),
+            value: (template.id),
+        });
+        (template.name);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMaterialUploadDialog))
+                    return;
+                __VLS_ctx.showMaterialUploadDialog = false;
+            } },
+        ...{ class: "ghost" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.uploadMaterialAssets) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.materialUploading),
+    });
+    (__VLS_ctx.materialUploading ? '上传中…' : '确认上传');
+}
+if (__VLS_ctx.showMaterialTemplateDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMaterialTemplateDialog))
+                    return;
+                __VLS_ctx.showMaterialTemplateDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card material-template-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMaterialTemplateDialog))
+                    return;
+                __VLS_ctx.showMaterialTemplateDialog = false;
+            } },
+        ...{ class: "modal-close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.selectedMaterialAssetIds.length);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.materialTemplateId),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (null),
+        disabled: true,
+    });
+    for (const [template] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (template.id),
+            value: (template.id),
+        });
+        (template.name);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMaterialTemplateDialog))
+                    return;
+                __VLS_ctx.showMaterialTemplateDialog = false;
+            } },
+        ...{ class: "ghost" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.setMaterialTemplate) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.materialTemplateSaving),
+    });
+    (__VLS_ctx.materialTemplateSaving ? '设置中…' : '确认设置');
+}
 /** @type {__VLS_StyleScopedClasses['login-shell']} */ ;
 /** @type {__VLS_StyleScopedClasses['login-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['brand-mark']} */ ;
@@ -3351,7 +3574,7 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['task-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['thumb']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
-/** @type {__VLS_StyleScopedClasses['blue']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['quick']} */ ;
 /** @type {__VLS_StyleScopedClasses['quick']} */ ;
@@ -3418,11 +3641,13 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-template-filter']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-upload-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-upload-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-bar']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['negative']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
@@ -3432,6 +3657,7 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-template-filter']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
@@ -3611,6 +3837,20 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['image-preview-modal']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
 /** @type {__VLS_StyleScopedClasses['toast']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-template-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-template-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
@@ -3668,6 +3908,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             materialUploading: materialUploading,
             materialUploadError: materialUploadError,
             selectedMaterialAssetIds: selectedMaterialAssetIds,
+            materialTemplateFilterId: materialTemplateFilterId,
             showMaterialDraftDialog: showMaterialDraftDialog,
             materialDraftTemplateId: materialDraftTemplateId,
             materialDraftTitle: materialDraftTitle,
@@ -3676,6 +3917,12 @@ const __VLS_self = (await import('vue')).defineComponent({
             materialDraftSizeChartPreview: materialDraftSizeChartPreview,
             materialDraftTitleGenerating: materialDraftTitleGenerating,
             materialDraftSaving: materialDraftSaving,
+            showMaterialTemplateDialog: showMaterialTemplateDialog,
+            materialTemplateId: materialTemplateId,
+            materialTemplateSaving: materialTemplateSaving,
+            pendingMaterialUploadFiles: pendingMaterialUploadFiles,
+            showMaterialUploadDialog: showMaterialUploadDialog,
+            materialUploadTemplateId: materialUploadTemplateId,
             materialDraftSkuPreviewItems: materialDraftSkuPreviewItems,
             showDraftEditDialog: showDraftEditDialog,
             editingDraft: editingDraft,
@@ -3686,6 +3933,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             publishingDraftId: publishingDraftId,
             draftPageSize: draftPageSize,
             currentDraftPage: currentDraftPage,
+            draftTemplateFilterId: draftTemplateFilterId,
             taskPageSize: taskPageSize,
             currentTaskPage: currentTaskPage,
             ledgerPageSize: ledgerPageSize,
@@ -3726,9 +3974,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             filteredTemplates: filteredTemplates,
             selectedTemplate: selectedTemplate,
             selectedMaterialAssets: selectedMaterialAssets,
+            filteredMaterialAssets: filteredMaterialAssets,
             materialDraftTemplate: materialDraftTemplate,
             materialDraftSizes: materialDraftSizes,
             materialDraftSkuCount: materialDraftSkuCount,
+            filteredDrafts: filteredDrafts,
             draftPageCount: draftPageCount,
             visibleDraftPage: visibleDraftPage,
             pagedDrafts: pagedDrafts,
@@ -3769,6 +4019,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             hasTemplateCover: hasTemplateCover,
             useTemplate: useTemplate,
             toggleMaterialAsset: toggleMaterialAsset,
+            materialTemplateName: materialTemplateName,
+            draftTemplateName: draftTemplateName,
             onMaterialDraftTemplateChange: onMaterialDraftTemplateChange,
             onMaterialDraftSizeChartChange: onMaterialDraftSizeChartChange,
             generateMaterialDraftTitle: generateMaterialDraftTitle,
@@ -3787,7 +4039,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             toggleClaimResult: toggleClaimResult,
             claimMaterials: claimMaterials,
             retryTaskResult: retryTaskResult,
+            chooseMaterialUploadFiles: chooseMaterialUploadFiles,
             uploadMaterialAssets: uploadMaterialAssets,
+            openMaterialTemplateDialog: openMaterialTemplateDialog,
+            setMaterialTemplate: setMaterialTemplate,
             deleteSelectedMaterialAssets: deleteSelectedMaterialAssets,
             openMemberDialog: openMemberDialog,
             openMyAccountDialog: openMyAccountDialog,
