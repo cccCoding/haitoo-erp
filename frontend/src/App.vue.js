@@ -1286,8 +1286,36 @@ else {
                 ...{ class: (__VLS_ctx.taskStatusClass(task.status)) },
             });
             (__VLS_ctx.taskStatusLabel[task.status] || task.status || '—');
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (task.result_urls?.length || 0);
+            if (task.result_urls?.[0]) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(!__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!(task.result_urls?.[0]))
+                                return;
+                            __VLS_ctx.openImagePreview(task.result_urls[0], `任务 #${task.id} 结果图`);
+                        } },
+                    type: "button",
+                    ...{ class: "task-material-thumbnail" },
+                    title: "查看结果图",
+                    'aria-label': "查看首张结果图",
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                    src: (__VLS_ctx.imageUrl(task.result_urls[0])),
+                    alt: (`任务 #${task.id} 结果图`),
+                });
+            }
+            else {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: ({ error: task.failure_reason }) },
             });
@@ -3380,6 +3408,7 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['provider-task-id']} */ ;
 /** @type {__VLS_StyleScopedClasses['copy-icon-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-material-thumbnail']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
