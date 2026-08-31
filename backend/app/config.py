@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    database_url: str = "sqlite:///./haitoo.db"
+    database_url: str = "sqlite:///./haitoro.db"
     secret_key: str = "local-development-secret"
     access_token_minutes: int = 480
     cors_origins: str = "http://localhost:5173,http://localhost:5174"

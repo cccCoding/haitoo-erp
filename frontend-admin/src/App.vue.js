@@ -1,8 +1,8 @@
 import { computed, onMounted, ref } from 'vue';
 import axios from 'axios';
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8001' });
-const token = ref(localStorage.getItem('haitoo_admin_token') || '');
-const email = ref('owner@haitoo-demo.com'), password = ref('ChangeMe123!');
+const token = ref(localStorage.getItem('haitoro_admin_token') || '');
+const email = ref('owner@haitoro-demo.com'), password = ref('ChangeMe123!');
 const user = ref(null), overview = ref(null), providers = ref([]), companies = ref([]), ledger = ref([]), nonAiPointRules = ref([]);
 const loading = ref(false), saving = ref(''), error = ref('');
 const toast = ref('');
@@ -44,11 +44,11 @@ async function login() {
         error.value = '';
         const { data } = await api.post('/auth/login', { email: email.value, password: password.value });
         token.value = data.access_token;
-        localStorage.setItem('haitoo_admin_token', token.value);
+        localStorage.setItem('haitoro_admin_token', token.value);
         await loadAdmin();
     }
     catch (e) {
-        localStorage.removeItem('haitoo_admin_token');
+        localStorage.removeItem('haitoro_admin_token');
         token.value = '';
         error.value = e.response?.data?.detail || e.message || '登录失败，请使用超级管理员账号';
     }
@@ -168,7 +168,7 @@ finally {
 let toastTimer;
 function showToast(message) { toast.value = message; if (toastTimer)
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = ''; }, 3000); }
-function logout() { localStorage.removeItem('haitoo_admin_token'); token.value = ''; user.value = null; overview.value = null; providers.value = []; companies.value = []; ledger.value = []; nonAiPointRules.value = []; }
+function logout() { localStorage.removeItem('haitoro_admin_token'); token.value = ''; user.value = null; overview.value = null; providers.value = []; companies.value = []; ledger.value = []; nonAiPointRules.value = []; }
 api.interceptors.response.use(response => response, requestError => {
     if (requestError.response?.data?.detail === '登录已失效') {
         logout();

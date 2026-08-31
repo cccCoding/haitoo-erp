@@ -3,8 +3,8 @@ import { computed, onMounted, ref } from 'vue'
 import axios from 'axios'
 
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8001' })
-const token = ref(localStorage.getItem('haitoo_admin_token') || '')
-const email = ref('owner@haitoo-demo.com'), password = ref('ChangeMe123!')
+const token = ref(localStorage.getItem('haitoro_admin_token') || '')
+const email = ref('owner@haitoro-demo.com'), password = ref('ChangeMe123!')
 const user = ref<any>(null), overview = ref<any>(null), providers = ref<any[]>([]), companies = ref<any[]>([]), ledger = ref<any[]>([]), nonAiPointRules = ref<any[]>([])
 const loading = ref(false), saving = ref(''), error = ref('')
 const toast = ref('')
@@ -40,10 +40,10 @@ async function login() {
   try {
     loading.value = true; error.value = ''
     const { data } = await api.post('/auth/login', { email: email.value, password: password.value })
-    token.value = data.access_token; localStorage.setItem('haitoo_admin_token', token.value)
+    token.value = data.access_token; localStorage.setItem('haitoro_admin_token', token.value)
     await loadAdmin()
   } catch (e: any) {
-    localStorage.removeItem('haitoo_admin_token'); token.value = ''
+    localStorage.removeItem('haitoro_admin_token'); token.value = ''
     error.value = e.response?.data?.detail || e.message || '登录失败，请使用超级管理员账号'
   } finally { loading.value = false }
 }
@@ -71,7 +71,7 @@ async function saveRule() { if (!ruleForm.value.display_name.trim() || (!editing
 async function deleteRule(rule: any) { if (!confirm(`确定删除「${rule.display_name}」吗？`)) return; try { saving.value = `delete-${rule.id}`; error.value = ''; await api.delete(`/admin/non-ai-point-rules/${rule.id}`, { headers: headers.value }); await loadAdmin() } catch (e: any) { error.value = e.response?.data?.detail || '删除积分消耗配置失败' } finally { saving.value = '' } }
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 function showToast(message: string) { toast.value = message; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = '' }, 3000) }
-function logout() { localStorage.removeItem('haitoo_admin_token'); token.value = ''; user.value = null; overview.value = null; providers.value = []; companies.value = []; ledger.value = []; nonAiPointRules.value = [] }
+function logout() { localStorage.removeItem('haitoro_admin_token'); token.value = ''; user.value = null; overview.value = null; providers.value = []; companies.value = []; ledger.value = []; nonAiPointRules.value = [] }
 api.interceptors.response.use(
   response => response,
   requestError => {
@@ -87,10 +87,10 @@ onMounted(() => token.value && loadAdmin().catch(logout))
 
 <template>
   <main v-if="!token" class="login-page">
-    <section class="login-card"><div class="mark">H</div><p class="eyebrow">HAITOO PLATFORM</p><h1>超级管理员后台</h1><p>管理平台运行概况和印花贴合模型。</p><label>邮箱<input v-model="email" type="email" /></label><label>密码<input v-model="password" type="password" @keyup.enter="login" /></label><button class="primary" :disabled="loading" @click="login">{{ loading ? '登录中…' : '登录后台' }}</button><small>仅超级管理员可访问</small><p v-if="error" class="error">{{ error }}</p></section>
+    <section class="login-card"><div class="mark">H</div><p class="eyebrow">Haitoro PLATFORM</p><h1>超级管理员后台</h1><p>管理平台运行概况和印花贴合模型。</p><label>邮箱<input v-model="email" type="email" /></label><label>密码<input v-model="password" type="password" @keyup.enter="login" /></label><button class="primary" :disabled="loading" @click="login">{{ loading ? '登录中…' : '登录后台' }}</button><small>仅超级管理员可访问</small><p v-if="error" class="error">{{ error }}</p></section>
   </main>
   <main v-else class="shell">
-    <aside><div class="brand"><span>H</span> HAITOO</div><p>平台后台</p><nav><button :class="{active:activePage==='overview'}" @click="activePage='overview'">概览</button><button :class="{active:activePage==='companies'}" @click="activePage='companies'">公司管理</button><button :class="{active:activePage==='models'}" @click="activePage='models'">模型管理</button><button :class="{active:activePage==='non-ai-points'}" @click="activePage='non-ai-points'">积分消耗配置</button></nav><div class="operator"><b>{{ user?.name }}</b><small>超级管理员</small><button @click="logout">退出登录</button></div></aside>
+    <aside><div class="brand"><span>H</span> Haitoro</div><p>平台后台</p><nav><button :class="{active:activePage==='overview'}" @click="activePage='overview'">概览</button><button :class="{active:activePage==='companies'}" @click="activePage='companies'">公司管理</button><button :class="{active:activePage==='models'}" @click="activePage='models'">模型管理</button><button :class="{active:activePage==='non-ai-points'}" @click="activePage='non-ai-points'">积分消耗配置</button></nav><div class="operator"><b>{{ user?.name }}</b><small>超级管理员</small><button @click="logout">退出登录</button></div></aside>
     <section class="content"><header><div><p class="eyebrow">PLATFORM ADMIN</p><h1>{{activePage==='overview'?'平台概览':activePage==='companies'?'公司管理':activePage==='models'?'模型管理':'积分消耗配置'}}</h1></div><button class="refresh" @click="loadAdmin">↻ 刷新数据</button></header>
       <section class="page"><template v-if="activePage==='overview'"><div class="metrics"><article><span>公司</span><b>{{ overview?.companies ?? 0 }}</b><small>已开通企业</small></article><article><span>店铺</span><b>{{ overview?.shops ?? 0 }}</b><small>已授权店铺</small></article><article><span>平台用户</span><b>{{ overview?.users ?? 0 }}</b><small>含平台管理员</small></article><article><span>进行中任务</span><b>{{ overview?.running_tasks ?? 0 }}</b><small>累计 {{ overview?.tasks ?? 0 }} 个任务</small></article></div><section class="panel overview-note"><h2>管理入口</h2><p>在“公司管理”中开通公司、充值及查询积分流水；在“模型管理”中切换印花贴合模型。</p></section></template>
         <template v-else-if="activePage==='companies'"><section class="panel companies"><div class="heading heading-actions"><div><h2>公司与账号</h2><p>公司级妙手账号用于同步店铺并通过妙手 API 上架商品。</p></div><button class="primary compact" @click="showCompanyForm=true">＋ 开通公司</button></div><div class="company-table"><div class="company-head"><span>ID</span><span>公司</span><span>管理员账号</span><span>妙手 API Key</span><span>可用 / 冻结积分</span><span>开通时间</span><span>操作</span></div><div v-for="company in companies" :key="company.id" class="company-row"><span>{{company.id}}</span><span><b>{{company.name}}</b></span><span><template v-for="admin in company.admin_users" :key="admin.id"><b>{{admin.name}}</b><small>{{admin.email}}</small></template><small v-if="!company.admin_users.length">未配置管理员</small></span><span :class="company.miaoshou_configured?'ok':'bad'">{{company.miaoshou_configured?'已配置':'待配置'}}</span><span><b>{{company.points.available}}</b> / {{company.points.frozen}}</span><span>{{new Date(company.created_at).toLocaleDateString()}}</span><span class="company-actions"><button class="secondary" @click="openMiaoshou(company)">妙手 API Key</button><button class="secondary" @click="openRecharge(company)">积分充值</button><button class="secondary" @click="openRechargeHistory(company)">充值记录</button></span></div></div></section></template>

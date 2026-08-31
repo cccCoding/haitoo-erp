@@ -1,4 +1,4 @@
-# HAITOO AI 工作台
+# Haitoro AI 工作台
 
 多公司、多成员的 TikTok POD 运营系统 MVP。当前版本包含：
 
@@ -20,13 +20,13 @@ docker compose up --build
 
 | 角色 | 账号 |
 | --- | --- |
-| 超级管理员 | `owner@haitoo-demo.com` |
-| 公司管理员 | `admin@haitoo-demo.com` |
-| 运营成员 | `operator@haitoo-demo.com` |
+| 超级管理员 | `owner@haitoro-demo.com` |
+| 公司管理员 | `admin@haitoro-demo.com` |
+| 运营成员 | `operator@haitoro-demo.com` |
 
 API 文档：`http://localhost:8001/docs`。
 
-超级管理员后台是独立前端项目，启动后访问 `http://localhost:5174`，使用 `owner@haitoo-demo.com` 登录。
+超级管理员后台是独立前端项目，启动后访问 `http://localhost:5174`，使用 `owner@haitoro-demo.com` 登录。
 
 ## 通过 Cloudflare Tunnel 暴露 ERP（无需公网 IP）
 
@@ -75,7 +75,7 @@ export DEEPSEEK_API_KEY='...'
 export R2_ACCOUNT_ID='...'
 export R2_ACCESS_KEY_ID='...'
 export R2_SECRET_ACCESS_KEY='...'
-export R2_BUCKET='haitoo-images-prod'
+export R2_BUCKET='haitoro-images-prod'
 export R2_ENDPOINT='https://<account-id>.r2.cloudflarestorage.com'
 export R2_PUBLIC_BASE_URL='https://img.haitoro.com'
 # 是否复制 Seedream/千问的生成结果到 R2；默认 true，建议生产环境保持 true。

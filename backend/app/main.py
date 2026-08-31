@@ -43,9 +43,9 @@ def seed(db: Session) -> None:
             db.add(user); db.flush()
         return user
 
-    ensure_demo_user("owner@haitoo-demo.com", "平台超级管理员", Role.SUPER_ADMIN)
-    ensure_demo_user("admin@haitoo-demo.com", "演示公司管理员", Role.COMPANY_ADMIN, company.id)
-    ensure_demo_user("operator@haitoo-demo.com", "陈宁", Role.MEMBER, company.id)
+    ensure_demo_user("owner@haitoro-demo.com", "平台超级管理员", Role.SUPER_ADMIN)
+    ensure_demo_user("admin@haitoro-demo.com", "演示公司管理员", Role.COMPANY_ADMIN, company.id)
+    ensure_demo_user("operator@haitoro-demo.com", "陈宁", Role.MEMBER, company.id)
     # 仅清理无业务记录的早期内置演示店铺；实际店铺统一由妙手同步创建。
     builtin_shop = db.scalar(select(Shop).where(
         Shop.company_id == company.id, Shop.name == "MY TikTok Shop", Shop.external_shop_id.is_(None)
@@ -201,7 +201,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="HAITOO POD API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Haitoro POD API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=get_settings().cors_origins.split(","), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 

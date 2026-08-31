@@ -1,1 +1,1 @@
-"""HAITOO POD platform API."""
+"""Haitoro POD platform API."""

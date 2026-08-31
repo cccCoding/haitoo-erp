@@ -1,9 +1,9 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import axios from 'axios';
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' });
-const token = ref(localStorage.getItem('haitoo_token') || '');
+const token = ref(localStorage.getItem('haitoro_token') || '');
 const page = ref('dashboard');
-const email = ref('operator@haitoo-demo.com');
+const email = ref('operator@haitoro-demo.com');
 const password = ref('ChangeMe123!');
 const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), materialAssets = ref([]), drafts = ref([]), points = ref(null), members = ref([]), aiProviders = ref([]);
 const loading = ref(false), error = ref('');
@@ -119,7 +119,7 @@ async function login() { try {
     error.value = '';
     const { data } = await api.post('/auth/login', { email: email.value, password: password.value });
     token.value = data.access_token;
-    localStorage.setItem('haitoo_token', token.value);
+    localStorage.setItem('haitoro_token', token.value);
     await refresh();
 }
 catch {
@@ -622,7 +622,7 @@ finally {
 let toastTimer;
 function showToast(message) { toast.value = message; if (toastTimer)
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = ''; }, 3000); }
-function logout() { localStorage.removeItem('haitoo_token'); token.value = ''; user.value = null; }
+function logout() { localStorage.removeItem('haitoro_token'); token.value = ''; user.value = null; }
 api.interceptors.response.use(response => response, requestError => {
     if (requestError.response?.data?.detail === '登录已失效') {
         logout();

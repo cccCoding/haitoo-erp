@@ -3,9 +3,9 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import axios from 'axios'
 
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' })
-const token = ref(localStorage.getItem('haitoo_token') || '')
+const token = ref(localStorage.getItem('haitoro_token') || '')
 const page = ref('dashboard')
-const email = ref('operator@haitoo-demo.com')
+const email = ref('operator@haitoro-demo.com')
 const password = ref('ChangeMe123!')
 const user = ref<any>(null), company = ref<any>(null), shops = ref<any[]>([]), templates = ref<any[]>([]), templateGroups = ref<any[]>([]), tasks = ref<any[]>([]), materialAssets = ref<any[]>([]), drafts = ref<any[]>([]), points = ref<any>(null), members = ref<any[]>([]), aiProviders = ref<any[]>([])
 const loading = ref(false), error = ref('')
@@ -102,7 +102,7 @@ async function refresh() {
   if (!selectedTemplateId.value && templates.value[0]) selectedTemplateId.value=templates.value[0].id
   if (viewingTask.value) viewingTask.value = tasks.value.find(task => task.id === viewingTask.value.id) || null
 }
-async function login() { try { loading.value=true; error.value=''; const {data}=await api.post('/auth/login',{email:email.value,password:password.value}); token.value=data.access_token; localStorage.setItem('haitoo_token',token.value); await refresh() } catch { error.value='登录失败，请检查账号密码' } finally { loading.value=false } }
+async function login() { try { loading.value=true; error.value=''; const {data}=await api.post('/auth/login',{email:email.value,password:password.value}); token.value=data.access_token; localStorage.setItem('haitoro_token',token.value); await refresh() } catch { error.value='登录失败，请检查账号密码' } finally { loading.value=false } }
 function onCreativeAssetChange(event: Event) {
   const files = Array.from((event.target as HTMLInputElement).files || [])
   const available = 1000 - creativeAssets.value.length
@@ -370,7 +370,7 @@ function openShopManagersDialog(shop:any) { managingShop.value=shop; selectedMan
 async function saveShopManagers() { if (!managingShop.value) return; try { shopManagersSaving.value=true; await api.put(`/shops/${managingShop.value.id}/managers`, {member_ids:selectedManagerIds.value}, {headers:headers.value}); showShopManagersDialog.value=false; await refresh() } catch(e:any) { shopError.value=e.response?.data?.detail || '保存店铺管理人员失败' } finally { shopManagersSaving.value=false } }
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 function showToast(message: string) { toast.value = message; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = '' }, 3000) }
-function logout(){ localStorage.removeItem('haitoo_token'); token.value=''; user.value=null }
+function logout(){ localStorage.removeItem('haitoro_token'); token.value=''; user.value=null }
 api.interceptors.response.use(
   response => response,
   requestError => {
@@ -395,10 +395,10 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
 
 <template>
   <main v-if="!token" class="login-shell">
-    <section class="login-card"><div class="brand-mark">H</div><p class="eyebrow">HAITOO AI POD 工作台</p><h1>欢迎回到 POD 工作台</h1><p>登录后仅可访问所属公司及已授权店铺。</p><label>邮箱<input v-model="email" type="email" /></label><label>密码<input v-model="password" type="password" /></label><button class="primary full" :disabled="loading" @click="login">{{ loading ? '登录中…' : '登录' }}</button><small>演示账号：operator@haitoo-demo.com / ChangeMe123!</small><p v-if="error" class="error">{{ error }}</p></section>
+    <section class="login-card"><div class="brand-mark">H</div><p class="eyebrow">Haitoro AI POD 工作台</p><h1>欢迎回到 POD 工作台</h1><p>登录后仅可访问所属公司及已授权店铺。</p><label>邮箱<input v-model="email" type="email" /></label><label>密码<input v-model="password" type="password" /></label><button class="primary full" :disabled="loading" @click="login">{{ loading ? '登录中…' : '登录' }}</button><small>演示账号：operator@haitoro-demo.com / ChangeMe123!</small><p v-if="error" class="error">{{ error }}</p></section>
   </main>
   <main v-else class="app-shell">
-    <aside><div class="logo"><span>H</span><b>HAITOO AI</b></div><nav><button v-for="item in visibleNav" :key="item.key" :class="{active: page===item.key}" @click="page=item.key"><i>{{item.icon}}</i>{{item.label}}</button></nav></aside>
+    <aside><div class="logo"><span>H</span><b>Haitoro AI</b></div><nav><button v-for="item in visibleNav" :key="item.key" :class="{active: page===item.key}" @click="page=item.key"><i>{{item.icon}}</i>{{item.label}}</button></nav></aside>
     <section class="content"><header><div><h1>{{ pageTitle }}</h1></div><div class="context"><button class="member account-button" @click="openMyAccountDialog">{{user?.name}} · {{ user?.role === 'company_admin' ? '管理员' : '运营成员' }}{{user?.user_code ? ` · ${user.user_code}` : ''}}</button><button class="ghost" @click="logout">退出</button></div></header>
       <section v-if="page==='dashboard'" class="page"><div class="hero"><div><p>POD 商品工作台</p><h2>今天要先处理什么？</h2><span>从 AI创作到待发布商品，所有进度都在这里。</span></div><button class="primary" @click="page='pod'">✦ 开始 AI创作</button></div><div class="metrics"><article><span>待领取任务</span><b>{{tasks.filter(t=>t.status==='awaiting_selection').length}}</b><em>请选择要领取的图片</em></article><article><span>待发布商品</span><b>{{drafts.length}}</b><em>妙手接口待接入</em></article><article><span>可用积分</span><b>{{points?.available ?? 0}}</b><em>冻结 {{points?.frozen ?? 0}} 积分</em></article></div><div class="two-col"><section class="panel"><h3>最近任务 <button @click="page='tasks'">查看全部</button></h3><div v-for="task in tasks.slice(0,3)" :key="task.id" class="task-row"><span class="thumb">✦</span><div><strong>AI创作 #{{task.id}}</strong><small>{{task.parameters?.task_type || '替换印花'}} · {{new Date(task.created_at).toLocaleString()}}</small></div><span class="chip" :class="taskStatusClass(task.status)">{{taskStatusLabel[task.status] || task.status || '—'}}</span></div><p v-if="!tasks.length" class="empty">暂无 AI 创作任务。</p></section><section class="panel"><h3>快捷操作</h3><button class="quick" @click="page='templates'">▦ 浏览产品模板 <span>→</span></button><button class="quick" @click="page='points'">◉ 查看积分明细 <span>→</span></button></section></div></section>
       <section v-else-if="page==='templates'" class="page"><div class="toolbar"><input v-model="templateQuery" placeholder="搜索模板名称"/><div v-if="user?.role==='company_admin'" class="toolbar-actions"><button class="primary" @click="openTemplateDialog()">新增模板</button></div></div><div class="template-layout"><section class="groups"><div class="groups-heading"><h3>模板分类</h3><button v-if="user?.role==='company_admin'" class="add-group" @click="showGroupDialog=true">新增</button></div><button :class="{selected:activeGroupId===null}" @click="activeGroupId=null">全部模板</button><button v-for="group in templateGroups" :key="group.id" :class="{selected:activeGroupId===group.id}" @click="activeGroupId=group.id">{{group.name}}</button></section><section><div class="section-heading"><h2>{{activeGroupId ? templateGroups.find(g=>g.id===activeGroupId)?.name : '全部模板'}}</h2><span>共 {{filteredTemplates.length}} 个模板</span></div><div class="template-grid"><article v-for="t in filteredTemplates" :key="t.id" class="template-card"><div class="template-image" :class="{hasCover: hasTemplateCover(t)}"><img v-if="hasTemplateCover(t)" :src="templateCoverUrl(t)" :alt="t.name"/><span v-else>{{t.name.includes('T恤')?'♧':'♔'}}</span></div><h3>{{t.name}}</h3><p><span class="chip" :class="t.is_platform?'blue':'purple'">{{t.is_platform?'平台模板':'公司私有'}}</span></p><p v-if="t.description" class="template-description">{{t.description}}</p><small>{{t.color_count}} 个颜色 · {{t.sku_count}} 个 SKU</small><div class="template-actions"><button @click="useTemplate(t)">用于 AI创作 →</button><template v-if="!t.is_platform && user?.role==='company_admin'"><button @click="openTemplateDialog(t)">编辑</button><button class="danger" @click="deleteTemplate(t)">删除</button></template></div></article><p v-if="!filteredTemplates.length" class="empty">没有符合条件的模板。</p></div></section></div></section>
