@@ -4,6 +4,7 @@ const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://loca
 const token = ref(localStorage.getItem('haitoro_admin_token') || '');
 const email = ref('owner@haitoro-demo.com'), password = ref('ChangeMe123!');
 const user = ref(null), overview = ref(null), providers = ref([]), companies = ref([]);
+const queueSettings = ref({ submit_interval_seconds: 1, result_interval_seconds: 5 });
 const loading = ref(false), saving = ref(''), error = ref('');
 const toast = ref('');
 const activePage = ref('overview');
@@ -12,7 +13,7 @@ const showMiaoshouForm = ref(false), miaoshouCompany = ref(null);
 const showProviderForm = ref(false);
 const companyForm = ref({ name: '', admin_name: '', admin_email: '', admin_password: '' });
 const miaoshouForm = ref({ app_id: '', app_secret: '' });
-const providerForm = ref({ provider: '', display_name: '', model: '', enabled: false, is_default: false, batch_size: 1, max_concurrency: 1 });
+const providerForm = ref({ provider: '', display_name: '', model: '', enabled: false, is_default: false, images_per_task: 1 });
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
 const nativeToLocaleString = Date.prototype.toLocaleString;
@@ -27,13 +28,14 @@ Date.prototype.toLocaleDateString = function (...args) {
 };
 async function loadAdmin() {
     const h = { headers: headers.value };
-    const [me, stats, models, companyRows] = await Promise.all([api.get('/me', h), api.get('/admin/overview', h), api.get('/admin/ai-providers', h), api.get('/admin/companies', h)]);
+    const [me, stats, models, companyRows, queue] = await Promise.all([api.get('/me', h), api.get('/admin/overview', h), api.get('/admin/ai-providers', h), api.get('/admin/companies', h), api.get('/admin/task-queue-settings', h)]);
     if (me.data.user.role !== 'super_admin')
         throw new Error('该账号不是超级管理员');
     user.value = me.data.user;
     overview.value = stats.data;
     providers.value = models.data;
     companies.value = companyRows.data;
+    queueSettings.value = queue.data;
 }
 async function login() {
     try {
@@ -57,7 +59,7 @@ async function saveProvider(provider) {
     try {
         saving.value = provider.provider;
         error.value = '';
-        await api.put(`/admin/ai-providers/${provider.provider}`, { model: provider.model, enabled: provider.enabled, is_default: provider.is_default, batch_size: provider.batch_size, max_concurrency: provider.max_concurrency }, { headers: headers.value });
+        await api.put(`/admin/ai-providers/${provider.provider}`, { model: provider.model, enabled: provider.enabled, is_default: provider.is_default, images_per_task: provider.images_per_task }, { headers: headers.value });
         await loadAdmin();
     }
     catch (e) {
@@ -71,14 +73,27 @@ async function setDefault(provider) {
     providers.value.forEach(item => item.is_default = item.provider === provider.provider);
     await saveProvider(provider);
 }
-function openProviderForm(provider) { error.value = ''; providerForm.value = { provider: provider.provider, display_name: provider.display_name, model: provider.model, enabled: provider.enabled, is_default: provider.is_default, batch_size: provider.batch_size, max_concurrency: provider.max_concurrency }; showProviderForm.value = true; }
+function openProviderForm(provider) { error.value = ''; providerForm.value = { provider: provider.provider, display_name: provider.display_name, model: provider.model, enabled: provider.enabled, is_default: provider.is_default, images_per_task: provider.images_per_task }; showProviderForm.value = true; }
 async function saveProviderForm() { try {
     saving.value = providerForm.value.provider;
     error.value = '';
-    await api.put(`/admin/ai-providers/${providerForm.value.provider}`, { model: providerForm.value.model, enabled: providerForm.value.enabled, is_default: providerForm.value.is_default, batch_size: providerForm.value.batch_size, max_concurrency: providerForm.value.max_concurrency }, { headers: headers.value });
+    await api.put(`/admin/ai-providers/${providerForm.value.provider}`, { model: providerForm.value.model, enabled: providerForm.value.enabled, is_default: providerForm.value.is_default, images_per_task: providerForm.value.images_per_task }, { headers: headers.value });
     showProviderForm.value = false;
     await loadAdmin();
     showToast('模型配置已保存');
+}
+catch (e) {
+    error.value = e.response?.data?.detail || '保存失败';
+}
+finally {
+    saving.value = '';
+} }
+async function saveQueueSettings() { try {
+    saving.value = 'queue';
+    error.value = '';
+    await api.put('/admin/task-queue-settings', queueSettings.value, { headers: headers.value });
+    await loadAdmin();
+    showToast('任务间隔已保存');
 }
 catch (e) {
     error.value = e.response?.data?.detail || '保存失败';
@@ -294,13 +309,13 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
         (__VLS_ctx.overview?.queue?.completed_prints_last_hour ?? 0);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        (__VLS_ctx.overview?.queue?.completed_batches_last_hour ?? 0);
+        (__VLS_ctx.overview?.queue?.completed_tasks_last_hour ?? 0);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
         (__VLS_ctx.overview?.queue?.failure_rate_15m ?? 0);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        (__VLS_ctx.overview?.queue?.failed_batches_last_hour ?? 0);
+        (__VLS_ctx.overview?.queue?.failed_tasks_last_hour ?? 0);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "queue-model-table" },
         });
@@ -433,17 +448,34 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "concurrency-legend" },
+            ...{ class: "queue-setting-form" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            type: "number",
+            min: "1",
+            max: "3600",
+        });
+        (__VLS_ctx.queueSettings.submit_interval_seconds);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            type: "number",
+            min: "1",
+            max: "3600",
+        });
+        (__VLS_ctx.queueSettings.result_interval_seconds);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.saveQueueSettings) },
+            ...{ class: "secondary" },
+            disabled: (__VLS_ctx.saving === 'queue'),
+        });
+        (__VLS_ctx.saving === 'queue' ? '保存中…' : '保存任务间隔');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "provider-list" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "provider-list-head" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -469,9 +501,7 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
             (provider.model);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (provider.batch_size);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (provider.max_concurrency);
+            (provider.images_per_task);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "credential-status" },
                 ...{ class: (__VLS_ctx.overview?.credential_status?.[provider.provider] ? 'is-ready' : 'is-missing') },
@@ -671,21 +701,8 @@ if (__VLS_ctx.showProviderForm) {
         min: "1",
         max: "100",
     });
-    (__VLS_ctx.providerForm.batch_size);
+    (__VLS_ctx.providerForm.images_per_task);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-        type: "number",
-        min: "1",
-        max: "32",
-    });
-    (__VLS_ctx.providerForm.max_concurrency);
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "modal-tip" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "modal-tip" },
     });
@@ -766,7 +783,8 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['model-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-kicker']} */ ;
-/** @type {__VLS_StyleScopedClasses['concurrency-legend']} */ ;
+/** @type {__VLS_StyleScopedClasses['queue-setting-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['provider-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['provider-list-head']} */ ;
 /** @type {__VLS_StyleScopedClasses['provider-row']} */ ;
@@ -796,7 +814,6 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['section-kicker']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-field-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-tip']} */ ;
-/** @type {__VLS_StyleScopedClasses['modal-tip']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-switch']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
@@ -813,6 +830,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             overview: overview,
             providers: providers,
             companies: companies,
+            queueSettings: queueSettings,
             loading: loading,
             saving: saving,
             error: error,
@@ -830,6 +848,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             setDefault: setDefault,
             openProviderForm: openProviderForm,
             saveProviderForm: saveProviderForm,
+            saveQueueSettings: saveQueueSettings,
             createCompany: createCompany,
             openMiaoshou: openMiaoshou,
             saveMiaoshou: saveMiaoshou,

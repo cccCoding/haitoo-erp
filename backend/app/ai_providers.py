@@ -19,6 +19,10 @@ class ProviderError(Exception):
     pass
 
 
+class ProviderTaskTerminalError(ProviderError):
+    """外部异步任务已明确结束且失败，不应作为查询故障自动重新提交。"""
+
+
 @dataclass
 class GenerationRequest:
     model: str
@@ -226,7 +230,7 @@ class GrsaiProvider:
                 raise ProviderError("grsai 任务成功但未返回图片地址")
             return urls
         if status in {"failed", "violation"}:
-            raise ProviderError(f"grsai 任务{status}：{result.get('error') or '未提供原因'}")
+            raise ProviderTaskTerminalError(f"grsai 任务{status}：{result.get('error') or '未提供原因'}")
         return None
 
 

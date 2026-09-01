@@ -111,8 +111,12 @@ class AIProviderSettingUpdate(BaseModel):
     model: str = Field(min_length=1, max_length=120)
     enabled: bool
     is_default: bool = False
-    batch_size: int = Field(default=1, ge=1, le=100)
-    max_concurrency: int = Field(default=2, ge=1, le=32)
+    images_per_task: int = Field(default=1, ge=1, le=100)
+
+
+class TaskQueueSettingUpdate(BaseModel):
+    submit_interval_seconds: int = Field(default=1, ge=1, le=3600)
+    result_interval_seconds: int = Field(default=5, ge=1, le=3600)
 
 
 class AdminCompanyCreate(BaseModel):

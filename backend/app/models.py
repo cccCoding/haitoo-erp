@@ -112,39 +112,11 @@ class PodTask(Base):
     # 外部异步 AI 任务的标识，例如 Grsai 返回的 id。
     provider_task_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
     failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    total_prints: Mapped[int] = mapped_column(Integer, default=0)
-    total_batches: Mapped[int] = mapped_column(Integer, default=0)
-    completed_batches: Mapped[int] = mapped_column(Integer, default=0)
-    failed_batches: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-
-class PodTaskBatch(Base):
-    """父任务拆分出的可独立重试、可持久化恢复的生成批次。"""
-    __tablename__ = "pod_task_batches"
-    __table_args__ = (
-        UniqueConstraint("task_id", "batch_index", name="uq_pod_task_batch_index"),
-        Index("ix_pod_batches_status_enqueued", "status", "enqueued_at"),
-        Index("ix_pod_batches_status_updated", "status", "updated_at"),
-        Index("ix_pod_batches_status_completed", "status", "completed_at"),
-    )
-    id: Mapped[int] = mapped_column(primary_key=True)
-    task_id: Mapped[int] = mapped_column(index=True)
-    batch_index: Mapped[int] = mapped_column(Integer)
-    status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.QUEUED, index=True)
-    print_urls: Mapped[list] = mapped_column(JSON, default=list)
-    result_urls: Mapped[list] = mapped_column(JSON, default=list)
     result_map: Mapped[list] = mapped_column(JSON, default=list)
-    provider_task_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
-    lease_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
-    attempts: Mapped[int] = mapped_column(Integer, default=0)
-    poll_attempts: Mapped[int] = mapped_column(Integer, default=0)
-    failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    submit_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class MaterialAsset(Base):
@@ -193,5 +165,12 @@ class AIProviderSetting(Base):
     model: Mapped[str] = mapped_column(String(120))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
-    batch_size: Mapped[int] = mapped_column(Integer, default=1)
-    max_concurrency: Mapped[int] = mapped_column(Integer, default=2)
+    images_per_task: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class TaskQueueSetting(Base):
+    """平台级串行任务节奏配置；固定使用主键 1。"""
+    __tablename__ = "task_queue_settings"
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    submit_interval_seconds: Mapped[int] = mapped_column(Integer, default=1)
+    result_interval_seconds: Mapped[int] = mapped_column(Integer, default=5)

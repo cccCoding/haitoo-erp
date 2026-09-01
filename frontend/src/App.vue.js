@@ -21,10 +21,10 @@ const materialDraftSkuPreviewItems = ref([]);
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('');
 const publishingDraftId = ref(null);
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null);
-const taskPageSize = ref(20), currentTaskPage = ref(1);
+const taskPageSize = ref(20), currentTaskPage = ref(1), taskTotal = ref(0), taskActiveCount = ref(0), taskStatusCounts = ref({});
 const previewImageUrl = ref(''), previewImageAlt = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
-const showTaskDetailDialog = ref(false), viewingTask = ref(null);
+const showTaskDetailDialog = ref(false), viewingTask = ref(null), taskDetailLoading = ref(false);
 const taskListRefreshing = ref(false), retryingTaskId = ref(null);
 const showClaimMaterialsDialog = ref(false), claimingTask = ref(null), selectedClaimResultUrls = ref([]), claimingMaterials = ref(false);
 const showTaskDraftDialog = ref(false), draftingTask = ref(null), taskDraftTitle = ref(''), taskDraftProductDescription = ref(''), taskDraftSizeChart = ref(null), taskDraftSizeChartPreview = ref(''), taskDraftTitleGenerating = ref(false), taskDraftSaving = ref(false), taskDraftSkuPreviewItems = ref([]);
@@ -59,13 +59,12 @@ const pagedDrafts = computed(() => {
     return filteredDrafts.value.slice(start, start + draftPageSize.value);
 });
 function changeDraftPageSize() { currentDraftPage.value = 1; }
-const taskPageCount = computed(() => Math.max(1, Math.ceil(tasks.value.length / taskPageSize.value)));
+const taskPageCount = computed(() => Math.max(1, Math.ceil(taskTotal.value / taskPageSize.value)));
 const visibleTaskPage = computed(() => Math.min(currentTaskPage.value, taskPageCount.value));
-const pagedTasks = computed(() => {
-    const start = (visibleTaskPage.value - 1) * taskPageSize.value;
-    return tasks.value.slice(start, start + taskPageSize.value);
-});
-function changeTaskPageSize() { currentTaskPage.value = 1; }
+const pagedTasks = computed(() => tasks.value);
+function applyTaskPage(data) { tasks.value = data.items || []; taskTotal.value = data.total || 0; taskActiveCount.value = data.active_count || 0; taskStatusCounts.value = data.status_counts || {}; currentTaskPage.value = data.page || 1; }
+async function changeTaskPageSize() { currentTaskPage.value = 1; await refreshTaskList(); }
+async function changeTaskPage(targetPage) { currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); await refreshTaskList(); }
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
 const nativeToLocaleString = Date.prototype.toLocaleString;
 const nativeToLocaleDateString = Date.prototype.toLocaleDateString;
@@ -79,13 +78,13 @@ Date.prototype.toLocaleDateString = function (...args) {
 };
 async function refresh() {
     const h = { headers: headers.value };
-    const [me, s, t, g, task, material, d, providers] = await Promise.all([api.get('/me', h), api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', h), api.get('/material-assets', h), api.get('/drafts', h), api.get('/ai-providers', h)]);
+    const [me, s, t, g, task, material, d, providers] = await Promise.all([api.get('/me', h), api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: { page: currentTaskPage.value, page_size: taskPageSize.value } }), api.get('/material-assets', h), api.get('/drafts', h), api.get('/ai-providers', h)]);
     user.value = me.data.user;
     company.value = me.data.company;
     shops.value = s.data;
     templates.value = t.data;
     templateGroups.value = g.data;
-    tasks.value = task.data;
+    applyTaskPage(task.data);
     materialAssets.value = material.data;
     drafts.value = d.data;
     aiProviders.value = providers.data;
@@ -104,8 +103,6 @@ async function refresh() {
     }
     if (!selectedTemplateId.value && templates.value[0])
         selectedTemplateId.value = templates.value[0].id;
-    if (viewingTask.value)
-        viewingTask.value = tasks.value.find(task => task.id === viewingTask.value.id) || null;
 }
 async function login() { try {
     loading.value = true;
@@ -122,6 +119,11 @@ finally {
     loading.value = false;
 } }
 function onCreativeAssetChange(event) {
+    if (creativeUploading.value) {
+        showToast('图片上传处理中，请等待本轮上传结束');
+        event.target.value = '';
+        return;
+    }
     const files = Array.from(event.target.files || []);
     const available = 500 - creativeAssets.value.length;
     const supported = files.filter(file => ['image/jpeg', 'image/png', 'image/webp'].includes(file.type) && file.size <= 5 * 1024 * 1024);
@@ -134,22 +136,44 @@ function onCreativeAssetChange(event) {
         creativeAssetError.value = '单次印花贴合最多支持 500 张图片。';
     event.target.value = '';
 }
-function removeCreativeAsset(id) { const asset = creativeAssets.value.find(item => item.id === id); if (asset)
+function removeCreativeAsset(id) { if (creativeUploading.value) {
+    showToast('图片上传处理中，暂时不能删除素材');
+    return;
+} const asset = creativeAssets.value.find(item => item.id === id); if (asset)
     URL.revokeObjectURL(asset.preview); creativeAssets.value = creativeAssets.value.filter(item => item.id !== id); }
-function clearCreativeAssets() { creativeAssets.value.forEach(item => URL.revokeObjectURL(item.preview)); creativeAssets.value = []; showCreativeAssetsDialog.value = false; }
-async function uploadCreativeAssets() { const urls = Array(creativeAssets.value.length); let cursor = 0; creativeUploadedCount.value = creativeAssets.value.filter(asset => asset.uploadedUrl).length; const worker = async () => { while (cursor < creativeAssets.value.length) {
-    const index = cursor++;
-    const asset = creativeAssets.value[index];
-    if (asset.uploadedUrl) {
-        urls[index] = asset.uploadedUrl;
-        continue;
-    }
-    const { data: signed } = await api.post('/uploads/creative-asset/presign', { content_type: asset.file.type, content_length: asset.file.size }, { headers: headers.value });
-    await axios.put(signed.upload_url, asset.file, { headers: { 'Content-Type': asset.file.type } });
-    asset.uploadedUrl = signed.url;
-    urls[index] = signed.url;
-    creativeUploadedCount.value++;
-} }; await Promise.all(Array.from({ length: Math.min(4, creativeAssets.value.length) }, worker)); return urls; }
+function clearCreativeAssets() { if (creativeUploading.value) {
+    showToast('图片上传处理中，暂时不能清空素材');
+    return;
+} creativeAssets.value.forEach(item => URL.revokeObjectURL(item.preview)); creativeAssets.value = []; showCreativeAssetsDialog.value = false; }
+async function uploadCreativeAssets() {
+    // 固定本轮素材快照；任一 worker 失败后仍等待其他 worker 收尾，避免下一次提交与残留上传重叠。
+    const assets = [...creativeAssets.value];
+    const urls = Array(assets.length);
+    let cursor = 0;
+    creativeUploadedCount.value = assets.filter(asset => asset.uploadedUrl).length;
+    const worker = async () => {
+        while (true) {
+            const index = cursor++;
+            if (index >= assets.length)
+                return;
+            const asset = assets[index];
+            if (asset.uploadedUrl) {
+                urls[index] = asset.uploadedUrl;
+                continue;
+            }
+            const { data: signed } = await api.post('/uploads/creative-asset/presign', { content_type: asset.file.type, content_length: asset.file.size }, { headers: headers.value });
+            await axios.put(signed.upload_url, asset.file, { headers: { 'Content-Type': asset.file.type } });
+            asset.uploadedUrl = signed.url;
+            urls[index] = signed.url;
+            creativeUploadedCount.value++;
+        }
+    };
+    const workerResults = await Promise.allSettled(Array.from({ length: Math.min(4, assets.length) }, worker));
+    const failedWorker = workerResults.find((result) => result.status === 'rejected');
+    if (failedWorker)
+        throw failedWorker.reason;
+    return urls;
+}
 async function createTask() { if (!creativeAssets.value.length) {
     creativeAssetError.value = '请先上传至少一张印花图，再开始印花贴合。';
     return;
@@ -164,10 +188,11 @@ async function createTask() { if (!creativeAssets.value.length) {
     creativeAssetError.value = '';
     creativeUploading.value = true;
     const print_urls = await uploadCreativeAssets();
-    await api.post('/tasks', { template_id: selectedTemplateId.value, provider: creativeProvider.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() }, { headers: headers.value });
+    const { data } = await api.post('/tasks', { template_id: selectedTemplateId.value, provider: creativeProvider.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() }, { headers: headers.value });
+    currentTaskPage.value = 1;
     await refresh();
     page.value = 'tasks';
-    showToast(`已入队 ${print_urls.length} 张印花图`);
+    showToast(`已创建 ${data.total} 条任务，共 ${print_urls.length} 张印花`);
 }
 catch (e) {
     error.value = e.response?.data?.detail || '创建 AI 任务失败';
@@ -260,9 +285,10 @@ function taskStatusClass(status) { return status === 'awaiting_selection' ? 'pur
 async function refreshTaskList() {
     try {
         taskListRefreshing.value = true;
-        tasks.value = (await api.get('/tasks', { headers: headers.value })).data;
-        if (viewingTask.value)
-            viewingTask.value = tasks.value.find(task => task.id === viewingTask.value.id) || null;
+        const { data } = await api.get('/tasks', { headers: headers.value, params: { page: currentTaskPage.value, page_size: taskPageSize.value } });
+        applyTaskPage(data);
+        if (showTaskDetailDialog.value && viewingTask.value)
+            viewingTask.value = (await api.get(`/tasks/${viewingTask.value.id}`, { headers: headers.value })).data;
     }
     catch (e) {
         showToast(e.response?.data?.detail || '刷新任务列表失败');
@@ -279,7 +305,15 @@ async function copyProviderTaskId(task) { if (!task.provider_task_id)
 catch {
     showToast('复制失败，请手动复制');
 } }
-function openTaskDetail(task) { viewingTask.value = task; showTaskDetailDialog.value = true; }
+async function openTaskDetail(task) { viewingTask.value = task; showTaskDetailDialog.value = true; taskDetailLoading.value = true; try {
+    viewingTask.value = (await api.get(`/tasks/${task.id}`, { headers: headers.value })).data;
+}
+catch (e) {
+    showToast(e.response?.data?.detail || '加载任务详情失败');
+}
+finally {
+    taskDetailLoading.value = false;
+} }
 function templateCoverUrl(template) { if (template?.cover_url)
     return imageUrl(template.cover_url); return template?.name === '白色 T恤正面' ? '/template-white-tshirt-front.png' : '/template-tshirt.svg'; }
 function hasTemplateCover(template) { return Boolean(template?.cover_url || template?.name === '白色 T恤正面'); }
@@ -453,7 +487,14 @@ async function publishDraftToMiaoshou(draft) {
         publishingDraftId.value = null;
     }
 }
-function openClaimMaterialsDialog(task) { claimingTask.value = task; selectedClaimResultUrls.value = []; showClaimMaterialsDialog.value = true; }
+async function openClaimMaterialsDialog(task) { try {
+    claimingTask.value = (await api.get(`/tasks/${task.id}`, { headers: headers.value })).data;
+    selectedClaimResultUrls.value = [];
+    showClaimMaterialsDialog.value = true;
+}
+catch (e) {
+    showToast(e.response?.data?.detail || '加载任务结果失败');
+} }
 function toggleClaimResult(url) { selectedClaimResultUrls.value = selectedClaimResultUrls.value.includes(url) ? selectedClaimResultUrls.value.filter(item => item !== url) : [...selectedClaimResultUrls.value, url]; }
 async function claimMaterials() {
     if (!claimingTask.value || !selectedClaimResultUrls.value.length) {
@@ -477,12 +518,12 @@ async function claimMaterials() {
 async function retryTaskResult(task) {
     try {
         retryingTaskId.value = task.id;
-        await api.post(`/tasks/${task.id}/retry-result`, {}, { headers: headers.value });
+        await api.post(`/tasks/${task.id}/retry`, {}, { headers: headers.value });
         await refreshTaskList();
-        showToast('已开始重新获取结果');
+        showToast('失败任务已重新入队');
     }
     catch (e) {
-        showToast(e.response?.data?.detail || '重新获取结果失败');
+        showToast(e.response?.data?.detail || '重试任务失败');
     }
     finally {
         retryingTaskId.value = null;
@@ -650,10 +691,10 @@ api.interceptors.response.use(response => response, requestError => {
 });
 let taskResultPollingTimer;
 async function refreshPendingTaskResults() {
-    if (!token.value || !tasks.value.some(task => ['queued', 'running'].includes(task.status) || (task.progress?.total && task.progress.completed + task.progress.failed < task.progress.total)))
+    if (!token.value || !taskActiveCount.value)
         return;
     try {
-        tasks.value = (await api.get('/tasks', { headers: headers.value })).data;
+        applyTaskPage((await api.get('/tasks', { headers: headers.value, params: { page: currentTaskPage.value, page_size: taskPageSize.value } })).data);
     }
     catch { /* 保留上一次任务状态，等待下次轮询。 */ }
 }
@@ -779,7 +820,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-        (__VLS_ctx.tasks.filter(t => t.status === 'awaiting_selection').length);
+        (__VLS_ctx.taskStatusCounts.awaiting_selection || 0);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.em, __VLS_intrinsicElements.em)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -1301,7 +1342,7 @@ else {
             (task.id);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (task.parameters?.task_type || '替换印花');
-            if (task.parameters?.print_urls?.[0] || task.parameters?.print_url) {
+            if (task.parameters?.print_url) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!!(!__VLS_ctx.token))
@@ -1314,9 +1355,9 @@ else {
                                 return;
                             if (!(__VLS_ctx.page === 'tasks'))
                                 return;
-                            if (!(task.parameters?.print_urls?.[0] || task.parameters?.print_url))
+                            if (!(task.parameters?.print_url))
                                 return;
-                            __VLS_ctx.openImagePreview(task.parameters?.print_urls?.[0] || task.parameters?.print_url, '创作素材');
+                            __VLS_ctx.openImagePreview(task.parameters.print_url, '创作素材');
                         } },
                     type: "button",
                     ...{ class: "task-material-thumbnail" },
@@ -1324,7 +1365,7 @@ else {
                     'aria-label': "查看创作素材大图",
                 });
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                    src: (__VLS_ctx.imageUrl(task.parameters?.print_urls?.[0] || task.parameters?.print_url)),
+                    src: (__VLS_ctx.imageUrl(task.parameters.print_url)),
                     alt: "创作素材",
                 });
             }
@@ -1382,13 +1423,8 @@ else {
             });
             (__VLS_ctx.taskStatusLabel[task.status] || task.status || '—');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-            (task.progress?.completed || 0);
-            (task.progress?.failed || 0);
-            (task.progress?.total || 0);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.progress, __VLS_intrinsicElements.progress)({
-                max: (task.progress?.total || 1),
-                value: ((task.progress?.completed || 0) + (task.progress?.failed || 0)),
-            });
+            (task.progress?.total_prints || 0);
+            (task.submit_attempts || 0);
             if (task.result_urls?.[0]) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
@@ -1420,7 +1456,7 @@ else {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: ({ error: task.failure_reason }) },
+                ...{ class: ({ error: task.status === 'failed' }) },
             });
             (task.failure_reason || '—');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
@@ -1442,7 +1478,7 @@ else {
                     } },
                 ...{ class: "secondary" },
             });
-            if (task.failed_batches > 0) {
+            if (task.status === 'failed') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!!(!__VLS_ctx.token))
@@ -1455,16 +1491,16 @@ else {
                                 return;
                             if (!(__VLS_ctx.page === 'tasks'))
                                 return;
-                            if (!(task.failed_batches > 0))
+                            if (!(task.status === 'failed'))
                                 return;
                             __VLS_ctx.retryTaskResult(task);
                         } },
                     ...{ class: "secondary" },
                     disabled: (__VLS_ctx.retryingTaskId === task.id),
                 });
-                (__VLS_ctx.retryingTaskId === task.id ? '重试中…' : `重试失败项（${task.failed_batches}）`);
+                (__VLS_ctx.retryingTaskId === task.id ? '重试中…' : '重试任务');
             }
-            if (task.result_urls?.length) {
+            if (task.result_count || task.result_urls?.length) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!!(!__VLS_ctx.token))
@@ -1477,7 +1513,7 @@ else {
                                 return;
                             if (!(__VLS_ctx.page === 'tasks'))
                                 return;
-                            if (!(task.result_urls?.length))
+                            if (!(task.result_count || task.result_urls?.length))
                                 return;
                             __VLS_ctx.openClaimMaterialsDialog(task);
                         } },
@@ -1510,12 +1546,12 @@ else {
                 ...{ class: "empty" },
             });
         }
-        if (__VLS_ctx.tasks.length) {
+        if (__VLS_ctx.taskTotal) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
                 ...{ class: "draft-pagination" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (__VLS_ctx.tasks.length);
+            (__VLS_ctx.taskTotal);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
                 ...{ onChange: (__VLS_ctx.changeTaskPageSize) },
@@ -1530,12 +1566,6 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
                 value: (100),
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (500),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (1000),
-            });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!!(!__VLS_ctx.token))
@@ -1548,9 +1578,9 @@ else {
                             return;
                         if (!(__VLS_ctx.page === 'tasks'))
                             return;
-                        if (!(__VLS_ctx.tasks.length))
+                        if (!(__VLS_ctx.taskTotal))
                             return;
-                        __VLS_ctx.currentTaskPage = __VLS_ctx.visibleTaskPage - 1;
+                        __VLS_ctx.changeTaskPage(__VLS_ctx.visibleTaskPage - 1);
                     } },
                 disabled: (__VLS_ctx.visibleTaskPage === 1),
             });
@@ -1569,9 +1599,9 @@ else {
                             return;
                         if (!(__VLS_ctx.page === 'tasks'))
                             return;
-                        if (!(__VLS_ctx.tasks.length))
+                        if (!(__VLS_ctx.taskTotal))
                             return;
-                        __VLS_ctx.currentTaskPage = __VLS_ctx.visibleTaskPage + 1;
+                        __VLS_ctx.changeTaskPage(__VLS_ctx.visibleTaskPage + 1);
                     } },
                 disabled: (__VLS_ctx.visibleTaskPage === __VLS_ctx.taskPageCount),
             });
@@ -2330,48 +2360,64 @@ if (__VLS_ctx.showTaskDetailDialog) {
         ...{ class: (__VLS_ctx.taskStatusClass(__VLS_ctx.viewingTask?.status)) },
     });
     (__VLS_ctx.taskStatusLabel[__VLS_ctx.viewingTask?.status] || __VLS_ctx.viewingTask?.status || '—');
-    (__VLS_ctx.viewingTask?.progress?.percent || 0);
+    (__VLS_ctx.viewingTask?.parameters?.print_urls?.length || 0);
+    (__VLS_ctx.viewingTask?.submit_attempts || 0);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    (__VLS_ctx.viewingTask?.progress?.completed || 0);
-    (__VLS_ctx.viewingTask?.progress?.failed || 0);
-    (__VLS_ctx.viewingTask?.progress?.total || 0);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
+    (__VLS_ctx.viewingTask?.provider_task_id || '—');
     if (__VLS_ctx.viewingTask?.failure_reason) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
-            ...{ class: "error" },
+            ...{ class: ({ error: __VLS_ctx.viewingTask?.status === 'failed' }) },
         });
         (__VLS_ctx.viewingTask.failure_reason);
     }
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-        ...{ class: "draft-edit-section" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "task-batch-list" },
-    });
-    for (const [batch] of __VLS_getVForSourceType((__VLS_ctx.viewingTask?.batches || []))) {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            key: (batch.id),
+    if (__VLS_ctx.viewingTask?.result_map?.length) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "draft-edit-section" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-        (batch.batch_index);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-            ...{ class: "chip" },
-            ...{ class: (__VLS_ctx.taskStatusClass(batch.status)) },
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "task-result-map" },
         });
-        (__VLS_ctx.taskStatusLabel[batch.status] || batch.status);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        (batch.print_urls?.length || 0);
-        (batch.attempts || 0);
-        (batch.result_urls?.length || 0);
-        if (batch.provider_task_id) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
-            (batch.provider_task_id);
-        }
-        if (batch.failure_reason) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
-                ...{ class: "error" },
+        for (const [item] of __VLS_getVForSourceType((__VLS_ctx.viewingTask.result_map))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+                key: (item.print_url),
             });
-            (batch.failure_reason);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showTaskDetailDialog))
+                            return;
+                        if (!(__VLS_ctx.viewingTask?.result_map?.length))
+                            return;
+                        __VLS_ctx.openImagePreview(item.print_url, '印花图');
+                    } },
+                ...{ class: "task-material-thumbnail" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                src: (__VLS_ctx.imageUrl(item.print_url)),
+                alt: "印花图",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (item.result_urls?.length || 0);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "material-draft-preview-images" },
+            });
+            for (const [url] of __VLS_getVForSourceType((item.result_urls || []))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.showTaskDetailDialog))
+                                return;
+                            if (!(__VLS_ctx.viewingTask?.result_map?.length))
+                                return;
+                            __VLS_ctx.openImagePreview(url, '生成结果');
+                        } },
+                    key: (url),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                    src: (__VLS_ctx.imageUrl(url)),
+                    alt: "生成结果",
+                });
+            }
         }
     }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -3662,11 +3708,10 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
-/** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
-/** @type {__VLS_StyleScopedClasses['task-batch-list']} */ ;
-/** @type {__VLS_StyleScopedClasses['chip']} */ ;
-/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-result-map']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-material-thumbnail']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-preview-images']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
@@ -3878,7 +3923,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             currentDraftPage: currentDraftPage,
             draftTemplateFilterId: draftTemplateFilterId,
             taskPageSize: taskPageSize,
-            currentTaskPage: currentTaskPage,
+            taskTotal: taskTotal,
+            taskStatusCounts: taskStatusCounts,
             previewImageUrl: previewImageUrl,
             previewImageAlt: previewImageAlt,
             showShopManagersDialog: showShopManagersDialog,
@@ -3931,6 +3977,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             visibleTaskPage: visibleTaskPage,
             pagedTasks: pagedTasks,
             changeTaskPageSize: changeTaskPageSize,
+            changeTaskPage: changeTaskPage,
             login: login,
             onCreativeAssetChange: onCreativeAssetChange,
             removeCreativeAsset: removeCreativeAsset,

@@ -37,11 +37,6 @@ services:
       mysql:
         condition: service_healthy
 
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-
   api:
     build: ./backend
     environment:
@@ -65,13 +60,8 @@ services:
       R2_BUCKET: ${R2_BUCKET:-haitoo-images-prod}
       R2_ENDPOINT: ${R2_ENDPOINT:-}
       R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
-      TASK_MAX_RETRIES: ${TASK_MAX_RETRIES:-2}
-      TASK_STALE_SECONDS: ${TASK_STALE_SECONDS:-600}
-      GRSAI_POLL_SECONDS: ${GRSAI_POLL_SECONDS:-300}
-      GRSAI_MAX_POLL_ATTEMPTS: ${GRSAI_MAX_POLL_ATTEMPTS:-144}
       # false 时不复制 Seedream/千问生成结果到 R2；Gemini 的内嵌结果仍需上传 R2。
       AI_GENERATED_IMAGE_UPLOAD_TO_R2: ${AI_GENERATED_IMAGE_UPLOAD_TO_R2:-true}
-      REDIS_URL: redis://redis:6379/0
     ports:
       - "8001:8000"
     volumes:
@@ -81,13 +71,11 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  worker:
+  submit-worker:
     build: ./backend
-    command: celery -A app.worker.celery worker --loglevel=INFO --concurrency=${WORKER_CONCURRENCY:-4}
+    command: python -m app.task_worker submit
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
-      REDIS_URL: redis://redis:6379/0
-      TASK_STALE_SECONDS: ${TASK_STALE_SECONDS:-600}
       SEEDREAM_API_KEY: ${SEEDREAM_API_KEY:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
@@ -100,27 +88,27 @@ services:
       R2_ENDPOINT: ${R2_ENDPOINT:-}
       R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
       AI_GENERATED_IMAGE_UPLOAD_TO_R2: ${AI_GENERATED_IMAGE_UPLOAD_TO_R2:-true}
-      TASK_MAX_RETRIES: ${TASK_MAX_RETRIES:-2}
-      GRSAI_POLL_SECONDS: ${GRSAI_POLL_SECONDS:-300}
-      GRSAI_MAX_POLL_ATTEMPTS: ${GRSAI_MAX_POLL_ATTEMPTS:-144}
     depends_on:
-      db-init:
-        condition: service_completed_successfully
-      redis:
+      api:
         condition: service_started
     restart: unless-stopped
 
-  beat:
+  result-worker:
     build: ./backend
-    command: celery -A app.worker.celery beat --loglevel=INFO
+    command: python -m app.task_worker result
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
-      REDIS_URL: redis://redis:6379/0
-      TASK_STALE_SECONDS: ${TASK_STALE_SECONDS:-600}
+      GRSAI_API_KEY: ${GRSAI_API_KEY:-}
+      GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-haitoo-images-prod}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
+      AI_GENERATED_IMAGE_UPLOAD_TO_R2: ${AI_GENERATED_IMAGE_UPLOAD_TO_R2:-true}
     depends_on:
-      db-init:
-        condition: service_completed_successfully
-      redis:
+      api:
         condition: service_started
     restart: unless-stopped
 

@@ -1,5 +1,4 @@
 from contextlib import asynccontextmanager
-import asyncio
 import hashlib
 import hmac
 import json
@@ -11,18 +10,17 @@ import time
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
-from .models import AIProviderSetting, Company, MaterialAsset, PodTask, PodTaskBatch, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
-from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LoginInput, MaterialAssetsTemplateUpdate, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskDraftCreate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut
+from .models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserShop
+from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LoginInput, MaterialAssetsTemplateUpdate, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskDraftCreate, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
-from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, generate_draft_title, poll_async_generation, provider_credential_env, provider_has_credentials, submit_async_generation
-from .celery_app import enqueue_batch
+from .ai_providers import ProviderError, generate_draft_title, provider_credential_env, provider_has_credentials
 from .credentials import decrypt_secret, encrypt_secret
 from .storage import StorageError, create_image_upload_url, is_company_r2_url, is_public_r2_url, upload_image_bytes_async
 import httpx
@@ -67,6 +65,8 @@ def seed(db: Session) -> None:
         db.add(AIProviderSetting(provider="grsai", display_name="Grsai", model="nano-banana-fast", enabled=True, is_default=True))
     elif grsai_setting.display_name == "Nano Banana Fast":
         grsai_setting.display_name = "Grsai"
+    if not db.get(TaskQueueSetting, 1):
+        db.add(TaskQueueSetting(id=1, submit_interval_seconds=1, result_interval_seconds=5))
     # 启动时只补齐必要的演示配置，绝不删除用户的模板、分类或历史数据。
     db.commit()
 
@@ -84,7 +84,6 @@ def ensure_schema() -> None:
                 connection.execute(text(f"DROP TABLE {quote(table_name)}"))
         for table_name, obsolete_columns in (
             ("pod_tasks", ("estimated_points", "actual_points", "refunded_points")),
-            ("pod_task_batches", ("estimated_points", "settled_points", "refunded_at", "settled_at")),
         ):
             if table_name not in table_names:
                 continue
@@ -148,33 +147,38 @@ def ensure_schema() -> None:
             SET template_id = (SELECT template_id FROM pod_tasks WHERE pod_tasks.id = product_drafts.source_task_id)
             WHERE template_id IS NULL AND source_task_id IS NOT NULL
         """))
+        # 旧批次结构只在首次升级时存在。按已确认的迁移策略清空历史任务，
+        # 并先解除素材和草稿引用，避免新任务复用旧 ID 后产生错误关联。
+        if "pod_task_batches" in table_names:
+            connection.execute(text("UPDATE material_assets SET source_task_id = NULL WHERE source_task_id IS NOT NULL"))
+            connection.execute(text("UPDATE product_drafts SET source_task_id = NULL WHERE source_task_id IS NOT NULL"))
+            connection.execute(text("DELETE FROM pod_tasks"))
+            connection.execute(text(f"DROP TABLE {quote('pod_task_batches')}"))
         task_columns = {column["name"] for column in inspect(engine).get_columns("pod_tasks")}
-        for column, definition in (("provider", "VARCHAR(40)"), ("provider_model", "VARCHAR(120)"), ("provider_task_id", "VARCHAR(160)"), ("failure_reason", "VARCHAR(500)"), ("total_prints", "INTEGER DEFAULT 0"), ("total_batches", "INTEGER DEFAULT 0"), ("completed_batches", "INTEGER DEFAULT 0"), ("failed_batches", "INTEGER DEFAULT 0")):
+        for column, definition in (
+            ("provider", "VARCHAR(40)"), ("provider_model", "VARCHAR(120)"),
+            ("provider_task_id", "VARCHAR(160)"), ("failure_reason", "VARCHAR(500)"),
+            ("result_map", "JSON"), ("submit_attempts", "INTEGER DEFAULT 0"),
+            ("submitted_at", "DATETIME"), ("completed_at", "DATETIME"),
+        ):
             if column not in task_columns:
                 connection.execute(text(f"ALTER TABLE pod_tasks ADD COLUMN {column} {definition}"))
+        task_columns = {column["name"] for column in inspect(connection).get_columns("pod_tasks")}
+        for obsolete_column in ("total_prints", "total_batches", "completed_batches", "failed_batches"):
+            if obsolete_column in task_columns:
+                connection.execute(text(f"ALTER TABLE pod_tasks DROP COLUMN {obsolete_column}"))
         provider_columns = {column["name"] for column in inspect(engine).get_columns("ai_provider_settings")}
-        for column, definition in (("batch_size", "INTEGER DEFAULT 1"), ("max_concurrency", "INTEGER DEFAULT 2")):
-            if column not in provider_columns:
-                connection.execute(text(f"ALTER TABLE ai_provider_settings ADD COLUMN {column} {definition}"))
-        batch_columns = {column["name"] for column in inspect(engine).get_columns("pod_task_batches")}
-        for column, definition in (
-            ("result_map", "JSON"), ("lease_id", "VARCHAR(80)"),
-            ("poll_attempts", "INTEGER DEFAULT 0"), ("enqueued_at", "DATETIME"),
-            ("started_at", "DATETIME"), ("completed_at", "DATETIME"),
-        ):
-            if column not in batch_columns:
-                connection.execute(text(f"ALTER TABLE pod_task_batches ADD COLUMN {column} {definition}"))
+        if "images_per_task" not in provider_columns:
+            connection.execute(text("ALTER TABLE ai_provider_settings ADD COLUMN images_per_task INTEGER DEFAULT 1"))
+            if "batch_size" in provider_columns:
+                connection.execute(text("UPDATE ai_provider_settings SET images_per_task = batch_size"))
+        provider_columns = {column["name"] for column in inspect(connection).get_columns("ai_provider_settings")}
+        for obsolete_column in ("batch_size", "max_concurrency"):
+            if obsolete_column in provider_columns:
+                connection.execute(text(f"ALTER TABLE ai_provider_settings DROP COLUMN {obsolete_column}"))
         task_indexes = {index["name"] for index in inspect(connection).get_indexes("pod_tasks")}
         if "ix_pod_tasks_provider_model" not in task_indexes:
             connection.execute(text("CREATE INDEX ix_pod_tasks_provider_model ON pod_tasks (provider, provider_model)"))
-        batch_indexes = {index["name"] for index in inspect(connection).get_indexes("pod_task_batches")}
-        for index_name, columns_sql in (
-            ("ix_pod_batches_status_enqueued", "status, enqueued_at"),
-            ("ix_pod_batches_status_updated", "status, updated_at"),
-            ("ix_pod_batches_status_completed", "status, completed_at"),
-        ):
-            if index_name not in batch_indexes:
-                connection.execute(text(f"CREATE INDEX {index_name} ON pod_task_batches ({columns_sql})"))
         if "shop_id" in task_columns:
             connection.execute(text("ALTER TABLE pod_tasks DROP COLUMN shop_id"))
         company_columns = {column["name"] for column in inspect(engine).get_columns("companies")}
@@ -742,48 +746,79 @@ async def upload_material_assets(files: list[UploadFile] = File(...), template_i
     return [serialize_record(asset) for asset in assets]
 
 
+def serialize_task_view(task: PodTask, creator_name: str, template_name: str, *, include_details: bool) -> dict:
+    """任务列表只返回首图摘要；详情返回完整印花和结果映射。"""
+    parameters = dict(task.parameters or {})
+    print_urls = list(parameters.get("print_urls") or ([parameters["print_url"]] if parameters.get("print_url") else []))
+    result_urls = list(task.result_urls or [])
+    if not include_details:
+        parameters.pop("print_urls", None)
+        parameters["print_url"] = print_urls[0] if print_urls else None
+    result = serialize_record(task) | {
+        "parameters": parameters,
+        "result_urls": result_urls if include_details else result_urls[:1],
+        "result_count": len(result_urls),
+        "created_by_name": creator_name,
+        "template_name": template_name,
+        "progress": {
+            "total_prints": len(print_urls),
+            "result_count": len(result_urls),
+            "percent": 100 if task.status in (TaskStatus.AWAITING_SELECTION, TaskStatus.COMPLETED, TaskStatus.FAILED) else 0,
+        },
+    }
+    return result
+
+
 @app.get("/tasks")
-def list_tasks(user: User = Depends(current_user), db: Session = Depends(get_db)):
+def list_tasks(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    scope = PodTask.company_id == user.company_id if user.role != Role.SUPER_ADMIN else None
+    total_stmt = select(func.count()).select_from(PodTask)
+    if scope is not None:
+        total_stmt = total_stmt.where(scope)
+    total = db.scalar(total_stmt) or 0
+    page_count = max(1, (total + page_size - 1) // page_size)
+    page = min(page, page_count)
     stmt = select(PodTask)
-    if user.role != Role.SUPER_ADMIN:
-        stmt = stmt.where(PodTask.company_id == user.company_id)
-    tasks = db.scalars(stmt.order_by(PodTask.id.desc())).all()
+    if scope is not None:
+        stmt = stmt.where(scope)
+    tasks = db.scalars(stmt.order_by(PodTask.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     creator_ids = {task.created_by for task in tasks}
     creator_names = {member.id: member.name for member in db.scalars(select(User).where(User.id.in_(creator_ids))).all()} if creator_ids else {}
     template_ids = {task.template_id for task in tasks}
     template_names = {template.id: template.name for template in db.scalars(select(ProductTemplate).where(ProductTemplate.id.in_(template_ids))).all()} if template_ids else {}
-    batch_rows = db.scalars(select(PodTaskBatch).where(PodTaskBatch.task_id.in_([task.id for task in tasks]))).all() if tasks else []
-    batches_by_task: dict[int, list[PodTaskBatch]] = {}
-    for batch in batch_rows:
-        batches_by_task.setdefault(batch.task_id, []).append(batch)
-    result = []
-    for task in tasks:
-        batches = sorted(batches_by_task.get(task.id, []), key=lambda item: item.batch_index)
-        completed = [batch for batch in batches if batch.status == TaskStatus.COMPLETED]
-        failed = [batch for batch in batches if batch.status == TaskStatus.FAILED]
-        queued = sum(batch.status == TaskStatus.QUEUED for batch in batches)
-        running = sum(batch.status == TaskStatus.RUNNING for batch in batches)
-        succeeded_prints = sum(len(batch.print_urls or []) for batch in completed)
-        failed_prints = sum(len(batch.print_urls or []) for batch in failed)
-        total_prints = task.total_prints or sum(len(batch.print_urls or []) for batch in batches)
-        result.append(serialize_record(task) | {
-            "created_by_name": creator_names.get(task.created_by, "历史记录缺失"),
-            "template_name": template_names.get(task.template_id, "历史模板已删除"),
-            "progress": {
-                "uploaded": total_prints,
-                "total_prints": total_prints,
-                "succeeded_prints": succeeded_prints,
-                "failed_prints": failed_prints,
-                "total": len(batches) or task.total_batches,
-                "queued": queued,
-                "running": running,
-                "completed": len(completed),
-                "failed": len(failed),
-                "percent": round((succeeded_prints + failed_prints) * 100 / total_prints) if total_prints else 0,
-            },
-            "batches": [serialize_record(batch) for batch in batches],
-        })
-    return result
+    status_stmt = select(PodTask.status, func.count()).group_by(PodTask.status)
+    if scope is not None:
+        status_stmt = status_stmt.where(scope)
+    status_counts = {status.value: count for status, count in db.execute(status_stmt).all()}
+    active_stmt = select(func.count()).select_from(PodTask).where(PodTask.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]))
+    if scope is not None:
+        active_stmt = active_stmt.where(scope)
+    return {
+        "items": [
+            serialize_task_view(task, creator_names.get(task.created_by, "历史记录缺失"), template_names.get(task.template_id, "历史模板已删除"), include_details=False)
+            for task in tasks
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "status_counts": status_counts,
+        "active_count": db.scalar(active_stmt) or 0,
+    }
+
+
+@app.get("/tasks/{task_id}")
+def get_task_detail(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    task = db.get(PodTask, task_id)
+    if not can_access_task(task, user):
+        raise HTTPException(404, "任务不存在")
+    creator = db.get(User, task.created_by)
+    template = db.get(ProductTemplate, task.template_id)
+    return serialize_task_view(task, creator.name if creator else "历史记录缺失", template.name if template else "历史模板已删除", include_details=True)
 
 
 @app.get("/material-assets")
@@ -834,51 +869,47 @@ def list_ai_providers(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db:
 def admin_overview(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
     settings = get_settings()
     now = datetime.utcnow()
-    queued_batches = db.scalar(select(func.count()).select_from(PodTaskBatch).where(PodTaskBatch.status == TaskStatus.QUEUED)) or 0
-    running_batches = db.scalar(select(func.count()).select_from(PodTaskBatch).where(PodTaskBatch.status == TaskStatus.RUNNING)) or 0
-    failed_batches = db.scalar(select(func.count()).select_from(PodTaskBatch).where(PodTaskBatch.status == TaskStatus.FAILED)) or 0
-    retrying_batches = db.scalar(select(func.count()).select_from(PodTaskBatch).where(PodTaskBatch.status == TaskStatus.QUEUED, PodTaskBatch.attempts > 0)) or 0
-    oldest = db.scalar(select(func.min(PodTaskBatch.created_at)).where(PodTaskBatch.status == TaskStatus.QUEUED))
+    queued_tasks = db.scalar(select(func.count()).select_from(PodTask).where(PodTask.status == TaskStatus.QUEUED)) or 0
+    running_tasks = db.scalar(select(func.count()).select_from(PodTask).where(PodTask.status == TaskStatus.RUNNING)) or 0
+    failed_tasks = db.scalar(select(func.count()).select_from(PodTask).where(PodTask.status == TaskStatus.FAILED)) or 0
+    retrying_tasks = db.scalar(select(func.count()).select_from(PodTask).where(PodTask.status == TaskStatus.QUEUED, PodTask.submit_attempts > 0)) or 0
+    oldest = db.scalar(select(func.min(PodTask.created_at)).where(PodTask.status == TaskStatus.QUEUED))
     backlog_minutes = int((now - oldest).total_seconds() / 60) if oldest else 0
-    terminal_hour = db.scalars(select(PodTaskBatch).where(
-        PodTaskBatch.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED]),
-        PodTaskBatch.completed_at >= now - timedelta(hours=1),
+    terminal_hour = db.scalars(select(PodTask).where(
+        PodTask.status.in_([TaskStatus.AWAITING_SELECTION, TaskStatus.COMPLETED, TaskStatus.FAILED]),
+        PodTask.completed_at >= now - timedelta(hours=1),
     )).all()
-    terminal_15m = [batch for batch in terminal_hour if batch.completed_at and batch.completed_at >= now - timedelta(minutes=15)]
-    completed_hour = [batch for batch in terminal_hour if batch.status == TaskStatus.COMPLETED]
-    failed_hour = [batch for batch in terminal_hour if batch.status == TaskStatus.FAILED]
-    failed_15m = sum(batch.status == TaskStatus.FAILED for batch in terminal_15m)
+    terminal_15m = [task for task in terminal_hour if task.completed_at and task.completed_at >= now - timedelta(minutes=15)]
+    completed_hour = [task for task in terminal_hour if task.status != TaskStatus.FAILED]
+    failed_hour = [task for task in terminal_hour if task.status == TaskStatus.FAILED]
+    failed_15m = sum(task.status == TaskStatus.FAILED for task in terminal_15m)
     failure_rate_15m = round(failed_15m * 100 / len(terminal_15m), 1) if terminal_15m else 0.0
     model_rows = db.execute(
-        select(PodTask.provider, PodTask.provider_model, PodTaskBatch.status, func.count())
-        .join(PodTask, PodTask.id == PodTaskBatch.task_id)
-        .where(PodTaskBatch.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.FAILED]))
-        .group_by(PodTask.provider, PodTask.provider_model, PodTaskBatch.status)
+        select(PodTask.provider, PodTask.provider_model, PodTask.status, func.count())
+        .where(PodTask.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.FAILED]))
+        .group_by(PodTask.provider, PodTask.provider_model, PodTask.status)
     ).all()
     model_backlog: dict[tuple[str, str], dict] = {}
     for provider, model, status, count in model_rows:
         key = (provider or "unknown", model or "unknown")
         item = model_backlog.setdefault(key, {"provider": key[0], "model": key[1], "queued": 0, "running": 0, "failed": 0})
         item[status.value] = count
-    queue_alert = queued_batches > 200 or backlog_minutes > 10 or (len(terminal_15m) > 0 and failure_rate_15m > 10)
+    queue_alert = queued_tasks > 200 or backlog_minutes > 10 or (len(terminal_15m) > 0 and failure_rate_15m > 10)
     return {
         "companies": db.scalar(select(func.count()).select_from(Company)) or 0,
         "shops": db.scalar(select(func.count()).select_from(Shop)) or 0,
         "users": db.scalar(select(func.count()).select_from(User)) or 0,
         "tasks": db.scalar(select(func.count()).select_from(PodTask)) or 0,
-        "running_tasks": db.scalar(
-            select(func.count(func.distinct(PodTaskBatch.task_id)))
-            .where(PodTaskBatch.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]))
-        ) or 0,
+        "running_tasks": queued_tasks + running_tasks,
         "queue": {
-            "queued": queued_batches,
-            "running": running_batches,
-            "retrying": retrying_batches,
-            "failed": failed_batches,
+            "queued": queued_tasks,
+            "running": running_tasks,
+            "retrying": retrying_tasks,
+            "failed": failed_tasks,
             "oldest_wait_minutes": backlog_minutes,
-            "completed_batches_last_hour": len(completed_hour),
-            "completed_prints_last_hour": sum(len(batch.print_urls or []) for batch in completed_hour),
-            "failed_batches_last_hour": len(failed_hour),
+            "completed_tasks_last_hour": len(completed_hour),
+            "completed_prints_last_hour": sum(len((task.parameters or {}).get("print_urls") or []) for task in completed_hour),
+            "failed_tasks_last_hour": len(failed_hour),
             "failure_rate_15m": failure_rate_15m,
             "model_backlog": sorted(model_backlog.values(), key=lambda item: (-item["queued"], item["provider"], item["model"])),
             "alert": queue_alert,
@@ -951,299 +982,46 @@ def update_ai_provider(provider: str, payload: AIProviderSettingUpdate, user: Us
         for item in db.scalars(select(AIProviderSetting)).all():
             item.is_default = False
     setting.model = payload.model.strip(); setting.enabled = payload.enabled; setting.is_default = payload.is_default
-    setting.batch_size = payload.batch_size; setting.max_concurrency = payload.max_concurrency
+    setting.images_per_task = payload.images_per_task
     if setting.is_default is False and not db.scalar(select(AIProviderSetting).where(AIProviderSetting.is_default.is_(True), AIProviderSetting.provider != provider)) and payload.enabled:
         setting.is_default = True
     db.commit(); db.refresh(setting)
     return serialize_record(setting)
 
 
-def dispatch_batch(batch_id: int, countdown: int = 0, *, poll: bool = False) -> bool:
-    """投递后记录时间；失败时保留数据库状态，由 reconciler 自动补投。"""
-    try:
-        enqueue_batch(batch_id, countdown=countdown, poll=poll)
-    except Exception:
-        logger.exception("批次 #%s 投递到 Redis 失败，等待自动补投", batch_id)
-        return False
-    db = next(get_db())
-    try:
-        batch = db.get(PodTaskBatch, batch_id)
-        if batch:
-            batch.enqueued_at = datetime.utcnow()
-            db.commit()
-    finally:
-        db.close()
-    return True
+@app.get("/admin/task-queue-settings")
+def get_task_queue_settings(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
+    setting = db.get(TaskQueueSetting, 1)
+    if not setting:
+        setting = TaskQueueSetting(id=1, submit_interval_seconds=1, result_interval_seconds=5)
+        db.add(setting); db.commit(); db.refresh(setting)
+    return serialize_record(setting)
 
 
-def _map_batch_results(batch: PodTaskBatch, urls: list[str]) -> list[dict]:
-    """只接受可无歧义分组的结果；不能映射时拒绝静默错配。"""
-    print_urls = batch.print_urls or []
+@app.put("/admin/task-queue-settings")
+def update_task_queue_settings(payload: TaskQueueSettingUpdate, user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
+    setting = db.get(TaskQueueSetting, 1) or TaskQueueSetting(id=1)
+    setting.submit_interval_seconds = payload.submit_interval_seconds
+    setting.result_interval_seconds = payload.result_interval_seconds
+    db.add(setting); db.commit(); db.refresh(setting)
+    return serialize_record(setting)
+
+
+def map_task_results(task: PodTask, urls: list[str]) -> list[dict]:
+    """按任务内印花顺序映射第三方结果，拒绝无法无歧义对应的响应。"""
+    parameters = task.parameters or {}
+    print_urls = list(parameters.get("print_urls") or ([parameters["print_url"]] if parameters.get("print_url") else []))
     if not print_urls or not urls:
         raise ProviderError("模型未返回可映射的印花结果")
     if len(print_urls) == 1:
         return [{"print_url": print_urls[0], "result_urls": urls}]
     if len(urls) % len(print_urls) != 0:
-        raise ProviderError("模型返回结果数无法与本批印花逐一对应，请将该模型的单次 API 印花图数量设为 1")
+        raise ProviderError("模型返回结果数无法与任务印花逐一对应，请将单个任务印花图数量设为 1")
     per_print = len(urls) // len(print_urls)
     return [
         {"print_url": print_url, "result_urls": urls[index * per_print:(index + 1) * per_print]}
         for index, print_url in enumerate(print_urls)
     ]
-
-
-def update_parent_progress(db: Session, task: PodTask) -> None:
-    """根据持久化批次刷新父任务；成功批次永不因其他批次失败而被丢弃。"""
-    batches = db.scalars(select(PodTaskBatch).where(PodTaskBatch.task_id == task.id)).all()
-    task.total_batches = len(batches)
-    task.completed_batches = sum(batch.status == TaskStatus.COMPLETED for batch in batches)
-    task.failed_batches = sum(batch.status == TaskStatus.FAILED for batch in batches)
-    results = [url for batch in batches if batch.status == TaskStatus.COMPLETED for url in (batch.result_urls or [])]
-    task.result_urls = results
-    active = any(batch.status in (TaskStatus.QUEUED, TaskStatus.RUNNING) for batch in batches)
-    if task.status == TaskStatus.COMPLETED and results:
-        task.failure_reason = f"{task.failed_batches} 个批次失败，可单独重试" if task.failed_batches else None
-    elif results:
-        task.status = TaskStatus.AWAITING_SELECTION
-        task.failure_reason = f"{task.failed_batches} 个批次失败，可单独重试" if task.failed_batches else None
-    elif active:
-        if not task.result_urls and task.status != TaskStatus.COMPLETED:
-            task.status = TaskStatus.RUNNING
-    else:
-        task.status = TaskStatus.FAILED
-        task.failure_reason = task.failure_reason or "所有印花批次均失败"
-
-
-def _handle_batch_failure(batch_id: int, reason: str, lease_id: str | None = None) -> None:
-    db = next(get_db())
-    retry_countdown: int | None = None
-    try:
-        batch = db.scalar(select(PodTaskBatch).where(PodTaskBatch.id == batch_id).with_for_update())
-        if not batch or batch.status == TaskStatus.COMPLETED:
-            return
-        if lease_id and batch.status == TaskStatus.RUNNING and batch.lease_id != lease_id:
-            logger.warning("忽略批次 #%s 的过期失败回调，当前租约已变更", batch_id)
-            return
-        task = db.scalar(select(PodTask).where(PodTask.id == batch.task_id).with_for_update())
-        if not task:
-            return
-        batch.failure_reason = reason[:500]
-        batch.lease_id = None
-        if batch.attempts <= get_settings().task_max_retries:
-            batch.status = TaskStatus.QUEUED
-            batch.provider_task_id = None
-            batch.poll_attempts = 0
-            batch.enqueued_at = None
-            retry_countdown = min(300, 10 * (2 ** max(0, batch.attempts - 1)))
-        else:
-            batch.status = TaskStatus.FAILED
-            batch.completed_at = datetime.utcnow()
-        task.failure_reason = batch.failure_reason
-        update_parent_progress(db, task)
-        db.commit()
-    finally:
-        db.close()
-    if retry_countdown is not None:
-        dispatch_batch(batch_id, countdown=retry_countdown)
-
-
-def _complete_batch(batch_id: int, urls: list[str], lease_id: str | None = None) -> None:
-    db = next(get_db())
-    try:
-        batch = db.scalar(select(PodTaskBatch).where(PodTaskBatch.id == batch_id).with_for_update())
-        if not batch or batch.status == TaskStatus.COMPLETED:
-            return
-        if lease_id and batch.status == TaskStatus.RUNNING and batch.lease_id != lease_id:
-            logger.warning("忽略批次 #%s 的过期成功回调，当前租约已变更", batch_id)
-            return
-        task = db.scalar(select(PodTask).where(PodTask.id == batch.task_id).with_for_update())
-        if not task:
-            return
-        batch.result_map = _map_batch_results(batch, urls)
-        batch.result_urls = urls
-        batch.status = TaskStatus.COMPLETED
-        batch.failure_reason = None
-        batch.lease_id = None
-        batch.completed_at = datetime.utcnow()
-        update_parent_progress(db, task)
-        db.commit()
-    finally:
-        db.close()
-
-
-async def _heartbeat_batch(batch_id: int, lease_id: str) -> None:
-    """运行外部请求时定期续租，避免耗时 R2 落盘被误判为 worker 丢失。"""
-    while True:
-        await asyncio.sleep(60)
-        db = next(get_db())
-        try:
-            db.execute(
-                update(PodTaskBatch)
-                .where(
-                    PodTaskBatch.id == batch_id,
-                    PodTaskBatch.status == TaskStatus.RUNNING,
-                    PodTaskBatch.lease_id == lease_id,
-                )
-                .values(updated_at=datetime.utcnow())
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
-            logger.exception("批次 #%s 续租失败，下一周期继续尝试", batch_id)
-        finally:
-            db.close()
-
-
-async def run_generation_batch(batch_id: int, lease_id: str) -> None:
-    """原子领取批次；同一模型的并发检查由配置行锁串行化。"""
-    db = next(get_db())
-    heartbeat: asyncio.Task | None = None
-    try:
-        batch = db.scalar(select(PodTaskBatch).where(PodTaskBatch.id == batch_id).with_for_update())
-        if not batch or batch.status != TaskStatus.QUEUED:
-            return
-        task = db.get(PodTask, batch.task_id)
-        template = db.get(ProductTemplate, task.template_id) if task else None
-        setting = db.scalar(select(AIProviderSetting).where(AIProviderSetting.provider == task.provider).with_for_update()) if task else None
-        if not task or not template or not setting or not setting.enabled:
-            batch.attempts += 1
-            db.commit()
-            raise ProviderError("任务所选模型已停用或产品模板不存在")
-        running_for_model = db.scalar(
-            select(func.count()).select_from(PodTaskBatch)
-            .join(PodTask, PodTask.id == PodTaskBatch.task_id)
-            .where(PodTask.provider == task.provider, PodTask.provider_model == task.provider_model, PodTaskBatch.status == TaskStatus.RUNNING)
-        ) or 0
-        if running_for_model >= max(1, setting.max_concurrency or 1):
-            batch.enqueued_at = None
-            db.commit()
-            return
-        batch.status = TaskStatus.RUNNING
-        batch.attempts += 1
-        batch.lease_id = lease_id
-        batch.started_at = batch.started_at or datetime.utcnow()
-        batch.enqueued_at = None
-        if not task.result_urls and task.status != TaskStatus.COMPLETED:
-            task.status = TaskStatus.RUNNING
-        db.commit()
-        heartbeat = asyncio.create_task(_heartbeat_batch(batch_id, lease_id))
-
-        request = GenerationRequest(
-            model=task.provider_model, prompt=build_prompt(task.parameters, template.name),
-            template_url=template.cover_url or "", print_urls=batch.print_urls or [],
-            ratio=task.parameters["ratio"], quality=task.parameters["quality"],
-            company_id=task.company_id, task_id=task.id,
-            idempotency_key=f"haitoro-task-{task.id}-batch-{batch.id}",
-        )
-        if task.provider == "grsai":
-            initial_result, _, _ = await submit_async_generation(task.provider, request)
-            provider_task_id = initial_result.get("id")
-            if not isinstance(provider_task_id, str) or not provider_task_id:
-                raise ProviderError("grsai 异步任务未返回任务 ID")
-            batch.provider_task_id = provider_task_id
-            batch.lease_id = None
-            task.provider_task_id = task.provider_task_id or provider_task_id
-            db.commit()
-            dispatch_batch(batch.id, countdown=get_settings().grsai_poll_seconds, poll=True)
-            return
-        urls = await generate(task.provider, request)
-        urls = await persist_generated_images(urls, task.company_id, task.id)
-        _complete_batch(batch.id, urls, lease_id)
-    except Exception as exc:
-        db.rollback()
-        logger.exception("AI 批次 #%s 生成过程异常", batch_id)
-        _handle_batch_failure(batch_id, str(exc), lease_id)
-    finally:
-        if heartbeat:
-            heartbeat.cancel()
-            try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
-        db.close()
-
-
-async def poll_generation_batch(batch_id: int, lease_id: str) -> None:
-    """Grsai 单次轮询；未完成时重新排期，不占用 worker 休眠。"""
-    db = next(get_db())
-    heartbeat: asyncio.Task | None = None
-    try:
-        batch = db.scalar(select(PodTaskBatch).where(PodTaskBatch.id == batch_id).with_for_update())
-        if not batch or batch.status != TaskStatus.RUNNING or not batch.provider_task_id or batch.lease_id:
-            return
-        task = db.get(PodTask, batch.task_id)
-        if not task:
-            raise ProviderError("父任务不存在")
-        batch.lease_id = lease_id
-        batch.poll_attempts += 1
-        provider_task_id = batch.provider_task_id
-        poll_attempts = batch.poll_attempts
-        company_id, task_id = task.company_id, task.id
-        db.commit()
-        heartbeat = asyncio.create_task(_heartbeat_batch(batch_id, lease_id))
-        urls = await poll_async_generation(task.provider, provider_task_id)
-        if urls is None:
-            if poll_attempts >= get_settings().grsai_max_poll_attempts:
-                raise ProviderError("grsai 任务查询超时，请稍后重试")
-            batch = db.scalar(select(PodTaskBatch).where(PodTaskBatch.id == batch_id).with_for_update())
-            if not batch or batch.status != TaskStatus.RUNNING or batch.lease_id != lease_id:
-                return
-            batch.lease_id = None
-            db.commit()
-            dispatch_batch(batch_id, countdown=get_settings().grsai_poll_seconds, poll=True)
-            return
-        urls = await persist_generated_images(urls, company_id, task_id)
-        _complete_batch(batch_id, urls, lease_id)
-    except Exception as exc:
-        db.rollback()
-        logger.exception("AI 批次 #%s 查询结果异常", batch_id)
-        _handle_batch_failure(batch_id, str(exc), lease_id)
-    finally:
-        if heartbeat:
-            heartbeat.cancel()
-            try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
-        db.close()
-
-
-def reconcile_batches() -> None:
-    """补投 Redis 双写遗漏，并恢复 worker 异常退出后遗留的批次。"""
-    db = next(get_db())
-    queued_ids: list[int] = []
-    poll_ids: list[int] = []
-    try:
-        now = datetime.utcnow()
-        stale_enqueue = now - timedelta(seconds=90)
-        stale_running = now - timedelta(seconds=get_settings().task_stale_seconds)
-        queued = db.scalars(select(PodTaskBatch).where(
-            PodTaskBatch.status == TaskStatus.QUEUED,
-            or_(PodTaskBatch.enqueued_at.is_(None), PodTaskBatch.enqueued_at < stale_enqueue),
-        ).limit(500)).all()
-        queued_ids = [batch.id for batch in queued]
-        running = db.scalars(select(PodTaskBatch).where(
-            PodTaskBatch.status == TaskStatus.RUNNING, PodTaskBatch.updated_at < stale_running,
-        ).limit(500)).all()
-        for batch in running:
-            if batch.provider_task_id:
-                batch.lease_id = None
-                batch.enqueued_at = None
-                poll_ids.append(batch.id)
-            else:
-                batch.status = TaskStatus.QUEUED
-                batch.lease_id = None
-                batch.enqueued_at = None
-                queued_ids.append(batch.id)
-        db.commit()
-    finally:
-        db.close()
-    for batch_id in queued_ids:
-        dispatch_batch(batch_id)
-    for batch_id in poll_ids:
-        dispatch_batch(batch_id, poll=True)
-
-
 async def persist_generated_images(urls: list[str], company_id: int, task_id: int) -> list[str]:
     """将模型供应商的临时 URL 复制到 R2，任务结果不依赖第三方 URL 的有效期。"""
     if not get_settings().ai_generated_image_upload_to_r2:
@@ -1297,46 +1075,56 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
         raise HTTPException(400, "暂无已启用的默认 AI 模型，请联系超级管理员配置")
     if not provider_has_credentials(provider.provider):
         raise HTTPException(400, f"所选 AI 模型尚未配置 {provider_credential_env(provider.provider)}，请联系管理员配置")
-    batch_size = max(1, provider.batch_size or 1)
-    chunks = [print_urls[start:start + batch_size] for start in range(0, len(print_urls), batch_size)]
-    task = PodTask(company_id=user.company_id, template_id=template.id, created_by=user.id, status=TaskStatus.QUEUED, parameters=payload.model_dump() | {"print_urls": print_urls, "print_url": print_urls[0]}, result_urls=[], provider=provider.provider, provider_model=provider.model, total_prints=len(print_urls))
-    db.add(task); db.flush()
-    batches = [PodTaskBatch(task_id=task.id, batch_index=index, status=TaskStatus.QUEUED, print_urls=chunk, result_urls=[], result_map=[])
-               for index, chunk in enumerate(chunks, start=1)]
-    db.add_all(batches); task.total_batches = len(batches)
-    db.commit(); db.refresh(task)
-    for batch in batches:
-        dispatch_batch(batch.id)
-    return serialize_record(task)
+    images_per_task = max(1, provider.images_per_task or 1)
+    chunks = [print_urls[start:start + images_per_task] for start in range(0, len(print_urls), images_per_task)]
+    common_parameters = payload.model_dump(exclude={"print_urls", "print_url"})
+    tasks = [
+        PodTask(
+            company_id=user.company_id,
+            template_id=template.id,
+            created_by=user.id,
+            status=TaskStatus.QUEUED,
+            parameters=common_parameters | {"print_urls": chunk, "print_url": chunk[0]},
+            result_urls=[],
+            result_map=[],
+            provider=provider.provider,
+            provider_model=provider.model,
+        )
+        for chunk in chunks
+    ]
+    db.add_all(tasks); db.commit()
+    for task in tasks:
+        db.refresh(task)
+    return {"items": [serialize_record(task) for task in tasks], "total": len(tasks)}
 
 
 @app.get("/ai-providers")
 def list_available_ai_providers(user: User = Depends(current_user), db: Session = Depends(get_db)):
     """运营端仅能查看可用模型及默认模型，不暴露任何凭据配置。"""
     return [
-        {"provider": setting.provider, "display_name": setting.display_name, "model": setting.model, "is_default": setting.is_default, "batch_size": setting.batch_size}
+        {"provider": setting.provider, "display_name": setting.display_name, "model": setting.model, "is_default": setting.is_default, "images_per_task": setting.images_per_task}
         for setting in db.scalars(select(AIProviderSetting).where(AIProviderSetting.enabled.is_(True)).order_by(AIProviderSetting.provider)).all()
     ]
 
 
-@app.post("/tasks/{task_id}/retry-result")
-def retry_task_result(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """只重试失败批次，已成功的印花结果会保留。"""
+@app.post("/tasks/{task_id}/retry")
+def retry_task(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """将一条失败任务完整重置为待提交状态。"""
     task = db.get(PodTask, task_id)
     if not can_access_task(task, user):
         raise HTTPException(404, "任务不存在")
-    batches = db.scalars(select(PodTaskBatch).where(PodTaskBatch.task_id == task.id, PodTaskBatch.status == TaskStatus.FAILED).with_for_update()).all()
-    if not batches:
-        raise HTTPException(400, "当前任务没有可重试的失败批次")
-    for batch in batches:
-        batch.status = TaskStatus.QUEUED; batch.attempts = 0; batch.poll_attempts = 0
-        batch.failure_reason = None; batch.provider_task_id = None; batch.lease_id = None
-        batch.enqueued_at = None; batch.completed_at = None
+    if task.status != TaskStatus.FAILED:
+        raise HTTPException(400, "只有失败任务可以重试")
+    task.status = TaskStatus.QUEUED
+    task.provider_task_id = None
     task.failure_reason = None
-    update_parent_progress(db, task)
+    task.result_urls = []
+    task.result_map = []
+    task.selected_result_url = None
+    task.submit_attempts = 0
+    task.submitted_at = None
+    task.completed_at = None
     db.commit(); db.refresh(task)
-    for batch in batches:
-        dispatch_batch(batch.id)
     return serialize_record(task)
 
 
