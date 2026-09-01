@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import hashlib
 import hmac
 import json
@@ -7,23 +8,23 @@ import re
 import secrets
 import string
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from uuid import uuid4
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
-from .models import AIProviderSetting, Company, MaterialAsset, NonAIPointRule, PointAccount, PointLedger, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
-from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LedgerOut, LoginInput, MaterialAssetsTemplateUpdate, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, NonAIPointRuleCreate, NonAIPointRuleUpdate, PodTaskCreate, RechargeInput, ShopManagerUpdate, ShopOut, TaskDraftCreate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UserOut
+from .models import AIProviderSetting, Company, MaterialAsset, PodTask, PodTaskBatch, ProductDraft, ProductTemplate, Role, Shop, TaskStatus, TemplateGroup, User, UserShop
+from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LoginInput, MaterialAssetsTemplateUpdate, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskDraftCreate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
-from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, generate_draft_title, provider_credential_env, provider_has_credentials, resume_async_generation, submit_async_generation, wait_for_async_generation
+from .ai_providers import GenerationRequest, ProviderError, build_prompt, generate, generate_draft_title, poll_async_generation, provider_credential_env, provider_has_credentials, submit_async_generation
+from .celery_app import enqueue_batch
 from .credentials import decrypt_secret, encrypt_secret
-from .storage import StorageError, is_public_r2_url, upload_image_bytes_async
+from .storage import StorageError, create_image_upload_url, is_company_r2_url, is_public_r2_url, upload_image_bytes_async
 import httpx
 
 
@@ -53,8 +54,6 @@ def seed(db: Session) -> None:
     if builtin_shop and not db.scalar(select(ProductDraft.id).where(ProductDraft.shop_id == builtin_shop.id).limit(1)):
         db.execute(delete(UserShop).where(UserShop.shop_id == builtin_shop.id))
         db.delete(builtin_shop)
-    if not db.get(PointAccount, company.id):
-        db.add(PointAccount(company_id=company.id, available=1280, frozen=120))
     if not db.get(AIProviderSetting, "seedream"):
         db.add(AIProviderSetting(provider="seedream", display_name="Seedream", model="doubao-seedream-4-0-250828", enabled=True, is_default=False))
     if not db.get(AIProviderSetting, "qwen"):
@@ -68,14 +67,6 @@ def seed(db: Session) -> None:
         db.add(AIProviderSetting(provider="grsai", display_name="Grsai", model="nano-banana-fast", enabled=True, is_default=True))
     elif grsai_setting.display_name == "Nano Banana Fast":
         grsai_setting.display_name = "Grsai"
-    for operation_code, display_name, points, description in (
-        ("product_draft_create", "创建商品草稿", 0, "从已选定的创作结果创建商品草稿"),
-        ("product_publish", "发布商品", 0, "将商品发布到已授权店铺"),
-        ("shop_sync", "同步店铺", 0, "从妙手同步店铺信息"),
-    ):
-        if not db.scalar(select(NonAIPointRule.id).where(NonAIPointRule.operation_code == operation_code)):
-            db.add(NonAIPointRule(operation_code=operation_code, display_name=display_name, points=points, description=description))
-
     # 启动时只补齐必要的演示配置，绝不删除用户的模板、分类或历史数据。
     db.commit()
 
@@ -84,6 +75,23 @@ def ensure_schema() -> None:
     """轻量兼容迁移。关系一致性由应用层维护；MySQL 不使用外键。"""
     columns = {column["name"] for column in inspect(engine).get_columns("product_templates")}
     with engine.begin() as connection:
+        # 一次性清理已经下线的旧计费数据结构；重复启动时无副作用。
+        inspector = inspect(connection)
+        quote = connection.dialect.identifier_preparer.quote
+        table_names = set(inspector.get_table_names())
+        for table_name in ("non_ai_point_rules", "point_ledgers", "point_accounts"):
+            if table_name in table_names:
+                connection.execute(text(f"DROP TABLE {quote(table_name)}"))
+        for table_name, obsolete_columns in (
+            ("pod_tasks", ("estimated_points", "actual_points", "refunded_points")),
+            ("pod_task_batches", ("estimated_points", "settled_points", "refunded_at", "settled_at")),
+        ):
+            if table_name not in table_names:
+                continue
+            existing_columns = {column["name"] for column in inspect(connection).get_columns(table_name)}
+            for column_name in obsolete_columns:
+                if column_name in existing_columns:
+                    connection.execute(text(f"ALTER TABLE {quote(table_name)} DROP COLUMN {quote(column_name)}"))
         # `print_areas` 已从产品模板定义中移除。旧库中若仍保留 NOT NULL 的
         # 无默认值列，会导致 ORM 新建模板时 INSERT 失败（MySQL 1364）。
         if "print_areas" in columns:
@@ -141,9 +149,32 @@ def ensure_schema() -> None:
             WHERE template_id IS NULL AND source_task_id IS NOT NULL
         """))
         task_columns = {column["name"] for column in inspect(engine).get_columns("pod_tasks")}
-        for column, definition in (("provider", "VARCHAR(40)"), ("provider_model", "VARCHAR(120)"), ("provider_task_id", "VARCHAR(160)"), ("failure_reason", "VARCHAR(500)")):
+        for column, definition in (("provider", "VARCHAR(40)"), ("provider_model", "VARCHAR(120)"), ("provider_task_id", "VARCHAR(160)"), ("failure_reason", "VARCHAR(500)"), ("total_prints", "INTEGER DEFAULT 0"), ("total_batches", "INTEGER DEFAULT 0"), ("completed_batches", "INTEGER DEFAULT 0"), ("failed_batches", "INTEGER DEFAULT 0")):
             if column not in task_columns:
                 connection.execute(text(f"ALTER TABLE pod_tasks ADD COLUMN {column} {definition}"))
+        provider_columns = {column["name"] for column in inspect(engine).get_columns("ai_provider_settings")}
+        for column, definition in (("batch_size", "INTEGER DEFAULT 1"), ("max_concurrency", "INTEGER DEFAULT 2")):
+            if column not in provider_columns:
+                connection.execute(text(f"ALTER TABLE ai_provider_settings ADD COLUMN {column} {definition}"))
+        batch_columns = {column["name"] for column in inspect(engine).get_columns("pod_task_batches")}
+        for column, definition in (
+            ("result_map", "JSON"), ("lease_id", "VARCHAR(80)"),
+            ("poll_attempts", "INTEGER DEFAULT 0"), ("enqueued_at", "DATETIME"),
+            ("started_at", "DATETIME"), ("completed_at", "DATETIME"),
+        ):
+            if column not in batch_columns:
+                connection.execute(text(f"ALTER TABLE pod_task_batches ADD COLUMN {column} {definition}"))
+        task_indexes = {index["name"] for index in inspect(connection).get_indexes("pod_tasks")}
+        if "ix_pod_tasks_provider_model" not in task_indexes:
+            connection.execute(text("CREATE INDEX ix_pod_tasks_provider_model ON pod_tasks (provider, provider_model)"))
+        batch_indexes = {index["name"] for index in inspect(connection).get_indexes("pod_task_batches")}
+        for index_name, columns_sql in (
+            ("ix_pod_batches_status_enqueued", "status, enqueued_at"),
+            ("ix_pod_batches_status_updated", "status, updated_at"),
+            ("ix_pod_batches_status_completed", "status, completed_at"),
+        ):
+            if index_name not in batch_indexes:
+                connection.execute(text(f"CREATE INDEX {index_name} ON pod_task_batches ({columns_sql})"))
         if "shop_id" in task_columns:
             connection.execute(text("ALTER TABLE pod_tasks DROP COLUMN shop_id"))
         company_columns = {column["name"] for column in inspect(engine).get_columns("companies")}
@@ -211,20 +242,6 @@ def allowed_shop_ids(db: Session, user: User) -> set[int]:
     if user.role == Role.COMPANY_ADMIN:
         return set(db.scalars(select(Shop.id).where(Shop.company_id == user.company_id)).all())
     return set(db.scalars(select(UserShop.shop_id).where(UserShop.user_id == user.id)).all())
-
-
-def serialize_ledger(rows: list[PointLedger], db: Session) -> list[LedgerOut]:
-    """积分流水保留操作人 ID，同时返回便于展示的操作人名称。"""
-    actor_ids = {row.actor_id for row in rows if row.actor_id is not None}
-    actor_names = {
-        actor.id: actor.name
-        for actor in db.scalars(select(User).where(User.id.in_(actor_ids))).all()
-    } if actor_ids else {}
-    return [LedgerOut(
-        id=row.id, actor_id=row.actor_id, actor_name=actor_names.get(row.actor_id, "系统"),
-        entry_type=row.entry_type, amount=row.amount, balance_after=row.balance_after,
-        note=row.note, created_at=row.created_at,
-    ) for row in rows]
 
 
 def timestamp_ms(value: datetime) -> int:
@@ -686,6 +703,16 @@ async def upload_creative_asset(file: UploadFile = File(...), user: User = Depen
     return await save_image_upload(file, user.company_id, "creative")
 
 
+@app.post("/uploads/creative-asset/presign")
+def presign_creative_asset(payload: UploadPresignInput, user: User = Depends(current_user)):
+    if payload.content_type not in {"image/jpeg", "image/png", "image/webp"}:
+        raise HTTPException(400, "请上传 JPG、PNG 或 WebP 图片")
+    try:
+        return create_image_upload_url(payload.content_type, payload.content_length, user.company_id, "creative")
+    except StorageError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
 @app.post("/material-assets/upload")
 async def upload_material_assets(files: list[UploadFile] = File(...), template_id: int = Form(...), user: User = Depends(current_user), db: Session = Depends(get_db)):
     """上传一张或多张本地图片到当前公司的素材库。"""
@@ -725,7 +752,38 @@ def list_tasks(user: User = Depends(current_user), db: Session = Depends(get_db)
     creator_names = {member.id: member.name for member in db.scalars(select(User).where(User.id.in_(creator_ids))).all()} if creator_ids else {}
     template_ids = {task.template_id for task in tasks}
     template_names = {template.id: template.name for template in db.scalars(select(ProductTemplate).where(ProductTemplate.id.in_(template_ids))).all()} if template_ids else {}
-    return [serialize_record(task) | {"created_by_name": creator_names.get(task.created_by, "历史记录缺失"), "template_name": template_names.get(task.template_id, "历史模板已删除")} for task in tasks]
+    batch_rows = db.scalars(select(PodTaskBatch).where(PodTaskBatch.task_id.in_([task.id for task in tasks]))).all() if tasks else []
+    batches_by_task: dict[int, list[PodTaskBatch]] = {}
+    for batch in batch_rows:
+        batches_by_task.setdefault(batch.task_id, []).append(batch)
+    result = []
+    for task in tasks:
+        batches = sorted(batches_by_task.get(task.id, []), key=lambda item: item.batch_index)
+        completed = [batch for batch in batches if batch.status == TaskStatus.COMPLETED]
+        failed = [batch for batch in batches if batch.status == TaskStatus.FAILED]
+        queued = sum(batch.status == TaskStatus.QUEUED for batch in batches)
+        running = sum(batch.status == TaskStatus.RUNNING for batch in batches)
+        succeeded_prints = sum(len(batch.print_urls or []) for batch in completed)
+        failed_prints = sum(len(batch.print_urls or []) for batch in failed)
+        total_prints = task.total_prints or sum(len(batch.print_urls or []) for batch in batches)
+        result.append(serialize_record(task) | {
+            "created_by_name": creator_names.get(task.created_by, "历史记录缺失"),
+            "template_name": template_names.get(task.template_id, "历史模板已删除"),
+            "progress": {
+                "uploaded": total_prints,
+                "total_prints": total_prints,
+                "succeeded_prints": succeeded_prints,
+                "failed_prints": failed_prints,
+                "total": len(batches) or task.total_batches,
+                "queued": queued,
+                "running": running,
+                "completed": len(completed),
+                "failed": len(failed),
+                "percent": round((succeeded_prints + failed_prints) * 100 / total_prints) if total_prints else 0,
+            },
+            "batches": [serialize_record(batch) for batch in batches],
+        })
+    return result
 
 
 @app.get("/material-assets")
@@ -772,50 +830,59 @@ def list_ai_providers(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db:
     ]
 
 
-@app.get("/admin/non-ai-point-rules")
-def list_non_ai_point_rules(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
-    return [serialize_record(rule) for rule in db.scalars(select(NonAIPointRule).order_by(NonAIPointRule.id.desc())).all()]
-
-
-@app.post("/admin/non-ai-point-rules")
-def create_non_ai_point_rule(payload: NonAIPointRuleCreate, user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
-    operation_code = payload.operation_code.strip().lower()
-    if db.scalar(select(NonAIPointRule.id).where(NonAIPointRule.operation_code == operation_code)):
-        raise HTTPException(400, "操作代码已存在")
-    rule = NonAIPointRule(operation_code=operation_code, display_name=payload.display_name.strip(), points=payload.points, enabled=payload.enabled, description=payload.description.strip() if payload.description else None)
-    db.add(rule); db.commit(); db.refresh(rule)
-    return serialize_record(rule)
-
-
-@app.put("/admin/non-ai-point-rules/{rule_id}")
-def update_non_ai_point_rule(rule_id: int, payload: NonAIPointRuleUpdate, user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
-    rule = db.get(NonAIPointRule, rule_id)
-    if not rule:
-        raise HTTPException(404, "积分消耗配置不存在")
-    rule.display_name = payload.display_name.strip(); rule.points = payload.points; rule.enabled = payload.enabled
-    rule.description = payload.description.strip() if payload.description else None
-    db.commit(); db.refresh(rule)
-    return serialize_record(rule)
-
-
-@app.delete("/admin/non-ai-point-rules/{rule_id}")
-def delete_non_ai_point_rule(rule_id: int, user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
-    rule = db.get(NonAIPointRule, rule_id)
-    if not rule:
-        raise HTTPException(404, "积分消耗配置不存在")
-    db.delete(rule); db.commit()
-    return {"deleted": True}
-
-
 @app.get("/admin/overview")
 def admin_overview(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
     settings = get_settings()
+    now = datetime.utcnow()
+    queued_batches = db.scalar(select(func.count()).select_from(PodTaskBatch).where(PodTaskBatch.status == TaskStatus.QUEUED)) or 0
+    running_batches = db.scalar(select(func.count()).select_from(PodTaskBatch).where(PodTaskBatch.status == TaskStatus.RUNNING)) or 0
+    failed_batches = db.scalar(select(func.count()).select_from(PodTaskBatch).where(PodTaskBatch.status == TaskStatus.FAILED)) or 0
+    retrying_batches = db.scalar(select(func.count()).select_from(PodTaskBatch).where(PodTaskBatch.status == TaskStatus.QUEUED, PodTaskBatch.attempts > 0)) or 0
+    oldest = db.scalar(select(func.min(PodTaskBatch.created_at)).where(PodTaskBatch.status == TaskStatus.QUEUED))
+    backlog_minutes = int((now - oldest).total_seconds() / 60) if oldest else 0
+    terminal_hour = db.scalars(select(PodTaskBatch).where(
+        PodTaskBatch.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED]),
+        PodTaskBatch.completed_at >= now - timedelta(hours=1),
+    )).all()
+    terminal_15m = [batch for batch in terminal_hour if batch.completed_at and batch.completed_at >= now - timedelta(minutes=15)]
+    completed_hour = [batch for batch in terminal_hour if batch.status == TaskStatus.COMPLETED]
+    failed_hour = [batch for batch in terminal_hour if batch.status == TaskStatus.FAILED]
+    failed_15m = sum(batch.status == TaskStatus.FAILED for batch in terminal_15m)
+    failure_rate_15m = round(failed_15m * 100 / len(terminal_15m), 1) if terminal_15m else 0.0
+    model_rows = db.execute(
+        select(PodTask.provider, PodTask.provider_model, PodTaskBatch.status, func.count())
+        .join(PodTask, PodTask.id == PodTaskBatch.task_id)
+        .where(PodTaskBatch.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.FAILED]))
+        .group_by(PodTask.provider, PodTask.provider_model, PodTaskBatch.status)
+    ).all()
+    model_backlog: dict[tuple[str, str], dict] = {}
+    for provider, model, status, count in model_rows:
+        key = (provider or "unknown", model or "unknown")
+        item = model_backlog.setdefault(key, {"provider": key[0], "model": key[1], "queued": 0, "running": 0, "failed": 0})
+        item[status.value] = count
+    queue_alert = queued_batches > 200 or backlog_minutes > 10 or (len(terminal_15m) > 0 and failure_rate_15m > 10)
     return {
         "companies": db.scalar(select(func.count()).select_from(Company)) or 0,
         "shops": db.scalar(select(func.count()).select_from(Shop)) or 0,
         "users": db.scalar(select(func.count()).select_from(User)) or 0,
         "tasks": db.scalar(select(func.count()).select_from(PodTask)) or 0,
-        "running_tasks": db.scalar(select(func.count()).select_from(PodTask).where(PodTask.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]))) or 0,
+        "running_tasks": db.scalar(
+            select(func.count(func.distinct(PodTaskBatch.task_id)))
+            .where(PodTaskBatch.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]))
+        ) or 0,
+        "queue": {
+            "queued": queued_batches,
+            "running": running_batches,
+            "retrying": retrying_batches,
+            "failed": failed_batches,
+            "oldest_wait_minutes": backlog_minutes,
+            "completed_batches_last_hour": len(completed_hour),
+            "completed_prints_last_hour": sum(len(batch.print_urls or []) for batch in completed_hour),
+            "failed_batches_last_hour": len(failed_hour),
+            "failure_rate_15m": failure_rate_15m,
+            "model_backlog": sorted(model_backlog.values(), key=lambda item: (-item["queued"], item["provider"], item["model"])),
+            "alert": queue_alert,
+        },
         "credential_status": {
             "seedream": bool(settings.seedream_api_key),
             "qwen": bool(settings.qwen_api_key),
@@ -837,7 +904,6 @@ def list_admin_companies(user: User = Depends(require_roles(Role.SUPER_ADMIN)), 
     companies = db.scalars(select(Company).order_by(Company.id.desc())).all()
     result = []
     for company in companies:
-        account = db.get(PointAccount, company.id)
         result.append({
             "id": company.id,
             "name": company.name,
@@ -845,7 +911,6 @@ def list_admin_companies(user: User = Depends(require_roles(Role.SUPER_ADMIN)), 
             "miaoshou_configured": bool(company.miaoshou_app_id and company.miaoshou_secret_encrypted),
             "created_at": timestamp_ms(company.created_at),
             "admin_users": [UserOut.model_validate(item) for item in db.scalars(select(User).where(User.company_id == company.id, User.role == Role.COMPANY_ADMIN).order_by(User.id)).all()],
-            "points": {"available": account.available if account else 0, "frozen": account.frozen if account else 0},
         })
     return result
 
@@ -871,20 +936,8 @@ def create_admin_company(payload: AdminCompanyCreate, user: User = Depends(requi
     db.add(company); db.flush()
     admin = User(company_id=company.id, email=str(payload.admin_email), name=payload.admin_name.strip(), password_hash=hash_password(payload.admin_password), role=Role.COMPANY_ADMIN)
     db.add(admin)
-    account = PointAccount(company_id=company.id, available=payload.initial_points, frozen=0)
-    db.add(account)
-    if payload.initial_points:
-        db.add(PointLedger(company_id=company.id, actor_id=user.id, entry_type="initial_recharge", amount=payload.initial_points, balance_after=payload.initial_points, note="开通公司初始积分"))
     db.commit(); db.refresh(company)
     return {"id": company.id, "name": company.name}
-
-
-@app.get("/admin/points/ledger")
-def list_admin_point_ledger(company_id: int, limit: int = 100, user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
-    if not db.get(Company, company_id):
-        raise HTTPException(404, "公司不存在")
-    rows = db.scalars(select(PointLedger).where(PointLedger.company_id == company_id).order_by(PointLedger.id.desc()).limit(min(max(limit, 1), 500))).all()
-    return serialize_ledger(rows, db)
 
 
 @app.put("/admin/ai-providers/{provider}")
@@ -898,92 +951,297 @@ def update_ai_provider(provider: str, payload: AIProviderSettingUpdate, user: Us
         for item in db.scalars(select(AIProviderSetting)).all():
             item.is_default = False
     setting.model = payload.model.strip(); setting.enabled = payload.enabled; setting.is_default = payload.is_default
+    setting.batch_size = payload.batch_size; setting.max_concurrency = payload.max_concurrency
     if setting.is_default is False and not db.scalar(select(AIProviderSetting).where(AIProviderSetting.is_default.is_(True), AIProviderSetting.provider != provider)) and payload.enabled:
         setting.is_default = True
     db.commit(); db.refresh(setting)
     return serialize_record(setting)
 
 
-def settle_failed_task(task_id: int, reason: str, *, refund_points: bool = True) -> None:
+def dispatch_batch(batch_id: int, countdown: int = 0, *, poll: bool = False) -> bool:
+    """投递后记录时间；失败时保留数据库状态，由 reconciler 自动补投。"""
+    try:
+        enqueue_batch(batch_id, countdown=countdown, poll=poll)
+    except Exception:
+        logger.exception("批次 #%s 投递到 Redis 失败，等待自动补投", batch_id)
+        return False
     db = next(get_db())
     try:
-        task = db.get(PodTask, task_id)
-        if not task or task.status != TaskStatus.RUNNING:
+        batch = db.get(PodTaskBatch, batch_id)
+        if batch:
+            batch.enqueued_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+    return True
+
+
+def _map_batch_results(batch: PodTaskBatch, urls: list[str]) -> list[dict]:
+    """只接受可无歧义分组的结果；不能映射时拒绝静默错配。"""
+    print_urls = batch.print_urls or []
+    if not print_urls or not urls:
+        raise ProviderError("模型未返回可映射的印花结果")
+    if len(print_urls) == 1:
+        return [{"print_url": print_urls[0], "result_urls": urls}]
+    if len(urls) % len(print_urls) != 0:
+        raise ProviderError("模型返回结果数无法与本批印花逐一对应，请将该模型的单次 API 印花图数量设为 1")
+    per_print = len(urls) // len(print_urls)
+    return [
+        {"print_url": print_url, "result_urls": urls[index * per_print:(index + 1) * per_print]}
+        for index, print_url in enumerate(print_urls)
+    ]
+
+
+def update_parent_progress(db: Session, task: PodTask) -> None:
+    """根据持久化批次刷新父任务；成功批次永不因其他批次失败而被丢弃。"""
+    batches = db.scalars(select(PodTaskBatch).where(PodTaskBatch.task_id == task.id)).all()
+    task.total_batches = len(batches)
+    task.completed_batches = sum(batch.status == TaskStatus.COMPLETED for batch in batches)
+    task.failed_batches = sum(batch.status == TaskStatus.FAILED for batch in batches)
+    results = [url for batch in batches if batch.status == TaskStatus.COMPLETED for url in (batch.result_urls or [])]
+    task.result_urls = results
+    active = any(batch.status in (TaskStatus.QUEUED, TaskStatus.RUNNING) for batch in batches)
+    if task.status == TaskStatus.COMPLETED and results:
+        task.failure_reason = f"{task.failed_batches} 个批次失败，可单独重试" if task.failed_batches else None
+    elif results:
+        task.status = TaskStatus.AWAITING_SELECTION
+        task.failure_reason = f"{task.failed_batches} 个批次失败，可单独重试" if task.failed_batches else None
+    elif active:
+        if not task.result_urls and task.status != TaskStatus.COMPLETED:
+            task.status = TaskStatus.RUNNING
+    else:
+        task.status = TaskStatus.FAILED
+        task.failure_reason = task.failure_reason or "所有印花批次均失败"
+
+
+def _handle_batch_failure(batch_id: int, reason: str, lease_id: str | None = None) -> None:
+    db = next(get_db())
+    retry_countdown: int | None = None
+    try:
+        batch = db.scalar(select(PodTaskBatch).where(PodTaskBatch.id == batch_id).with_for_update())
+        if not batch or batch.status == TaskStatus.COMPLETED:
             return
-        account = db.get(PointAccount, task.company_id)
-        if refund_points:
-            account.frozen -= task.estimated_points; account.available += task.estimated_points
-        task.status = TaskStatus.FAILED; task.failure_reason = reason[:500]
-        logger.error("AI 任务 #%s 失败：%s", task_id, task.failure_reason)
-        if refund_points:
-            db.add(PointLedger(company_id=task.company_id, actor_id=task.created_by, task_id=task.id, entry_type="ai_refund", amount=task.estimated_points, balance_after=account.available, note="AI 任务失败，已退回预冻结积分"))
+        if lease_id and batch.status == TaskStatus.RUNNING and batch.lease_id != lease_id:
+            logger.warning("忽略批次 #%s 的过期失败回调，当前租约已变更", batch_id)
+            return
+        task = db.scalar(select(PodTask).where(PodTask.id == batch.task_id).with_for_update())
+        if not task:
+            return
+        batch.failure_reason = reason[:500]
+        batch.lease_id = None
+        if batch.attempts <= get_settings().task_max_retries:
+            batch.status = TaskStatus.QUEUED
+            batch.provider_task_id = None
+            batch.poll_attempts = 0
+            batch.enqueued_at = None
+            retry_countdown = min(300, 10 * (2 ** max(0, batch.attempts - 1)))
+        else:
+            batch.status = TaskStatus.FAILED
+            batch.completed_at = datetime.utcnow()
+        task.failure_reason = batch.failure_reason
+        update_parent_progress(db, task)
+        db.commit()
+    finally:
+        db.close()
+    if retry_countdown is not None:
+        dispatch_batch(batch_id, countdown=retry_countdown)
+
+
+def _complete_batch(batch_id: int, urls: list[str], lease_id: str | None = None) -> None:
+    db = next(get_db())
+    try:
+        batch = db.scalar(select(PodTaskBatch).where(PodTaskBatch.id == batch_id).with_for_update())
+        if not batch or batch.status == TaskStatus.COMPLETED:
+            return
+        if lease_id and batch.status == TaskStatus.RUNNING and batch.lease_id != lease_id:
+            logger.warning("忽略批次 #%s 的过期成功回调，当前租约已变更", batch_id)
+            return
+        task = db.scalar(select(PodTask).where(PodTask.id == batch.task_id).with_for_update())
+        if not task:
+            return
+        batch.result_map = _map_batch_results(batch, urls)
+        batch.result_urls = urls
+        batch.status = TaskStatus.COMPLETED
+        batch.failure_reason = None
+        batch.lease_id = None
+        batch.completed_at = datetime.utcnow()
+        update_parent_progress(db, task)
         db.commit()
     finally:
         db.close()
 
 
-async def run_generation(task_id: int) -> None:
+async def _heartbeat_batch(batch_id: int, lease_id: str) -> None:
+    """运行外部请求时定期续租，避免耗时 R2 落盘被误判为 worker 丢失。"""
+    while True:
+        await asyncio.sleep(60)
+        db = next(get_db())
+        try:
+            db.execute(
+                update(PodTaskBatch)
+                .where(
+                    PodTaskBatch.id == batch_id,
+                    PodTaskBatch.status == TaskStatus.RUNNING,
+                    PodTaskBatch.lease_id == lease_id,
+                )
+                .values(updated_at=datetime.utcnow())
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("批次 #%s 续租失败，下一周期继续尝试", batch_id)
+        finally:
+            db.close()
+
+
+async def run_generation_batch(batch_id: int, lease_id: str) -> None:
+    """原子领取批次；同一模型的并发检查由配置行锁串行化。"""
     db = next(get_db())
+    heartbeat: asyncio.Task | None = None
     try:
-        task = db.get(PodTask, task_id)
-        template = db.get(ProductTemplate, task.template_id) if task else None
-        if not task or not template:
+        batch = db.scalar(select(PodTaskBatch).where(PodTaskBatch.id == batch_id).with_for_update())
+        if not batch or batch.status != TaskStatus.QUEUED:
             return
-        setting = db.get(AIProviderSetting, task.provider)
-        if not setting or not setting.enabled:
-            raise ProviderError("任务所选模型已停用")
-        task.status = TaskStatus.RUNNING; db.commit()
+        task = db.get(PodTask, batch.task_id)
+        template = db.get(ProductTemplate, task.template_id) if task else None
+        setting = db.scalar(select(AIProviderSetting).where(AIProviderSetting.provider == task.provider).with_for_update()) if task else None
+        if not task or not template or not setting or not setting.enabled:
+            batch.attempts += 1
+            db.commit()
+            raise ProviderError("任务所选模型已停用或产品模板不存在")
+        running_for_model = db.scalar(
+            select(func.count()).select_from(PodTaskBatch)
+            .join(PodTask, PodTask.id == PodTaskBatch.task_id)
+            .where(PodTask.provider == task.provider, PodTask.provider_model == task.provider_model, PodTaskBatch.status == TaskStatus.RUNNING)
+        ) or 0
+        if running_for_model >= max(1, setting.max_concurrency or 1):
+            batch.enqueued_at = None
+            db.commit()
+            return
+        batch.status = TaskStatus.RUNNING
+        batch.attempts += 1
+        batch.lease_id = lease_id
+        batch.started_at = batch.started_at or datetime.utcnow()
+        batch.enqueued_at = None
+        if not task.result_urls and task.status != TaskStatus.COMPLETED:
+            task.status = TaskStatus.RUNNING
+        db.commit()
+        heartbeat = asyncio.create_task(_heartbeat_batch(batch_id, lease_id))
+
         request = GenerationRequest(
-            model=task.provider_model,
-            prompt=build_prompt(task.parameters, template.name),
-            template_url=template.cover_url or "",
-            print_urls=task.parameters.get("print_urls") or [],
-            ratio=task.parameters["ratio"],
-            quality=task.parameters["quality"],
-            company_id=task.company_id,
-            task_id=task.id,
+            model=task.provider_model, prompt=build_prompt(task.parameters, template.name),
+            template_url=template.cover_url or "", print_urls=batch.print_urls or [],
+            ratio=task.parameters["ratio"], quality=task.parameters["quality"],
+            company_id=task.company_id, task_id=task.id,
+            idempotency_key=f"haitoro-task-{task.id}-batch-{batch.id}",
         )
         if task.provider == "grsai":
-            initial_result, base_url, headers = await submit_async_generation(task.provider, request)
+            initial_result, _, _ = await submit_async_generation(task.provider, request)
             provider_task_id = initial_result.get("id")
             if not isinstance(provider_task_id, str) or not provider_task_id:
                 raise ProviderError("grsai 异步任务未返回任务 ID")
-            task.provider_task_id = provider_task_id; db.commit()
-            urls = await wait_for_async_generation(task.provider, initial_result, base_url, headers)
-        else:
-            urls = await generate(task.provider, request)
-        urls = await persist_generated_images(urls, task.company_id, task.id)
-        task.result_urls = urls; task.status = TaskStatus.AWAITING_SELECTION; db.commit()
-    except Exception as exc:
-        logger.exception("AI 任务 #%s 生成过程异常", task_id)
-        db.rollback()
-        settle_failed_task(task_id, str(exc))
-    finally:
-        db.close()
-
-
-async def resume_grsai_result(task_id: int) -> None:
-    """在超时后继续查询同一个 Grsai 外部任务，不重复扣费或提交生成请求。"""
-    db = next(get_db())
-    try:
-        task = db.get(PodTask, task_id)
-        if not task or task.provider != "grsai" or not task.provider_task_id:
+            batch.provider_task_id = provider_task_id
+            batch.lease_id = None
+            task.provider_task_id = task.provider_task_id or provider_task_id
+            db.commit()
+            dispatch_batch(batch.id, countdown=get_settings().grsai_poll_seconds, poll=True)
             return
-        task.status = TaskStatus.RUNNING
-        task.failure_reason = None
-        db.commit()
-        urls = await resume_async_generation(task.provider, task.provider_task_id)
+        urls = await generate(task.provider, request)
         urls = await persist_generated_images(urls, task.company_id, task.id)
-        task.result_urls = urls
-        task.status = TaskStatus.AWAITING_SELECTION
-        db.commit()
+        _complete_batch(batch.id, urls, lease_id)
     except Exception as exc:
-        logger.exception("AI 任务 #%s 重新获取结果时异常", task_id)
         db.rollback()
-        # 原任务在首次超时时已经退回积分，重查失败不能再次退款。
-        settle_failed_task(task_id, str(exc), refund_points=False)
+        logger.exception("AI 批次 #%s 生成过程异常", batch_id)
+        _handle_batch_failure(batch_id, str(exc), lease_id)
+    finally:
+        if heartbeat:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+        db.close()
+
+
+async def poll_generation_batch(batch_id: int, lease_id: str) -> None:
+    """Grsai 单次轮询；未完成时重新排期，不占用 worker 休眠。"""
+    db = next(get_db())
+    heartbeat: asyncio.Task | None = None
+    try:
+        batch = db.scalar(select(PodTaskBatch).where(PodTaskBatch.id == batch_id).with_for_update())
+        if not batch or batch.status != TaskStatus.RUNNING or not batch.provider_task_id or batch.lease_id:
+            return
+        task = db.get(PodTask, batch.task_id)
+        if not task:
+            raise ProviderError("父任务不存在")
+        batch.lease_id = lease_id
+        batch.poll_attempts += 1
+        provider_task_id = batch.provider_task_id
+        poll_attempts = batch.poll_attempts
+        company_id, task_id = task.company_id, task.id
+        db.commit()
+        heartbeat = asyncio.create_task(_heartbeat_batch(batch_id, lease_id))
+        urls = await poll_async_generation(task.provider, provider_task_id)
+        if urls is None:
+            if poll_attempts >= get_settings().grsai_max_poll_attempts:
+                raise ProviderError("grsai 任务查询超时，请稍后重试")
+            batch = db.scalar(select(PodTaskBatch).where(PodTaskBatch.id == batch_id).with_for_update())
+            if not batch or batch.status != TaskStatus.RUNNING or batch.lease_id != lease_id:
+                return
+            batch.lease_id = None
+            db.commit()
+            dispatch_batch(batch_id, countdown=get_settings().grsai_poll_seconds, poll=True)
+            return
+        urls = await persist_generated_images(urls, company_id, task_id)
+        _complete_batch(batch_id, urls, lease_id)
+    except Exception as exc:
+        db.rollback()
+        logger.exception("AI 批次 #%s 查询结果异常", batch_id)
+        _handle_batch_failure(batch_id, str(exc), lease_id)
+    finally:
+        if heartbeat:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+        db.close()
+
+
+def reconcile_batches() -> None:
+    """补投 Redis 双写遗漏，并恢复 worker 异常退出后遗留的批次。"""
+    db = next(get_db())
+    queued_ids: list[int] = []
+    poll_ids: list[int] = []
+    try:
+        now = datetime.utcnow()
+        stale_enqueue = now - timedelta(seconds=90)
+        stale_running = now - timedelta(seconds=get_settings().task_stale_seconds)
+        queued = db.scalars(select(PodTaskBatch).where(
+            PodTaskBatch.status == TaskStatus.QUEUED,
+            or_(PodTaskBatch.enqueued_at.is_(None), PodTaskBatch.enqueued_at < stale_enqueue),
+        ).limit(500)).all()
+        queued_ids = [batch.id for batch in queued]
+        running = db.scalars(select(PodTaskBatch).where(
+            PodTaskBatch.status == TaskStatus.RUNNING, PodTaskBatch.updated_at < stale_running,
+        ).limit(500)).all()
+        for batch in running:
+            if batch.provider_task_id:
+                batch.lease_id = None
+                batch.enqueued_at = None
+                poll_ids.append(batch.id)
+            else:
+                batch.status = TaskStatus.QUEUED
+                batch.lease_id = None
+                batch.enqueued_at = None
+                queued_ids.append(batch.id)
+        db.commit()
     finally:
         db.close()
+    for batch_id in queued_ids:
+        dispatch_batch(batch_id)
+    for batch_id in poll_ids:
+        dispatch_batch(batch_id, poll=True)
 
 
 async def persist_generated_images(urls: list[str], company_id: int, task_id: int) -> list[str]:
@@ -1014,12 +1272,18 @@ async def persist_generated_images(urls: list[str], company_id: int, task_id: in
 
 
 @app.post("/tasks")
-def create_task(payload: PodTaskCreate, background_tasks: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     template = db.get(ProductTemplate, payload.template_id)
     if not template or not (template.is_platform or template.company_id == user.company_id):
         raise HTTPException(404, "产品模板不存在")
-    if not payload.print_urls or not payload.print_url:
+    raw_print_urls = payload.print_urls or ([payload.print_url] if payload.print_url else [])
+    print_urls = list(dict.fromkeys(url for url in raw_print_urls if url))
+    if not print_urls:
         raise HTTPException(400, "请至少上传一张印花图")
+    if len(print_urls) > 500:
+        raise HTTPException(400, "单次印花贴合最多支持 500 张图片")
+    if any(not is_company_r2_url(url, user.company_id, "creative") for url in print_urls):
+        raise HTTPException(400, "印花图必须通过当前公司的 R2 直传地址上传")
     if not template.cover_url:
         raise HTTPException(400, "产品模板缺少模板图片，无法进行印花贴合")
     provider = None
@@ -1033,16 +1297,16 @@ def create_task(payload: PodTaskCreate, background_tasks: BackgroundTasks, user:
         raise HTTPException(400, "暂无已启用的默认 AI 模型，请联系超级管理员配置")
     if not provider_has_credentials(provider.provider):
         raise HTTPException(400, f"所选 AI 模型尚未配置 {provider_credential_env(provider.provider)}，请联系管理员配置")
-    account = db.get(PointAccount, user.company_id)
-    estimated = 20 if payload.quality == "2K" else 12
-    if not account or account.available < estimated:
-        raise HTTPException(400, "可用积分不足，无法创建 AI 任务")
-    account.available -= estimated; account.frozen += estimated
-    task = PodTask(company_id=user.company_id, template_id=template.id, created_by=user.id, status=TaskStatus.QUEUED, parameters=payload.model_dump(), estimated_points=estimated, result_urls=[], provider=provider.provider, provider_model=provider.model)
+    batch_size = max(1, provider.batch_size or 1)
+    chunks = [print_urls[start:start + batch_size] for start in range(0, len(print_urls), batch_size)]
+    task = PodTask(company_id=user.company_id, template_id=template.id, created_by=user.id, status=TaskStatus.QUEUED, parameters=payload.model_dump() | {"print_urls": print_urls, "print_url": print_urls[0]}, result_urls=[], provider=provider.provider, provider_model=provider.model, total_prints=len(print_urls))
     db.add(task); db.flush()
-    db.add(PointLedger(company_id=user.company_id, actor_id=user.id, task_id=task.id, entry_type="ai_freeze", amount=-estimated, balance_after=account.available, note="AI 创作预冻结"))
+    batches = [PodTaskBatch(task_id=task.id, batch_index=index, status=TaskStatus.QUEUED, print_urls=chunk, result_urls=[], result_map=[])
+               for index, chunk in enumerate(chunks, start=1)]
+    db.add_all(batches); task.total_batches = len(batches)
     db.commit(); db.refresh(task)
-    background_tasks.add_task(run_generation, task.id)
+    for batch in batches:
+        dispatch_batch(batch.id)
     return serialize_record(task)
 
 
@@ -1050,25 +1314,29 @@ def create_task(payload: PodTaskCreate, background_tasks: BackgroundTasks, user:
 def list_available_ai_providers(user: User = Depends(current_user), db: Session = Depends(get_db)):
     """运营端仅能查看可用模型及默认模型，不暴露任何凭据配置。"""
     return [
-        {"provider": setting.provider, "display_name": setting.display_name, "model": setting.model, "is_default": setting.is_default}
+        {"provider": setting.provider, "display_name": setting.display_name, "model": setting.model, "is_default": setting.is_default, "batch_size": setting.batch_size}
         for setting in db.scalars(select(AIProviderSetting).where(AIProviderSetting.enabled.is_(True)).order_by(AIProviderSetting.provider)).all()
     ]
 
 
 @app.post("/tasks/{task_id}/retry-result")
-def retry_task_result(task_id: int, background_tasks: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """仅允许重新获取已超时的 Grsai 任务结果，不会重新生成图片。"""
+def retry_task_result(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """只重试失败批次，已成功的印花结果会保留。"""
     task = db.get(PodTask, task_id)
     if not can_access_task(task, user):
         raise HTTPException(404, "任务不存在")
-    if task.provider != "grsai" or not task.provider_task_id:
-        raise HTTPException(400, "该任务不支持重新获取结果")
-    if task.status != TaskStatus.FAILED or task.failure_reason != "grsai 任务查询超时，请稍后重试":
-        raise HTTPException(400, "仅查询超时的任务可以重新获取结果")
-    task.status = TaskStatus.QUEUED
+    batches = db.scalars(select(PodTaskBatch).where(PodTaskBatch.task_id == task.id, PodTaskBatch.status == TaskStatus.FAILED).with_for_update()).all()
+    if not batches:
+        raise HTTPException(400, "当前任务没有可重试的失败批次")
+    for batch in batches:
+        batch.status = TaskStatus.QUEUED; batch.attempts = 0; batch.poll_attempts = 0
+        batch.failure_reason = None; batch.provider_task_id = None; batch.lease_id = None
+        batch.enqueued_at = None; batch.completed_at = None
     task.failure_reason = None
+    update_parent_progress(db, task)
     db.commit(); db.refresh(task)
-    background_tasks.add_task(resume_grsai_result, task.id)
+    for batch in batches:
+        dispatch_batch(batch.id)
     return serialize_record(task)
 
 
@@ -1088,16 +1356,10 @@ def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Dep
         if url not in existing_urls:
             db.add(MaterialAsset(company_id=task.company_id, source_task_id=task.id, template_id=task.template_id, url=url, name=f"AI 创作 #{task.id} · 结果 {index}", claimed_by=user.id))
             claimed_count += 1
-    # 首次领取同时完成任务结算，并将第一张领取图作为任务草稿的默认图。
+    # 首次领取同时完成任务，并将第一张领取图作为任务草稿的默认图。
     if task.status == TaskStatus.AWAITING_SELECTION:
-        actual = max(1, task.estimated_points - 2)
-        account = db.get(PointAccount, task.company_id)
-        account.frozen -= task.estimated_points
-        account.available += task.estimated_points - actual
         task.selected_result_url = selected_urls[0]
-        task.actual_points = actual
         task.status = TaskStatus.COMPLETED
-        db.add(PointLedger(company_id=task.company_id, actor_id=user.id, task_id=task.id, entry_type="ai_settlement", amount=task.estimated_points - actual, balance_after=account.available, note="AI 任务按实际用量结算"))
     db.commit()
     return {"claimed": claimed_count, "message": "已领取到素材库"}
 
@@ -1246,24 +1508,3 @@ def list_drafts(shop_id: int | None = None, user: User = Depends(current_user), 
         serialize_record(draft) | {"updated_by_name": editors.get(draft.updated_by)}
         for draft in drafts
     ]
-
-
-@app.get("/points")
-def points(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    if not user.company_id:
-        return {"available": 0, "frozen": 0, "ledger": []}
-    account = db.get(PointAccount, user.company_id)
-    rows = db.scalars(select(PointLedger).where(PointLedger.company_id == user.company_id).order_by(PointLedger.id.desc()).limit(50)).all()
-    return {"available": account.available, "frozen": account.frozen, "ledger": serialize_ledger(rows, db)}
-
-
-@app.post("/points/recharge")
-def recharge(payload: RechargeInput, user: User = Depends(require_roles(Role.SUPER_ADMIN, Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
-    if user.role == Role.COMPANY_ADMIN and payload.company_id != user.company_id:
-        raise HTTPException(403, "只能为本公司充值")
-    account = db.get(PointAccount, payload.company_id)
-    if not account:
-        raise HTTPException(404, "积分账户不存在")
-    account.available += payload.amount
-    db.add(PointLedger(company_id=payload.company_id, actor_id=user.id, entry_type="manual_recharge", amount=payload.amount, balance_after=account.available, note=payload.note))
-    db.commit(); return {"available": account.available, "frozen": account.frozen}

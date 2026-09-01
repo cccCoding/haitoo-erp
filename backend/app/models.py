@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, Enum, Float, Integer, JSON, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, Float, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
@@ -98,6 +98,7 @@ class ProductTemplate(Base):
 
 class PodTask(Base):
     __tablename__ = "pod_tasks"
+    __table_args__ = (Index("ix_pod_tasks_provider_model", "provider", "provider_model"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     template_id: Mapped[int] = mapped_column()
@@ -106,14 +107,44 @@ class PodTask(Base):
     parameters: Mapped[dict] = mapped_column(JSON, default=dict)
     result_urls: Mapped[dict] = mapped_column(JSON, default=list)
     selected_result_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    estimated_points: Mapped[int] = mapped_column(Integer)
-    actual_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
     provider: Mapped[str | None] = mapped_column(String(40), nullable=True)
     provider_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # 外部异步 AI 任务的标识，例如 Grsai 返回的 id。
     provider_task_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
     failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    total_prints: Mapped[int] = mapped_column(Integer, default=0)
+    total_batches: Mapped[int] = mapped_column(Integer, default=0)
+    completed_batches: Mapped[int] = mapped_column(Integer, default=0)
+    failed_batches: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PodTaskBatch(Base):
+    """父任务拆分出的可独立重试、可持久化恢复的生成批次。"""
+    __tablename__ = "pod_task_batches"
+    __table_args__ = (
+        UniqueConstraint("task_id", "batch_index", name="uq_pod_task_batch_index"),
+        Index("ix_pod_batches_status_enqueued", "status", "enqueued_at"),
+        Index("ix_pod_batches_status_updated", "status", "updated_at"),
+        Index("ix_pod_batches_status_completed", "status", "completed_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(index=True)
+    batch_index: Mapped[int] = mapped_column(Integer)
+    status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.QUEUED, index=True)
+    print_urls: Mapped[list] = mapped_column(JSON, default=list)
+    result_urls: Mapped[list] = mapped_column(JSON, default=list)
+    result_map: Mapped[list] = mapped_column(JSON, default=list)
+    provider_task_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    lease_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    poll_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class MaterialAsset(Base):
@@ -155,26 +186,6 @@ class ProductDraft(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-class PointAccount(Base):
-    __tablename__ = "point_accounts"
-    company_id: Mapped[int] = mapped_column(primary_key=True)
-    available: Mapped[int] = mapped_column(Integer, default=0)
-    frozen: Mapped[int] = mapped_column(Integer, default=0)
-
-
-class PointLedger(Base):
-    __tablename__ = "point_ledgers"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    company_id: Mapped[int] = mapped_column(index=True)
-    actor_id: Mapped[int | None] = mapped_column(nullable=True)
-    task_id: Mapped[int | None] = mapped_column(nullable=True)
-    entry_type: Mapped[str] = mapped_column(String(40))
-    amount: Mapped[int] = mapped_column(Integer)
-    balance_after: Mapped[int] = mapped_column(Integer)
-    note: Mapped[str] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-
 class AIProviderSetting(Base):
     __tablename__ = "ai_provider_settings"
     provider: Mapped[str] = mapped_column(String(40), primary_key=True)
@@ -182,15 +193,5 @@ class AIProviderSetting(Base):
     model: Mapped[str] = mapped_column(String(120))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
-
-
-class NonAIPointRule(Base):
-    """由平台管理员维护的非 AI 操作积分消耗规则。"""
-    __tablename__ = "non_ai_point_rules"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    operation_code: Mapped[str] = mapped_column(String(80), unique=True, index=True)
-    display_name: Mapped[str] = mapped_column(String(120))
-    points: Mapped[int] = mapped_column(Integer, default=0)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    description: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    batch_size: Mapped[int] = mapped_column(Integer, default=1)
+    max_concurrency: Mapped[int] = mapped_column(Integer, default=2)

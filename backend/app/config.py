@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # true 时将 Seedream/千问的临时结果复制到 R2；false 时保留其原始公网 URL。
     # Gemini 只返回内嵌图片，仍必须上传 R2 才能供后续选图和发布使用。
     ai_generated_image_upload_to_r2: bool = True
+    redis_url: str = "redis://redis:6379/0"
+    task_max_retries: int = 2
+    task_stale_seconds: int = 600
+    grsai_poll_seconds: int = 300
+    grsai_max_poll_attempts: int = 144
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

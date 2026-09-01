@@ -5,7 +5,7 @@ const token = ref(localStorage.getItem('haitoro_token') || '');
 const page = ref('dashboard');
 const email = ref('operator@haitoro-demo.com');
 const password = ref('ChangeMe123!');
-const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), materialAssets = ref([]), drafts = ref([]), points = ref(null), members = ref([]), aiProviders = ref([]);
+const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), materialAssets = ref([]), drafts = ref([]), members = ref([]), aiProviders = ref([]);
 const loading = ref(false), error = ref('');
 const toast = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
@@ -22,7 +22,6 @@ const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle
 const publishingDraftId = ref(null);
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null);
 const taskPageSize = ref(20), currentTaskPage = ref(1);
-const ledgerPageSize = ref(20), currentLedgerPage = ref(1);
 const previewImageUrl = ref(''), previewImageAlt = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
 const showTaskDetailDialog = ref(false), viewingTask = ref(null);
@@ -31,13 +30,14 @@ const showClaimMaterialsDialog = ref(false), claimingTask = ref(null), selectedC
 const showTaskDraftDialog = ref(false), draftingTask = ref(null), taskDraftTitle = ref(''), taskDraftProductDescription = ref(''), taskDraftSizeChart = ref(null), taskDraftSizeChartPreview = ref(''), taskDraftTitleGenerating = ref(false), taskDraftSaving = ref(false), taskDraftSkuPreviewItems = ref([]);
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
 const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2 };
-const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativePromptIndex = ref(''), creativeProvider = ref(''), creativeRatio = ref('1:1'), creativeQuality = ref('1K');
+const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativePromptIndex = ref(''), creativeProvider = ref(''), creativeRatio = ref('1:1'), creativeQuality = ref('1K'), creativeUploading = ref(false), creativeUploadedCount = ref(0);
 const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'materials', icon: '◈', label: '素材库' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }];
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
 const visibleNav = computed(() => nav.filter(item => !item.adminOnly || user.value?.role === 'company_admin'));
 const pageTitle = computed(() => nav.find(x => x.key === page.value)?.label || '');
 const filteredTemplates = computed(() => templates.value.filter(t => (!activeGroupId.value || t.group_id === activeGroupId.value) && t.name.toLowerCase().includes(templateQuery.value.trim().toLowerCase())));
-const estimatedCreativePoints = computed(() => creativeQuality.value === '2K' ? 20 : 12);
+// 运营端接口只返回后台已启用的模型；这里再保留一次筛选，避免接口数据异常时将停用模型带入任务。
+const availableAiProviders = computed(() => aiProviders.value.filter(provider => provider.enabled !== false));
 const selectedTemplate = computed(() => templates.value.find(t => t.id === selectedTemplateId.value));
 const selectedMaterialAssets = computed(() => materialAssets.value.filter(asset => selectedMaterialAssetIds.value.includes(asset.id)));
 const filteredMaterialAssets = computed(() => materialTemplateFilterId.value ? materialAssets.value.filter(asset => asset.template_id === materialTemplateFilterId.value) : materialAssets.value);
@@ -66,14 +66,6 @@ const pagedTasks = computed(() => {
     return tasks.value.slice(start, start + taskPageSize.value);
 });
 function changeTaskPageSize() { currentTaskPage.value = 1; }
-const ledgerEntries = computed(() => points.value?.ledger || []);
-const ledgerPageCount = computed(() => Math.max(1, Math.ceil(ledgerEntries.value.length / ledgerPageSize.value)));
-const visibleLedgerPage = computed(() => Math.min(currentLedgerPage.value, ledgerPageCount.value));
-const pagedLedgerEntries = computed(() => {
-    const start = (visibleLedgerPage.value - 1) * ledgerPageSize.value;
-    return ledgerEntries.value.slice(start, start + ledgerPageSize.value);
-});
-function changeLedgerPageSize() { currentLedgerPage.value = 1; }
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
 const nativeToLocaleString = Date.prototype.toLocaleString;
 const nativeToLocaleDateString = Date.prototype.toLocaleDateString;
@@ -87,7 +79,7 @@ Date.prototype.toLocaleDateString = function (...args) {
 };
 async function refresh() {
     const h = { headers: headers.value };
-    const [me, s, t, g, task, material, d, p, providers] = await Promise.all([api.get('/me', h), api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', h), api.get('/material-assets', h), api.get('/drafts', h), api.get('/points', h), api.get('/ai-providers', h)]);
+    const [me, s, t, g, task, material, d, providers] = await Promise.all([api.get('/me', h), api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', h), api.get('/material-assets', h), api.get('/drafts', h), api.get('/ai-providers', h)]);
     user.value = me.data.user;
     company.value = me.data.company;
     shops.value = s.data;
@@ -96,10 +88,11 @@ async function refresh() {
     tasks.value = task.data;
     materialAssets.value = material.data;
     drafts.value = d.data;
-    points.value = p.data;
     aiProviders.value = providers.data;
-    if (!creativeProvider.value)
-        creativeProvider.value = aiProviders.value.find(item => item.is_default)?.provider || aiProviders.value[0]?.provider || '';
+    // 后台停用当前所选模型后，刷新时立即切换到仍启用的默认模型，避免提交已停用的值。
+    if (!availableAiProviders.value.some(item => item.provider === creativeProvider.value)) {
+        creativeProvider.value = availableAiProviders.value.find(item => item.is_default)?.provider || availableAiProviders.value[0]?.provider || '';
+    }
     if (user.value.role === 'company_admin') {
         const [companyMembers, companyShops] = await Promise.all([api.get('/members', h), api.get('/shops/manage', h)]);
         members.value = companyMembers.data;
@@ -130,32 +123,57 @@ finally {
 } }
 function onCreativeAssetChange(event) {
     const files = Array.from(event.target.files || []);
-    const available = 1000 - creativeAssets.value.length;
-    files.slice(0, available).forEach(file => creativeAssets.value.push({ id: `${file.name}-${file.lastModified}-${crypto.randomUUID()}`, file, preview: URL.createObjectURL(file) }));
-    if (files.length)
+    const available = 500 - creativeAssets.value.length;
+    const supported = files.filter(file => ['image/jpeg', 'image/png', 'image/webp'].includes(file.type) && file.size <= 5 * 1024 * 1024);
+    supported.slice(0, available).forEach(file => creativeAssets.value.push({ id: `${file.name}-${file.lastModified}-${crypto.randomUUID()}`, file, preview: URL.createObjectURL(file) }));
+    if (files.length <= available)
         creativeAssetError.value = '';
+    if (supported.length !== files.length)
+        creativeAssetError.value = '仅支持 JPG、PNG、WebP，且单张不能超过 5MB。';
+    if (files.length > available)
+        creativeAssetError.value = '单次印花贴合最多支持 500 张图片。';
     event.target.value = '';
 }
 function removeCreativeAsset(id) { const asset = creativeAssets.value.find(item => item.id === id); if (asset)
     URL.revokeObjectURL(asset.preview); creativeAssets.value = creativeAssets.value.filter(item => item.id !== id); }
 function clearCreativeAssets() { creativeAssets.value.forEach(item => URL.revokeObjectURL(item.preview)); creativeAssets.value = []; showCreativeAssetsDialog.value = false; }
-async function uploadCreativeAssets() { return Promise.all(creativeAssets.value.map(async (asset) => { const form = new FormData(); form.append('file', asset.file); const { data } = await api.post('/uploads/creative-asset', form, { headers: headers.value }); return data.url; })); }
+async function uploadCreativeAssets() { const urls = Array(creativeAssets.value.length); let cursor = 0; creativeUploadedCount.value = creativeAssets.value.filter(asset => asset.uploadedUrl).length; const worker = async () => { while (cursor < creativeAssets.value.length) {
+    const index = cursor++;
+    const asset = creativeAssets.value[index];
+    if (asset.uploadedUrl) {
+        urls[index] = asset.uploadedUrl;
+        continue;
+    }
+    const { data: signed } = await api.post('/uploads/creative-asset/presign', { content_type: asset.file.type, content_length: asset.file.size }, { headers: headers.value });
+    await axios.put(signed.upload_url, asset.file, { headers: { 'Content-Type': asset.file.type } });
+    asset.uploadedUrl = signed.url;
+    urls[index] = signed.url;
+    creativeUploadedCount.value++;
+} }; await Promise.all(Array.from({ length: Math.min(4, creativeAssets.value.length) }, worker)); return urls; }
 async function createTask() { if (!creativeAssets.value.length) {
     creativeAssetError.value = '请先上传至少一张印花图，再开始印花贴合。';
     return;
 } if (!creativeRequirement.value.trim()) {
     showToast('请填写创作要求');
     return;
-} if (!selectedTemplateId.value || !creativeProvider.value)
-    return; try {
+} if (!selectedTemplateId.value)
+    return; if (!creativeProvider.value || !availableAiProviders.value.some(item => item.provider === creativeProvider.value)) {
+    showToast('暂无可用的 AI 模型，请联系超级管理员在后台启用模型');
+    return;
+} try {
     creativeAssetError.value = '';
+    creativeUploading.value = true;
     const print_urls = await uploadCreativeAssets();
     await api.post('/tasks', { template_id: selectedTemplateId.value, provider: creativeProvider.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() }, { headers: headers.value });
     await refresh();
     page.value = 'tasks';
+    showToast(`已入队 ${print_urls.length} 张印花图`);
 }
 catch (e) {
     error.value = e.response?.data?.detail || '创建 AI 任务失败';
+}
+finally {
+    creativeUploading.value = false;
 } }
 async function createGroup() { if (!newGroupName.value.trim())
     return; try {
@@ -632,7 +650,7 @@ api.interceptors.response.use(response => response, requestError => {
 });
 let taskResultPollingTimer;
 async function refreshPendingTaskResults() {
-    if (!token.value || !tasks.value.some(task => ['queued', 'running'].includes(task.status)))
+    if (!token.value || !tasks.value.some(task => ['queued', 'running'].includes(task.status) || (task.progress?.total && task.progress.completed + task.progress.failed < task.progress.total)))
         return;
     try {
         tasks.value = (await api.get('/tasks', { headers: headers.value })).data;
@@ -771,9 +789,8 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-        (__VLS_ctx.points?.available ?? 0);
+        (__VLS_ctx.materialAssets.length);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.em, __VLS_intrinsicElements.em)({});
-        (__VLS_ctx.points?.frozen ?? 0);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "two-col" },
         });
@@ -836,7 +853,7 @@ else {
                         return;
                     if (!(__VLS_ctx.page === 'dashboard'))
                         return;
-                    __VLS_ctx.page = 'points';
+                    __VLS_ctx.page = 'tasks';
                 } },
             ...{ class: "quick" },
         });
@@ -1181,14 +1198,23 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
             value: (__VLS_ctx.creativeProvider),
+            disabled: (!__VLS_ctx.availableAiProviders.length),
         });
-        for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.aiProviders))) {
+        if (!__VLS_ctx.availableAiProviders.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: "",
+            });
+        }
+        for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.availableAiProviders))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
                 key: (provider.provider),
                 value: (provider.provider),
             });
             (provider.display_name);
             (provider.model);
+        }
+        if (!__VLS_ctx.availableAiProviders.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "parameter-field" },
@@ -1211,10 +1237,25 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.aside, __VLS_intrinsicElements.aside)({
             ...{ class: "estimate" },
         });
+        if (__VLS_ctx.creativeUploading) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "upload-progress" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.creativeUploadedCount);
+            (__VLS_ctx.creativeAssets.length);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.progress, __VLS_intrinsicElements.progress)({
+                max: (__VLS_ctx.creativeAssets.length),
+                value: (__VLS_ctx.creativeUploadedCount),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.createTask) },
             ...{ class: "primary full" },
+            disabled: (!__VLS_ctx.availableAiProviders.length || __VLS_ctx.creativeUploading),
         });
+        (__VLS_ctx.creativeUploading ? `上传中 ${__VLS_ctx.creativeUploadedCount}/${__VLS_ctx.creativeAssets.length}` : '✦ 开始印花贴合');
     }
     else if (__VLS_ctx.page === 'tasks') {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
@@ -1333,10 +1374,21 @@ else {
                 });
             }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "task-progress-cell" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "chip" },
                 ...{ class: (__VLS_ctx.taskStatusClass(task.status)) },
             });
             (__VLS_ctx.taskStatusLabel[task.status] || task.status || '—');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (task.progress?.completed || 0);
+            (task.progress?.failed || 0);
+            (task.progress?.total || 0);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.progress, __VLS_intrinsicElements.progress)({
+                max: (task.progress?.total || 1),
+                value: ((task.progress?.completed || 0) + (task.progress?.failed || 0)),
+            });
             if (task.result_urls?.[0]) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
@@ -1390,7 +1442,7 @@ else {
                     } },
                 ...{ class: "secondary" },
             });
-            if (task.provider === 'grsai' && task.status === 'failed' && task.failure_reason === 'grsai 任务查询超时，请稍后重试') {
+            if (task.failed_batches > 0) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!!(!__VLS_ctx.token))
@@ -1403,16 +1455,16 @@ else {
                                 return;
                             if (!(__VLS_ctx.page === 'tasks'))
                                 return;
-                            if (!(task.provider === 'grsai' && task.status === 'failed' && task.failure_reason === 'grsai 任务查询超时，请稍后重试'))
+                            if (!(task.failed_batches > 0))
                                 return;
                             __VLS_ctx.retryTaskResult(task);
                         } },
                     ...{ class: "secondary" },
                     disabled: (__VLS_ctx.retryingTaskId === task.id),
                 });
-                (__VLS_ctx.retryingTaskId === task.id ? '获取中…' : '重新获取结果');
+                (__VLS_ctx.retryingTaskId === task.id ? '重试中…' : `重试失败项（${task.failed_batches}）`);
             }
-            if (['awaiting_selection', 'completed'].includes(task.status)) {
+            if (task.result_urls?.length) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!!(!__VLS_ctx.token))
@@ -1425,7 +1477,7 @@ else {
                                 return;
                             if (!(__VLS_ctx.page === 'tasks'))
                                 return;
-                            if (!(['awaiting_selection', 'completed'].includes(task.status)))
+                            if (!(task.result_urls?.length))
                                 return;
                             __VLS_ctx.openClaimMaterialsDialog(task);
                         } },
@@ -2135,143 +2187,6 @@ else {
             });
         }
     }
-    else {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "page" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "points-grid" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "balance" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-        (__VLS_ctx.points?.available ?? 0);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "balance muted" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-        (__VLS_ctx.points?.frozen ?? 0);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "rule" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "panel ledger" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
-        for (const [row] of __VLS_getVForSourceType((__VLS_ctx.pagedLedgerEntries))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                key: (row.id),
-                ...{ class: "ledger-row" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-            (row.entry_type);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-            (new Date(row.created_at).toLocaleString());
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (row.note);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "ledger-actor" },
-            });
-            (row.actor_name);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({
-                ...{ class: (row.amount > 0 ? 'positive' : 'negative') },
-            });
-            (row.amount > 0 ? '+' : '');
-            (row.amount);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (row.balance_after);
-        }
-        if (__VLS_ctx.ledgerEntries.length) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
-                ...{ class: "draft-pagination" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (__VLS_ctx.ledgerEntries.length);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-                ...{ onChange: (__VLS_ctx.changeLedgerPageSize) },
-                value: (__VLS_ctx.ledgerPageSize),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (20),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (50),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (100),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (500),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (1000),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
-                            return;
-                        if (!!(__VLS_ctx.page === 'dashboard'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'templates'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'pod'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'tasks'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'materials'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'drafts'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
-                            return;
-                        if (!(__VLS_ctx.ledgerEntries.length))
-                            return;
-                        __VLS_ctx.currentLedgerPage = __VLS_ctx.visibleLedgerPage - 1;
-                    } },
-                disabled: (__VLS_ctx.visibleLedgerPage === 1),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (__VLS_ctx.visibleLedgerPage);
-            (__VLS_ctx.ledgerPageCount);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
-                            return;
-                        if (!!(__VLS_ctx.page === 'dashboard'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'templates'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'pod'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'tasks'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'materials'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'drafts'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
-                            return;
-                        if (!(__VLS_ctx.ledgerEntries.length))
-                            return;
-                        __VLS_ctx.currentLedgerPage = __VLS_ctx.visibleLedgerPage + 1;
-                    } },
-                disabled: (__VLS_ctx.visibleLedgerPage === __VLS_ctx.ledgerPageCount),
-            });
-        }
-    }
 }
 if (__VLS_ctx.showClaimMaterialsDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -2415,13 +2330,49 @@ if (__VLS_ctx.showTaskDetailDialog) {
         ...{ class: (__VLS_ctx.taskStatusClass(__VLS_ctx.viewingTask?.status)) },
     });
     (__VLS_ctx.taskStatusLabel[__VLS_ctx.viewingTask?.status] || __VLS_ctx.viewingTask?.status || '—');
+    (__VLS_ctx.viewingTask?.progress?.percent || 0);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    (__VLS_ctx.viewingTask?.provider_task_id || '—');
+    (__VLS_ctx.viewingTask?.progress?.completed || 0);
+    (__VLS_ctx.viewingTask?.progress?.failed || 0);
+    (__VLS_ctx.viewingTask?.progress?.total || 0);
     if (__VLS_ctx.viewingTask?.failure_reason) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
             ...{ class: "error" },
         });
         (__VLS_ctx.viewingTask.failure_reason);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "draft-edit-section" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "task-batch-list" },
+    });
+    for (const [batch] of __VLS_getVForSourceType((__VLS_ctx.viewingTask?.batches || []))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+            key: (batch.id),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        (batch.batch_index);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "chip" },
+            ...{ class: (__VLS_ctx.taskStatusClass(batch.status)) },
+        });
+        (__VLS_ctx.taskStatusLabel[batch.status] || batch.status);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        (batch.print_urls?.length || 0);
+        (batch.attempts || 0);
+        (batch.result_urls?.length || 0);
+        if (batch.provider_task_id) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
+            (batch.provider_task_id);
+        }
+        if (batch.failure_reason) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "error" },
+            });
+            (batch.failure_reason);
+        }
     }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "modal-actions" },
@@ -2461,7 +2412,7 @@ if (__VLS_ctx.showCreativeAssetsDialog) {
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     (__VLS_ctx.creativeAssets.length);
-    (__VLS_ctx.creativeAssets.length);
+    (__VLS_ctx.creativeAssets.filter(asset => asset.uploadedUrl).length);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
         ...{ class: "add-assets" },
     });
@@ -2484,8 +2435,6 @@ if (__VLS_ctx.showCreativeAssetsDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
         ...{ class: "asset-status" },
     });
-    (__VLS_ctx.creativeAssets.length);
-    (__VLS_ctx.creativeAssets.length);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "asset-list" },
     });
@@ -2503,6 +2452,7 @@ if (__VLS_ctx.showCreativeAssetsDialog) {
         (asset.file.name);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (asset.uploadedUrl ? '已直传' : '待上传');
         ((asset.file.size / 1024).toFixed(1));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
@@ -3617,6 +3567,7 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['parameter-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['estimate']} */ ;
+/** @type {__VLS_StyleScopedClasses['upload-progress']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['full']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
@@ -3630,6 +3581,7 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['ai-model-cell']} */ ;
 /** @type {__VLS_StyleScopedClasses['provider-task-id']} */ ;
 /** @type {__VLS_StyleScopedClasses['copy-icon-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-progress-cell']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-material-thumbnail']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-actions']} */ ;
@@ -3688,17 +3640,6 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
-/** @type {__VLS_StyleScopedClasses['page']} */ ;
-/** @type {__VLS_StyleScopedClasses['points-grid']} */ ;
-/** @type {__VLS_StyleScopedClasses['balance']} */ ;
-/** @type {__VLS_StyleScopedClasses['balance']} */ ;
-/** @type {__VLS_StyleScopedClasses['muted']} */ ;
-/** @type {__VLS_StyleScopedClasses['rule']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['ledger']} */ ;
-/** @type {__VLS_StyleScopedClasses['ledger-row']} */ ;
-/** @type {__VLS_StyleScopedClasses['ledger-actor']} */ ;
-/** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-dialog']} */ ;
@@ -3720,6 +3661,10 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['material-draft-preview-images']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-batch-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
@@ -3865,9 +3810,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             tasks: tasks,
             materialAssets: materialAssets,
             drafts: drafts,
-            points: points,
             members: members,
-            aiProviders: aiProviders,
             loading: loading,
             error: error,
             toast: toast,
@@ -3936,8 +3879,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             draftTemplateFilterId: draftTemplateFilterId,
             taskPageSize: taskPageSize,
             currentTaskPage: currentTaskPage,
-            ledgerPageSize: ledgerPageSize,
-            currentLedgerPage: currentLedgerPage,
             previewImageUrl: previewImageUrl,
             previewImageAlt: previewImageAlt,
             showShopManagersDialog: showShopManagersDialog,
@@ -3969,9 +3910,12 @@ const __VLS_self = (await import('vue')).defineComponent({
             creativeProvider: creativeProvider,
             creativeRatio: creativeRatio,
             creativeQuality: creativeQuality,
+            creativeUploading: creativeUploading,
+            creativeUploadedCount: creativeUploadedCount,
             visibleNav: visibleNav,
             pageTitle: pageTitle,
             filteredTemplates: filteredTemplates,
+            availableAiProviders: availableAiProviders,
             selectedTemplate: selectedTemplate,
             selectedMaterialAssets: selectedMaterialAssets,
             filteredMaterialAssets: filteredMaterialAssets,
@@ -3987,11 +3931,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             visibleTaskPage: visibleTaskPage,
             pagedTasks: pagedTasks,
             changeTaskPageSize: changeTaskPageSize,
-            ledgerEntries: ledgerEntries,
-            ledgerPageCount: ledgerPageCount,
-            visibleLedgerPage: visibleLedgerPage,
-            pagedLedgerEntries: pagedLedgerEntries,
-            changeLedgerPageSize: changeLedgerPageSize,
             login: login,
             onCreativeAssetChange: onCreativeAssetChange,
             removeCreativeAsset: removeCreativeAsset,

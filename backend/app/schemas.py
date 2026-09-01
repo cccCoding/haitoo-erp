@@ -98,29 +98,21 @@ class PodTaskCreate(BaseModel):
     ratio: Literal["1:1", "3:4"] = "1:1"
     quality: Literal["1K", "2K"] = "1K"
     print_url: str | None = None
-    print_urls: list[str] = Field(default_factory=list, max_length=1000)
+    print_urls: list[str] = Field(default_factory=list, max_length=500)
     creative_requirement: str = Field(min_length=1, max_length=1000)
+
+
+class UploadPresignInput(BaseModel):
+    content_type: str
+    content_length: int = Field(gt=0, le=5 * 1024 * 1024)
 
 
 class AIProviderSettingUpdate(BaseModel):
     model: str = Field(min_length=1, max_length=120)
     enabled: bool
     is_default: bool = False
-
-
-class NonAIPointRuleCreate(BaseModel):
-    operation_code: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_]*$")
-    display_name: str = Field(min_length=1, max_length=120)
-    points: int = Field(ge=0, le=1000000)
-    enabled: bool = True
-    description: str | None = Field(default=None, max_length=255)
-
-
-class NonAIPointRuleUpdate(BaseModel):
-    display_name: str = Field(min_length=1, max_length=120)
-    points: int = Field(ge=0, le=1000000)
-    enabled: bool = True
-    description: str | None = Field(default=None, max_length=255)
+    batch_size: int = Field(default=1, ge=1, le=100)
+    max_concurrency: int = Field(default=2, ge=1, le=32)
 
 
 class AdminCompanyCreate(BaseModel):
@@ -128,7 +120,6 @@ class AdminCompanyCreate(BaseModel):
     admin_name: str = Field(min_length=1, max_length=80)
     admin_email: EmailStr
     admin_password: str = Field(min_length=8, max_length=128)
-    initial_points: int = Field(default=0, ge=0)
 
 
 class MiaoshouAccountUpdate(BaseModel):
@@ -174,12 +165,6 @@ class DraftTitleGenerate(BaseModel):
 class DraftUpdate(BaseModel):
     title: str = Field(min_length=1, max_length=180)
     product_description: str | None = Field(default=None, max_length=5000)
-
-
-class RechargeInput(BaseModel):
-    company_id: int
-    amount: int = Field(gt=0)
-    note: str = Field(min_length=1, max_length=255)
 
 
 class MemberCreate(BaseModel):
@@ -242,21 +227,3 @@ class MiaoshouShopQuery(BaseModel):
     site: str | None = Field(default=None, max_length=20)
     page_no: int = Field(default=1, ge=1, alias="pageNo")
     page_size: int = Field(default=100, ge=1, le=100, alias="pageSize")
-
-
-class LedgerOut(BaseModel):
-    id: int
-    actor_id: int | None
-    actor_name: str
-    entry_type: str
-    amount: int
-    balance_after: int
-    note: str
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-    @field_serializer("created_at", return_type=int)
-    def serialize_created_at(self, value: datetime) -> int:
-        return int(value.replace(tzinfo=timezone.utc).timestamp() * 1000)

@@ -2,9 +2,8 @@
 
 业务流程只调用 :func:`generate`，每个供应商的鉴权、请求格式和响应格式都由
 独立适配器处理。新增豆包、千问等模型时，实现 ``ImageGenerationProvider`` 并
-登记到 ``PROVIDERS``，无需修改任务、积分或选图流程。
+登记到 ``PROVIDERS``，无需修改任务或选图流程。
 """
-import asyncio
 import base64
 import binascii
 from dataclasses import dataclass
@@ -30,6 +29,7 @@ class GenerationRequest:
     quality: str
     company_id: int
     task_id: int
+    idempotency_key: str
 
 
 class ImageGenerationProvider(Protocol):
@@ -90,7 +90,7 @@ class SeedreamProvider:
         images = [_public_url(request.template_url), *[_public_url(url) for url in request.print_urls]]
         response = await client.post(
             f"{settings.seedream_base_url.rstrip('/')}/images/generations",
-            headers={"Authorization": f"Bearer {settings.seedream_api_key}"},
+            headers={"Authorization": f"Bearer {settings.seedream_api_key}", "Idempotency-Key": request.idempotency_key},
             json={"model": request.model, "prompt": request.prompt, "image": images, "size": "2048x2048" if request.quality == "2K" else "1024x1024", "response_format": "url", "n": 2},
         )
         _raise_for_provider_error(self.name, response)
@@ -108,7 +108,7 @@ class QwenProvider:
         content = [{"image": image} for image in images] + [{"text": request.prompt}]
         response = await client.post(
             settings.qwen_base_url,
-            headers={"Authorization": f"Bearer {settings.qwen_api_key}", "X-DashScope-Async": "enable"},
+            headers={"Authorization": f"Bearer {settings.qwen_api_key}", "X-DashScope-Async": "enable", "Idempotency-Key": request.idempotency_key},
             json={"model": request.model, "input": {"messages": [{"role": "user", "content": content}]}, "parameters": {"n": 2, "size": "2048*2048" if request.quality == "2K" else "1024*1024"}},
         )
         _raise_for_provider_error(self.name, response)
@@ -134,6 +134,7 @@ class GeminiProvider:
         response = await client.post(
             f"{settings.gemini_base_url.rstrip('/')}/models/{request.model}:generateContent",
             params={"key": settings.gemini_api_key},
+            headers={"Idempotency-Key": request.idempotency_key},
             json={
                 "contents": [{"role": "user", "parts": [{"text": request.prompt}, *image_parts]}],
                 "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
@@ -173,20 +174,15 @@ class GrsaiProvider:
 
     name = "grsai"
     credential_env = "GRSAI_API_KEY"
-    # 供应商任务可能持续较长时间；降低查询频率以避免无意义的外部请求。
-    _poll_interval_seconds = 5 * 60
-    _max_poll_attempts = 144
-
     async def generate(self, request: GenerationRequest, settings: Settings, client: httpx.AsyncClient) -> list[str]:
-        result, base_url, headers = await self.submit(request, settings, client)
-        return await self.wait_for_result(result, base_url, headers, client)
+        raise ProviderError("grsai 必须通过异步提交和短轮询队列处理")
 
     async def submit(self, request: GenerationRequest, settings: Settings, client: httpx.AsyncClient) -> tuple[dict[str, Any], str, dict[str, str]]:
         if not settings.grsai_api_key:
             raise ProviderError(f"未配置 {self.credential_env}")
         images = [_public_url(request.template_url), *[_public_url(url) for url in request.print_urls]]
         base_url = settings.grsai_base_url.rstrip("/")
-        headers = {"Authorization": f"Bearer {settings.grsai_api_key}"}
+        headers = {"Authorization": f"Bearer {settings.grsai_api_key}", "Idempotency-Key": request.idempotency_key}
         response = await client.post(
             f"{base_url}/v1/api/generate",
             headers=headers,
@@ -212,24 +208,26 @@ class GrsaiProvider:
             raise ProviderError("grsai 返回了无效的响应格式")
         return data
 
-    async def wait_for_result(self, result: dict[str, Any], base_url: str, headers: dict[str, str], client: httpx.AsyncClient) -> list[str]:
-        for _ in range(self._max_poll_attempts):
-            status = str(result.get("status", "")).lower()
-            if status == "succeeded":
-                urls = [item["url"] for item in result.get("results", []) if isinstance(item, dict) and isinstance(item.get("url"), str)]
-                if urls:
-                    return urls
+    async def poll_once(self, provider_task_id: str, settings: Settings, client: httpx.AsyncClient) -> list[str] | None:
+        """只查询一次外部任务；未完成返回 None，不占用 worker 等待。"""
+        if not settings.grsai_api_key:
+            raise ProviderError(f"未配置 {self.credential_env}")
+        response = await client.get(
+            f"{settings.grsai_base_url.rstrip('/')}/v1/api/result",
+            headers={"Authorization": f"Bearer {settings.grsai_api_key}"},
+            params={"id": provider_task_id},
+        )
+        _raise_for_provider_error(self.name, response)
+        result = self._response_data(response)
+        status = str(result.get("status", "")).lower()
+        if status == "succeeded":
+            urls = [item["url"] for item in result.get("results", []) if isinstance(item, dict) and isinstance(item.get("url"), str)]
+            if not urls:
                 raise ProviderError("grsai 任务成功但未返回图片地址")
-            if status in {"failed", "violation"}:
-                raise ProviderError(f"grsai 任务{status}：{result.get('error') or '未提供原因'}")
-            task_id = result.get("id")
-            if not isinstance(task_id, str) or not task_id:
-                raise ProviderError("grsai 异步任务未返回任务 ID")
-            await asyncio.sleep(self._poll_interval_seconds)
-            response = await client.get(f"{base_url}/v1/api/result", headers=headers, params={"id": task_id})
-            _raise_for_provider_error(self.name, response)
-            result = self._response_data(response)
-        raise ProviderError("grsai 任务查询超时，请稍后重试")
+            return urls
+        if status in {"failed", "violation"}:
+            raise ProviderError(f"grsai 任务{status}：{result.get('error') or '未提供原因'}")
+        return None
 
 
 def _raise_for_provider_error(provider: str, response: httpx.Response) -> None:
@@ -275,30 +273,12 @@ async def submit_async_generation(provider: str, request: GenerationRequest) -> 
         return await adapter.submit(request, get_settings(), client)
 
 
-async def wait_for_async_generation(provider: str, initial_result: dict[str, Any], base_url: str, headers: dict[str, str]) -> list[str]:
-    """根据供应商异步任务 ID 轮询并取得最终图片地址。"""
+async def poll_async_generation(provider: str, provider_task_id: str) -> list[str] | None:
     adapter = PROVIDERS.get(provider)
     if not isinstance(adapter, GrsaiProvider):
         raise ProviderError("当前模型不支持异步任务查询")
     async with httpx.AsyncClient(timeout=120) as client:
-        return await adapter.wait_for_result(initial_result, base_url, headers, client)
-
-
-async def resume_async_generation(provider: str, provider_task_id: str) -> list[str]:
-    """重新查询一个已提交的供应商异步任务，不会重新发起图片生成。"""
-    adapter = PROVIDERS.get(provider)
-    if not isinstance(adapter, GrsaiProvider):
-        raise ProviderError("当前模型不支持异步任务查询")
-    settings = get_settings()
-    if not settings.grsai_api_key:
-        raise ProviderError(f"未配置 {adapter.credential_env}")
-    async with httpx.AsyncClient(timeout=120) as client:
-        return await adapter.wait_for_result(
-            {"id": provider_task_id, "status": "running"},
-            settings.grsai_base_url.rstrip("/"),
-            {"Authorization": f"Bearer {settings.grsai_api_key}"},
-            client,
-        )
+        return await adapter.poll_once(provider_task_id, get_settings(), client)
 
 
 async def generate_draft_title(title_constraint: str, image_url: str) -> str:
