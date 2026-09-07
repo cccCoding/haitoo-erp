@@ -64,13 +64,11 @@ API 文档：`http://localhost:8001/docs`。
 
 超级管理员登录后可在“AI 模型管理”中启用并切换印花贴合模型，并为每个平台模型设置“单个任务印花图数量”。批量快捷操作会按该数量创建多条独立任务；只有服务商保证输出顺序与输入一致时才能把数量设为大于 1，否则必须保持默认值 1。
 
-默认生产模型为 Grsai 的 `nano-banana-fast`。MySQL 中的任务记录就是队列状态源，`submit-worker` 按创建时间串行提交第三方 API，`result-worker` 独立串行查询异步结果。提交失败最多再重试 2 次，查询未完成或临时失败时留到下一轮。启动生产服务时需要同时运行 `api`、两个 Worker 和 MySQL；任务间隔可由超级管理员在线配置。每个新任务会记录实际使用的提供方和模型版本。密钥只由后端读取：
+默认生产模型为 Grsai 的 `nano-banana-fast`。MySQL 中的任务记录就是队列状态源，`submit-worker` 按创建时间串行提交第三方 API，`result-worker` 独立串行查询异步结果。提交失败最多再重试 2 次，查询未完成或临时失败时留到下一轮。启动生产服务时需要同时运行 `api`、两个 Worker 和 MySQL；任务间隔可由超级管理员在线配置。每个新任务会记录实际使用的提供方、模型版本和创建人。模型平台密钥由公司管理员在“成员管理”中为每位员工单独配置，经加密保存后仅由后端按任务创建人读取，不再使用平台级共享模型密钥。
+
+模型服务地址、标题生成服务及 R2 存储仍由部署环境配置：
 
 ```bash
-export SEEDREAM_API_KEY='...'
-export QWEN_API_KEY='...'
-export GEMINI_API_KEY='...'
-export GRSAI_API_KEY='...'
 # 可选，默认 https://grsaiapi.com；国内节点可使用 https://grsai.dakka.com.cn
 export GRSAI_BASE_URL='https://grsaiapi.com'
 export DEEPSEEK_API_KEY='...'

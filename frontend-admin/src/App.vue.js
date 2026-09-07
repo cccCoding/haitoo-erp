@@ -9,10 +9,8 @@ const loading = ref(false), saving = ref(''), error = ref('');
 const toast = ref('');
 const activePage = ref('overview');
 const showCompanyForm = ref(false);
-const showMiaoshouForm = ref(false), miaoshouCompany = ref(null);
 const showProviderForm = ref(false);
 const companyForm = ref({ name: '', admin_name: '', admin_email: '', admin_password: '' });
-const miaoshouForm = ref({ app_id: '', app_secret: '' });
 const providerForm = ref({ provider: '', display_name: '', model: '', enabled: false, is_default: false, images_per_task: 1 });
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
@@ -114,21 +112,6 @@ async function createCompany() { if (companyForm.value.admin_password.length < 8
 }
 catch (e) {
     error.value = e.response?.data?.detail || '创建公司失败';
-}
-finally {
-    saving.value = '';
-} }
-function openMiaoshou(company) { miaoshouCompany.value = company; miaoshouForm.value = { app_id: '', app_secret: '' }; showMiaoshouForm.value = true; }
-async function saveMiaoshou() { if (!miaoshouCompany.value || !miaoshouForm.value.app_id.trim() || !miaoshouForm.value.app_secret.trim())
-    return; try {
-    saving.value = 'miaoshou';
-    error.value = '';
-    await api.put(`/admin/companies/${miaoshouCompany.value.id}/miaoshou-account`, miaoshouForm.value, { headers: headers.value });
-    showMiaoshouForm.value = false;
-    await loadAdmin();
-}
-catch (e) {
-    error.value = e.response?.data?.detail || '保存妙手账号失败';
 }
 finally {
     saving.value = '';
@@ -388,8 +371,6 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         for (const [company] of __VLS_getVForSourceType((__VLS_ctx.companies))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 key: (company.id),
@@ -411,27 +392,8 @@ else {
             if (!company.admin_users.length) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
             }
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: (company.miaoshou_configured ? 'ok' : 'bad') },
-            });
-            (company.miaoshou_configured ? '已配置' : '待配置');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (new Date(company.created_at).toLocaleDateString());
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "company-actions" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
-                            return;
-                        if (!!(__VLS_ctx.activePage === 'overview'))
-                            return;
-                        if (!(__VLS_ctx.activePage === 'companies'))
-                            return;
-                        __VLS_ctx.openMiaoshou(company);
-                    } },
-                ...{ class: "secondary" },
-            });
         }
     }
     else {
@@ -481,7 +443,6 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.providers))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
                 key: (provider.provider),
@@ -496,17 +457,10 @@ else {
             }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
             (provider.display_name);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-            (provider.credential_env || '未定义环境变量');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
             (provider.model);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (provider.images_per_task);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "credential-status" },
-                ...{ class: (__VLS_ctx.overview?.credential_status?.[provider.provider] ? 'is-ready' : 'is-missing') },
-            });
-            (__VLS_ctx.overview?.credential_status?.[provider.provider] ? '密钥就绪' : '缺少密钥');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "provider-enabled" },
             });
@@ -543,11 +497,10 @@ else {
                 ...{ class: "primary compact" },
             });
         }
-        if (!__VLS_ctx.overview?.credential_status?.r2) {
+        if (!__VLS_ctx.overview?.storage_ready) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "notice" },
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
         }
     }
     if (__VLS_ctx.error) {
@@ -618,47 +571,6 @@ if (__VLS_ctx.showCompanyForm) {
         disabled: (__VLS_ctx.saving === 'company'),
     });
     (__VLS_ctx.saving === 'company' ? '开通中…' : '确认开通');
-}
-if (__VLS_ctx.showMiaoshouForm) {
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ onClick: (...[$event]) => {
-                if (!(__VLS_ctx.showMiaoshouForm))
-                    return;
-                __VLS_ctx.showMiaoshouForm = false;
-            } },
-        ...{ class: "modal-backdrop" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-        ...{ class: "modal" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-        ...{ onClick: (...[$event]) => {
-                if (!(__VLS_ctx.showMiaoshouForm))
-                    return;
-                __VLS_ctx.showMiaoshouForm = false;
-            } },
-        ...{ class: "close" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    (__VLS_ctx.miaoshouCompany?.name);
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-        maxlength: "255",
-    });
-    (__VLS_ctx.miaoshouForm.app_id);
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-        type: "password",
-        maxlength: "500",
-    });
-    (__VLS_ctx.miaoshouForm.app_secret);
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-        ...{ onClick: (__VLS_ctx.saveMiaoshou) },
-        ...{ class: "primary" },
-        disabled: (__VLS_ctx.saving === 'miaoshou'),
-    });
-    (__VLS_ctx.saving === 'miaoshou' ? '保存中…' : '安全保存');
 }
 if (__VLS_ctx.showProviderForm) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -776,8 +688,6 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['company-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['company-head']} */ ;
 /** @type {__VLS_StyleScopedClasses['company-row']} */ ;
-/** @type {__VLS_StyleScopedClasses['company-actions']} */ ;
-/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['model-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['heading']} */ ;
@@ -789,7 +699,6 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['provider-list-head']} */ ;
 /** @type {__VLS_StyleScopedClasses['provider-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['provider-platform-name']} */ ;
-/** @type {__VLS_StyleScopedClasses['credential-status']} */ ;
 /** @type {__VLS_StyleScopedClasses['provider-enabled']} */ ;
 /** @type {__VLS_StyleScopedClasses['provider-row-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
@@ -802,10 +711,6 @@ if (__VLS_ctx.toast) {
 /** @type {__VLS_StyleScopedClasses['modal']} */ ;
 /** @type {__VLS_StyleScopedClasses['close']} */ ;
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
-/** @type {__VLS_StyleScopedClasses['primary']} */ ;
-/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
-/** @type {__VLS_StyleScopedClasses['modal']} */ ;
-/** @type {__VLS_StyleScopedClasses['close']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal']} */ ;
@@ -837,11 +742,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             toast: toast,
             activePage: activePage,
             showCompanyForm: showCompanyForm,
-            showMiaoshouForm: showMiaoshouForm,
-            miaoshouCompany: miaoshouCompany,
             showProviderForm: showProviderForm,
             companyForm: companyForm,
-            miaoshouForm: miaoshouForm,
             providerForm: providerForm,
             loadAdmin: loadAdmin,
             login: login,
@@ -850,8 +752,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             saveProviderForm: saveProviderForm,
             saveQueueSettings: saveQueueSettings,
             createCompany: createCompany,
-            openMiaoshou: openMiaoshou,
-            saveMiaoshou: saveMiaoshou,
             logout: logout,
         };
     },

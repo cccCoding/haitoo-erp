@@ -168,6 +168,19 @@ class AIProviderSetting(Base):
     images_per_task: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class UserAIProviderCredential(Base):
+    """员工自己的模型平台密钥；密文仅由任务 Worker 解密使用。"""
+    __tablename__ = "user_ai_provider_credentials"
+    __table_args__ = (UniqueConstraint("user_id", "provider", name="uq_user_ai_provider_credential"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    user_id: Mapped[int] = mapped_column(index=True)
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    secret_encrypted: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class TaskQueueSetting(Base):
     """平台级串行任务节奏配置；固定使用主键 1。"""
     __tablename__ = "task_queue_settings"

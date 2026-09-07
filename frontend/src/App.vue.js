@@ -11,8 +11,10 @@ const toast = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
 const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFormTab = ref('basic'), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateTitleTemplate = ref(''), newTemplateProductDescription = ref(''), newTemplateSizeChart = ref(null), newTemplateSizeChartPreview = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), newPackageWeight = ref(null), newPackageLength = ref(null), newPackageWidth = ref(null), newPackageHeight = ref(null), newSkuSizeOptions = ref([]), newTemplateAiPrompts = ref([]), editingTemplate = ref(null);
 const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', user_code: '', email: '', password: '', is_active: true }), memberSaving = ref(false);
+const showMemberCredentialDialog = ref(false), credentialMember = ref(null), credentialProvider = ref(null), credentialApiKey = ref(''), credentialSaving = ref(false);
 const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), myAccountSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
+const showMiaoshouDialog = ref(false), miaoshouForm = ref({ app_id: '', app_secret: '' }), miaoshouSaving = ref(false);
 const materialUploading = ref(false), materialUploadError = ref('');
 const selectedMaterialAssetIds = ref([]), materialTemplateFilterId = ref(null), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChart = ref(null), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false);
 const showMaterialTemplateDialog = ref(false), materialTemplateId = ref(null), materialTemplateSaving = ref(false);
@@ -652,18 +654,76 @@ async function toggleMember(member) { try {
 catch (e) {
     error.value = e.response?.data?.detail || '更新成员状态失败';
 } }
+function openMemberCredentialDialog(member, provider) { credentialMember.value = member; credentialProvider.value = provider; credentialApiKey.value = ''; showMemberCredentialDialog.value = true; }
+async function saveMemberCredential() { if (!credentialMember.value || !credentialProvider.value || !credentialApiKey.value.trim()) {
+    showToast('请输入平台密钥');
+    return;
+} try {
+    credentialSaving.value = true;
+    await api.put(`/members/${credentialMember.value.id}/ai-provider-credentials/${credentialProvider.value.provider}`, { api_key: credentialApiKey.value.trim() }, { headers: headers.value });
+    showMemberCredentialDialog.value = false;
+    await refresh();
+    showToast(`${credentialProvider.value.display_name} 平台密钥已安全保存`);
+}
+catch (e) {
+    showToast(e.response?.data?.detail || '保存平台密钥失败');
+}
+finally {
+    credentialSaving.value = false;
+} }
+async function clearMemberCredential() { if (!credentialMember.value || !credentialProvider.value || !confirm(`确定清除 ${credentialMember.value.name} 的 ${credentialProvider.value.display_name} 平台密钥吗？`))
+    return; try {
+    credentialSaving.value = true;
+    await api.delete(`/members/${credentialMember.value.id}/ai-provider-credentials/${credentialProvider.value.provider}`, { headers: headers.value });
+    showMemberCredentialDialog.value = false;
+    await refresh();
+    showToast('平台密钥已清除');
+}
+catch (e) {
+    showToast(e.response?.data?.detail || '清除平台密钥失败');
+}
+finally {
+    credentialSaving.value = false;
+} }
 async function loadMiaoshouShops() { try {
     shopLoading.value = true;
     shopError.value = '';
     await api.post('/miaoshou/shops', {}, { headers: headers.value });
     await refresh();
+    return true;
 }
 catch (e) {
     shopError.value = e.response?.data?.detail || '获取妙手店铺失败';
+    return false;
 }
 finally {
     shopLoading.value = false;
 } }
+function openMiaoshouDialog() { miaoshouForm.value = { app_id: '', app_secret: '' }; shopError.value = ''; showMiaoshouDialog.value = true; }
+async function saveMiaoshouAccount() {
+    const appId = miaoshouForm.value.app_id.trim(), appSecret = miaoshouForm.value.app_secret.trim();
+    if (!appId || !appSecret) {
+        showToast('请输入 App ID 和 App Secret');
+        return;
+    }
+    try {
+        miaoshouSaving.value = true;
+        shopError.value = '';
+        await api.put('/miaoshou/account', { app_id: appId, app_secret: appSecret }, { headers: headers.value });
+        if (company.value)
+            company.value.miaoshou_configured = true;
+        showMiaoshouDialog.value = false;
+        const synced = await loadMiaoshouShops();
+        showToast(synced ? '妙手 API Key 已保存，店铺同步完成' : '妙手 API Key 已保存，请检查同步错误后重试');
+    }
+    catch (e) {
+        shopError.value = e.response?.data?.detail || '保存妙手 API Key 失败';
+        showToast(shopError.value);
+    }
+    finally {
+        miaoshouSaving.value = false;
+    }
+}
 function openShopManagersDialog(shop) { managingShop.value = shop; selectedManagerIds.value = shop.manager_users.map((member) => member.id); showShopManagersDialog.value = true; }
 async function saveShopManagers() { if (!managingShop.value)
     return; try {
@@ -2062,6 +2122,7 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (member.user_code || '—');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (member.role === 'company_admin' ? '公司管理员' : '普通成员');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (member.email);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
@@ -2071,51 +2132,87 @@ else {
             (member.is_active ? '启用中' : '已停用');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (new Date(member.created_at).toLocaleDateString());
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
-                            return;
-                        if (!!(__VLS_ctx.page === 'dashboard'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'templates'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'pod'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'tasks'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'materials'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'drafts'))
-                            return;
-                        if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
-                            return;
-                        __VLS_ctx.openMemberDialog(member);
-                    } },
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "member-row-actions" },
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
-                            return;
-                        if (!!(__VLS_ctx.page === 'dashboard'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'templates'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'pod'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'tasks'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'materials'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'drafts'))
-                            return;
-                        if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
-                            return;
-                        __VLS_ctx.toggleMember(member);
-                    } },
-                ...{ class: (member.is_active ? 'negative' : 'positive') },
-            });
-            (member.is_active ? '停用' : '启用');
+            if (member.role === 'member') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(!__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            if (!(member.role === 'member'))
+                                return;
+                            __VLS_ctx.openMemberDialog(member);
+                        } },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(!__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            if (!(member.role === 'member'))
+                                return;
+                            __VLS_ctx.toggleMember(member);
+                        } },
+                    ...{ class: (member.is_active ? 'negative' : 'positive') },
+                });
+                (member.is_active ? '停用' : '启用');
+            }
+            for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.aiProviders))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(!__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            __VLS_ctx.openMemberCredentialDialog(member, provider);
+                        } },
+                    key: (provider.provider),
+                    ...{ class: "credential-button" },
+                    ...{ class: (member.ai_provider_credentials?.[provider.provider] ? 'configured' : 'missing') },
+                });
+                (provider.display_name);
+                (member.ai_provider_credentials?.[provider.provider] ? '已配置' : '待配置');
+            }
         }
         if (!__VLS_ctx.members.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
@@ -2132,10 +2229,24 @@ else {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "miaoshou-status" },
+            ...{ class: (__VLS_ctx.company?.miaoshou_configured ? 'configured' : 'missing') },
+        });
+        (__VLS_ctx.company?.miaoshou_configured ? '妙手 API Key 已配置' : '请先配置妙手 API Key');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "shop-actions" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.openMiaoshouDialog) },
+            ...{ class: "secondary" },
+            disabled: (__VLS_ctx.miaoshouSaving || __VLS_ctx.shopLoading),
+        });
+        (__VLS_ctx.company?.miaoshou_configured ? '更新 API Key' : '配置 API Key');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.loadMiaoshouShops) },
             ...{ class: "primary" },
-            disabled: (__VLS_ctx.shopLoading),
+            disabled: (__VLS_ctx.shopLoading || __VLS_ctx.miaoshouSaving || !__VLS_ctx.company?.miaoshou_configured),
         });
         (__VLS_ctx.shopLoading ? '同步中…' : '↻ 同步妙手店铺');
         if (__VLS_ctx.shopError) {
@@ -2215,6 +2326,7 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "empty" },
             });
+            (__VLS_ctx.company?.miaoshou_configured ? '暂无已同步店铺，点击“同步妙手店铺”开始获取。' : '配置妙手 API Key 后即可同步店铺。');
         }
     }
 }
@@ -3027,6 +3139,108 @@ if (__VLS_ctx.showMemberDialog) {
     });
     (__VLS_ctx.memberSaving ? '保存中…' : '保存');
 }
+if (__VLS_ctx.showMemberCredentialDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMemberCredentialDialog))
+                    return;
+                __VLS_ctx.showMemberCredentialDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    (__VLS_ctx.credentialProvider?.display_name);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.credentialMember?.name);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        ...{ onKeyup: (__VLS_ctx.saveMemberCredential) },
+        type: "password",
+        maxlength: "2000",
+        autocomplete: "new-password",
+        placeholder: "请输入新的平台密钥",
+    });
+    (__VLS_ctx.credentialApiKey);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions credential-modal-actions" },
+    });
+    if (__VLS_ctx.credentialMember?.ai_provider_credentials?.[__VLS_ctx.credentialProvider?.provider]) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.clearMemberCredential) },
+            ...{ class: "negative" },
+            disabled: (__VLS_ctx.credentialSaving),
+        });
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMemberCredentialDialog))
+                    return;
+                __VLS_ctx.showMemberCredentialDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.credentialSaving),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveMemberCredential) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.credentialSaving || !__VLS_ctx.credentialApiKey.trim()),
+    });
+    (__VLS_ctx.credentialSaving ? '保存中…' : '安全保存');
+}
+if (__VLS_ctx.showMiaoshouDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMiaoshouDialog))
+                    return;
+                __VLS_ctx.showMiaoshouDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    (__VLS_ctx.company?.miaoshou_configured ? '更新' : '配置');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "255",
+        autocomplete: "off",
+        placeholder: "请输入 App ID",
+    });
+    (__VLS_ctx.miaoshouForm.app_id);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        ...{ onKeyup: (__VLS_ctx.saveMiaoshouAccount) },
+        type: "password",
+        maxlength: "500",
+        autocomplete: "new-password",
+        placeholder: "请输入 App Secret",
+    });
+    (__VLS_ctx.miaoshouForm.app_secret);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMiaoshouDialog))
+                    return;
+                __VLS_ctx.showMiaoshouDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.miaoshouSaving),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveMiaoshouAccount) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.miaoshouSaving || !__VLS_ctx.miaoshouForm.app_id.trim() || !__VLS_ctx.miaoshouForm.app_secret.trim()),
+    });
+    (__VLS_ctx.miaoshouSaving ? '保存中…' : '保存并同步');
+}
 if (__VLS_ctx.showShopManagersDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
@@ -3042,7 +3256,7 @@ if (__VLS_ctx.showShopManagersDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     (__VLS_ctx.managingShop?.name);
-    for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members))) {
+    for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members.filter(item => item.role === 'member')))) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             key: (member.id),
             ...{ class: "manager-option" },
@@ -3056,7 +3270,7 @@ if (__VLS_ctx.showShopManagersDialog) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
         (member.email);
     }
-    if (!__VLS_ctx.members.length) {
+    if (!__VLS_ctx.members.some(item => item.role === 'member')) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
             ...{ class: "empty" },
         });
@@ -3676,9 +3890,14 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['member-row-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['credential-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['miaoshou-status']} */ ;
+/** @type {__VLS_StyleScopedClasses['shop-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
@@ -3791,6 +4010,18 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['credential-modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['negative']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['manager-option']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
@@ -3850,12 +4081,14 @@ const __VLS_self = (await import('vue')).defineComponent({
             email: email,
             password: password,
             user: user,
+            company: company,
             templates: templates,
             templateGroups: templateGroups,
             tasks: tasks,
             materialAssets: materialAssets,
             drafts: drafts,
             members: members,
+            aiProviders: aiProviders,
             loading: loading,
             error: error,
             toast: toast,
@@ -3886,6 +4119,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             editingMember: editingMember,
             memberForm: memberForm,
             memberSaving: memberSaving,
+            showMemberCredentialDialog: showMemberCredentialDialog,
+            credentialMember: credentialMember,
+            credentialProvider: credentialProvider,
+            credentialApiKey: credentialApiKey,
+            credentialSaving: credentialSaving,
             showMyAccountDialog: showMyAccountDialog,
             myName: myName,
             myUserCode: myUserCode,
@@ -3893,6 +4131,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             managedShops: managedShops,
             shopLoading: shopLoading,
             shopError: shopError,
+            showMiaoshouDialog: showMiaoshouDialog,
+            miaoshouForm: miaoshouForm,
+            miaoshouSaving: miaoshouSaving,
             materialUploading: materialUploading,
             materialUploadError: materialUploadError,
             selectedMaterialAssetIds: selectedMaterialAssetIds,
@@ -4035,7 +4276,12 @@ const __VLS_self = (await import('vue')).defineComponent({
             saveMyUserCode: saveMyUserCode,
             saveMember: saveMember,
             toggleMember: toggleMember,
+            openMemberCredentialDialog: openMemberCredentialDialog,
+            saveMemberCredential: saveMemberCredential,
+            clearMemberCredential: clearMemberCredential,
             loadMiaoshouShops: loadMiaoshouShops,
+            openMiaoshouDialog: openMiaoshouDialog,
+            saveMiaoshouAccount: saveMiaoshouAccount,
             openShopManagersDialog: openShopManagersDialog,
             saveShopManagers: saveShopManagers,
             logout: logout,

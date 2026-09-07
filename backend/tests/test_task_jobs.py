@@ -11,8 +11,9 @@ from app import main, task_jobs
 from app.ai_providers import GrsaiProvider, ProviderError, ProviderTaskTerminalError
 from app.config import Settings
 from app.database import Base
-from app.models import AIProviderSetting, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User
-from app.schemas import PodTaskCreate
+from app.credentials import encrypt_secret
+from app.models import AIProviderSetting, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential
+from app.schemas import AIProviderCredentialUpdate, PodTaskCreate
 
 
 class TaskJobTests(unittest.TestCase):
@@ -27,6 +28,9 @@ class TaskJobTests(unittest.TestCase):
                 AIProviderSetting(provider="seedream", display_name="Seedream", model="seed", enabled=True, is_default=False, images_per_task=1),
                 ProductTemplate(id=1, company_id=1, name="Template", cover_url="https://img.example/template.png"),
                 User(id=1, company_id=1, email="operator@example.com", name="Operator", password_hash="x", role=Role.MEMBER),
+                User(id=2, company_id=1, email="admin@example.com", name="Admin", password_hash="x", role=Role.COMPANY_ADMIN),
+                UserAIProviderCredential(company_id=1, user_id=1, provider="grsai", secret_encrypted=encrypt_secret("member-key")),
+                UserAIProviderCredential(company_id=1, user_id=1, provider="seedream", secret_encrypted=encrypt_secret("seedream-member-key")),
             ])
             db.commit()
 
@@ -55,7 +59,7 @@ class TaskJobTests(unittest.TestCase):
             template_id=1, provider="grsai", creative_requirement="test",
             print_urls=[f"https://img.example/creative/{index}.png" for index in range(5)],
         )
-        with self.session_factory() as db, patch.object(main, "is_company_r2_url", return_value=True), patch.object(main, "provider_has_credentials", return_value=True):
+        with self.session_factory() as db, patch.object(main, "is_company_r2_url", return_value=True):
             user = db.get(User, 1)
             response = main.create_task(payload, user=user, db=db)
             tasks = db.scalars(select(PodTask).order_by(PodTask.id)).all()
@@ -67,8 +71,9 @@ class TaskJobTests(unittest.TestCase):
         task_id = self.add_task()
         requests = []
 
-        async def submit(_, request):
+        async def submit(_, request, api_key):
             requests.append(request)
+            self.assertEqual(api_key, "member-key")
             if len(requests) < 3:
                 raise ProviderError("temporary")
             return {"id": "provider-1"}, "", {}
@@ -83,6 +88,30 @@ class TaskJobTests(unittest.TestCase):
             self.assertEqual(task.provider_task_id, "provider-1")
         self.assertEqual([request.idempotency_key for request in requests], [f"haitoro-task-{task_id}"] * 3)
         self.assertEqual(sleep.await_count, 2)
+
+    def test_member_credential_status_and_update_never_return_secret(self) -> None:
+        with self.session_factory() as db:
+            admin = db.get(User, 2)
+            rows = main.list_members(user=admin, db=db)
+            member_row = next(row for row in rows if row["id"] == 1)
+            self.assertTrue(member_row["ai_provider_credentials"]["grsai"])
+            response = main.update_member_ai_provider_credential(
+                1, "grsai", AIProviderCredentialUpdate(api_key="replacement-key"), user=admin, db=db,
+            )
+            stored = db.scalar(select(UserAIProviderCredential).where(UserAIProviderCredential.user_id == 1))
+        self.assertEqual(response, {"member_id": 1, "provider": "grsai", "configured": True})
+        self.assertNotIn("replacement-key", stored.secret_encrypted)
+
+    def test_task_creation_requires_its_creators_credential(self) -> None:
+        payload = PodTaskCreate(
+            template_id=1, provider="grsai", creative_requirement="test",
+            print_urls=["https://img.example/creative/1.png"],
+        )
+        with self.session_factory() as db, patch.object(main, "is_company_r2_url", return_value=True):
+            credential = db.scalar(select(UserAIProviderCredential).where(UserAIProviderCredential.user_id == 1))
+            db.delete(credential); db.commit()
+            with self.assertRaisesRegex(Exception, "个人 Grsai 平台密钥"):
+                main.create_task(payload, user=db.get(User, 1), db=db)
 
     def test_sync_provider_completes_in_submit_worker(self) -> None:
         task_id = self.add_task()
@@ -150,7 +179,7 @@ class TaskJobTests(unittest.TestCase):
         response = httpx.Response(200, request=httpx.Request("GET", "https://grsai.example/result"), json={"status": "failed", "error": "rejected"})
         client = AsyncMock(); client.get.return_value = response
         with self.assertRaises(ProviderTaskTerminalError):
-            asyncio.run(GrsaiProvider().poll_once("provider-1", Settings(grsai_api_key="test"), client))
+            asyncio.run(GrsaiProvider().poll_once("provider-1", "test", Settings(), client))
 
     def test_task_summary_omits_bulk_payload_and_has_no_batches(self) -> None:
         task_id = self.add_task()

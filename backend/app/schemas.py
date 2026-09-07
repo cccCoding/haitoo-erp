@@ -130,6 +130,26 @@ class MiaoshouAccountUpdate(BaseModel):
     app_id: str = Field(min_length=1, max_length=255)
     app_secret: str = Field(min_length=1, max_length=500)
 
+    @field_validator("app_id", "app_secret")
+    @classmethod
+    def validate_credentials(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("妙手 API Key 不能为空")
+        return value
+
+
+class AIProviderCredentialUpdate(BaseModel):
+    api_key: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("平台密钥不能为空")
+        return value
+
 
 class ClaimMaterials(BaseModel):
     result_urls: list[str] = Field(min_length=1, max_length=1000)

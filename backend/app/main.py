@@ -17,10 +17,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
-from .models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserShop
-from .schemas import AdminCompanyCreate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LoginInput, MaterialAssetsTemplateUpdate, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskDraftCreate, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut
+from .models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserShop
+from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LoginInput, MaterialAssetsTemplateUpdate, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskDraftCreate, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
-from .ai_providers import ProviderError, generate_draft_title, provider_credential_env, provider_has_credentials
+from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
 from .storage import StorageError, create_image_upload_url, is_company_r2_url, is_public_r2_url, upload_image_bytes_async
 import httpx
@@ -73,10 +73,10 @@ def seed(db: Session) -> None:
 
 def ensure_schema() -> None:
     """轻量兼容迁移。关系一致性由应用层维护；MySQL 不使用外键。"""
-    columns = {column["name"] for column in inspect(engine).get_columns("product_templates")}
     with engine.begin() as connection:
         # 一次性清理已经下线的旧计费数据结构；重复启动时无副作用。
         inspector = inspect(connection)
+        columns = {column["name"] for column in inspector.get_columns("product_templates")}
         quote = connection.dialect.identifier_preparer.quote
         table_names = set(inspector.get_table_names())
         for table_name in ("non_ai_point_rules", "point_ledgers", "point_accounts"):
@@ -110,7 +110,7 @@ def ensure_schema() -> None:
             connection.execute(text("ALTER TABLE product_templates ADD COLUMN sku_specifications JSON"))
         if "ai_prompts" not in columns:
             connection.execute(text("ALTER TABLE product_templates ADD COLUMN ai_prompts JSON"))
-        draft_columns = {column["name"] for column in inspect(engine).get_columns("product_drafts")}
+        draft_columns = {column["name"] for column in inspect(connection).get_columns("product_drafts")}
         if "sku_items" not in draft_columns:
             connection.execute(text("ALTER TABLE product_drafts ADD COLUMN sku_items JSON"))
         if "template_id" not in draft_columns:
@@ -154,7 +154,7 @@ def ensure_schema() -> None:
             connection.execute(text("UPDATE product_drafts SET source_task_id = NULL WHERE source_task_id IS NOT NULL"))
             connection.execute(text("DELETE FROM pod_tasks"))
             connection.execute(text(f"DROP TABLE {quote('pod_task_batches')}"))
-        task_columns = {column["name"] for column in inspect(engine).get_columns("pod_tasks")}
+        task_columns = {column["name"] for column in inspect(connection).get_columns("pod_tasks")}
         for column, definition in (
             ("provider", "VARCHAR(40)"), ("provider_model", "VARCHAR(120)"),
             ("provider_task_id", "VARCHAR(160)"), ("failure_reason", "VARCHAR(500)"),
@@ -167,7 +167,7 @@ def ensure_schema() -> None:
         for obsolete_column in ("total_prints", "total_batches", "completed_batches", "failed_batches"):
             if obsolete_column in task_columns:
                 connection.execute(text(f"ALTER TABLE pod_tasks DROP COLUMN {obsolete_column}"))
-        provider_columns = {column["name"] for column in inspect(engine).get_columns("ai_provider_settings")}
+        provider_columns = {column["name"] for column in inspect(connection).get_columns("ai_provider_settings")}
         if "images_per_task" not in provider_columns:
             connection.execute(text("ALTER TABLE ai_provider_settings ADD COLUMN images_per_task INTEGER DEFAULT 1"))
             if "batch_size" in provider_columns:
@@ -181,12 +181,12 @@ def ensure_schema() -> None:
             connection.execute(text("CREATE INDEX ix_pod_tasks_provider_model ON pod_tasks (provider, provider_model)"))
         if "shop_id" in task_columns:
             connection.execute(text("ALTER TABLE pod_tasks DROP COLUMN shop_id"))
-        company_columns = {column["name"] for column in inspect(engine).get_columns("companies")}
+        company_columns = {column["name"] for column in inspect(connection).get_columns("companies")}
         if "miaoshou_app_id" not in company_columns:
             connection.execute(text("ALTER TABLE companies ADD COLUMN miaoshou_app_id VARCHAR(255)"))
         if "miaoshou_secret_encrypted" not in company_columns:
             connection.execute(text("ALTER TABLE companies ADD COLUMN miaoshou_secret_encrypted TEXT"))
-        user_columns = {column["name"] for column in inspect(engine).get_columns("users")}
+        user_columns = {column["name"] for column in inspect(connection).get_columns("users")}
         if "user_code" not in user_columns:
             connection.execute(text("ALTER TABLE users ADD COLUMN user_code VARCHAR(2)"))
         user_indexes = inspect(connection).get_indexes("users")
@@ -199,16 +199,16 @@ def ensure_schema() -> None:
         )
         if not has_user_code_unique_index:
             connection.execute(text("CREATE UNIQUE INDEX uq_users_company_user_code ON users (company_id, user_code)"))
-        shop_columns = {column["name"] for column in inspect(engine).get_columns("shops")}
+        shop_columns = {column["name"] for column in inspect(connection).get_columns("shops")}
         for column, definition in (("nickname", "VARCHAR(120)"), ("platform", "VARCHAR(40)"), ("auth_expires_at", "VARCHAR(50)")):
             if column not in shop_columns:
                 connection.execute(text(f"ALTER TABLE shops ADD COLUMN {column} {definition}"))
-        material_columns = {column["name"]: column for column in inspect(engine).get_columns("material_assets")}
+        material_columns = {column["name"]: column for column in inspect(connection).get_columns("material_assets")}
         if "template_id" not in material_columns:
             connection.execute(text("ALTER TABLE material_assets ADD COLUMN template_id INTEGER"))
         if connection.dialect.name == "mysql" and not material_columns["source_task_id"]["nullable"]:
             connection.execute(text("ALTER TABLE material_assets MODIFY COLUMN source_task_id INTEGER NULL"))
-        draft_columns = {column["name"]: column for column in inspect(engine).get_columns("product_drafts")}
+        draft_columns = {column["name"]: column for column in inspect(connection).get_columns("product_drafts")}
         if connection.dialect.name == "mysql" and not draft_columns["source_task_id"]["nullable"]:
             connection.execute(text("ALTER TABLE product_drafts MODIFY COLUMN source_task_id INTEGER NULL"))
         if connection.dialect.name == "mysql" and not draft_columns["shop_id"]["nullable"]:
@@ -311,7 +311,14 @@ def login(payload: LoginInput, db: Session = Depends(get_db)):
 @app.get("/me")
 def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
     company = db.get(Company, user.company_id) if user.company_id else None
-    return {"user": UserOut.model_validate(user), "company": {"id": company.id, "name": company.name} if company else None}
+    return {
+        "user": UserOut.model_validate(user),
+        "company": {
+            "id": company.id,
+            "name": company.name,
+            "miaoshou_configured": bool(company.miaoshou_app_id and company.miaoshou_secret_encrypted),
+        } if company else None,
+    }
 
 
 @app.patch("/me", response_model=UserOut)
@@ -372,11 +379,31 @@ def update_shop_managers(shop_id: int, payload: ShopManagerUpdate, user: User = 
     return {"shop_id": shop.id, "member_ids": sorted(member_ids)}
 
 
-@app.get("/members", response_model=list[UserOut])
+@app.get("/members")
 def list_members(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
-    return db.scalars(
-        select(User).where(User.company_id == user.company_id, User.role == Role.MEMBER).order_by(User.id.desc())
+    members = db.scalars(
+        select(User).where(
+            User.company_id == user.company_id,
+            User.role.in_([Role.COMPANY_ADMIN, Role.MEMBER]),
+        ).order_by(User.role, User.id.desc())
     ).all()
+    member_ids = [member.id for member in members]
+    configured = {
+        (row.user_id, row.provider)
+        for row in db.scalars(select(UserAIProviderCredential).where(UserAIProviderCredential.user_id.in_(member_ids))).all()
+    } if member_ids else set()
+    enabled_providers = db.scalars(
+        select(AIProviderSetting).where(AIProviderSetting.enabled.is_(True)).order_by(AIProviderSetting.provider)
+    ).all()
+    return [
+        UserOut.model_validate(member).model_dump() | {
+            "ai_provider_credentials": {
+                provider.provider: (member.id, provider.provider) in configured
+                for provider in enabled_providers
+            }
+        }
+        for member in members
+    ]
 
 
 @app.post("/members", response_model=UserOut)
@@ -416,11 +443,70 @@ def update_member(member_id: int, payload: MemberUpdate, user: User = Depends(re
     return member
 
 
+def get_company_credential_user(db: Session, user: User, member_id: int) -> User:
+    member = db.get(User, member_id)
+    if not member or member.company_id != user.company_id or member.role not in {Role.COMPANY_ADMIN, Role.MEMBER}:
+        raise HTTPException(404, "公司用户不存在")
+    return member
+
+
+@app.put("/members/{member_id}/ai-provider-credentials/{provider}")
+def update_member_ai_provider_credential(
+    member_id: int,
+    provider: str,
+    payload: AIProviderCredentialUpdate,
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """公司管理员为本公司成员保存独立模型密钥；接口永不返回密钥内容。"""
+    member = get_company_credential_user(db, user, member_id)
+    setting = db.get(AIProviderSetting, provider)
+    if not setting or not setting.enabled:
+        raise HTTPException(400, "模型平台不存在或未启用")
+    if not provider_supports_user_credentials(provider):
+        raise HTTPException(400, "该模型平台不支持独立密钥")
+    credential = db.scalar(select(UserAIProviderCredential).where(
+        UserAIProviderCredential.user_id == member.id,
+        UserAIProviderCredential.provider == provider,
+    ))
+    if credential:
+        credential.secret_encrypted = encrypt_secret(payload.api_key)
+        credential.updated_at = datetime.utcnow()
+    else:
+        credential = UserAIProviderCredential(
+            company_id=user.company_id,
+            user_id=member.id,
+            provider=provider,
+            secret_encrypted=encrypt_secret(payload.api_key),
+        )
+        db.add(credential)
+    db.commit()
+    return {"member_id": member.id, "provider": provider, "configured": True}
+
+
+@app.delete("/members/{member_id}/ai-provider-credentials/{provider}")
+def delete_member_ai_provider_credential(
+    member_id: int,
+    provider: str,
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    member = get_company_credential_user(db, user, member_id)
+    credential = db.scalar(select(UserAIProviderCredential).where(
+        UserAIProviderCredential.user_id == member.id,
+        UserAIProviderCredential.provider == provider,
+    ))
+    if credential:
+        db.delete(credential)
+        db.commit()
+    return {"member_id": member.id, "provider": provider, "configured": False}
+
+
 @app.post("/miaoshou/shops")
 async def list_miaoshou_shops(payload: MiaoshouShopQuery, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
     company = db.get(Company, user.company_id)
     if not company or not company.miaoshou_app_id or not company.miaoshou_secret_encrypted:
-        raise HTTPException(400, "尚未配置妙手账号，请联系平台管理员配置 AppKey 与 AppSecret")
+        raise HTTPException(400, "尚未配置妙手 API Key，请先在店铺管理中完成配置")
 
     body = {"platform": "tiktok", "pageNo": payload.page_no, "pageSize": payload.page_size}
     if payload.site:
@@ -464,6 +550,22 @@ async def list_miaoshou_shops(payload: MiaoshouShopQuery, user: User = Depends(r
     db.commit()
     data["synced_count"] = synced_count
     return data
+
+
+@app.put("/miaoshou/account")
+def update_miaoshou_account(
+    payload: MiaoshouAccountUpdate,
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """公司管理员配置本公司的妙手凭据；接口永不返回密钥内容。"""
+    company = db.get(Company, user.company_id)
+    if not company:
+        raise HTTPException(404, "公司不存在")
+    company.miaoshou_app_id = payload.app_id
+    company.miaoshou_secret_encrypted = encrypt_secret(payload.app_secret)
+    db.commit()
+    return {"company_id": company.id, "configured": True}
 
 
 @app.get("/template-groups")
@@ -859,10 +961,7 @@ def delete_material_asset(asset_id: int, user: User = Depends(current_user), db:
 
 @app.get("/admin/ai-providers")
 def list_ai_providers(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
-    return [
-        {**serialize_record(setting), "credential_env": provider_credential_env(setting.provider)}
-        for setting in db.scalars(select(AIProviderSetting).order_by(AIProviderSetting.provider)).all()
-    ]
+    return [serialize_record(setting) for setting in db.scalars(select(AIProviderSetting).order_by(AIProviderSetting.provider)).all()]
 
 
 @app.get("/admin/overview")
@@ -914,19 +1013,13 @@ def admin_overview(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Se
             "model_backlog": sorted(model_backlog.values(), key=lambda item: (-item["queued"], item["provider"], item["model"])),
             "alert": queue_alert,
         },
-        "credential_status": {
-            "seedream": bool(settings.seedream_api_key),
-            "qwen": bool(settings.qwen_api_key),
-            "gemini": bool(settings.gemini_api_key),
-            "grsai": bool(settings.grsai_api_key),
-            "r2": bool(
-                settings.r2_access_key_id
-                and settings.r2_secret_access_key
-                and settings.r2_bucket
-                and (settings.r2_endpoint or settings.r2_account_id)
-                and settings.r2_public_base_url
-            ),
-        },
+        "storage_ready": bool(
+            settings.r2_access_key_id
+            and settings.r2_secret_access_key
+            and settings.r2_bucket
+            and (settings.r2_endpoint or settings.r2_account_id)
+            and settings.r2_public_base_url
+        ),
     }
 
 
@@ -939,22 +1032,10 @@ def list_admin_companies(user: User = Depends(require_roles(Role.SUPER_ADMIN)), 
             "id": company.id,
             "name": company.name,
             "is_active": company.is_active,
-            "miaoshou_configured": bool(company.miaoshou_app_id and company.miaoshou_secret_encrypted),
             "created_at": timestamp_ms(company.created_at),
             "admin_users": [UserOut.model_validate(item) for item in db.scalars(select(User).where(User.company_id == company.id, User.role == Role.COMPANY_ADMIN).order_by(User.id)).all()],
         })
     return result
-
-
-@app.put("/admin/companies/{company_id}/miaoshou-account")
-def update_company_miaoshou_account(company_id: int, payload: MiaoshouAccountUpdate, user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
-    company = db.get(Company, company_id)
-    if not company:
-        raise HTTPException(404, "公司不存在")
-    company.miaoshou_app_id = payload.app_id.strip()
-    company.miaoshou_secret_encrypted = encrypt_secret(payload.app_secret)
-    db.commit()
-    return {"company_id": company.id, "configured": True}
 
 
 @app.post("/admin/companies")
@@ -1073,8 +1154,13 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
         provider = db.scalar(select(AIProviderSetting).where(AIProviderSetting.is_default.is_(True), AIProviderSetting.enabled.is_(True)))
     if not provider:
         raise HTTPException(400, "暂无已启用的默认 AI 模型，请联系超级管理员配置")
-    if not provider_has_credentials(provider.provider):
-        raise HTTPException(400, f"所选 AI 模型尚未配置 {provider_credential_env(provider.provider)}，请联系管理员配置")
+    credential = db.scalar(select(UserAIProviderCredential).where(
+        UserAIProviderCredential.company_id == user.company_id,
+        UserAIProviderCredential.user_id == user.id,
+        UserAIProviderCredential.provider == provider.provider,
+    ))
+    if not credential:
+        raise HTTPException(400, f"尚未配置个人 {provider.display_name} 平台密钥，请联系公司管理员配置")
     images_per_task = max(1, provider.images_per_task or 1)
     chunks = [print_urls[start:start + images_per_task] for start in range(0, len(print_urls), images_per_task)]
     common_parameters = payload.model_dump(exclude={"print_urls", "print_url"})
@@ -1244,7 +1330,7 @@ async def publish_draft_to_miaoshou(draft_id: int, user: User = Depends(current_
         return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "already_published": True}
     company = db.get(Company, draft.company_id)
     if not company or not company.miaoshou_app_id or not company.miaoshou_secret_encrypted:
-        raise HTTPException(400, "尚未配置妙手账号，请联系平台管理员配置 AppKey 与 AppSecret")
+        raise HTTPException(400, "尚未配置妙手 API Key，请联系公司管理员在店铺管理中配置")
     template = db.get(ProductTemplate, draft.template_id) if draft.template_id else None
     if not template:
         raise HTTPException(400, "该商品草稿缺少产品模板信息，无法生成公共采集箱商品")
@@ -1266,7 +1352,7 @@ async def claim_draft_to_tiktok(draft_id: int, user: User = Depends(current_user
         return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "tiktok_collect_box_detail_id": draft.tiktok_collect_box_id, "already_claimed": True}
     company = db.get(Company, draft.company_id)
     if not company or not company.miaoshou_app_id or not company.miaoshou_secret_encrypted:
-        raise HTTPException(400, "尚未配置妙手账号，请联系平台管理员配置 AppKey 与 AppSecret")
+        raise HTTPException(400, "尚未配置妙手 API Key，请联系公司管理员在店铺管理中配置")
     template = db.get(ProductTemplate, draft.template_id) if draft.template_id else None
     if not template:
         raise HTTPException(400, "该商品草稿缺少产品模板信息，无法生成公共采集箱商品")

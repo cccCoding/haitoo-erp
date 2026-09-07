@@ -16,8 +16,9 @@ from .ai_providers import (
     submit_async_generation,
 )
 from .database import get_db
+from .credentials import decrypt_secret
 from .main import map_task_results, persist_generated_images
-from .models import AIProviderSetting, PodTask, ProductTemplate, TaskQueueSetting, TaskStatus
+from .models import AIProviderSetting, PodTask, ProductTemplate, TaskQueueSetting, TaskStatus, UserAIProviderCredential
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,20 @@ def _request_for(task: PodTask, template: ProductTemplate) -> GenerationRequest:
     )
 
 
+def _task_api_key(db, task: PodTask) -> str:
+    credential = db.scalar(select(UserAIProviderCredential).where(
+        UserAIProviderCredential.company_id == task.company_id,
+        UserAIProviderCredential.user_id == task.created_by,
+        UserAIProviderCredential.provider == task.provider,
+    ))
+    if not credential:
+        raise ProviderError("任务创建人尚未配置该模型平台密钥")
+    try:
+        return decrypt_secret(credential.secret_encrypted)
+    except Exception as exc:
+        raise ProviderError("任务创建人的模型平台密钥无法解密，请重新配置") from exc
+
+
 async def submit_task_once(task_id: int) -> str:
     """提交一次；返回 done、retry 或 skipped。"""
     db = next(get_db())
@@ -86,8 +101,9 @@ async def submit_task_once(task_id: int) -> str:
         if not setting or not setting.enabled:
             raise ProviderError("任务所选模型已停用或不存在")
         request = _request_for(task, template)
+        api_key = _task_api_key(db, task)
         if task.provider == "grsai":
-            initial_result, _, _ = await submit_async_generation(task.provider, request)
+            initial_result, _, _ = await submit_async_generation(task.provider, request, api_key)
             provider_task_id = initial_result.get("id")
             if not isinstance(provider_task_id, str) or not provider_task_id:
                 raise ProviderError("grsai 异步任务未返回任务 ID")
@@ -101,7 +117,7 @@ async def submit_task_once(task_id: int) -> str:
             db.commit()
             return "done"
 
-        urls = await generate(task.provider or "", request)
+        urls = await generate(task.provider or "", request, api_key)
         urls = await persist_generated_images(urls, task.company_id, task.id)
         task = db.get(PodTask, task_id)
         if not task or task.status != TaskStatus.QUEUED:
@@ -148,7 +164,8 @@ async def process_result_task(task_id: int) -> None:
         provider, provider_task_id = task.provider or "", task.provider_task_id
         company_id = task.company_id
         try:
-            urls = await poll_async_generation(provider, provider_task_id)
+            api_key = _task_api_key(db, task)
+            urls = await poll_async_generation(provider, provider_task_id, api_key)
         except ProviderTaskTerminalError as exc:
             task = db.get(PodTask, task_id)
             if task and task.status == TaskStatus.RUNNING:
@@ -209,4 +226,3 @@ async def run_cycle(kind: str, sleep: SleepCallable = asyncio.sleep) -> int:
             await process_result_task(task_id)
         await sleep(queue_interval(kind))
     return len(task_ids)
-

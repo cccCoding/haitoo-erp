@@ -40,17 +40,14 @@ class ImageGenerationProvider(Protocol):
     """供应商适配器的稳定边界。返回值一律为系统可访问的图片 URL。"""
 
     name: str
-    credential_env: str
 
-    async def generate(self, request: GenerationRequest, settings: Settings, client: httpx.AsyncClient) -> list[str]: ...
+    async def generate(self, request: GenerationRequest, api_key: str, settings: Settings, client: httpx.AsyncClient) -> list[str]: ...
 
 
 def build_prompt(parameters: dict, template_name: str) -> str:
     requirement = parameters.get("creative_requirement") or ""
     return (
-        f"以产品模板「{template_name}」为主体，将参考印花自然融入商品图。"
-        "必须保留印花中的文字、Logo、颜色与图案细节，不新增品牌标识；仅自然融合布料的褶皱、光影和遮挡。"
-        f"输出电商商品主图，比例 {parameters['ratio']}，清晰度 {parameters['quality']}。{requirement}"
+        f"{requirement}。输出电商商品主图，比例 {parameters['ratio']}，清晰度 {parameters['quality']}。"
     )
 
 
@@ -86,15 +83,12 @@ async def _save_generated_image(data: bytes, mime_type: str, company_id: int, ta
 
 class SeedreamProvider:
     name = "seedream"
-    credential_env = "SEEDREAM_API_KEY"
 
-    async def generate(self, request: GenerationRequest, settings: Settings, client: httpx.AsyncClient) -> list[str]:
-        if not settings.seedream_api_key:
-            raise ProviderError(f"未配置 {self.credential_env}")
+    async def generate(self, request: GenerationRequest, api_key: str, settings: Settings, client: httpx.AsyncClient) -> list[str]:
         images = [_public_url(request.template_url), *[_public_url(url) for url in request.print_urls]]
         response = await client.post(
             f"{settings.seedream_base_url.rstrip('/')}/images/generations",
-            headers={"Authorization": f"Bearer {settings.seedream_api_key}", "Idempotency-Key": request.idempotency_key},
+            headers={"Authorization": f"Bearer {api_key}", "Idempotency-Key": request.idempotency_key},
             json={"model": request.model, "prompt": request.prompt, "image": images, "size": "2048x2048" if request.quality == "2K" else "1024x1024", "response_format": "url", "n": 2},
         )
         _raise_for_provider_error(self.name, response)
@@ -103,16 +97,13 @@ class SeedreamProvider:
 
 class QwenProvider:
     name = "qwen"
-    credential_env = "QWEN_API_KEY"
 
-    async def generate(self, request: GenerationRequest, settings: Settings, client: httpx.AsyncClient) -> list[str]:
-        if not settings.qwen_api_key:
-            raise ProviderError(f"未配置 {self.credential_env}")
+    async def generate(self, request: GenerationRequest, api_key: str, settings: Settings, client: httpx.AsyncClient) -> list[str]:
         images = [_public_url(request.template_url), *[_public_url(url) for url in request.print_urls]]
         content = [{"image": image} for image in images] + [{"text": request.prompt}]
         response = await client.post(
             settings.qwen_base_url,
-            headers={"Authorization": f"Bearer {settings.qwen_api_key}", "X-DashScope-Async": "enable", "Idempotency-Key": request.idempotency_key},
+            headers={"Authorization": f"Bearer {api_key}", "X-DashScope-Async": "enable", "Idempotency-Key": request.idempotency_key},
             json={"model": request.model, "input": {"messages": [{"role": "user", "content": content}]}, "parameters": {"n": 2, "size": "2048*2048" if request.quality == "2K" else "1024*1024"}},
         )
         _raise_for_provider_error(self.name, response)
@@ -128,16 +119,13 @@ class GeminiProvider:
     """
 
     name = "gemini"
-    credential_env = "GEMINI_API_KEY"
 
-    async def generate(self, request: GenerationRequest, settings: Settings, client: httpx.AsyncClient) -> list[str]:
-        if not settings.gemini_api_key:
-            raise ProviderError(f"未配置 {self.credential_env}")
+    async def generate(self, request: GenerationRequest, api_key: str, settings: Settings, client: httpx.AsyncClient) -> list[str]:
         source_urls = [_public_url(request.template_url), *[_public_url(url) for url in request.print_urls]]
         image_parts = [await self._input_image_part(url, client) for url in source_urls]
         response = await client.post(
             f"{settings.gemini_base_url.rstrip('/')}/models/{request.model}:generateContent",
-            params={"key": settings.gemini_api_key},
+            params={"key": api_key},
             headers={"Idempotency-Key": request.idempotency_key},
             json={
                 "contents": [{"role": "user", "parts": [{"text": request.prompt}, *image_parts]}],
@@ -177,16 +165,13 @@ class GrsaiProvider:
     """Grsai Nano Banana 异步图像生成适配器。"""
 
     name = "grsai"
-    credential_env = "GRSAI_API_KEY"
-    async def generate(self, request: GenerationRequest, settings: Settings, client: httpx.AsyncClient) -> list[str]:
+    async def generate(self, request: GenerationRequest, api_key: str, settings: Settings, client: httpx.AsyncClient) -> list[str]:
         raise ProviderError("grsai 必须通过异步提交和短轮询队列处理")
 
-    async def submit(self, request: GenerationRequest, settings: Settings, client: httpx.AsyncClient) -> tuple[dict[str, Any], str, dict[str, str]]:
-        if not settings.grsai_api_key:
-            raise ProviderError(f"未配置 {self.credential_env}")
+    async def submit(self, request: GenerationRequest, api_key: str, settings: Settings, client: httpx.AsyncClient) -> tuple[dict[str, Any], str, dict[str, str]]:
         images = [_public_url(request.template_url), *[_public_url(url) for url in request.print_urls]]
         base_url = settings.grsai_base_url.rstrip("/")
-        headers = {"Authorization": f"Bearer {settings.grsai_api_key}", "Idempotency-Key": request.idempotency_key}
+        headers = {"Authorization": f"Bearer {api_key}", "Idempotency-Key": request.idempotency_key}
         response = await client.post(
             f"{base_url}/v1/api/generate",
             headers=headers,
@@ -212,13 +197,11 @@ class GrsaiProvider:
             raise ProviderError("grsai 返回了无效的响应格式")
         return data
 
-    async def poll_once(self, provider_task_id: str, settings: Settings, client: httpx.AsyncClient) -> list[str] | None:
+    async def poll_once(self, provider_task_id: str, api_key: str, settings: Settings, client: httpx.AsyncClient) -> list[str] | None:
         """只查询一次外部任务；未完成返回 None，不占用 worker 等待。"""
-        if not settings.grsai_api_key:
-            raise ProviderError(f"未配置 {self.credential_env}")
         response = await client.get(
             f"{settings.grsai_base_url.rstrip('/')}/v1/api/result",
-            headers={"Authorization": f"Bearer {settings.grsai_api_key}"},
+            headers={"Authorization": f"Bearer {api_key}"},
             params={"id": provider_task_id},
         )
         _raise_for_provider_error(self.name, response)
@@ -247,42 +230,33 @@ PROVIDERS: dict[str, ImageGenerationProvider] = {
 }
 
 
-def provider_credential_env(provider: str) -> str | None:
-    adapter = PROVIDERS.get(provider)
-    return adapter.credential_env if adapter else None
+def provider_supports_user_credentials(provider: str) -> bool:
+    return provider in PROVIDERS
 
 
-def provider_has_credentials(provider: str) -> bool:
-    """判断模型必要的 API 密钥是否已由部署环境注入。"""
-    credential_env = provider_credential_env(provider)
-    if not credential_env:
-        return False
-    return bool(getattr(get_settings(), credential_env.lower()))
-
-
-async def generate(provider: str, request: GenerationRequest) -> list[str]:
+async def generate(provider: str, request: GenerationRequest, api_key: str) -> list[str]:
     adapter = PROVIDERS.get(provider)
     if not adapter:
         raise ProviderError("不支持的模型提供方")
     async with httpx.AsyncClient(timeout=120) as client:
-        return await adapter.generate(request, get_settings(), client)
+        return await adapter.generate(request, api_key, get_settings(), client)
 
 
-async def submit_async_generation(provider: str, request: GenerationRequest) -> tuple[dict[str, Any], str, dict[str, str]]:
+async def submit_async_generation(provider: str, request: GenerationRequest, api_key: str) -> tuple[dict[str, Any], str, dict[str, str]]:
     """提交支持外部异步任务的模型，并返回供应商响应和查询所需上下文。"""
     adapter = PROVIDERS.get(provider)
     if not isinstance(adapter, GrsaiProvider):
         raise ProviderError("当前模型不支持异步任务提交")
     async with httpx.AsyncClient(timeout=120) as client:
-        return await adapter.submit(request, get_settings(), client)
+        return await adapter.submit(request, api_key, get_settings(), client)
 
 
-async def poll_async_generation(provider: str, provider_task_id: str) -> list[str] | None:
+async def poll_async_generation(provider: str, provider_task_id: str, api_key: str) -> list[str] | None:
     adapter = PROVIDERS.get(provider)
     if not isinstance(adapter, GrsaiProvider):
         raise ProviderError("当前模型不支持异步任务查询")
     async with httpx.AsyncClient(timeout=120) as client:
-        return await adapter.poll_once(provider_task_id, get_settings(), client)
+        return await adapter.poll_once(provider_task_id, api_key, get_settings(), client)
 
 
 async def generate_draft_title(title_constraint: str, image_url: str) -> str:
