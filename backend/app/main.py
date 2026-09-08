@@ -454,6 +454,13 @@ def update_shop_managers(shop_id: int, payload: ShopManagerUpdate, user: User = 
     return {"shop_id": shop.id, "member_ids": sorted(member_ids)}
 
 
+def mask_api_key(api_key: str) -> str:
+    """生成仅供管理员辨认密钥的脱敏预览，不向前端返回原文。"""
+    if len(api_key) <= 11:
+        return f"{api_key[:3]}...{api_key[-2:]}"
+    return f"{api_key[:6]}...{api_key[-5:]}"
+
+
 @app.get("/members")
 def list_members(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
     members = db.scalars(
@@ -463,10 +470,18 @@ def list_members(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Se
         ).order_by(User.role, User.id.desc())
     ).all()
     member_ids = [member.id for member in members]
+    credential_rows = db.scalars(select(UserAIProviderCredential).where(
+        UserAIProviderCredential.company_id == user.company_id,
+        UserAIProviderCredential.user_id.in_(member_ids),
+    )).all() if member_ids else []
     configured = {
         (row.user_id, row.provider)
-        for row in db.scalars(select(UserAIProviderCredential).where(UserAIProviderCredential.user_id.in_(member_ids))).all()
-    } if member_ids else set()
+        for row in credential_rows
+    }
+    credential_previews = {
+        (row.user_id, row.provider): mask_api_key(decrypt_secret(row.secret_encrypted))
+        for row in credential_rows
+    }
     enabled_providers = db.scalars(
         select(AIProviderSetting).where(AIProviderSetting.enabled.is_(True)).order_by(AIProviderSetting.provider)
     ).all()
@@ -475,6 +490,11 @@ def list_members(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Se
             "ai_provider_credentials": {
                 provider.provider: (member.id, provider.provider) in configured
                 for provider in enabled_providers
+            },
+            "ai_provider_credential_previews": {
+                provider.provider: credential_previews.get((member.id, provider.provider))
+                for provider in enabled_providers
+                if (member.id, provider.provider) in configured
             }
         }
         for member in members
@@ -718,26 +738,29 @@ def commit_template_resource(db: Session, duplicate_message: str) -> None:
 
 @app.get("/user-template-resources")
 def list_user_template_resources(
-    template_id: int,
+    template_id: int | None = None,
     user_id: int | None = None,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    template = get_usable_template(db, user, template_id)
     owner = get_resource_owner(db, user, user_id)
-    white_images = db.scalars(select(UserTemplateWhiteImage).where(
+    white_image_query = select(UserTemplateWhiteImage).where(
         UserTemplateWhiteImage.company_id == user.company_id,
         UserTemplateWhiteImage.user_id == owner.id,
-        UserTemplateWhiteImage.template_id == template.id,
-    ).order_by(UserTemplateWhiteImage.id.desc())).all()
-    prompts = db.scalars(select(UserTemplatePrompt).where(
+    )
+    prompt_query = select(UserTemplatePrompt).where(
         UserTemplatePrompt.company_id == user.company_id,
         UserTemplatePrompt.user_id == owner.id,
-        UserTemplatePrompt.template_id == template.id,
-    ).order_by(UserTemplatePrompt.id.desc())).all()
+    )
+    if template_id is not None:
+        template = get_usable_template(db, user, template_id)
+        white_image_query = white_image_query.where(UserTemplateWhiteImage.template_id == template.id)
+        prompt_query = prompt_query.where(UserTemplatePrompt.template_id == template.id)
+    white_images = db.scalars(white_image_query.order_by(UserTemplateWhiteImage.id.desc())).all()
+    prompts = db.scalars(prompt_query.order_by(UserTemplatePrompt.id.desc())).all()
     return {
         "user_id": owner.id,
-        "template_id": template.id,
+        "template_id": template_id,
         "white_images": [serialize_record(item) for item in white_images],
         "prompts": [serialize_record(item) for item in prompts],
     }

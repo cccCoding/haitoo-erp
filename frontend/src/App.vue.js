@@ -38,9 +38,9 @@ const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2
 const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeSubmitError = ref(''), creativeRequirement = ref(''), creativePromptIndex = ref(''), creativeProvider = ref(''), creativeRatio = ref('1:1'), creativeQuality = ref('1K'), creativeUploading = ref(false), creativeUploadedCount = ref(0);
 const personalWhiteImages = ref([]), personalPrompts = ref([]), selectedWhiteImageId = ref(null), personalResourcesLoading = ref(false);
 const showPersonalResourcesDialog = ref(false), personalResourceTab = ref('white-images'), managedResourceUserId = ref(null), managedWhiteImages = ref([]), managedPrompts = ref([]), personalResourceSaving = ref(false);
-const showTeamResourcesDialog = ref(false), teamResourceTab = ref('white-images'), teamResourceUserId = ref(null), teamWhiteImages = ref([]), teamPrompts = ref([]), teamResourcesLoading = ref(false), teamResourceQuery = ref('');
-const editingWhiteImage = ref(null), whiteImageForm = ref({ name: '', file: null });
-const editingPersonalPrompt = ref(null), personalPromptForm = ref({ name: '', content: '' });
+const showTeamResourcesDialog = ref(false), teamResourceTab = ref('white-images'), teamResourceUserId = ref(null), teamResourceTemplateId = ref(null), teamWhiteImages = ref([]), teamPrompts = ref([]), teamResourcesLoading = ref(false), teamResourceQuery = ref('');
+const editingWhiteImage = ref(null), whiteImageForm = ref({ template_id: null, name: '', file: null });
+const editingPersonalPrompt = ref(null), personalPromptForm = ref({ template_id: null, name: '', content: '' });
 const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'materials', icon: '◈', label: '素材库' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }];
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
 const visibleNav = computed(() => nav.filter(item => !item.adminOnly || user.value?.role === 'company_admin'));
@@ -317,10 +317,10 @@ async function loadMyTemplateResources(preserveSelection = true) {
 }
 async function onCreativeTemplateChange() { selectedWhiteImageId.value = null; creativePromptIndex.value = ''; creativeRequirement.value = ''; await loadMyTemplateResources(false); }
 async function loadManagedTemplateResources() {
-    if (!selectedTemplateId.value || !managedResourceUserId.value)
+    if (!managedResourceUserId.value)
         return;
     try {
-        const { data } = await api.get('/user-template-resources', { headers: headers.value, params: { template_id: selectedTemplateId.value, user_id: managedResourceUserId.value } });
+        const { data } = await api.get('/user-template-resources', { headers: headers.value, params: { user_id: managedResourceUserId.value } });
         managedWhiteImages.value = data.white_images || [];
         managedPrompts.value = data.prompts || [];
     }
@@ -329,10 +329,6 @@ async function loadManagedTemplateResources() {
     }
 }
 async function openPersonalResourcesDialog(tab = 'white-images') {
-    if (!selectedTemplateId.value) {
-        showToast('请先选择产品模板');
-        return;
-    }
     personalResourceTab.value = tab;
     managedResourceUserId.value = user.value.id;
     resetWhiteImageForm();
@@ -341,14 +337,20 @@ async function openPersonalResourcesDialog(tab = 'white-images') {
     await loadManagedTemplateResources();
 }
 async function loadTeamTemplateResources() {
-    if (!selectedTemplateId.value || !teamResourceUserId.value) {
+    if (!teamResourceUserId.value) {
         teamWhiteImages.value = [];
         teamPrompts.value = [];
         return;
     }
+    const userId = teamResourceUserId.value, templateId = teamResourceTemplateId.value;
     try {
         teamResourcesLoading.value = true;
-        const { data } = await api.get('/user-template-resources', { headers: headers.value, params: { template_id: selectedTemplateId.value, user_id: teamResourceUserId.value } });
+        const params = { user_id: userId };
+        if (templateId)
+            params.template_id = templateId;
+        const { data } = await api.get('/user-template-resources', { headers: headers.value, params });
+        if (teamResourceUserId.value !== userId || teamResourceTemplateId.value !== templateId)
+            return;
         teamWhiteImages.value = data.white_images || [];
         teamPrompts.value = data.prompts || [];
     }
@@ -362,23 +364,24 @@ async function loadTeamTemplateResources() {
 async function openTeamResourcesDialog() {
     if (user.value?.role !== 'company_admin')
         return;
-    if (!selectedTemplateId.value) {
-        showToast('请先选择产品模板');
-        return;
-    }
     teamResourceTab.value = 'white-images';
     teamResourceQuery.value = '';
     teamResourceUserId.value = otherResourceOwners.value[0]?.id || null;
+    teamResourceTemplateId.value = null;
     teamWhiteImages.value = [];
     teamPrompts.value = [];
     showTeamResourcesDialog.value = true;
     await loadTeamTemplateResources();
 }
-function resetWhiteImageForm() { editingWhiteImage.value = null; whiteImageForm.value = { name: '', file: null }; }
-function editWhiteImage(item) { editingWhiteImage.value = item; whiteImageForm.value = { name: item.name, file: null }; }
+function resetWhiteImageForm() { editingWhiteImage.value = null; whiteImageForm.value = { template_id: null, name: '', file: null }; }
+function editWhiteImage(item) { editingWhiteImage.value = item; whiteImageForm.value = { template_id: item.template_id, name: item.name, file: null }; }
 function onWhiteImageFileChange(event) { whiteImageForm.value.file = event.target.files?.[0] || null; }
 async function saveWhiteImage() {
-    if (!selectedTemplateId.value || !managedResourceUserId.value || !whiteImageForm.value.name.trim()) {
+    if (!whiteImageForm.value.template_id) {
+        showToast('请先选择产品模板');
+        return;
+    }
+    if (!managedResourceUserId.value || !whiteImageForm.value.name.trim()) {
         showToast('请填写白底图名称');
         return;
     }
@@ -394,7 +397,7 @@ async function saveWhiteImage() {
         if (editingWhiteImage.value)
             await api.put(`/user-template-white-images/${editingWhiteImage.value.id}`, { name: whiteImageForm.value.name.trim(), ...(image_url ? { image_url } : {}) }, { headers: headers.value });
         else
-            await api.post('/user-template-white-images', { template_id: selectedTemplateId.value, user_id: managedResourceUserId.value, name: whiteImageForm.value.name.trim(), image_url }, { headers: headers.value });
+            await api.post('/user-template-white-images', { template_id: whiteImageForm.value.template_id, user_id: managedResourceUserId.value, name: whiteImageForm.value.name.trim(), image_url }, { headers: headers.value });
         resetWhiteImageForm();
         await loadManagedTemplateResources();
         if (managedResourceUserId.value === user.value.id)
@@ -417,11 +420,16 @@ async function deleteWhiteImage(item) { if (!confirm(`确定删除白底图「${
 catch (e) {
     showToast(e.response?.data?.detail || '删除白底图失败');
 } }
-function resetPersonalPromptForm() { editingPersonalPrompt.value = null; personalPromptForm.value = { name: '', content: '' }; }
-function editPersonalPrompt(item) { editingPersonalPrompt.value = item; personalPromptForm.value = { name: item.name, content: item.content }; }
+function resetPersonalPromptForm() { editingPersonalPrompt.value = null; personalPromptForm.value = { template_id: null, name: '', content: '' }; }
+function editPersonalPrompt(item) { editingPersonalPrompt.value = item; personalPromptForm.value = { template_id: item.template_id, name: item.name, content: item.content }; }
+function resourceTemplateName(item) { return templates.value.find(template => template.id === item.template_id)?.name || '模板已删除'; }
 async function savePersonalPrompt() {
     const name = personalPromptForm.value.name.trim(), content = personalPromptForm.value.content.trim();
-    if (!selectedTemplateId.value || !managedResourceUserId.value || !name || !content) {
+    if (!personalPromptForm.value.template_id) {
+        showToast('请先选择产品模板');
+        return;
+    }
+    if (!managedResourceUserId.value || !name || !content) {
         showToast('请完整填写名称和创作要求');
         return;
     }
@@ -430,7 +438,7 @@ async function savePersonalPrompt() {
         if (editingPersonalPrompt.value)
             await api.put(`/user-template-prompts/${editingPersonalPrompt.value.id}`, { name, content }, { headers: headers.value });
         else
-            await api.post('/user-template-prompts', { template_id: selectedTemplateId.value, user_id: managedResourceUserId.value, name, content }, { headers: headers.value });
+            await api.post('/user-template-prompts', { template_id: personalPromptForm.value.template_id, user_id: managedResourceUserId.value, name, content }, { headers: headers.value });
         resetPersonalPromptForm();
         await loadManagedTemplateResources();
         if (managedResourceUserId.value === user.value.id)
@@ -892,6 +900,7 @@ catch (e) {
     error.value = e.response?.data?.detail || '更新成员状态失败';
 } }
 function openMemberCredentialDialog(member, provider) { credentialMember.value = member; credentialProvider.value = provider; credentialApiKey.value = ''; showMemberCredentialDialog.value = true; }
+function memberCredentialPreview() { return credentialMember.value?.ai_provider_credential_previews?.[credentialProvider.value?.provider] || ''; }
 async function saveMemberCredential() { if (!credentialMember.value || !credentialProvider.value || !credentialApiKey.value.trim()) {
     showToast('请输入平台密钥');
     return;
@@ -3171,7 +3180,6 @@ if (__VLS_ctx.showPersonalResourcesDialog) {
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    (__VLS_ctx.selectedTemplate?.name);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
         ...{ class: "resource-tabs" },
     });
@@ -3201,6 +3209,26 @@ if (__VLS_ctx.showPersonalResourcesDialog) {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
         (__VLS_ctx.editingWhiteImage ? '编辑白底图' : '新增白底图');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.whiteImageForm.template_id),
+            disabled: (Boolean(__VLS_ctx.editingWhiteImage)),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: (null),
+            disabled: true,
+        });
+        for (const [template] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (template.id),
+                value: (template.id),
+            });
+            (template.name);
+        }
+        if (__VLS_ctx.editingWhiteImage) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
             maxlength: "80",
@@ -3243,6 +3271,7 @@ if (__VLS_ctx.showPersonalResourcesDialog) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (item.name);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (__VLS_ctx.resourceTemplateName(item));
             (new Date(item.updated_at).toLocaleString());
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
@@ -3281,6 +3310,26 @@ if (__VLS_ctx.showPersonalResourcesDialog) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
         (__VLS_ctx.editingPersonalPrompt ? '编辑创作要求' : '新增创作要求');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.personalPromptForm.template_id),
+            disabled: (Boolean(__VLS_ctx.editingPersonalPrompt)),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: (null),
+            disabled: true,
+        });
+        for (const [template] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (template.id),
+                value: (template.id),
+            });
+            (template.name);
+        }
+        if (__VLS_ctx.editingPersonalPrompt) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
             maxlength: "80",
             placeholder: "例如：自然布料贴合",
@@ -3315,6 +3364,8 @@ if (__VLS_ctx.showPersonalResourcesDialog) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (item.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (__VLS_ctx.resourceTemplateName(item));
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
             (item.content);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
@@ -3366,7 +3417,6 @@ if (__VLS_ctx.showTeamResourcesDialog) {
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    (__VLS_ctx.selectedTemplate?.name);
     if (__VLS_ctx.otherResourceOwners.length) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "team-resource-filters" },
@@ -3392,6 +3442,30 @@ if (__VLS_ctx.showTeamResourcesDialog) {
             });
             (owner.name);
             (owner.email);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "resource-owner-picker" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (...[$event]) => {
+                    if (!(__VLS_ctx.showTeamResourcesDialog))
+                        return;
+                    if (!(__VLS_ctx.otherResourceOwners.length))
+                        return;
+                    __VLS_ctx.teamResourceQuery = '';
+                    __VLS_ctx.loadTeamTemplateResources();
+                } },
+            value: (__VLS_ctx.teamResourceTemplateId),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: (null),
+        });
+        for (const [template] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (template.id),
+                value: (template.id),
+            });
+            (template.name);
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "resource-query-picker" },
@@ -3462,6 +3536,7 @@ if (__VLS_ctx.showTeamResourcesDialog) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (item.name);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (__VLS_ctx.resourceTemplateName(item));
             (new Date(item.updated_at).toLocaleString());
         }
         if (!__VLS_ctx.filteredTeamWhiteImages.length) {
@@ -3481,10 +3556,11 @@ if (__VLS_ctx.showTeamResourcesDialog) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (item.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (__VLS_ctx.resourceTemplateName(item));
+            (new Date(item.updated_at).toLocaleString());
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
             (item.content);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-            (new Date(item.updated_at).toLocaleString());
         }
         if (!__VLS_ctx.filteredTeamPrompts.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
@@ -3907,13 +3983,20 @@ if (__VLS_ctx.showMemberCredentialDialog) {
     (__VLS_ctx.credentialProvider?.display_name);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     (__VLS_ctx.credentialMember?.name);
+    if (__VLS_ctx.memberCredentialPreview()) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "credential-preview" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
+        (__VLS_ctx.memberCredentialPreview());
+    }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
         ...{ onKeyup: (__VLS_ctx.saveMemberCredential) },
         type: "password",
         maxlength: "2000",
         autocomplete: "new-password",
-        placeholder: "请输入新的平台密钥",
+        placeholder: (__VLS_ctx.memberCredentialPreview() ? '输入新密钥以替换当前配置' : '请输入新的平台密钥'),
     });
     (__VLS_ctx.credentialApiKey);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -4709,6 +4792,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
 /** @type {__VLS_StyleScopedClasses['team-resource-filters']} */ ;
 /** @type {__VLS_StyleScopedClasses['resource-owner-picker']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-owner-picker']} */ ;
 /** @type {__VLS_StyleScopedClasses['resource-query-picker']} */ ;
 /** @type {__VLS_StyleScopedClasses['resource-tabs']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
@@ -4775,6 +4859,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['credential-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['credential-modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['negative']} */ ;
@@ -4963,6 +5048,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             showTeamResourcesDialog: showTeamResourcesDialog,
             teamResourceTab: teamResourceTab,
             teamResourceUserId: teamResourceUserId,
+            teamResourceTemplateId: teamResourceTemplateId,
             teamWhiteImages: teamWhiteImages,
             teamPrompts: teamPrompts,
             teamResourcesLoading: teamResourcesLoading,
@@ -4976,7 +5062,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             filteredTemplates: filteredTemplates,
             availableAiProviders: availableAiProviders,
             creativeCredentialError: creativeCredentialError,
-            selectedTemplate: selectedTemplate,
             selectedWhiteImage: selectedWhiteImage,
             otherResourceOwners: otherResourceOwners,
             filteredTeamWhiteImages: filteredTeamWhiteImages,
@@ -5028,6 +5113,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             deleteWhiteImage: deleteWhiteImage,
             resetPersonalPromptForm: resetPersonalPromptForm,
             editPersonalPrompt: editPersonalPrompt,
+            resourceTemplateName: resourceTemplateName,
             savePersonalPrompt: savePersonalPrompt,
             deletePersonalPrompt: deletePersonalPrompt,
             onCoverChange: onCoverChange,
@@ -5068,6 +5154,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             saveMember: saveMember,
             toggleMember: toggleMember,
             openMemberCredentialDialog: openMemberCredentialDialog,
+            memberCredentialPreview: memberCredentialPreview,
             saveMemberCredential: saveMemberCredential,
             clearMemberCredential: clearMemberCredential,
             loadMiaoshouShops: loadMiaoshouShops,

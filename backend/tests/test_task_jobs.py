@@ -12,7 +12,7 @@ from app.ai_providers import GrsaiProvider, ProviderError, ProviderTaskTerminalE
 from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
-from app.models import AIProviderSetting, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential, UserTemplateWhiteImage
+from app.models import AIProviderSetting, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential, UserTemplatePrompt, UserTemplateWhiteImage
 from app.schemas import AIProviderCredentialUpdate, ClaimMaterials, DraftUpdate, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
 
 
@@ -96,13 +96,18 @@ class TaskJobTests(unittest.TestCase):
             admin = db.get(User, 2)
             rows = main.list_members(user=admin, db=db)
             member_row = next(row for row in rows if row["id"] == 1)
-            self.assertTrue(member_row["ai_provider_credentials"]["grsai"])
             response = main.update_member_ai_provider_credential(
                 1, "grsai", AIProviderCredentialUpdate(api_key="replacement-key"), user=admin, db=db,
             )
             stored = db.scalar(select(UserAIProviderCredential).where(UserAIProviderCredential.user_id == 1))
+        self.assertTrue(member_row["ai_provider_credentials"]["grsai"])
+        self.assertEqual(member_row["ai_provider_credential_previews"]["grsai"], "mem...ey")
+        self.assertNotIn("member-key", str(member_row))
         self.assertEqual(response, {"member_id": 1, "provider": "grsai", "configured": True})
         self.assertNotIn("replacement-key", stored.secret_encrypted)
+
+    def test_api_key_preview_keeps_only_prefix_and_suffix(self) -> None:
+        self.assertEqual(main.mask_api_key("sk-a08-example-secret-71465"), "sk-a08...71465")
 
     def test_available_providers_include_current_users_credential_status_without_secret(self) -> None:
         with self.session_factory() as db:
@@ -151,6 +156,23 @@ class TaskJobTests(unittest.TestCase):
                 main.create_task(payload, user=db.get(User, 1), db=db)
             with self.assertRaisesRegex(Exception, "只能管理自己"):
                 main.list_user_template_resources(template_id=1, user_id=3, user=db.get(User, 1), db=db)
+
+    def test_resource_management_can_list_all_templates_without_ai_selection(self) -> None:
+        with self.session_factory() as db:
+            db.add_all([
+                ProductTemplate(id=2, company_id=1, name="M06L", cover_url="https://img.example/template-2.png"),
+                UserTemplateWhiteImage(id=2, company_id=1, user_id=1, template_id=2, name="Back", image_url="https://img.example/template-white/2.png"),
+                UserTemplatePrompt(company_id=1, user_id=1, template_id=2, name="Soft", content="soft fabric"),
+            ])
+            db.commit()
+            user = db.get(User, 1)
+            all_resources = main.list_user_template_resources(user=user, db=db)
+            filtered_resources = main.list_user_template_resources(template_id=1, user=user, db=db)
+
+        self.assertEqual({item["template_id"] for item in all_resources["white_images"]}, {1, 2})
+        self.assertEqual([item["template_id"] for item in all_resources["prompts"]], [2])
+        self.assertEqual([item["template_id"] for item in filtered_resources["white_images"]], [1])
+        self.assertEqual(filtered_resources["prompts"], [])
 
     def test_admin_can_manage_member_prompt_and_other_member_sees_redacted_task(self) -> None:
         with self.session_factory() as db:
