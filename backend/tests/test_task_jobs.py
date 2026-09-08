@@ -13,7 +13,7 @@ from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
 from app.models import AIProviderSetting, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential, UserTemplateWhiteImage
-from app.schemas import AIProviderCredentialUpdate, MaterialAssetsTemplateUpdate, PodTaskCreate, UserTemplatePromptCreate
+from app.schemas import AIProviderCredentialUpdate, DraftUpdate, MaterialAssetsTemplateUpdate, PodTaskCreate, UserTemplatePromptCreate
 
 
 class TaskJobTests(unittest.TestCase):
@@ -264,18 +264,43 @@ class TaskJobTests(unittest.TestCase):
     def test_members_only_see_and_modify_their_materials(self) -> None:
         with self.session_factory() as db:
             own = MaterialAsset(company_id=1, template_id=1, url="https://img.example/own.png", name="own", claimed_by=1)
+            own_newer = MaterialAsset(company_id=1, template_id=1, url="https://img.example/own-newer.png", name="own-newer", claimed_by=1)
             other = MaterialAsset(company_id=1, template_id=1, url="https://img.example/other.png", name="other", claimed_by=3)
-            db.add_all([own, other]); db.commit(); db.refresh(own); db.refresh(other)
+            db.add_all([own, own_newer, other]); db.commit(); db.refresh(own); db.refresh(own_newer); db.refresh(other)
 
-            member_assets = main.list_material_assets(creator_id=None, user=db.get(User, 1), db=db)
-            admin_assets = main.list_material_assets(creator_id=3, user=db.get(User, 2), db=db)
-            self.assertEqual([item["id"] for item in member_assets], [own.id])
-            self.assertEqual([item["id"] for item in admin_assets], [other.id])
-            self.assertEqual(admin_assets[0]["created_by_name"], "Other")
+            member_assets = main.list_material_assets(page=2, page_size=1, creator_id=None, template_id=1, user=db.get(User, 1), db=db)
+            admin_assets = main.list_material_assets(page=1, page_size=20, creator_id=3, template_id=None, user=db.get(User, 2), db=db)
+            self.assertEqual([item["id"] for item in member_assets["items"]], [own.id])
+            self.assertEqual(member_assets["total"], 2)
+            self.assertEqual(member_assets["page"], 2)
+            self.assertEqual([item["id"] for item in admin_assets["items"]], [other.id])
+            self.assertEqual(admin_assets["items"][0]["created_by_name"], "Other")
+            self.assertEqual(admin_assets["items"][0]["source_type"], "local_upload")
+            self.assertEqual(admin_assets["total"], 1)
 
             with self.assertRaisesRegex(Exception, "无权设置"):
                 main.update_material_assets_template(
                     MaterialAssetsTemplateUpdate(material_asset_ids=[other.id], template_id=1),
+                    user=db.get(User, 1), db=db,
+                )
+
+    def test_members_only_see_and_modify_their_drafts(self) -> None:
+        with self.session_factory() as db:
+            own = ProductDraft(company_id=1, template_id=1, title="own", image_urls=[], sku_items=[], created_by=1, updated_by=1)
+            other = ProductDraft(company_id=1, template_id=1, title="other", image_urls=[], sku_items=[], created_by=3, updated_by=3)
+            db.add_all([own, other]); db.commit(); db.refresh(own); db.refresh(other)
+
+            member_drafts = main.list_drafts(shop_id=None, creator_id=None, user=db.get(User, 1), db=db)
+            admin_drafts = main.list_drafts(shop_id=None, creator_id=3, user=db.get(User, 2), db=db)
+            self.assertEqual([item["id"] for item in member_drafts], [own.id])
+            self.assertEqual([item["id"] for item in admin_drafts], [other.id])
+            self.assertEqual(admin_drafts[0]["created_by_name"], "Other")
+            self.assertFalse(main.can_access_draft(other, db.get(User, 1)))
+            self.assertTrue(main.can_access_draft(other, db.get(User, 2)))
+
+            with self.assertRaisesRegex(Exception, "商品草稿不存在"):
+                main.update_draft(
+                    other.id, DraftUpdate(title="changed", product_description=None),
                     user=db.get(User, 1), db=db,
                 )
 

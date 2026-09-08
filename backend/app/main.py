@@ -324,6 +324,15 @@ def can_access_task(task: PodTask | None, user: User) -> bool:
     ))
 
 
+def can_access_draft(draft: ProductDraft | None, user: User) -> bool:
+    """普通员工仅可访问自己的草稿，公司管理员可访问本公司全部草稿。"""
+    return bool(draft and (
+        user.role == Role.SUPER_ADMIN
+        or draft.company_id == user.company_id
+        and (user.role == Role.COMPANY_ADMIN or draft.created_by == user.id)
+    ))
+
+
 def user_code_in_use(db: Session, company_id: int | None, user_code: str, excluding_user_id: int | None = None) -> bool:
     """用户代码在公司内唯一；平台账号则在平台账号范围内唯一。"""
     statement = select(User.id).where(User.user_code == user_code)
@@ -1146,30 +1155,56 @@ def get_task_detail(task_id: int, user: User = Depends(current_user), db: Sessio
 
 @app.get("/material-assets")
 def list_material_assets(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
     creator_id: int | None = Query(default=None, ge=1),
+    template_id: int | None = Query(default=None, ge=1),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    stmt = select(MaterialAsset)
+    filters = []
     if user.role != Role.SUPER_ADMIN:
-        stmt = stmt.where(MaterialAsset.company_id == user.company_id)
+        filters.append(MaterialAsset.company_id == user.company_id)
     if user.role == Role.MEMBER:
-        stmt = stmt.where(MaterialAsset.claimed_by == user.id)
+        filters.append(MaterialAsset.claimed_by == user.id)
     elif creator_id is not None:
-        stmt = stmt.where(MaterialAsset.claimed_by == creator_id)
-    assets = db.scalars(stmt.order_by(MaterialAsset.id.desc())).all()
+        filters.append(MaterialAsset.claimed_by == creator_id)
+    if template_id is not None:
+        filters.append(MaterialAsset.template_id == template_id)
+    total_stmt = select(func.count()).select_from(MaterialAsset)
+    if filters:
+        total_stmt = total_stmt.where(*filters)
+    total = db.scalar(total_stmt) or 0
+    page_count = max(1, (total + page_size - 1) // page_size)
+    page = min(page, page_count)
+    stmt = select(MaterialAsset)
+    if filters:
+        stmt = stmt.where(*filters)
+    assets = db.scalars(stmt.order_by(MaterialAsset.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     creator_ids = {asset.claimed_by for asset in assets}
     creator_names = {
         creator.id: creator.name
         for creator in db.scalars(select(User).where(User.id.in_(creator_ids))).all()
     } if creator_ids else {}
-    return [
-        serialize_record(asset) | {
-            "created_by": asset.claimed_by,
-            "created_by_name": creator_names.get(asset.claimed_by, "历史记录缺失"),
-        }
-        for asset in assets
-    ]
+    template_ids = {asset.template_id for asset in assets if asset.template_id is not None}
+    template_names = {
+        template.id: template.name
+        for template in db.scalars(select(ProductTemplate).where(ProductTemplate.id.in_(template_ids))).all()
+    } if template_ids else {}
+    return {
+        "items": [
+            serialize_record(asset) | {
+                "created_by": asset.claimed_by,
+                "created_by_name": creator_names.get(asset.claimed_by, "历史记录缺失"),
+                "template_name": template_names.get(asset.template_id, "未设置模板" if asset.template_id is None else "历史模板已删除"),
+                "source_type": "ai_created" if asset.source_task_id is not None else "local_upload",
+            }
+            for asset in assets
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @app.put("/material-assets/template")
@@ -1571,7 +1606,7 @@ async def generate_material_draft_title(template_id: int, payload: DraftTitleGen
 @app.put("/drafts/{draft_id}")
 def update_draft(draft_id: int, payload: DraftUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     draft = db.get(ProductDraft, draft_id)
-    if not draft or draft.company_id != user.company_id or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
+    if not can_access_draft(draft, user) or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
         raise HTTPException(404, "商品草稿不存在")
     draft.title = payload.title.strip()
     draft.product_description = payload.product_description.strip() if payload.product_description else None
@@ -1584,7 +1619,7 @@ def update_draft(draft_id: int, payload: DraftUpdate, user: User = Depends(curre
 async def publish_draft_to_miaoshou(draft_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """将商品草稿创建到妙手公共采集箱，避免重复创建。"""
     draft = db.get(ProductDraft, draft_id)
-    if not draft or draft.company_id != user.company_id or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
+    if not can_access_draft(draft, user) or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
         raise HTTPException(404, "商品草稿不存在")
     if draft.miaoshou_collect_box_id:
         return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "already_published": True}
@@ -1606,7 +1641,7 @@ async def publish_draft_to_miaoshou(draft_id: int, user: User = Depends(current_
 async def claim_draft_to_tiktok(draft_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """商品先进入公共草稿箱，再认领到 TikTok 采集箱；任一步失败均可安全重试。"""
     draft = db.get(ProductDraft, draft_id)
-    if not draft or draft.company_id != user.company_id or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
+    if not can_access_draft(draft, user) or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
         raise HTTPException(404, "商品草稿不存在")
     if draft.tiktok_collect_box_id:
         return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "tiktok_collect_box_detail_id": draft.tiktok_collect_box_id, "already_claimed": True}
@@ -1625,20 +1660,37 @@ async def claim_draft_to_tiktok(draft_id: int, user: User = Depends(current_user
 
 
 @app.get("/drafts")
-def list_drafts(shop_id: int | None = None, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def list_drafts(
+    shop_id: int | None = None,
+    creator_id: int | None = Query(default=None, ge=1),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
     stmt = select(ProductDraft).where(
         ProductDraft.company_id == user.company_id,
         or_(ProductDraft.shop_id.is_(None), ProductDraft.shop_id.in_(allowed_shop_ids(db, user))),
     )
+    if user.role == Role.MEMBER:
+        stmt = stmt.where(ProductDraft.created_by == user.id)
+    elif creator_id is not None:
+        stmt = stmt.where(ProductDraft.created_by == creator_id)
     if shop_id:
         ensure_shop(db, user, shop_id); stmt = stmt.where(ProductDraft.shop_id == shop_id)
     drafts = db.scalars(stmt.order_by(ProductDraft.id.desc())).all()
-    editor_ids = {draft.updated_by for draft in drafts if draft.updated_by is not None}
-    editors = {
-        editor.id: editor.name
-        for editor in db.scalars(select(User).where(User.id.in_(editor_ids))).all()
-    } if editor_ids else {}
+    user_ids = {
+        user_id
+        for draft in drafts
+        for user_id in (draft.created_by, draft.updated_by)
+        if user_id is not None
+    }
+    user_names = {
+        record.id: record.name
+        for record in db.scalars(select(User).where(User.id.in_(user_ids))).all()
+    } if user_ids else {}
     return [
-        serialize_record(draft) | {"updated_by_name": editors.get(draft.updated_by)}
+        serialize_record(draft) | {
+            "created_by_name": user_names.get(draft.created_by, "历史记录缺失"),
+            "updated_by_name": user_names.get(draft.updated_by, "历史记录缺失"),
+        }
         for draft in drafts
     ]

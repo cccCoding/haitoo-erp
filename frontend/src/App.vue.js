@@ -22,8 +22,10 @@ const pendingMaterialUploadFiles = ref([]), showMaterialUploadDialog = ref(false
 const materialDraftSkuPreviewItems = ref([]);
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('');
 const publishingDraftId = ref(null);
-const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null);
-const taskPageSize = ref(20), currentTaskPage = ref(1), taskTotal = ref(0), taskActiveCount = ref(0), taskStatusCounts = ref({}), taskCreatorFilterId = ref(null), materialCreatorFilterId = ref(null);
+const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null);
+const taskPageSize = ref(20), currentTaskPage = ref(1), taskTotal = ref(0), taskActiveCount = ref(0), taskStatusCounts = ref({}), taskCreatorFilterId = ref(null);
+const materialPageSize = ref(20), currentMaterialPage = ref(1), materialTotal = ref(0), materialCreatorFilterId = ref(null);
+const creatorFiltersInitialized = ref(false);
 const previewImageUrl = ref(''), previewImageAlt = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
 const showTaskDetailDialog = ref(false), viewingTask = ref(null), taskDetailLoading = ref(false);
@@ -57,7 +59,7 @@ const filteredTeamPrompts = computed(() => {
     return query ? teamPrompts.value.filter(item => `${item.name} ${item.content}`.toLowerCase().includes(query)) : teamPrompts.value;
 });
 const selectedMaterialAssets = computed(() => materialAssets.value.filter(asset => selectedMaterialAssetIds.value.includes(asset.id)));
-const filteredMaterialAssets = computed(() => materialTemplateFilterId.value ? materialAssets.value.filter(asset => asset.template_id === materialTemplateFilterId.value) : materialAssets.value);
+const filteredMaterialAssets = computed(() => materialAssets.value);
 const selectedMaterialTemplateId = computed(() => {
     const templateIds = [...new Set(selectedMaterialAssets.value.map(asset => asset.template_id).filter(Boolean))];
     return templateIds.length === 1 ? templateIds[0] : null;
@@ -76,6 +78,11 @@ const pagedDrafts = computed(() => {
     return filteredDrafts.value.slice(start, start + draftPageSize.value);
 });
 function changeDraftPageSize() { currentDraftPage.value = 1; }
+async function changeDraftCreatorFilter() { currentDraftPage.value = 1; await refreshDraftList(); }
+async function refreshDraftList() {
+    const { data } = await api.get('/drafts', { headers: headers.value, params: { creator_id: draftCreatorFilterId.value } });
+    drafts.value = data;
+}
 const taskPageCount = computed(() => Math.max(1, Math.ceil(taskTotal.value / taskPageSize.value)));
 const visibleTaskPage = computed(() => Math.min(currentTaskPage.value, taskPageCount.value));
 const pagedTasks = computed(() => tasks.value);
@@ -83,10 +90,16 @@ function applyTaskPage(data) { tasks.value = data.items || []; taskTotal.value =
 async function changeTaskPageSize() { currentTaskPage.value = 1; await refreshTaskList(); }
 async function changeTaskPage(targetPage) { currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); await refreshTaskList(); }
 async function changeTaskCreatorFilter() { currentTaskPage.value = 1; await refreshTaskList(); }
+const materialPageCount = computed(() => Math.max(1, Math.ceil(materialTotal.value / materialPageSize.value)));
+const visibleMaterialPage = computed(() => Math.min(currentMaterialPage.value, materialPageCount.value));
+function applyMaterialPage(data) { materialAssets.value = data.items || []; materialTotal.value = data.total || 0; currentMaterialPage.value = data.page || 1; }
+async function changeMaterialPageSize() { currentMaterialPage.value = 1; await refreshMaterialList(); }
+async function changeMaterialPage(targetPage) { currentMaterialPage.value = Math.min(Math.max(1, targetPage), materialPageCount.value); await refreshMaterialList(); }
+async function changeMaterialFilter() { currentMaterialPage.value = 1; await refreshMaterialList(); }
 async function refreshMaterialList() {
     selectedMaterialAssetIds.value = [];
-    const { data } = await api.get('/material-assets', { headers: headers.value, params: { creator_id: materialCreatorFilterId.value } });
-    materialAssets.value = data;
+    const { data } = await api.get('/material-assets', { headers: headers.value, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value } });
+    applyMaterialPage(data);
 }
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
 const nativeToLocaleString = Date.prototype.toLocaleString;
@@ -101,14 +114,21 @@ Date.prototype.toLocaleDateString = function (...args) {
 };
 async function refresh() {
     const h = { headers: headers.value };
-    const [me, s, t, g, task, material, d, providers] = await Promise.all([api.get('/me', h), api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: { page: currentTaskPage.value, page_size: taskPageSize.value, creator_id: taskCreatorFilterId.value } }), api.get('/material-assets', { ...h, params: { creator_id: materialCreatorFilterId.value } }), api.get('/drafts', h), api.get('/ai-providers', h)]);
+    const me = await api.get('/me', h);
     user.value = me.data.user;
     company.value = me.data.company;
+    if (!creatorFiltersInitialized.value) {
+        taskCreatorFilterId.value = user.value.id;
+        materialCreatorFilterId.value = user.value.id;
+        draftCreatorFilterId.value = user.value.id;
+        creatorFiltersInitialized.value = true;
+    }
+    const [s, t, g, task, material, d, providers] = await Promise.all([api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: { page: currentTaskPage.value, page_size: taskPageSize.value, creator_id: taskCreatorFilterId.value } }), api.get('/material-assets', { ...h, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value } }), api.get('/drafts', { ...h, params: { creator_id: draftCreatorFilterId.value } }), api.get('/ai-providers', h)]);
     shops.value = s.data;
     templates.value = t.data;
     templateGroups.value = g.data;
     applyTaskPage(task.data);
-    materialAssets.value = material.data;
+    applyMaterialPage(material.data);
     drafts.value = d.data;
     aiProviders.value = providers.data;
     // 后台停用当前所选模型后，刷新时立即切换到仍启用的默认模型，避免提交已停用的值。
@@ -748,7 +768,8 @@ async function uploadMaterialAssets() {
         await api.post('/material-assets/upload', form, { headers: headers.value });
         showMaterialUploadDialog.value = false;
         pendingMaterialUploadFiles.value = [];
-        await refresh();
+        currentMaterialPage.value = 1;
+        await refreshMaterialList();
     }
     catch (e) {
         materialUploadError.value = e.response?.data?.detail || '上传素材失败，请稍后重试';
@@ -768,7 +789,7 @@ async function setMaterialTemplate() {
         materialTemplateSaving.value = true;
         const { data } = await api.put('/material-assets/template', { material_asset_ids: selectedMaterialAssetIds.value, template_id: materialTemplateId.value }, { headers: headers.value });
         showMaterialTemplateDialog.value = false;
-        await refresh();
+        await refreshMaterialList();
         showToast(`已为 ${data.updated} 张素材设置模板`);
     }
     catch (e) {
@@ -784,12 +805,11 @@ async function deleteSelectedMaterialAssets() {
         return;
     try {
         await Promise.all(assetIds.map(assetId => api.delete(`/material-assets/${assetId}`, { headers: headers.value })));
-        materialAssets.value = materialAssets.value.filter(item => !assetIds.includes(item.id));
-        selectedMaterialAssetIds.value = [];
+        await refreshMaterialList();
         showToast(`已删除 ${assetIds.length} 张素材`);
     }
     catch (e) {
-        await refresh();
+        await refreshMaterialList();
         showToast(e.response?.data?.detail || '删除素材失败，请稍后重试');
     }
 }
@@ -934,7 +954,7 @@ finally {
 let toastTimer;
 function showToast(message) { toast.value = message; if (toastTimer)
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = ''; }, 3000); }
-function logout() { localStorage.removeItem('haitoro_token'); token.value = ''; user.value = null; }
+function logout() { localStorage.removeItem('haitoro_token'); token.value = ''; user.value = null; taskCreatorFilterId.value = null; materialCreatorFilterId.value = null; draftCreatorFilterId.value = null; creatorFiltersInitialized.value = false; }
 api.interceptors.response.use(response => response, requestError => {
     if (requestError.response?.data?.detail === '登录已失效') {
         logout();
@@ -1083,7 +1103,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-        (__VLS_ctx.materialAssets.length);
+        (__VLS_ctx.materialTotal);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.em, __VLS_intrinsicElements.em)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "two-col" },
@@ -1983,6 +2003,7 @@ else {
             ...{ class: "material-template-filter" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (__VLS_ctx.changeMaterialFilter) },
             value: (__VLS_ctx.materialTemplateFilterId),
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
@@ -2000,7 +2021,7 @@ else {
                 ...{ class: "material-template-filter" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-                ...{ onChange: (__VLS_ctx.refreshMaterialList) },
+                ...{ onChange: (__VLS_ctx.changeMaterialFilter) },
                 value: (__VLS_ctx.materialCreatorFilterId),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
@@ -2071,12 +2092,30 @@ else {
                 ...{ class: "ghost" },
             });
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "material-grid" },
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "draft-table material-list" },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "thead material-thead" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         for (const [asset] of __VLS_getVForSourceType((__VLS_ctx.filteredMaterialAssets))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                key: (asset.id),
+                ...{ class: "trow material-trow" },
+                ...{ class: ({ selected: __VLS_ctx.selectedMaterialAssetIds.includes(asset.id) }) },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+                ...{ class: "material-checkbox" },
+                'aria-label': (`选择素材 ${asset.name}`),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                ...{ onChange: (...[$event]) => {
                         if (!!(!__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
@@ -2091,36 +2130,122 @@ else {
                             return;
                         __VLS_ctx.toggleMaterialAsset(asset.id);
                     } },
-                key: (asset.id),
-                ...{ class: "material-card" },
-                ...{ class: ({ selected: __VLS_ctx.selectedMaterialAssetIds.includes(asset.id) }) },
+                type: "checkbox",
+                checked: (__VLS_ctx.selectedMaterialAssetIds.includes(asset.id)),
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "material-select-mark" },
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!(__VLS_ctx.page === 'materials'))
+                            return;
+                        __VLS_ctx.openImagePreview(asset.url, asset.name);
+                    } },
+                type: "button",
+                ...{ class: "material-list-thumbnail" },
+                title: (asset.name),
+                'aria-label': (`预览素材 ${asset.name}`),
             });
-            (__VLS_ctx.selectedMaterialAssetIds.includes(asset.id) ? '✓' : '');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
                 src: (__VLS_ctx.imageUrl(asset.url)),
                 alt: (asset.name),
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-            (asset.name);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-            (__VLS_ctx.materialTemplateName(asset));
-            if (__VLS_ctx.user?.role === 'company_admin') {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-                (asset.created_by_name || '历史记录缺失');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (asset.template_name || __VLS_ctx.materialTemplateName(asset));
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({
+                ...{ class: "chip" },
+                ...{ class: (asset.source_type === 'ai_created' ? 'purple' : 'blue') },
+            });
+            (asset.source_type === 'ai_created' ? 'AI创作' : '本地上传');
+            if (asset.source_task_id) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
+                    ...{ class: "material-source-task" },
+                });
+                (asset.source_task_id);
             }
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-            (asset.source_task_id ? `来源任务 #${asset.source_task_id}` : '本地上传');
-            (new Date(asset.created_at).toLocaleDateString());
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (new Date(asset.created_at).toLocaleString());
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (asset.created_by_name || '历史记录缺失');
         }
         if (!__VLS_ctx.filteredMaterialAssets.length) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "empty" },
             });
-            (__VLS_ctx.materialAssets.length ? '没有符合该模板的素材。' : '暂无素材。可上传本地图片，或在任务中心领取生成图片。');
+            (__VLS_ctx.materialTotal ? '没有符合筛选条件的素材。' : '暂无素材。可上传本地图片，或在任务中心领取生成图片。');
+        }
+        if (__VLS_ctx.materialTotal) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
+                ...{ class: "draft-pagination" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.materialTotal);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                ...{ onChange: (__VLS_ctx.changeMaterialPageSize) },
+                value: (__VLS_ctx.materialPageSize),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (20),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (50),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (100),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!(__VLS_ctx.materialTotal))
+                            return;
+                        __VLS_ctx.changeMaterialPage(__VLS_ctx.visibleMaterialPage - 1);
+                    } },
+                disabled: (__VLS_ctx.visibleMaterialPage === 1),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.visibleMaterialPage);
+            (__VLS_ctx.materialPageCount);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!(__VLS_ctx.materialTotal))
+                            return;
+                        __VLS_ctx.changeMaterialPage(__VLS_ctx.visibleMaterialPage + 1);
+                    } },
+                disabled: (__VLS_ctx.visibleMaterialPage === __VLS_ctx.materialPageCount),
+            });
         }
     }
     else if (__VLS_ctx.page === 'drafts') {
@@ -2132,6 +2257,9 @@ else {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "material-filter-row" },
+        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "draft-template-filter" },
         });
@@ -2165,6 +2293,25 @@ else {
             });
             (template.name);
         }
+        if (__VLS_ctx.user?.role === 'company_admin') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+                ...{ class: "draft-template-filter" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                ...{ onChange: (__VLS_ctx.changeDraftCreatorFilter) },
+                value: (__VLS_ctx.draftCreatorFilterId),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (null),
+            });
+            for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    key: (member.id),
+                    value: (member.id),
+                });
+                (member.name);
+            }
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
                     if (!!(!__VLS_ctx.token))
@@ -2191,6 +2338,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "thead draft-thead" },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -2250,6 +2398,8 @@ else {
             (draft.source_task_id ? `#${draft.source_task_id}` : '素材库');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (new Date(draft.created_at).toLocaleString());
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (draft.created_by_name || '历史记录缺失');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (new Date(draft.updated_at || draft.created_at).toLocaleString());
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -2314,7 +2464,7 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "empty" },
             });
-            (__VLS_ctx.drafts.length ? '没有符合该模板的商品草稿。' : '暂无商品草稿，请先在任务中心领取素材，或上传本地素材。');
+            (__VLS_ctx.drafts.length ? '没有符合筛选条件的商品草稿。' : '暂无商品草稿，请先在任务中心领取素材，或上传本地素材。');
         }
         else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
@@ -4568,12 +4718,22 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['negative']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
-/** @type {__VLS_StyleScopedClasses['material-grid']} */ ;
-/** @type {__VLS_StyleScopedClasses['material-card']} */ ;
-/** @type {__VLS_StyleScopedClasses['material-select-mark']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-checkbox']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-list-thumbnail']} */ ;
+/** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-source-task']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-filter-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-template-filter']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-template-filter']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
@@ -4831,7 +4991,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             templates: templates,
             templateGroups: templateGroups,
             tasks: tasks,
-            materialAssets: materialAssets,
             drafts: drafts,
             members: members,
             aiProviders: aiProviders,
@@ -4909,10 +5068,13 @@ const __VLS_self = (await import('vue')).defineComponent({
             draftPageSize: draftPageSize,
             currentDraftPage: currentDraftPage,
             draftTemplateFilterId: draftTemplateFilterId,
+            draftCreatorFilterId: draftCreatorFilterId,
             taskPageSize: taskPageSize,
             taskTotal: taskTotal,
             taskStatusCounts: taskStatusCounts,
             taskCreatorFilterId: taskCreatorFilterId,
+            materialPageSize: materialPageSize,
+            materialTotal: materialTotal,
             materialCreatorFilterId: materialCreatorFilterId,
             previewImageUrl: previewImageUrl,
             previewImageAlt: previewImageAlt,
@@ -4986,13 +5148,18 @@ const __VLS_self = (await import('vue')).defineComponent({
             visibleDraftPage: visibleDraftPage,
             pagedDrafts: pagedDrafts,
             changeDraftPageSize: changeDraftPageSize,
+            changeDraftCreatorFilter: changeDraftCreatorFilter,
             taskPageCount: taskPageCount,
             visibleTaskPage: visibleTaskPage,
             pagedTasks: pagedTasks,
             changeTaskPageSize: changeTaskPageSize,
             changeTaskPage: changeTaskPage,
             changeTaskCreatorFilter: changeTaskCreatorFilter,
-            refreshMaterialList: refreshMaterialList,
+            materialPageCount: materialPageCount,
+            visibleMaterialPage: visibleMaterialPage,
+            changeMaterialPageSize: changeMaterialPageSize,
+            changeMaterialPage: changeMaterialPage,
+            changeMaterialFilter: changeMaterialFilter,
             login: login,
             onCreativeAssetChange: onCreativeAssetChange,
             removeCreativeAsset: removeCreativeAsset,
