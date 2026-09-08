@@ -7,3 +7,4 @@ node_modules/
 dist/
 mysql_data/
 backend/uploads/
+.workbuddy-ai/

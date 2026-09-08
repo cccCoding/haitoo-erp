@@ -82,7 +82,24 @@ export R2_PUBLIC_BASE_URL='https://img.haitoro.com'
 export AI_GENERATED_IMAGE_UPLOAD_TO_R2='true'
 ```
 
-用户上传的图片会以 4 路受控并发直接上传至 Cloudflare R2，数据库保存完整公网 URL；单图上限 5MB，签名同时绑定文件大小、类型、公司目录和 15 分钟有效期。AI 模型、DeepSeek 标题生成和妙手均通过该地址读取图片。无需配置或持久化本地 `uploads` 目录。默认使用 DeepSeek 图像理解模型 `deepseek-v4-flash-vision-exp`，可通过 `DEEPSEEK_TITLE_MODEL` 覆盖。
+用户上传的图片不经过 API 容器，直接上传至 Cloudflare R2，数据库保存完整公网 URL；单图上限 5MB，签名同时绑定文件大小、类型、公司目录和 15 分钟有效期。AI 模型、DeepSeek 标题生成和妙手均通过该地址读取图片。无需配置或持久化本地 `uploads` 目录。默认使用 DeepSeek 图像理解模型 `deepseek-v4-flash-vision-exp`，可通过 `DEEPSEEK_TITLE_MODEL` 覆盖。
+
+直传分两步：前端先换取预签名地址，再并发 PUT 到 R2，最后提交保存。三个入口：
+
+| 场景 | 入口 | 并发 |
+| --- | --- | --- |
+| 素材库批量上传 | `POST /material-assets/presign` → PUT → `POST /material-assets/commit` | 8 路 |
+| 新增模板的模板图 + 尺码图 | `POST /uploads/presign`（category 为 `template` / `template-size-chart`）→ PUT → 随模板提交 | 两张并行 |
+| 产品白底图 | `POST /uploads/presign`（category 为 `template-white`）→ PUT → 随白底图提交 | 单张 |
+| AI 创作页印花图 | `POST /uploads/creative-asset/presign` → PUT | 4 路 |
+
+单张失败只重试该张，素材库已成功的地址会保留，重新提交时不会重复上传。
+
+**商品草稿没有独立的尺码图上传。** 草稿一律沿用所选产品模版的 `size_chart_url`，由 `POST /drafts/from-material-assets` 在服务端从模板取值写入，前端不再提交该字段；如需更换尺码图，请修改产品模版。
+
+直传后图片地址由前端提交，服务端在落库处兜底校验：`/material-assets/commit` 校验地址落在当前公司 `material/company/{id}/` 下；模板新增/更新校验 `cover_url`、`size_chart_url` 落在当前公司 `template/` 或 `template-size-chart/` 下。为兼容 R2 之前的历史地址，更新时若字段值与库中现有值一致则直接放行，不强制回溯改造。
+
+`POST /uploads/presign` 的 `category` 走服务端白名单（当前为 `template`、`template-size-chart`、`template-white`），签名本身始终绑定调用方公司。
 
 部署前需在 R2 Bucket 的 **Settings → CORS Policy** 配置前端域名的 PUT 跨域权限，例如：
 

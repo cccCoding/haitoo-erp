@@ -186,6 +186,32 @@ class UploadPresignInput(BaseModel):
     content_length: int = Field(gt=0, le=5 * 1024 * 1024)
 
 
+class ImageUploadPresignItem(BaseModel):
+    """直传单张图片的元信息；签名绑定大小与类型，防止中途替换文件。"""
+    content_type: str
+    content_length: int = Field(gt=0, le=5 * 1024 * 1024)
+
+
+class ImageUploadPresignInput(BaseModel):
+    """按业务目录批量签发 R2 直传地址；目录由服务端白名单限制。"""
+    category: str = Field(min_length=1, max_length=40)
+    files: list[ImageUploadPresignItem] = Field(min_length=1, max_length=20)
+
+
+class MaterialUploadPresignInput(BaseModel):
+    files: list[ImageUploadPresignItem] = Field(min_length=1, max_length=100)
+
+
+class MaterialUploadCommitItem(BaseModel):
+    url: str = Field(min_length=1, max_length=500)
+    name: str = Field(default="本地素材", max_length=180)
+
+
+class MaterialUploadCommitInput(BaseModel):
+    template_id: int
+    items: list[MaterialUploadCommitItem] = Field(min_length=1, max_length=100)
+
+
 class AIProviderSettingUpdate(BaseModel):
     model: str = Field(min_length=1, max_length=120)
     enabled: bool
@@ -235,11 +261,11 @@ class ClaimMaterials(BaseModel):
 
 
 class MaterialDraftCreate(BaseModel):
+    """尺码图不再随草稿提交，一律沿用所选产品模版的尺码图。"""
     template_id: int
     material_asset_ids: list[int] = Field(min_length=1, max_length=100)
     title: str = Field(min_length=1, max_length=180)
     product_description: str | None = Field(default=None, max_length=5000)
-    size_chart_url: str | None = Field(default=None, max_length=500)
 
 
 class DraftTitleGenerate(BaseModel):
@@ -253,17 +279,15 @@ class DraftUpdate(BaseModel):
 
 class MemberCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    user_code: str | None = Field(default=None, min_length=2, max_length=2)
+    user_code: str = Field(min_length=2, max_length=2)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
 
-    @field_validator("user_code")
+    @field_validator("user_code", mode="before")
     @classmethod
-    def validate_user_code(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = value.strip()
-        if len(value) != 2:
+    def validate_user_code(cls, value: str) -> str:
+        value = value.strip() if isinstance(value, str) else value
+        if not value or len(value) != 2:
             raise ValueError("用户代码必须恰好为两个字符")
         return value
 
@@ -275,12 +299,14 @@ class MemberUpdate(BaseModel):
     password: str | None = Field(default=None, min_length=8, max_length=128)
     is_active: bool | None = None
 
-    @field_validator("user_code")
+    @field_validator("user_code", mode="before")
     @classmethod
     def validate_user_code(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        value = value.strip()
+        value = value.strip() if isinstance(value, str) else value
+        if not value:
+            return None
         if len(value) != 2:
             raise ValueError("用户代码必须恰好为两个字符")
         return value

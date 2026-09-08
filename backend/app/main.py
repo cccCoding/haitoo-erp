@@ -11,7 +11,7 @@ from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
 from .models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
-from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LoginInput, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
+from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, ImageUploadPresignInput, LoginInput, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
@@ -507,6 +507,8 @@ def update_member(member_id: int, payload: MemberUpdate, user: User = Depends(re
     if payload.name is not None:
         member.name = payload.name.strip()
     if "user_code" in payload.model_fields_set:
+        if not payload.user_code:
+            raise HTTPException(400, "用户代码不能为空")
         if payload.user_code and user_code_in_use(db, user.company_id, payload.user_code, member.id):
             raise HTTPException(400, "该用户代码已被使用")
         member.user_code = payload.user_code
@@ -674,7 +676,10 @@ def list_templates(group_id: int | None = None, q: str | None = None, user: User
 
 @app.post("/templates")
 def create_template(payload: TemplateCreate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
-    template = ProductTemplate(company_id=user.company_id, **payload.model_dump())
+    data = payload.model_dump()
+    data["cover_url"] = validate_template_image_url(data["cover_url"], user.company_id, None)
+    data["size_chart_url"] = validate_template_image_url(data["size_chart_url"], user.company_id, None)
+    template = ProductTemplate(company_id=user.company_id, **data)
     db.add(template); db.commit(); db.refresh(template)
     return template
 
@@ -789,11 +794,6 @@ def delete_user_template_white_image(item_id: int, user: User = Depends(current_
     item = get_managed_white_image(db, user, item_id)
     db.delete(item); db.commit()
     return {"deleted": True}
-
-
-@app.post("/uploads/user-template-white-image")
-async def upload_user_template_white_image(file: UploadFile = File(...), user: User = Depends(current_user)):
-    return await save_image_upload(file, user.company_id, "template-white")
 
 
 @app.post("/user-template-prompts")
@@ -1008,6 +1008,10 @@ async def claim_common_collect_box_to_tiktok(draft: ProductDraft, company: Compa
 def update_template(template_id: int, payload: TemplateUpdate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
     template = get_company_template(db, user, template_id)
     for field, value in payload.model_dump(exclude_unset=True).items():
+        if field == "cover_url":
+            value = validate_template_image_url(value, user.company_id, template.cover_url)
+        elif field == "size_chart_url":
+            value = validate_template_image_url(value, user.company_id, template.size_chart_url)
         setattr(template, field, value)
     db.commit(); db.refresh(template)
     return template
@@ -1022,31 +1026,36 @@ def delete_template(template_id: int, user: User = Depends(require_roles(Role.CO
     return {"deleted": True}
 
 
-@app.post("/uploads/template-cover")
-async def upload_template_cover(file: UploadFile = File(...), user: User = Depends(require_roles(Role.COMPANY_ADMIN))):
-    return await save_image_upload(file, user.company_id, "template")
+# 允许前端直传的业务目录；值即 R2 对象 key 首段。签名始终绑定调用方公司，
+# 越权写到其他公司目录不可行，这里只限制可写入的业务类型。
+DIRECT_UPLOAD_CATEGORIES = frozenset({"template", "template-size-chart", "template-white"})
+TEMPLATE_IMAGE_CATEGORIES = ("template", "template-size-chart")
+SUPPORTED_UPLOAD_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
-@app.post("/uploads/draft-size-chart")
-async def upload_draft_size_chart(file: UploadFile = File(...), user: User = Depends(current_user)):
-    return await save_image_upload(file, user.company_id, "draft-size-chart")
-
-
-async def save_image_upload(file: UploadFile, company_id: int | None, prefix: str) -> dict:
-    if file.content_type not in {"image/jpeg", "image/png", "image/webp"}:
+@app.post("/uploads/presign")
+def presign_image_upload(payload: ImageUploadPresignInput, user: User = Depends(current_user)):
+    """按业务目录批量签发 R2 直传地址，单张图片不再经 API 容器中转。"""
+    if payload.category not in DIRECT_UPLOAD_CATEGORIES:
+        raise HTTPException(400, "不支持的上传目录")
+    if any(item.content_type not in SUPPORTED_UPLOAD_MIME_TYPES for item in payload.files):
         raise HTTPException(400, "请上传 JPG、PNG 或 WebP 图片")
-    content = await file.read()
-    if len(content) > 5 * 1024 * 1024:
-        raise HTTPException(400, "图片不能超过 5MB")
     try:
-        return {"url": await upload_image_bytes_async(content, file.content_type, company_id, prefix)}
+        return [
+            create_image_upload_url(item.content_type, item.content_length, user.company_id, payload.category)
+            for item in payload.files
+        ]
     except StorageError as exc:
         raise HTTPException(503, str(exc)) from exc
 
 
-@app.post("/uploads/creative-asset")
-async def upload_creative_asset(file: UploadFile = File(...), user: User = Depends(current_user)):
-    return await save_image_upload(file, user.company_id, "creative")
+def validate_template_image_url(url: str | None, company_id: int, current: str | None) -> str | None:
+    """直传后地址由前端提交：只接受本公司模板目录的 R2 对象，或保持不变的历史值。"""
+    if url is None or url == current:
+        return url
+    if not any(is_company_r2_url(url, company_id, category) for category in TEMPLATE_IMAGE_CATEGORIES):
+        raise HTTPException(400, "模板图片和尺码图必须通过上传接口上传")
+    return url
 
 
 @app.post("/uploads/creative-asset/presign")
@@ -1059,25 +1068,39 @@ def presign_creative_asset(payload: UploadPresignInput, user: User = Depends(cur
         raise HTTPException(503, str(exc)) from exc
 
 
-@app.post("/material-assets/upload")
-async def upload_material_assets(files: list[UploadFile] = File(...), template_id: int = Form(...), user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """上传一张或多张本地图片到当前公司的素材库。"""
-    if not files:
-        raise HTTPException(400, "请至少选择一张图片")
-    if len(files) > 100:
-        raise HTTPException(400, "单次最多上传 100 张图片")
-    template = get_company_template(db, user, template_id)
-    validate_material_sku_source(template, user)
+MATERIAL_UPLOAD_CATEGORY = "material"
 
-    assets: list[MaterialAsset] = []
-    for file in files:
-        uploaded = await save_image_upload(file, user.company_id, "material")
-        name = Path(file.filename or "本地素材").name.rsplit(".", 1)[0] or "本地素材"
-        asset = add_material_asset_with_sku(
+
+@app.post("/material-assets/presign")
+def presign_material_assets(payload: MaterialUploadPresignInput, user: User = Depends(current_user)):
+    """批量签发 R2 直传地址，让本地素材不经过 API 容器中转。"""
+    for item in payload.files:
+        if item.content_type not in {"image/jpeg", "image/png", "image/webp"}:
+            raise HTTPException(400, "请上传 JPG、PNG 或 WebP 图片")
+    try:
+        return [
+            create_image_upload_url(item.content_type, item.content_length, user.company_id, MATERIAL_UPLOAD_CATEGORY)
+            for item in payload.files
+        ]
+    except StorageError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/material-assets/commit")
+def commit_material_assets(payload: MaterialUploadCommitInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """直传完成后批量登记素材；地址必须是本次签发到本公司素材目录的 R2 对象。"""
+    template = get_company_template(db, user, payload.template_id)
+    validate_material_sku_source(template, user)
+    for item in payload.items:
+        if not is_company_r2_url(item.url, user.company_id, MATERIAL_UPLOAD_CATEGORY):
+            raise HTTPException(400, "素材地址无效，请重新上传")
+    assets = [
+        add_material_asset_with_sku(
             db, template=template, owner=user, company_id=user.company_id,
-            source_task_id=None, url=uploaded["url"], name=name[:180],
+            source_task_id=None, url=item.url, name=(Path(item.name or "本地素材").name.rsplit(".", 1)[0] or "本地素材")[:180],
         )
-        assets.append(asset)
+        for item in payload.items
+    ]
     db.commit()
     for asset in assets:
         db.refresh(asset)
@@ -1568,7 +1591,7 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
         source_task_id=source_task_id,
         title=payload.title.strip(),
         product_description=payload.product_description.strip() if payload.product_description else None,
-        size_chart_url=payload.size_chart_url,
+        size_chart_url=template.size_chart_url,
         image_urls=image_urls,
         sku_items=sku_items,
         created_by=user.id,

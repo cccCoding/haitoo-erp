@@ -10,14 +10,18 @@ const loading = ref(false), error = ref('');
 const toast = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
 const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFormTab = ref('basic'), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateTitleTemplate = ref(''), newTemplateProductDescription = ref(''), newTemplateSizeChart = ref(null), newTemplateSizeChartPreview = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), newPackageWeight = ref(null), newPackageLength = ref(null), newPackageWidth = ref(null), newPackageHeight = ref(null), newSkuSizeOptions = ref([]), newTemplateAiPrompts = ref([]), editingTemplate = ref(null);
-const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', user_code: '', email: '', password: '', is_active: true }), memberSaving = ref(false);
+const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', user_code: '', email: '', password: '', is_active: true }), memberSaving = ref(false), memberFormError = ref('');
 const showMemberCredentialDialog = ref(false), credentialMember = ref(null), credentialProvider = ref(null), credentialApiKey = ref(''), credentialSaving = ref(false);
 const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), myAccountSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
 const showMiaoshouDialog = ref(false), miaoshouForm = ref({ app_id: '', app_secret: '' }), miaoshouSaving = ref(false);
 const materialUploading = ref(false), materialUploadError = ref('');
-const selectedMaterialAssetIds = ref([]), materialTemplateFilterId = ref(null), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChart = ref(null), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false);
+const selectedMaterialAssetIds = ref([]), materialTemplateFilterId = ref(null), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false);
 const pendingMaterialUploadFiles = ref([]), showMaterialUploadDialog = ref(false), materialUploadTemplateId = ref(null);
+const materialUploadedCount = ref(0), materialUploadTotal = ref(0), pendingMaterialUploadUrls = ref([]);
+const MATERIAL_UPLOAD_CONCURRENCY = 8, MATERIAL_UPLOAD_MAX_FILES = 100, IMAGE_UPLOAD_RETRY = 2;
+const templateSaving = ref(false);
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'], MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('');
 const publishingDraftId = ref(null);
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null);
@@ -366,11 +370,8 @@ async function saveWhiteImage() {
     try {
         personalResourceSaving.value = true;
         let image_url;
-        if (whiteImageForm.value.file) {
-            const form = new FormData();
-            form.append('file', whiteImageForm.value.file);
-            image_url = (await api.post('/uploads/user-template-white-image', form, { headers: headers.value })).data.url;
-        }
+        if (whiteImageForm.value.file)
+            image_url = await presignAndUploadImage(whiteImageForm.value.file, 'template-white');
         if (editingWhiteImage.value)
             await api.put(`/user-template-white-images/${editingWhiteImage.value.id}`, { name: whiteImageForm.value.name.trim(), ...(image_url ? { image_url } : {}) }, { headers: headers.value });
         else
@@ -440,10 +441,26 @@ function normalizeTemplateNameForSku() { const name = newTemplateName.value.trim
     showToast('模板名称同时作为 SKU 前缀，仅支持 1-5 位字母或数字');
     throw new Error('invalid template name');
 } newTemplateName.value = name; }
+async function presignAndUploadImage(file, category) {
+    let lastError;
+    for (let attempt = 0; attempt <= IMAGE_UPLOAD_RETRY; attempt++) {
+        try {
+            const { data } = await api.post('/uploads/presign', {
+                category, files: [{ content_type: file.type, content_length: file.size }],
+            }, { headers: headers.value });
+            await axios.put(data[0].upload_url, file, { headers: { 'Content-Type': file.type } });
+            return data[0].url;
+        }
+        catch (e) {
+            lastError = e;
+        }
+    }
+    throw lastError;
+}
 async function uploadCover() { normalizeTemplateNameForSku(); if (!newTemplateImage.value)
-    return undefined; const form = new FormData(); form.append('file', newTemplateImage.value); const { data } = await api.post('/uploads/template-cover', form, { headers: headers.value }); return data.url; }
+    return undefined; return presignAndUploadImage(newTemplateImage.value, 'template'); }
 async function uploadSizeChart() { if (!newTemplateSizeChart.value)
-    return undefined; const form = new FormData(); form.append('file', newTemplateSizeChart.value); const { data } = await api.post('/uploads/template-cover', form, { headers: headers.value }); return data.url; }
+    return undefined; return presignAndUploadImage(newTemplateSizeChart.value, 'template-size-chart'); }
 function validateNewTemplate() {
     const sizeOptions = newSkuSizeOptions.value.map(value => value.trim()).filter(Boolean);
     const validations = [
@@ -474,8 +491,10 @@ async function createTemplate() { if (!editingTemplate.value && !validateNewTemp
     showToast('请完整填写 AI 提示词的名称和内容，或删除空白项');
     return;
 } try {
-    const cover_url = (await uploadCover()) ?? editingTemplate.value?.cover_url ?? null;
-    const size_chart_url = (await uploadSizeChart()) ?? editingTemplate.value?.size_chart_url ?? null;
+    templateSaving.value = true;
+    const [uploadedCoverUrl, uploadedSizeChartUrl] = await Promise.all([uploadCover(), uploadSizeChart()]);
+    const cover_url = uploadedCoverUrl ?? editingTemplate.value?.cover_url ?? null;
+    const size_chart_url = uploadedSizeChartUrl ?? editingTemplate.value?.size_chart_url ?? null;
     const sizeOptions = newSkuSizeOptions.value.map(value => value.trim()).filter(Boolean);
     const sku_specifications = { size: { name: '尺码', options: sizeOptions } };
     const payload = { name: newTemplateName.value.trim(), description: newTemplateDescription.value.trim() || null, title_template: newTemplateTitleTemplate.value.trim() || null, product_description: newTemplateProductDescription.value.trim() || null, size_chart_url, group_id: newTemplateGroupId.value, cover_url, package_weight: newPackageWeight.value, package_length: newPackageLength.value, package_width: newPackageWidth.value, package_height: newPackageHeight.value, sku_specifications, ai_prompts, color_count: 1, sku_count: Math.max(1, sizeOptions.length) };
@@ -487,7 +506,10 @@ async function createTemplate() { if (!editingTemplate.value && !validateNewTemp
     await refresh();
 }
 catch (e) {
-    error.value = e.response?.data?.detail || '保存模板失败';
+    error.value = e.response?.data?.detail || e?.message || '保存模板失败';
+}
+finally {
+    templateSaving.value = false;
 } }
 async function deleteTemplate(template) { if (!confirm(`确定删除模板「${template.name}」吗？`))
     return; try {
@@ -549,12 +571,8 @@ function onMaterialDraftTemplateChange() {
     const template = materialDraftTemplate.value;
     materialDraftTitle.value = template ? `${template.name} POD 商品` : '';
     materialDraftProductDescription.value = template?.product_description || '';
-    materialDraftSizeChart.value = null;
     materialDraftSizeChartPreview.value = imageUrl(template?.size_chart_url);
 }
-function onMaterialDraftSizeChartChange(event) { const file = event.target.files?.[0] || null; materialDraftSizeChart.value = file; materialDraftSizeChartPreview.value = file ? URL.createObjectURL(file) : imageUrl(materialDraftTemplate.value?.size_chart_url); }
-async function uploadMaterialDraftSizeChart() { if (!materialDraftSizeChart.value)
-    return undefined; const form = new FormData(); form.append('file', materialDraftSizeChart.value); const { data } = await api.post('/uploads/draft-size-chart', form, { headers: headers.value }); return data.url; }
 async function generateMaterialDraftTitle() {
     if (!materialDraftTemplateId.value || !selectedMaterialAssets.value[0])
         return;
@@ -573,7 +591,7 @@ async function generateMaterialDraftTitle() {
 function openMaterialDraftDialog() { if (!selectedMaterialTemplateId.value) {
     showToast('请选择属于同一产品模板的素材');
     return;
-} materialDraftTemplateId.value = selectedMaterialTemplateId.value; materialDraftTitle.value = ''; materialDraftProductDescription.value = ''; materialDraftSizeChart.value = null; materialDraftSizeChartPreview.value = ''; onMaterialDraftTemplateChange(); showMaterialDraftDialog.value = true; }
+} materialDraftTemplateId.value = selectedMaterialTemplateId.value; materialDraftTitle.value = ''; materialDraftProductDescription.value = ''; materialDraftSizeChartPreview.value = ''; onMaterialDraftTemplateChange(); showMaterialDraftDialog.value = true; }
 async function createDraftFromMaterialAssets() {
     if (!selectedMaterialAssetIds.value.length)
         return;
@@ -587,7 +605,7 @@ async function createDraftFromMaterialAssets() {
     }
     try {
         materialDraftSaving.value = true;
-        const size_chart_url = (await uploadMaterialDraftSizeChart()) ?? materialDraftTemplate.value?.size_chart_url ?? null;
+        const size_chart_url = materialDraftTemplate.value?.size_chart_url ?? null;
         const { data: draft } = await api.post('/drafts/from-material-assets', { material_asset_ids: selectedMaterialAssetIds.value, template_id: materialDraftTemplateId.value, title: materialDraftTitle.value.trim(), product_description: materialDraftProductDescription.value.trim() || null, size_chart_url }, { headers: headers.value });
         const { data: publishResult } = await api.post(`/drafts/${draft.id}/claim-to-tiktok`, {}, { headers: headers.value });
         selectedMaterialAssetIds.value = [];
@@ -689,32 +707,75 @@ function chooseMaterialUploadFiles(event) {
     input.value = '';
     if (!files.length)
         return;
+    if (files.length > MATERIAL_UPLOAD_MAX_FILES) {
+        showToast(`单次最多上传 ${MATERIAL_UPLOAD_MAX_FILES} 张图片`);
+        return;
+    }
+    if (files.some(file => !ALLOWED_IMAGE_TYPES.includes(file.type) || !file.size || file.size > MAX_IMAGE_BYTES)) {
+        showToast('仅支持 JPG、PNG、WebP，且单张不能超过 5MB');
+        return;
+    }
     pendingMaterialUploadFiles.value = files;
+    pendingMaterialUploadUrls.value = [];
     materialUploadTemplateId.value = null;
     showMaterialUploadDialog.value = true;
 }
 async function uploadMaterialAssets() {
-    if (!pendingMaterialUploadFiles.value.length || !materialUploadTemplateId.value) {
+    const files = [...pendingMaterialUploadFiles.value];
+    if (!files.length || !materialUploadTemplateId.value) {
         showToast('请选择产品模板');
         return;
     }
     try {
         materialUploading.value = true;
         materialUploadError.value = '';
-        const form = new FormData();
-        pendingMaterialUploadFiles.value.forEach(file => form.append('files', file));
-        form.append('template_id', String(materialUploadTemplateId.value));
-        await api.post('/material-assets/upload', form, { headers: headers.value });
+        materialUploadTotal.value = files.length;
+        materialUploadedCount.value = 0;
+        // 已直传成功的图片保留 URL，重试时只补传失败的那几张。
+        const missing = files.map((_file, index) => index).filter(index => !pendingMaterialUploadUrls.value[index]);
+        if (missing.length) {
+            const { data: signed } = await api.post('/material-assets/presign', {
+                files: missing.map(index => ({ content_type: files[index].type, content_length: files[index].size })),
+            }, { headers: headers.value });
+            let cursor = 0;
+            const worker = async () => {
+                while (true) {
+                    const slot = cursor++;
+                    if (slot >= missing.length)
+                        return;
+                    const index = missing[slot], file = files[index], target = signed[slot];
+                    for (let attempt = 0; attempt <= IMAGE_UPLOAD_RETRY && !pendingMaterialUploadUrls.value[index]; attempt++) {
+                        await axios.put(target.upload_url, file, { headers: { 'Content-Type': file.type } })
+                            .then(() => { pendingMaterialUploadUrls.value[index] = target.url; })
+                            .catch(() => undefined);
+                    }
+                    if (!pendingMaterialUploadUrls.value[index])
+                        throw new Error(`「${file.name}」上传失败`);
+                    materialUploadedCount.value++;
+                }
+            };
+            const results = await Promise.allSettled(Array.from({ length: Math.min(MATERIAL_UPLOAD_CONCURRENCY, missing.length) }, worker));
+            const failed = results.find((result) => result.status === 'rejected');
+            if (failed)
+                throw failed.reason;
+        }
+        await api.post('/material-assets/commit', {
+            template_id: materialUploadTemplateId.value,
+            items: files.map((file, index) => ({ url: pendingMaterialUploadUrls.value[index], name: file.name })),
+        }, { headers: headers.value });
         showMaterialUploadDialog.value = false;
         pendingMaterialUploadFiles.value = [];
+        pendingMaterialUploadUrls.value = [];
         currentMaterialPage.value = 1;
         await refreshMaterialList();
+        showToast(`已上传 ${files.length} 张素材`);
     }
     catch (e) {
-        materialUploadError.value = e.response?.data?.detail || '上传素材失败，请稍后重试';
+        materialUploadError.value = e.response?.data?.detail || e?.message || '上传素材失败，请稍后重试';
     }
     finally {
         materialUploading.value = false;
+        materialUploadTotal.value = 0;
     }
 }
 async function deleteSelectedMaterialAssets() {
@@ -731,7 +792,7 @@ async function deleteSelectedMaterialAssets() {
         showToast(e.response?.data?.detail || '删除素材失败，请稍后重试');
     }
 }
-function openMemberDialog(member) { editingMember.value = member || null; memberForm.value = { name: member?.name || '', user_code: member?.user_code || '', email: member?.email || '', password: '', is_active: member?.is_active ?? true }; showMemberDialog.value = true; }
+function openMemberDialog(member) { editingMember.value = member || null; memberForm.value = { name: member?.name || '', user_code: member?.user_code || '', email: member?.email || '', password: '', is_active: member?.is_active ?? true }; memberFormError.value = ''; showMemberDialog.value = true; }
 function openMyAccountDialog() { myName.value = user.value?.name || ''; myUserCode.value = user.value?.user_code || ''; showMyAccountDialog.value = true; }
 async function saveMyUserCode() { const name = myName.value.trim(), userCode = myUserCode.value.trim(); if (!name) {
     showToast('请输入管理员名称');
@@ -752,32 +813,58 @@ catch (e) {
 finally {
     myAccountSaving.value = false;
 } }
-async function saveMember() { if (!memberForm.value.name.trim() || !memberForm.value.email.trim() || (!editingMember.value && memberForm.value.password.length < 8))
-    return; const userCode = memberForm.value.user_code.trim(); if (userCode && [...userCode].length !== 2) {
-    showToast('用户代码必须恰好为两个字符');
-    return;
-} try {
-    memberSaving.value = true;
-    error.value = '';
-    const payload = { name: memberForm.value.name.trim(), user_code: userCode || null, email: memberForm.value.email.trim() };
-    if (memberForm.value.password)
-        payload.password = memberForm.value.password;
-    if (editingMember.value)
-        await api.put(`/members/${editingMember.value.id}`, payload, { headers: headers.value });
-    else
-        await api.post('/members', payload, { headers: headers.value });
-    showMemberDialog.value = false;
-    await refresh();
-    showToast('成员已保存');
+async function saveMember() {
+    const name = memberForm.value.name.trim(), userCode = memberForm.value.user_code.trim(), email = memberForm.value.email.trim();
+    memberFormError.value = '';
+    const invalid = (message) => { memberFormError.value = message; showToast(message); };
+    if (!name) {
+        invalid('请输入姓名');
+        return;
+    }
+    if (!userCode) {
+        invalid('请输入用户代码');
+        return;
+    }
+    if ([...userCode].length !== 2) {
+        invalid('用户代码必须恰好为两个字符');
+        return;
+    }
+    if (!email) {
+        invalid('请输入邮箱');
+        return;
+    }
+    if (!memberForm.value.password && !editingMember.value) {
+        invalid('请设置登录密码');
+        return;
+    }
+    if (memberForm.value.password && memberForm.value.password.length < 8) {
+        invalid('登录密码至少 8 个字符');
+        return;
+    }
+    try {
+        memberSaving.value = true;
+        error.value = '';
+        const payload = { name, user_code: userCode, email };
+        if (memberForm.value.password)
+            payload.password = memberForm.value.password;
+        if (editingMember.value)
+            await api.put(`/members/${editingMember.value.id}`, payload, { headers: headers.value });
+        else
+            await api.post('/members', payload, { headers: headers.value });
+        showMemberDialog.value = false;
+        await refresh();
+        showToast('成员已保存');
+    }
+    catch (e) {
+        const message = e.response?.data?.detail || '保存成员失败';
+        memberFormError.value = message;
+        error.value = message;
+        showToast(message);
+    }
+    finally {
+        memberSaving.value = false;
+    }
 }
-catch (e) {
-    const message = e.response?.data?.detail || '保存成员失败';
-    error.value = message;
-    showToast(message);
-}
-finally {
-    memberSaving.value = false;
-} }
 async function toggleMember(member) { try {
     await api.put(`/members/${member.id}`, { is_active: !member.is_active }, { headers: headers.value });
     await refresh();
@@ -3527,18 +3614,15 @@ if (__VLS_ctx.showMaterialDraftDialog) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "material-draft-size-chart" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-            ...{ onChange: (__VLS_ctx.onMaterialDraftSizeChartChange) },
-            accept: "image/png,image/jpeg,image/webp",
-            type: "file",
-        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        (__VLS_ctx.materialDraftSizeChart ? __VLS_ctx.materialDraftSizeChart.name : __VLS_ctx.materialDraftTemplate?.size_chart_url ? '默认使用产品模版尺码图，可重新选择一张图片' : '可上传 1 张尺码图，支持 JPG、PNG、WebP，最大 5MB');
         if (__VLS_ctx.materialDraftSizeChartPreview) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
                 src: (__VLS_ctx.materialDraftSizeChartPreview),
                 alt: "尺码图预览",
             });
+        }
+        else {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
         }
     }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -3721,20 +3805,29 @@ if (__VLS_ctx.showMemberDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     (__VLS_ctx.editingMember ? '编辑成员' : '新增成员');
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    (__VLS_ctx.editingMember ? '留空密码即可保持原密码不变。' : '新成员将作为普通成员加入当前公司。');
+    (__VLS_ctx.editingMember ? '姓名、用户代码、邮箱为必填项；留空密码即可保持原密码不变。' : '姓名、用户代码、邮箱为必填项；新成员将作为普通成员加入当前公司。');
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+        ...{ class: "required" },
+    });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
         maxlength: "80",
         placeholder: "请输入姓名",
     });
     (__VLS_ctx.memberForm.name);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+        ...{ class: "required" },
+    });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
         maxlength: "2",
-        placeholder: "例如：CN",
+        placeholder: "例如：CN（两个字符）",
     });
     (__VLS_ctx.memberForm.user_code);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+        ...{ class: "required" },
+    });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
         type: "email",
         placeholder: "name@example.com",
@@ -3747,6 +3840,12 @@ if (__VLS_ctx.showMemberDialog) {
         placeholder: (__VLS_ctx.editingMember ? '留空则不修改' : '至少 8 个字符'),
     });
     (__VLS_ctx.memberForm.password);
+    if (__VLS_ctx.memberFormError) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "error modal-error" },
+        });
+        (__VLS_ctx.memberFormError);
+    }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "modal-actions" },
     });
@@ -3939,6 +4038,7 @@ if (__VLS_ctx.showTemplateDialog) {
             } },
         ...{ class: "drawer-close" },
         'aria-label': "关闭",
+        disabled: (__VLS_ctx.templateSaving),
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
         ...{ class: "drawer-tabs" },
@@ -4234,12 +4334,14 @@ if (__VLS_ctx.showTemplateDialog) {
                 __VLS_ctx.showTemplateDialog = false;
             } },
         ...{ class: "ghost" },
+        disabled: (__VLS_ctx.templateSaving),
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.createTemplate) },
         ...{ class: "primary" },
+        disabled: (__VLS_ctx.templateSaving),
     });
-    (__VLS_ctx.editingTemplate ? '保存修改' : '确认新增');
+    (__VLS_ctx.templateSaving ? '上传中…' : (__VLS_ctx.editingTemplate ? '保存修改' : '确认新增'));
 }
 if (__VLS_ctx.previewImageUrl) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -4298,9 +4400,17 @@ if (__VLS_ctx.showMaterialUploadDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     (__VLS_ctx.pendingMaterialUploadFiles.length);
+    if (__VLS_ctx.materialUploading) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ style: {} },
+        });
+        (__VLS_ctx.materialUploadedCount);
+        (__VLS_ctx.materialUploadTotal);
+    }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
         value: (__VLS_ctx.materialUploadTemplateId),
+        disabled: (__VLS_ctx.materialUploading),
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
         value: (null),
@@ -4313,6 +4423,12 @@ if (__VLS_ctx.showMaterialUploadDialog) {
         });
         (template.name);
     }
+    if (__VLS_ctx.materialUploadError) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ style: {} },
+        });
+        (__VLS_ctx.materialUploadError);
+    }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "modal-actions" },
     });
@@ -4323,6 +4439,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
                 __VLS_ctx.showMaterialUploadDialog = false;
             } },
         ...{ class: "ghost" },
+        disabled: (__VLS_ctx.materialUploading),
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.uploadMaterialAssets) },
@@ -4620,6 +4737,11 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -4726,6 +4848,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             editingMember: editingMember,
             memberForm: memberForm,
             memberSaving: memberSaving,
+            memberFormError: memberFormError,
             showMemberCredentialDialog: showMemberCredentialDialog,
             credentialMember: credentialMember,
             credentialProvider: credentialProvider,
@@ -4748,13 +4871,15 @@ const __VLS_self = (await import('vue')).defineComponent({
             showMaterialDraftDialog: showMaterialDraftDialog,
             materialDraftTitle: materialDraftTitle,
             materialDraftProductDescription: materialDraftProductDescription,
-            materialDraftSizeChart: materialDraftSizeChart,
             materialDraftSizeChartPreview: materialDraftSizeChartPreview,
             materialDraftTitleGenerating: materialDraftTitleGenerating,
             materialDraftSaving: materialDraftSaving,
             pendingMaterialUploadFiles: pendingMaterialUploadFiles,
             showMaterialUploadDialog: showMaterialUploadDialog,
             materialUploadTemplateId: materialUploadTemplateId,
+            materialUploadedCount: materialUploadedCount,
+            materialUploadTotal: materialUploadTotal,
+            templateSaving: templateSaving,
             showDraftEditDialog: showDraftEditDialog,
             editingDraft: editingDraft,
             draftEditTitle: draftEditTitle,
@@ -4892,7 +5017,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             toggleAllCurrentMaterialAssets: toggleAllCurrentMaterialAssets,
             materialTemplateName: materialTemplateName,
             draftTemplateName: draftTemplateName,
-            onMaterialDraftSizeChartChange: onMaterialDraftSizeChartChange,
             generateMaterialDraftTitle: generateMaterialDraftTitle,
             openMaterialDraftDialog: openMaterialDraftDialog,
             createDraftFromMaterialAssets: createDraftFromMaterialAssets,
