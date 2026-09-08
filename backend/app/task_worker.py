@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import logging
 
+from .logging_config import configure_logging
 from .task_jobs import queue_interval, run_cycle
 
 
@@ -17,10 +18,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Haitoro 印花任务数据库 Worker")
     parser.add_argument("kind", choices=("submit", "result"))
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
+    logging.getLogger(__name__).info("任务 Worker 启动 | kind=%s", args.kind)
     asyncio.run(run_forever(args.kind))
 
 
 if __name__ == "__main__":
     main()
-

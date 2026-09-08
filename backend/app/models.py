@@ -96,6 +96,40 @@ class ProductTemplate(Base):
     sku_count: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class UserTemplateWhiteImage(Base):
+    """员工针对产品模板保存的白底图。"""
+    __tablename__ = "user_template_white_images"
+    __table_args__ = (
+        UniqueConstraint("user_id", "template_id", "name", name="uq_user_template_white_image_name"),
+        Index("ix_user_template_white_images_owner_template", "user_id", "template_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    user_id: Mapped[int] = mapped_column(index=True)
+    template_id: Mapped[int] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    image_url: Mapped[str] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserTemplatePrompt(Base):
+    """员工针对产品模板保存的印花贴合创作要求。"""
+    __tablename__ = "user_template_prompts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "template_id", "name", name="uq_user_template_prompt_name"),
+        Index("ix_user_template_prompts_owner_template", "user_id", "template_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    user_id: Mapped[int] = mapped_column(index=True)
+    template_id: Mapped[int] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class PodTask(Base):
     __tablename__ = "pod_tasks"
     __table_args__ = (Index("ix_pod_tasks_provider_model", "provider", "provider_model"),)

@@ -92,6 +92,7 @@ class TemplateGroupCreate(BaseModel):
 
 class PodTaskCreate(BaseModel):
     template_id: int
+    white_image_id: int
     # 不传时沿用平台后台配置的默认模型。
     provider: str | None = Field(default=None, max_length=40)
     task_type: str = Field(default="替换印花", min_length=1, max_length=80)
@@ -100,6 +101,66 @@ class PodTaskCreate(BaseModel):
     print_url: str | None = None
     print_urls: list[str] = Field(default_factory=list, max_length=500)
     creative_requirement: str = Field(min_length=1, max_length=1000)
+
+
+class UserTemplateWhiteImageCreate(BaseModel):
+    template_id: int
+    user_id: int | None = None
+    name: str = Field(min_length=1, max_length=80)
+    image_url: str = Field(min_length=1, max_length=500)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("白底图名称不能为空")
+        return value
+
+
+class UserTemplateWhiteImageUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    image_url: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("白底图名称不能为空")
+        return value
+
+
+class UserTemplatePromptCreate(BaseModel):
+    template_id: int
+    user_id: int | None = None
+    name: str = Field(min_length=1, max_length=80)
+    content: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("name", "content")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("名称和创作要求不能为空")
+        return value
+
+
+class UserTemplatePromptUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    content: str | None = Field(default=None, min_length=1, max_length=1000)
+
+    @field_validator("name", "content")
+    @classmethod
+    def normalize_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("名称和创作要求不能为空")
+        return value
 
 
 class UploadPresignInput(BaseModel):

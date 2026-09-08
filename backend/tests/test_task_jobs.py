@@ -12,8 +12,8 @@ from app.ai_providers import GrsaiProvider, ProviderError, ProviderTaskTerminalE
 from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
-from app.models import AIProviderSetting, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential
-from app.schemas import AIProviderCredentialUpdate, PodTaskCreate
+from app.models import AIProviderSetting, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential, UserTemplateWhiteImage
+from app.schemas import AIProviderCredentialUpdate, PodTaskCreate, UserTemplatePromptCreate
 
 
 class TaskJobTests(unittest.TestCase):
@@ -29,8 +29,10 @@ class TaskJobTests(unittest.TestCase):
                 ProductTemplate(id=1, company_id=1, name="Template", cover_url="https://img.example/template.png"),
                 User(id=1, company_id=1, email="operator@example.com", name="Operator", password_hash="x", role=Role.MEMBER),
                 User(id=2, company_id=1, email="admin@example.com", name="Admin", password_hash="x", role=Role.COMPANY_ADMIN),
+                User(id=3, company_id=1, email="other@example.com", name="Other", password_hash="x", role=Role.MEMBER),
                 UserAIProviderCredential(company_id=1, user_id=1, provider="grsai", secret_encrypted=encrypt_secret("member-key")),
                 UserAIProviderCredential(company_id=1, user_id=1, provider="seedream", secret_encrypted=encrypt_secret("seedream-member-key")),
+                UserTemplateWhiteImage(id=1, company_id=1, user_id=1, template_id=1, name="Front", image_url="https://img.example/template-white/1.png"),
             ])
             db.commit()
 
@@ -56,7 +58,7 @@ class TaskJobTests(unittest.TestCase):
 
     def test_bulk_create_splits_into_independent_tasks(self) -> None:
         payload = PodTaskCreate(
-            template_id=1, provider="grsai", creative_requirement="test",
+            template_id=1, white_image_id=1, provider="grsai", creative_requirement="test",
             print_urls=[f"https://img.example/creative/{index}.png" for index in range(5)],
         )
         with self.session_factory() as db, patch.object(main, "is_company_r2_url", return_value=True):
@@ -104,7 +106,7 @@ class TaskJobTests(unittest.TestCase):
 
     def test_task_creation_requires_its_creators_credential(self) -> None:
         payload = PodTaskCreate(
-            template_id=1, provider="grsai", creative_requirement="test",
+            template_id=1, white_image_id=1, provider="grsai", creative_requirement="test",
             print_urls=["https://img.example/creative/1.png"],
         )
         with self.session_factory() as db, patch.object(main, "is_company_r2_url", return_value=True):
@@ -112,6 +114,56 @@ class TaskJobTests(unittest.TestCase):
             db.delete(credential); db.commit()
             with self.assertRaisesRegex(Exception, "个人 Grsai 平台密钥"):
                 main.create_task(payload, user=db.get(User, 1), db=db)
+
+    def test_task_snapshots_and_worker_uses_selected_white_image(self) -> None:
+        payload = PodTaskCreate(
+            template_id=1, white_image_id=1, provider="grsai", creative_requirement="test",
+            print_urls=["https://img.example/creative/1.png"],
+        )
+        with self.session_factory() as db, patch.object(main, "is_company_r2_url", return_value=True):
+            response = main.create_task(payload, user=db.get(User, 1), db=db)
+            task = db.get(PodTask, response["items"][0]["id"])
+            request = task_jobs._request_for(task, db.get(ProductTemplate, 1))
+        self.assertEqual(task.parameters["white_image_name"], "Front")
+        self.assertEqual(request.template_url, "https://img.example/template-white/1.png")
+
+    def test_member_cannot_use_or_read_another_members_resources(self) -> None:
+        with self.session_factory() as db:
+            other_image = UserTemplateWhiteImage(
+                company_id=1, user_id=3, template_id=1, name="Other Front",
+                image_url="https://img.example/template-white/other.png",
+            )
+            db.add(other_image); db.commit(); db.refresh(other_image)
+            payload = PodTaskCreate(
+                template_id=1, white_image_id=other_image.id, provider="grsai", creative_requirement="test",
+                print_urls=["https://img.example/creative/1.png"],
+            )
+            with patch.object(main, "is_company_r2_url", return_value=True), self.assertRaisesRegex(Exception, "自己的产品白底图"):
+                main.create_task(payload, user=db.get(User, 1), db=db)
+            with self.assertRaisesRegex(Exception, "只能管理自己"):
+                main.list_user_template_resources(template_id=1, user_id=3, user=db.get(User, 1), db=db)
+
+    def test_admin_can_manage_member_prompt_and_other_member_sees_redacted_task(self) -> None:
+        with self.session_factory() as db:
+            admin = db.get(User, 2)
+            created = main.create_user_template_prompt(
+                UserTemplatePromptCreate(template_id=1, user_id=1, name="Natural", content="private prompt"),
+                user=admin, db=db,
+            )
+            managed = main.list_user_template_resources(template_id=1, user_id=1, user=admin, db=db)
+            self.assertEqual(managed["prompts"][0]["id"], created["id"])
+            task = PodTask(
+                company_id=1, template_id=1, created_by=1, status=TaskStatus.QUEUED,
+                parameters={"ratio":"1:1","quality":"1K","creative_requirement":"private prompt","white_image_id":1,"white_image_name":"Front","white_image_url":"https://img.example/template-white/1.png","print_urls":["https://img.example/print.png"]},
+                result_urls=[], result_map=[], provider="grsai", provider_model="nano",
+            )
+            db.add(task); db.commit(); db.refresh(task)
+            hidden = main.serialize_task_view(task, "Operator", "Template", db.get(User, 3), include_details=True)
+            visible = main.serialize_task_view(task, "Operator", "Template", admin, include_details=True)
+        self.assertTrue(hidden["parameters"]["private_creative_configuration"])
+        self.assertNotIn("white_image_url", hidden["parameters"])
+        self.assertIsNone(hidden["parameters"]["creative_requirement"])
+        self.assertEqual(visible["parameters"]["creative_requirement"], "private prompt")
 
     def test_sync_provider_completes_in_submit_worker(self) -> None:
         task_id = self.add_task()
@@ -185,8 +237,9 @@ class TaskJobTests(unittest.TestCase):
         task_id = self.add_task()
         with self.session_factory() as db:
             task = db.get(PodTask, task_id)
-            summary = main.serialize_task_view(task, "Operator", "Template", include_details=False)
-            detail = main.serialize_task_view(task, "Operator", "Template", include_details=True)
+            viewer = db.get(User, 1)
+            summary = main.serialize_task_view(task, "Operator", "Template", viewer, include_details=False)
+            detail = main.serialize_task_view(task, "Operator", "Template", viewer, include_details=True)
         self.assertNotIn("print_urls", summary["parameters"])
         self.assertNotIn("batches", summary)
         self.assertEqual(len(detail["parameters"]["print_urls"]), 1)

@@ -55,7 +55,7 @@ def _request_for(task: PodTask, template: ProductTemplate) -> GenerationRequest:
     return GenerationRequest(
         model=task.provider_model or "",
         prompt=build_prompt(parameters, template.name),
-        template_url=template.cover_url or "",
+        template_url=parameters.get("white_image_url") or template.cover_url or "",
         print_urls=print_urls,
         ratio=parameters["ratio"],
         quality=parameters["quality"],
@@ -91,13 +91,18 @@ async def submit_task_once(task_id: int) -> str:
             task.failure_reason = task.failure_reason or "提交第三方 API 已达到 3 次上限"
             task.completed_at = datetime.utcnow()
             db.commit()
+            logger.error("印花任务提交次数已达上限 | task_id=%s attempts=%s", task_id, task.submit_attempts)
             return "done"
         template = db.get(ProductTemplate, task.template_id)
         setting = db.get(AIProviderSetting, task.provider) if task.provider else None
         task.submit_attempts += 1
         db.commit()
-        if not template or not template.cover_url:
-            raise ProviderError("产品模板不存在或缺少模板图片")
+        logger.info(
+            "印花任务开始提交 | task_id=%s provider=%s model=%s attempt=%s",
+            task_id, task.provider, task.provider_model, task.submit_attempts,
+        )
+        if not template or not ((task.parameters or {}).get("white_image_url") or template.cover_url):
+            raise ProviderError("产品模板不存在或任务缺少产品白底图")
         if not setting or not setting.enabled:
             raise ProviderError("任务所选模型已停用或不存在")
         request = _request_for(task, template)
@@ -115,6 +120,10 @@ async def submit_task_once(task_id: int) -> str:
             task.submitted_at = datetime.utcnow()
             task.failure_reason = None
             db.commit()
+            logger.info(
+                "印花任务已提交第三方 | task_id=%s provider=%s provider_task_id=%s",
+                task_id, task.provider, provider_task_id,
+            )
             return "done"
 
         urls = await generate(task.provider or "", request, api_key)
@@ -129,12 +138,16 @@ async def submit_task_once(task_id: int) -> str:
         task.completed_at = datetime.utcnow()
         task.failure_reason = None
         db.commit()
+        logger.info("印花任务同步生成完成 | task_id=%s image_count=%s", task_id, len(urls))
         return "done"
     except Exception as exc:
         db.rollback()
-        logger.exception("印花任务 #%s 提交失败", task_id)
         task = db.get(PodTask, task_id)
         if not task or task.status != TaskStatus.QUEUED:
+            logger.warning(
+                "印花任务提交异常后状态已变化 | task_id=%s exception_type=%s reason=%s",
+                task_id, type(exc).__name__, exc,
+            )
             return "skipped"
         task.failure_reason = str(exc)[:500]
         if task.submit_attempts >= MAX_SUBMIT_ATTEMPTS:
@@ -144,6 +157,12 @@ async def submit_task_once(task_id: int) -> str:
         else:
             outcome = "retry"
         db.commit()
+        log_method = logger.error if outcome == "done" else logger.warning
+        log_method(
+            "印花任务提交失败 | task_id=%s attempt=%s outcome=%s exception_type=%s reason=%s",
+            task_id, task.submit_attempts, outcome, type(exc).__name__, exc,
+            exc_info=not isinstance(exc, ProviderError),
+        )
         return outcome
     finally:
         db.close()
@@ -173,6 +192,7 @@ async def process_result_task(task_id: int) -> None:
                 task.failure_reason = str(exc)[:500]
                 task.completed_at = datetime.utcnow()
                 db.commit()
+                logger.error("印花任务第三方处理失败 | task_id=%s reason=%s", task_id, exc)
             return
         except Exception as exc:
             logger.warning("印花任务 #%s 查询临时失败：%s", task_id, exc)
@@ -205,6 +225,7 @@ async def process_result_task(task_id: int) -> None:
         task.failure_reason = None
         task.completed_at = datetime.utcnow()
         db.commit()
+        logger.info("印花任务异步生成完成 | task_id=%s image_count=%s", task_id, len(urls))
     except Exception as exc:
         db.rollback()
         logger.exception("印花任务 #%s 结果处理异常", task_id)

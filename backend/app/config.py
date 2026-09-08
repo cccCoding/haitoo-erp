@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     secret_key: str = "local-development-secret"
     access_token_minutes: int = 480
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
+    log_level: str = "INFO"
+    log_timezone: str = "Asia/Hong_Kong"
     seedream_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     qwen_base_url: str = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"

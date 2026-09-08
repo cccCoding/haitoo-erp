@@ -7,25 +7,28 @@ import re
 import secrets
 import string
 import time
+from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
-from .models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserShop
-from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LoginInput, MaterialAssetsTemplateUpdate, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskDraftCreate, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut
+from .models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
+from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LoginInput, MaterialAssetsTemplateUpdate, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskDraftCreate, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
 from .storage import StorageError, create_image_upload_url, is_company_r2_url, is_public_r2_url, upload_image_bytes_async
+from .logging_config import configure_logging
 import httpx
 
 
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -226,6 +229,7 @@ def ensure_schema() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    logger.info("应用初始化开始")
     Base.metadata.create_all(bind=engine)
     ensure_schema()
     db = next(get_db())
@@ -233,11 +237,40 @@ async def lifespan(_: FastAPI):
         seed(db)
     finally:
         db.close()
-    yield
+    logger.info("应用初始化完成")
+    try:
+        yield
+    finally:
+        logger.info("应用关闭")
 
 
 app = FastAPI(title="Haitoro POD API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=get_settings().cors_origins.split(","), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def log_request(request: Request, call_next):
+    """为每个 HTTP 请求记录可关联的结果和耗时。"""
+    supplied_request_id = request.headers.get("x-request-id", "")
+    request_id = supplied_request_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied_request_id) else uuid4().hex
+    started_at = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        logger.exception(
+            "HTTP 请求异常 | request_id=%s method=%s path=%s duration_ms=%.2f",
+            request_id, request.method, request.url.path, duration_ms,
+        )
+        raise
+    duration_ms = (time.perf_counter() - started_at) * 1000
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "HTTP 请求完成 | request_id=%s method=%s path=%s status=%s duration_ms=%.2f client=%s",
+        request_id, request.method, request.url.path, response.status_code, duration_ms,
+        request.client.host if request.client else "unknown",
+    )
+    return response
 
 
 def allowed_shop_ids(db: Session, user: User) -> set[int]:
@@ -611,6 +644,164 @@ def get_company_template(db: Session, user: User, template_id: int) -> ProductTe
     return template
 
 
+def get_usable_template(db: Session, user: User, template_id: int) -> ProductTemplate:
+    template = db.get(ProductTemplate, template_id)
+    if not template or not (template.is_platform or template.company_id == user.company_id):
+        raise HTTPException(404, "产品模板不存在")
+    return template
+
+
+def get_resource_owner(db: Session, user: User, requested_user_id: int | None) -> User:
+    owner_id = requested_user_id or user.id
+    if owner_id != user.id and user.role != Role.COMPANY_ADMIN:
+        raise HTTPException(403, "只能管理自己的模板资源")
+    owner = db.get(User, owner_id)
+    if not owner or owner.company_id != user.company_id or owner.role not in {Role.COMPANY_ADMIN, Role.MEMBER}:
+        raise HTTPException(404, "公司用户不存在")
+    return owner
+
+
+def commit_template_resource(db: Session, duplicate_message: str) -> None:
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(400, duplicate_message) from exc
+
+
+@app.get("/user-template-resources")
+def list_user_template_resources(
+    template_id: int,
+    user_id: int | None = None,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    template = get_usable_template(db, user, template_id)
+    owner = get_resource_owner(db, user, user_id)
+    white_images = db.scalars(select(UserTemplateWhiteImage).where(
+        UserTemplateWhiteImage.company_id == user.company_id,
+        UserTemplateWhiteImage.user_id == owner.id,
+        UserTemplateWhiteImage.template_id == template.id,
+    ).order_by(UserTemplateWhiteImage.id.desc())).all()
+    prompts = db.scalars(select(UserTemplatePrompt).where(
+        UserTemplatePrompt.company_id == user.company_id,
+        UserTemplatePrompt.user_id == owner.id,
+        UserTemplatePrompt.template_id == template.id,
+    ).order_by(UserTemplatePrompt.id.desc())).all()
+    return {
+        "user_id": owner.id,
+        "template_id": template.id,
+        "white_images": [serialize_record(item) for item in white_images],
+        "prompts": [serialize_record(item) for item in prompts],
+    }
+
+
+@app.post("/user-template-white-images")
+def create_user_template_white_image(
+    payload: UserTemplateWhiteImageCreate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    template = get_usable_template(db, user, payload.template_id)
+    owner = get_resource_owner(db, user, payload.user_id)
+    count = db.scalar(select(func.count()).select_from(UserTemplateWhiteImage).where(
+        UserTemplateWhiteImage.user_id == owner.id,
+        UserTemplateWhiteImage.template_id == template.id,
+    )) or 0
+    if count >= 50:
+        raise HTTPException(400, "每个模板最多保存 50 张白底图")
+    if not is_company_r2_url(payload.image_url, user.company_id, "template-white"):
+        raise HTTPException(400, "白底图必须通过当前公司的专用上传接口上传")
+    item = UserTemplateWhiteImage(
+        company_id=user.company_id, user_id=owner.id, template_id=template.id,
+        name=payload.name, image_url=payload.image_url,
+    )
+    db.add(item); commit_template_resource(db, "该模板下已有同名白底图"); db.refresh(item)
+    return serialize_record(item)
+
+
+def get_managed_white_image(db: Session, user: User, item_id: int) -> UserTemplateWhiteImage:
+    item = db.get(UserTemplateWhiteImage, item_id)
+    if not item or item.company_id != user.company_id or (item.user_id != user.id and user.role != Role.COMPANY_ADMIN):
+        raise HTTPException(404, "白底图不存在或无权操作")
+    return item
+
+
+@app.put("/user-template-white-images/{item_id}")
+def update_user_template_white_image(
+    item_id: int, payload: UserTemplateWhiteImageUpdate,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    item = get_managed_white_image(db, user, item_id)
+    if payload.image_url is not None and not is_company_r2_url(payload.image_url, user.company_id, "template-white"):
+        raise HTTPException(400, "白底图必须通过当前公司的专用上传接口上传")
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(item, field, value)
+    item.updated_at = datetime.utcnow()
+    commit_template_resource(db, "该模板下已有同名白底图"); db.refresh(item)
+    return serialize_record(item)
+
+
+@app.delete("/user-template-white-images/{item_id}")
+def delete_user_template_white_image(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    item = get_managed_white_image(db, user, item_id)
+    db.delete(item); db.commit()
+    return {"deleted": True}
+
+
+@app.post("/uploads/user-template-white-image")
+async def upload_user_template_white_image(file: UploadFile = File(...), user: User = Depends(current_user)):
+    return await save_image_upload(file, user.company_id, "template-white")
+
+
+@app.post("/user-template-prompts")
+def create_user_template_prompt(
+    payload: UserTemplatePromptCreate,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    template = get_usable_template(db, user, payload.template_id)
+    owner = get_resource_owner(db, user, payload.user_id)
+    count = db.scalar(select(func.count()).select_from(UserTemplatePrompt).where(
+        UserTemplatePrompt.user_id == owner.id,
+        UserTemplatePrompt.template_id == template.id,
+    )) or 0
+    if count >= 50:
+        raise HTTPException(400, "每个模板最多保存 50 条创作要求")
+    item = UserTemplatePrompt(
+        company_id=user.company_id, user_id=owner.id, template_id=template.id,
+        name=payload.name, content=payload.content,
+    )
+    db.add(item); commit_template_resource(db, "该模板下已有同名创作要求"); db.refresh(item)
+    return serialize_record(item)
+
+
+def get_managed_template_prompt(db: Session, user: User, item_id: int) -> UserTemplatePrompt:
+    item = db.get(UserTemplatePrompt, item_id)
+    if not item or item.company_id != user.company_id or (item.user_id != user.id and user.role != Role.COMPANY_ADMIN):
+        raise HTTPException(404, "创作要求不存在或无权操作")
+    return item
+
+
+@app.put("/user-template-prompts/{item_id}")
+def update_user_template_prompt(
+    item_id: int, payload: UserTemplatePromptUpdate,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    item = get_managed_template_prompt(db, user, item_id)
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(item, field, value)
+    item.updated_at = datetime.utcnow()
+    commit_template_resource(db, "该模板下已有同名创作要求"); db.refresh(item)
+    return serialize_record(item)
+
+
+@app.delete("/user-template-prompts/{item_id}")
+def delete_user_template_prompt(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    item = get_managed_template_prompt(db, user, item_id)
+    db.delete(item); db.commit()
+    return {"deleted": True}
+
+
 def build_draft_sku_items(template: ProductTemplate, user: User, image_urls: list[str]) -> list[dict]:
     """按「每张图片一条」生成草稿基础 SKU；发布时再拼接模板尺码。"""
     if not user.user_code:
@@ -848,7 +1039,7 @@ async def upload_material_assets(files: list[UploadFile] = File(...), template_i
     return [serialize_record(asset) for asset in assets]
 
 
-def serialize_task_view(task: PodTask, creator_name: str, template_name: str, *, include_details: bool) -> dict:
+def serialize_task_view(task: PodTask, creator_name: str, template_name: str, viewer: User, *, include_details: bool) -> dict:
     """任务列表只返回首图摘要；详情返回完整印花和结果映射。"""
     parameters = dict(task.parameters or {})
     print_urls = list(parameters.get("print_urls") or ([parameters["print_url"]] if parameters.get("print_url") else []))
@@ -856,6 +1047,11 @@ def serialize_task_view(task: PodTask, creator_name: str, template_name: str, *,
     if not include_details:
         parameters.pop("print_urls", None)
         parameters["print_url"] = print_urls[0] if print_urls else None
+    if viewer.role not in {Role.COMPANY_ADMIN, Role.SUPER_ADMIN} and viewer.id != task.created_by:
+        for key in ("white_image_id", "white_image_url", "white_image_name", "personal_prompt_id", "personal_prompt_name"):
+            parameters.pop(key, None)
+        parameters["creative_requirement"] = None
+        parameters["private_creative_configuration"] = True
     result = serialize_record(task) | {
         "parameters": parameters,
         "result_urls": result_urls if include_details else result_urls[:1],
@@ -902,7 +1098,7 @@ def list_tasks(
         active_stmt = active_stmt.where(scope)
     return {
         "items": [
-            serialize_task_view(task, creator_names.get(task.created_by, "历史记录缺失"), template_names.get(task.template_id, "历史模板已删除"), include_details=False)
+            serialize_task_view(task, creator_names.get(task.created_by, "历史记录缺失"), template_names.get(task.template_id, "历史模板已删除"), user, include_details=False)
             for task in tasks
         ],
         "total": total,
@@ -920,7 +1116,7 @@ def get_task_detail(task_id: int, user: User = Depends(current_user), db: Sessio
         raise HTTPException(404, "任务不存在")
     creator = db.get(User, task.created_by)
     template = db.get(ProductTemplate, task.template_id)
-    return serialize_task_view(task, creator.name if creator else "历史记录缺失", template.name if template else "历史模板已删除", include_details=True)
+    return serialize_task_view(task, creator.name if creator else "历史记录缺失", template.name if template else "历史模板已删除", user, include_details=True)
 
 
 @app.get("/material-assets")
@@ -1132,9 +1328,17 @@ async def persist_generated_images(urls: list[str], company_id: int, task_id: in
 
 @app.post("/tasks")
 def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    template = db.get(ProductTemplate, payload.template_id)
-    if not template or not (template.is_platform or template.company_id == user.company_id):
-        raise HTTPException(404, "产品模板不存在")
+    template = get_usable_template(db, user, payload.template_id)
+    white_image = db.scalar(select(UserTemplateWhiteImage).where(
+        UserTemplateWhiteImage.id == payload.white_image_id,
+        UserTemplateWhiteImage.company_id == user.company_id,
+        UserTemplateWhiteImage.user_id == user.id,
+        UserTemplateWhiteImage.template_id == template.id,
+    ))
+    if not white_image:
+        raise HTTPException(400, "请选择当前模板下自己的产品白底图")
+    if not is_company_r2_url(white_image.image_url, user.company_id, "template-white"):
+        raise HTTPException(400, "所选产品白底图地址无效，请重新上传")
     raw_print_urls = payload.print_urls or ([payload.print_url] if payload.print_url else [])
     print_urls = list(dict.fromkeys(url for url in raw_print_urls if url))
     if not print_urls:
@@ -1143,8 +1347,6 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
         raise HTTPException(400, "单次印花贴合最多支持 500 张图片")
     if any(not is_company_r2_url(url, user.company_id, "creative") for url in print_urls):
         raise HTTPException(400, "印花图必须通过当前公司的 R2 直传地址上传")
-    if not template.cover_url:
-        raise HTTPException(400, "产品模板缺少模板图片，无法进行印花贴合")
     provider = None
     if payload.provider:
         provider = db.get(AIProviderSetting, payload.provider)
@@ -1163,7 +1365,11 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
         raise HTTPException(400, f"尚未配置个人 {provider.display_name} 平台密钥，请联系公司管理员配置")
     images_per_task = max(1, provider.images_per_task or 1)
     chunks = [print_urls[start:start + images_per_task] for start in range(0, len(print_urls), images_per_task)]
-    common_parameters = payload.model_dump(exclude={"print_urls", "print_url"})
+    common_parameters = payload.model_dump(exclude={"print_urls", "print_url", "white_image_id"}) | {
+        "white_image_id": white_image.id,
+        "white_image_name": white_image.name,
+        "white_image_url": white_image.image_url,
+    }
     tasks = [
         PodTask(
             company_id=user.company_id,

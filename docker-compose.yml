@@ -44,6 +44,8 @@ services:
       SECRET_KEY: change-me-before-production
       # 生产隧道启动时，在 .env 中设置为 https://erp.haitoro.com。
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:5174}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
       # 模型平台密钥由公司管理员在成员管理中按员工配置。
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
@@ -72,6 +74,8 @@ services:
     command: python -m app.task_worker submit
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
@@ -90,6 +94,8 @@ services:
     command: python -m app.task_worker result
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}

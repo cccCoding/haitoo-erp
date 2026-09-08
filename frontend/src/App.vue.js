@@ -33,6 +33,10 @@ const showTaskDraftDialog = ref(false), draftingTask = ref(null), taskDraftTitle
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
 const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2 };
 const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativePromptIndex = ref(''), creativeProvider = ref(''), creativeRatio = ref('1:1'), creativeQuality = ref('1K'), creativeUploading = ref(false), creativeUploadedCount = ref(0);
+const personalWhiteImages = ref([]), personalPrompts = ref([]), selectedWhiteImageId = ref(null), personalResourcesLoading = ref(false);
+const showPersonalResourcesDialog = ref(false), personalResourceTab = ref('white-images'), managedResourceUserId = ref(null), managedWhiteImages = ref([]), managedPrompts = ref([]), personalResourceSaving = ref(false);
+const editingWhiteImage = ref(null), whiteImageForm = ref({ name: '', file: null });
+const editingPersonalPrompt = ref(null), personalPromptForm = ref({ name: '', content: '' });
 const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'materials', icon: '◈', label: '素材库' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }];
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
 const visibleNav = computed(() => nav.filter(item => !item.adminOnly || user.value?.role === 'company_admin'));
@@ -41,6 +45,8 @@ const filteredTemplates = computed(() => templates.value.filter(t => (!activeGro
 // 运营端接口只返回后台已启用的模型；这里再保留一次筛选，避免接口数据异常时将停用模型带入任务。
 const availableAiProviders = computed(() => aiProviders.value.filter(provider => provider.enabled !== false));
 const selectedTemplate = computed(() => templates.value.find(t => t.id === selectedTemplateId.value));
+const selectedWhiteImage = computed(() => personalWhiteImages.value.find(item => item.id === selectedWhiteImageId.value));
+const resourceOwners = computed(() => user.value?.role === 'company_admin' ? members.value : user.value ? [user.value] : []);
 const selectedMaterialAssets = computed(() => materialAssets.value.filter(asset => selectedMaterialAssetIds.value.includes(asset.id)));
 const filteredMaterialAssets = computed(() => materialTemplateFilterId.value ? materialAssets.value.filter(asset => asset.template_id === materialTemplateFilterId.value) : materialAssets.value);
 const selectedMaterialTemplateId = computed(() => {
@@ -105,6 +111,8 @@ async function refresh() {
     }
     if (!selectedTemplateId.value && templates.value[0])
         selectedTemplateId.value = templates.value[0].id;
+    if (selectedTemplateId.value)
+        await loadMyTemplateResources(false);
 }
 async function login() { try {
     loading.value = true;
@@ -179,6 +187,9 @@ async function uploadCreativeAssets() {
 async function createTask() { if (!creativeAssets.value.length) {
     creativeAssetError.value = '请先上传至少一张印花图，再开始印花贴合。';
     return;
+} if (!selectedWhiteImageId.value) {
+    showToast(personalWhiteImages.value.length ? '请选择产品白底图' : '请先设置该模板的产品白底图');
+    return;
 } if (!creativeRequirement.value.trim()) {
     showToast('请填写创作要求');
     return;
@@ -190,7 +201,7 @@ async function createTask() { if (!creativeAssets.value.length) {
     creativeAssetError.value = '';
     creativeUploading.value = true;
     const print_urls = await uploadCreativeAssets();
-    const { data } = await api.post('/tasks', { template_id: selectedTemplateId.value, provider: creativeProvider.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() }, { headers: headers.value });
+    const { data } = await api.post('/tasks', { template_id: selectedTemplateId.value, white_image_id: selectedWhiteImageId.value, provider: creativeProvider.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() }, { headers: headers.value });
     currentTaskPage.value = 1;
     await refresh();
     page.value = 'tasks';
@@ -217,10 +228,143 @@ function addSkuSize() { newSkuSizeOptions.value.push(''); }
 function addTemplateAiPrompt() { newTemplateAiPrompts.value.push({ name: '', content: '' }); }
 function removeTemplateAiPrompt(index) { newTemplateAiPrompts.value.splice(index, 1); }
 function selectedTemplateAiPrompts() { return (selectedTemplate.value?.ai_prompts || []).filter((item) => item?.name && item?.content); }
-function applyTemplateAiPrompt() { if (creativePromptIndex.value === '')
-    return; const prompt = selectedTemplateAiPrompts()[Number(creativePromptIndex.value)]; if (prompt)
-    creativeRequirement.value = prompt.content; }
-function onCreativeTemplateChange() { creativePromptIndex.value = ''; creativeRequirement.value = ''; }
+function applyTemplateAiPrompt() {
+    if (!creativePromptIndex.value)
+        return;
+    const [source, identifier] = creativePromptIndex.value.split(':');
+    const prompt = source === 'template' ? selectedTemplateAiPrompts()[Number(identifier)] : personalPrompts.value.find(item => item.id === Number(identifier));
+    if (prompt)
+        creativeRequirement.value = prompt.content;
+}
+async function loadMyTemplateResources(preserveSelection = true) {
+    if (!selectedTemplateId.value || !user.value) {
+        personalWhiteImages.value = [];
+        personalPrompts.value = [];
+        selectedWhiteImageId.value = null;
+        return;
+    }
+    try {
+        personalResourcesLoading.value = true;
+        const { data } = await api.get('/user-template-resources', { headers: headers.value, params: { template_id: selectedTemplateId.value } });
+        personalWhiteImages.value = data.white_images || [];
+        personalPrompts.value = data.prompts || [];
+        if (!preserveSelection || !personalWhiteImages.value.some(item => item.id === selectedWhiteImageId.value))
+            selectedWhiteImageId.value = null;
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '加载个人模板资源失败');
+    }
+    finally {
+        personalResourcesLoading.value = false;
+    }
+}
+async function onCreativeTemplateChange() { selectedWhiteImageId.value = null; creativePromptIndex.value = ''; creativeRequirement.value = ''; await loadMyTemplateResources(false); }
+async function loadManagedTemplateResources() {
+    if (!selectedTemplateId.value || !managedResourceUserId.value)
+        return;
+    try {
+        const { data } = await api.get('/user-template-resources', { headers: headers.value, params: { template_id: selectedTemplateId.value, user_id: managedResourceUserId.value } });
+        managedWhiteImages.value = data.white_images || [];
+        managedPrompts.value = data.prompts || [];
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '加载员工模板资源失败');
+    }
+}
+async function openPersonalResourcesDialog(tab = 'white-images') {
+    if (!selectedTemplateId.value) {
+        showToast('请先选择产品模板');
+        return;
+    }
+    personalResourceTab.value = tab;
+    managedResourceUserId.value = user.value.id;
+    resetWhiteImageForm();
+    resetPersonalPromptForm();
+    showPersonalResourcesDialog.value = true;
+    await loadManagedTemplateResources();
+}
+function resetWhiteImageForm() { editingWhiteImage.value = null; whiteImageForm.value = { name: '', file: null }; }
+function editWhiteImage(item) { editingWhiteImage.value = item; whiteImageForm.value = { name: item.name, file: null }; }
+function onWhiteImageFileChange(event) { whiteImageForm.value.file = event.target.files?.[0] || null; }
+async function saveWhiteImage() {
+    if (!selectedTemplateId.value || !managedResourceUserId.value || !whiteImageForm.value.name.trim()) {
+        showToast('请填写白底图名称');
+        return;
+    }
+    if (!editingWhiteImage.value && !whiteImageForm.value.file) {
+        showToast('请上传白底图');
+        return;
+    }
+    try {
+        personalResourceSaving.value = true;
+        let image_url;
+        if (whiteImageForm.value.file) {
+            const form = new FormData();
+            form.append('file', whiteImageForm.value.file);
+            image_url = (await api.post('/uploads/user-template-white-image', form, { headers: headers.value })).data.url;
+        }
+        if (editingWhiteImage.value)
+            await api.put(`/user-template-white-images/${editingWhiteImage.value.id}`, { name: whiteImageForm.value.name.trim(), ...(image_url ? { image_url } : {}) }, { headers: headers.value });
+        else
+            await api.post('/user-template-white-images', { template_id: selectedTemplateId.value, user_id: managedResourceUserId.value, name: whiteImageForm.value.name.trim(), image_url }, { headers: headers.value });
+        resetWhiteImageForm();
+        await loadManagedTemplateResources();
+        if (managedResourceUserId.value === user.value.id)
+            await loadMyTemplateResources();
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '保存白底图失败');
+    }
+    finally {
+        personalResourceSaving.value = false;
+    }
+}
+async function deleteWhiteImage(item) { if (!confirm(`确定删除白底图「${item.name}」吗？`))
+    return; try {
+    await api.delete(`/user-template-white-images/${item.id}`, { headers: headers.value });
+    await loadManagedTemplateResources();
+    if (managedResourceUserId.value === user.value.id)
+        await loadMyTemplateResources();
+}
+catch (e) {
+    showToast(e.response?.data?.detail || '删除白底图失败');
+} }
+function resetPersonalPromptForm() { editingPersonalPrompt.value = null; personalPromptForm.value = { name: '', content: '' }; }
+function editPersonalPrompt(item) { editingPersonalPrompt.value = item; personalPromptForm.value = { name: item.name, content: item.content }; }
+async function savePersonalPrompt() {
+    const name = personalPromptForm.value.name.trim(), content = personalPromptForm.value.content.trim();
+    if (!selectedTemplateId.value || !managedResourceUserId.value || !name || !content) {
+        showToast('请完整填写名称和创作要求');
+        return;
+    }
+    try {
+        personalResourceSaving.value = true;
+        if (editingPersonalPrompt.value)
+            await api.put(`/user-template-prompts/${editingPersonalPrompt.value.id}`, { name, content }, { headers: headers.value });
+        else
+            await api.post('/user-template-prompts', { template_id: selectedTemplateId.value, user_id: managedResourceUserId.value, name, content }, { headers: headers.value });
+        resetPersonalPromptForm();
+        await loadManagedTemplateResources();
+        if (managedResourceUserId.value === user.value.id)
+            await loadMyTemplateResources();
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '保存创作要求失败');
+    }
+    finally {
+        personalResourceSaving.value = false;
+    }
+}
+async function deletePersonalPrompt(item) { if (!confirm(`确定删除创作要求「${item.name}」吗？`))
+    return; try {
+    await api.delete(`/user-template-prompts/${item.id}`, { headers: headers.value });
+    await loadManagedTemplateResources();
+    if (managedResourceUserId.value === user.value.id)
+        await loadMyTemplateResources();
+}
+catch (e) {
+    showToast(e.response?.data?.detail || '删除创作要求失败');
+} }
 function onCoverChange(event) { const file = event.target.files?.[0] || null; newTemplateImage.value = file; newTemplateImagePreview.value = file ? URL.createObjectURL(file) : imageUrl(editingTemplate.value?.cover_url); }
 function onSizeChartChange(event) { const file = event.target.files?.[0] || null; newTemplateSizeChart.value = file; newTemplateSizeChartPreview.value = file ? URL.createObjectURL(file) : imageUrl(editingTemplate.value?.size_chart_url); }
 async function uploadCover() { if (!newTemplateImage.value)
@@ -1157,15 +1301,30 @@ else {
             ...{ class: "pod-panel" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "pod-heading" },
+            ...{ class: "pod-heading personal-resource-heading" },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!!(!__VLS_ctx.token))
+                        return;
+                    if (!!(__VLS_ctx.page === 'dashboard'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'templates'))
+                        return;
+                    if (!(__VLS_ctx.page === 'pod'))
+                        return;
+                    __VLS_ctx.openPersonalResourcesDialog();
+                } },
+            ...{ class: "secondary" },
+        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "requirement-label" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-        if (__VLS_ctx.selectedTemplateAiPrompts().length) {
+        if (__VLS_ctx.selectedTemplateAiPrompts().length || __VLS_ctx.personalPrompts.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "prompt-picker" },
             });
@@ -1176,12 +1335,29 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
                 value: "",
             });
-            for (const [prompt, index] of __VLS_getVForSourceType((__VLS_ctx.selectedTemplateAiPrompts()))) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                    key: (`${prompt.name}-${index}`),
-                    value: (String(index)),
+            if (__VLS_ctx.selectedTemplateAiPrompts().length) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.optgroup, __VLS_intrinsicElements.optgroup)({
+                    label: "产品模板创作要求",
                 });
-                (prompt.name);
+                for (const [prompt, index] of __VLS_getVForSourceType((__VLS_ctx.selectedTemplateAiPrompts()))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                        key: (`template-${index}`),
+                        value: (`template:${index}`),
+                    });
+                    (prompt.name);
+                }
+            }
+            if (__VLS_ctx.personalPrompts.length) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.optgroup, __VLS_intrinsicElements.optgroup)({
+                    label: "我的创作要求",
+                });
+                for (const [prompt] of __VLS_getVForSourceType((__VLS_ctx.personalPrompts))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                        key: (`personal-${prompt.id}`),
+                        value: (`personal:${prompt.id}`),
+                    });
+                    (prompt.name);
+                }
             }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
         }
@@ -1262,7 +1438,9 @@ else {
             });
             (__VLS_ctx.creativeAssets.length);
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+            ...{ class: "white-image-picker" },
+        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
             ...{ onChange: (__VLS_ctx.onCreativeTemplateChange) },
@@ -1275,15 +1453,60 @@ else {
             });
             (t.name);
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "product-preview template-preview" },
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "white-image-label" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-            src: (__VLS_ctx.templateCoverUrl(__VLS_ctx.selectedTemplate)),
-            alt: (__VLS_ctx.selectedTemplate?.name || '产品模板'),
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.selectedWhiteImageId),
+            disabled: (__VLS_ctx.personalResourcesLoading || !__VLS_ctx.personalWhiteImages.length),
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        (__VLS_ctx.selectedTemplate?.name);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: (null),
+        });
+        (__VLS_ctx.personalWhiteImages.length ? '请选择白底图' : '尚未设置白底图');
+        for (const [item] of __VLS_getVForSourceType((__VLS_ctx.personalWhiteImages))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (item.id),
+                value: (item.id),
+            });
+            (item.name);
+        }
+        if (__VLS_ctx.selectedWhiteImage) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "product-preview template-preview" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                src: (__VLS_ctx.imageUrl(__VLS_ctx.selectedWhiteImage.image_url)),
+                alt: (__VLS_ctx.selectedWhiteImage.name),
+            });
+        }
+        else {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "white-image-empty" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.personalWhiteImages.length ? '请从上方选择一张白底图' : '尚未设置该模板的白底图，请先设置');
+            if (!__VLS_ctx.personalWhiteImages.length) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(!__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.selectedWhiteImage))
+                                return;
+                            if (!(!__VLS_ctx.personalWhiteImages.length))
+                                return;
+                            __VLS_ctx.openPersonalResourcesDialog('white-images');
+                        } },
+                });
+            }
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
             ...{ class: "settings" },
         });
@@ -1354,7 +1577,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.createTask) },
             ...{ class: "primary full" },
-            disabled: (!__VLS_ctx.availableAiProviders.length || __VLS_ctx.creativeUploading),
+            disabled: (!__VLS_ctx.availableAiProviders.length || __VLS_ctx.creativeUploading || !__VLS_ctx.selectedWhiteImageId),
         });
         (__VLS_ctx.creativeUploading ? `上传中 ${__VLS_ctx.creativeUploadedCount}/${__VLS_ctx.creativeAssets.length}` : '✦ 开始印花贴合');
     }
@@ -2447,6 +2670,26 @@ if (__VLS_ctx.showTaskDetailDialog) {
     if (!(__VLS_ctx.viewingTask?.parameters?.print_urls?.length)) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     }
+    if (__VLS_ctx.viewingTask?.parameters?.white_image_url) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "draft-edit-section" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.showTaskDetailDialog))
+                        return;
+                    if (!(__VLS_ctx.viewingTask?.parameters?.white_image_url))
+                        return;
+                    __VLS_ctx.openImagePreview(__VLS_ctx.viewingTask.parameters.white_image_url, __VLS_ctx.viewingTask.parameters.white_image_name || '产品白底图');
+                } },
+            ...{ class: "task-material-thumbnail" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+            src: (__VLS_ctx.imageUrl(__VLS_ctx.viewingTask.parameters.white_image_url)),
+            alt: (__VLS_ctx.viewingTask.parameters.white_image_name || '产品白底图'),
+        });
+    }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
         ...{ class: "draft-edit-section" },
     });
@@ -2455,7 +2698,7 @@ if (__VLS_ctx.showTaskDetailDialog) {
     (__VLS_ctx.viewingTask?.parameters?.ratio || '—');
     (__VLS_ctx.viewingTask?.parameters?.quality || '—');
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    (__VLS_ctx.viewingTask?.parameters?.creative_requirement || '未填写');
+    (__VLS_ctx.viewingTask?.parameters?.private_creative_configuration ? '个人创作配置已隐藏' : __VLS_ctx.viewingTask?.parameters?.creative_requirement || '未填写');
     __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
         ...{ class: "draft-edit-section" },
     });
@@ -2626,6 +2869,226 @@ if (__VLS_ctx.showCreativeAssetsDialog) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
             ...{ class: "asset-empty" },
         });
+    }
+}
+if (__VLS_ctx.showPersonalResourcesDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showPersonalResourcesDialog))
+                    return;
+                __VLS_ctx.showPersonalResourcesDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card personal-resources-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showPersonalResourcesDialog))
+                    return;
+                __VLS_ctx.showPersonalResourcesDialog = false;
+            } },
+        ...{ class: "modal-close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.selectedTemplate?.name);
+    if (__VLS_ctx.user?.role === 'company_admin') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "resource-owner-picker" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (...[$event]) => {
+                    if (!(__VLS_ctx.showPersonalResourcesDialog))
+                        return;
+                    if (!(__VLS_ctx.user?.role === 'company_admin'))
+                        return;
+                    __VLS_ctx.resetWhiteImageForm();
+                    __VLS_ctx.resetPersonalPromptForm();
+                    __VLS_ctx.loadManagedTemplateResources();
+                } },
+            value: (__VLS_ctx.managedResourceUserId),
+        });
+        for (const [owner] of __VLS_getVForSourceType((__VLS_ctx.resourceOwners))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (owner.id),
+                value: (owner.id),
+            });
+            (owner.name);
+            (owner.email);
+        }
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
+        ...{ class: "resource-tabs" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showPersonalResourcesDialog))
+                    return;
+                __VLS_ctx.personalResourceTab = 'white-images';
+            } },
+        ...{ class: ({ active: __VLS_ctx.personalResourceTab === 'white-images' }) },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showPersonalResourcesDialog))
+                    return;
+                __VLS_ctx.personalResourceTab = 'prompts';
+            } },
+        ...{ class: ({ active: __VLS_ctx.personalResourceTab === 'prompts' }) },
+    });
+    if (__VLS_ctx.personalResourceTab === 'white-images') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "resource-pane" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.form, __VLS_intrinsicElements.form)({
+            ...{ onSubmit: (__VLS_ctx.saveWhiteImage) },
+            ...{ class: "resource-editor" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+        (__VLS_ctx.editingWhiteImage ? '编辑白底图' : '新增白底图');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            maxlength: "80",
+            placeholder: "例如：正面白底图",
+        });
+        (__VLS_ctx.whiteImageForm.name);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            ...{ onChange: (__VLS_ctx.onWhiteImageFileChange) },
+            type: "file",
+            accept: "image/png,image/jpeg,image/webp",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        (__VLS_ctx.editingWhiteImage ? '不重新选择则保留当前图片' : 'JPG、PNG、WebP，最大 5MB');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+        if (__VLS_ctx.editingWhiteImage) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.resetWhiteImageForm) },
+                type: "button",
+                ...{ class: "ghost" },
+            });
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ class: "primary" },
+            disabled: (__VLS_ctx.personalResourceSaving),
+        });
+        (__VLS_ctx.personalResourceSaving ? '保存中…' : '保存白底图');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "resource-list" },
+        });
+        for (const [item] of __VLS_getVForSourceType((__VLS_ctx.managedWhiteImages))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+                key: (item.id),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                src: (__VLS_ctx.imageUrl(item.image_url)),
+                alt: (item.name),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            (item.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (new Date(item.updated_at).toLocaleString());
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showPersonalResourcesDialog))
+                            return;
+                        if (!(__VLS_ctx.personalResourceTab === 'white-images'))
+                            return;
+                        __VLS_ctx.editWhiteImage(item);
+                    } },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showPersonalResourcesDialog))
+                            return;
+                        if (!(__VLS_ctx.personalResourceTab === 'white-images'))
+                            return;
+                        __VLS_ctx.deleteWhiteImage(item);
+                    } },
+                ...{ class: "danger" },
+            });
+        }
+        if (!__VLS_ctx.managedWhiteImages.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
+        }
+    }
+    else {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "resource-pane" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.form, __VLS_intrinsicElements.form)({
+            ...{ onSubmit: (__VLS_ctx.savePersonalPrompt) },
+            ...{ class: "resource-editor" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+        (__VLS_ctx.editingPersonalPrompt ? '编辑创作要求' : '新增创作要求');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            maxlength: "80",
+            placeholder: "例如：自然布料贴合",
+        });
+        (__VLS_ctx.personalPromptForm.name);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+            value: (__VLS_ctx.personalPromptForm.content),
+            maxlength: "1000",
+            placeholder: "描述印花贴合方式、细节和光影",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+        if (__VLS_ctx.editingPersonalPrompt) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.resetPersonalPromptForm) },
+                type: "button",
+                ...{ class: "ghost" },
+            });
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ class: "primary" },
+            disabled: (__VLS_ctx.personalResourceSaving),
+        });
+        (__VLS_ctx.personalResourceSaving ? '保存中…' : '保存创作要求');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "resource-list prompt-resource-list" },
+        });
+        for (const [item] of __VLS_getVForSourceType((__VLS_ctx.managedPrompts))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+                key: (item.id),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            (item.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+            (item.content);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showPersonalResourcesDialog))
+                            return;
+                        if (!!(__VLS_ctx.personalResourceTab === 'white-images'))
+                            return;
+                        __VLS_ctx.editPersonalPrompt(item);
+                    } },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showPersonalResourcesDialog))
+                            return;
+                        if (!!(__VLS_ctx.personalResourceTab === 'white-images'))
+                            return;
+                        __VLS_ctx.deletePersonalPrompt(item);
+                    } },
+                ...{ class: "danger" },
+            });
+        }
+        if (!__VLS_ctx.managedPrompts.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
+        }
     }
 }
 if (__VLS_ctx.showMyAccountDialog) {
@@ -3810,6 +4273,8 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['active']} */ ;
 /** @type {__VLS_StyleScopedClasses['pod-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['pod-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['personal-resource-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['requirement-label']} */ ;
 /** @type {__VLS_StyleScopedClasses['prompt-picker']} */ ;
 /** @type {__VLS_StyleScopedClasses['pod-grid']} */ ;
@@ -3818,8 +4283,11 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['asset-count']} */ ;
 /** @type {__VLS_StyleScopedClasses['creative-asset-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['manage-assets']} */ ;
+/** @type {__VLS_StyleScopedClasses['white-image-picker']} */ ;
+/** @type {__VLS_StyleScopedClasses['white-image-label']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['template-preview']} */ ;
+/** @type {__VLS_StyleScopedClasses['white-image-empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-title']} */ ;
 /** @type {__VLS_StyleScopedClasses['parameter-fields']} */ ;
@@ -3925,6 +4393,8 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-preview-images']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-material-thumbnail']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-edit-section']} */ ;
@@ -3945,6 +4415,27 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['asset-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['asset-delete']} */ ;
 /** @type {__VLS_StyleScopedClasses['asset-empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['personal-resources-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-owner-picker']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-tabs']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-pane']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-editor']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['danger']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-pane']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-editor']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['prompt-resource-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['danger']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
@@ -4199,11 +4690,27 @@ const __VLS_self = (await import('vue')).defineComponent({
             creativeQuality: creativeQuality,
             creativeUploading: creativeUploading,
             creativeUploadedCount: creativeUploadedCount,
+            personalWhiteImages: personalWhiteImages,
+            personalPrompts: personalPrompts,
+            selectedWhiteImageId: selectedWhiteImageId,
+            personalResourcesLoading: personalResourcesLoading,
+            showPersonalResourcesDialog: showPersonalResourcesDialog,
+            personalResourceTab: personalResourceTab,
+            managedResourceUserId: managedResourceUserId,
+            managedWhiteImages: managedWhiteImages,
+            managedPrompts: managedPrompts,
+            personalResourceSaving: personalResourceSaving,
+            editingWhiteImage: editingWhiteImage,
+            whiteImageForm: whiteImageForm,
+            editingPersonalPrompt: editingPersonalPrompt,
+            personalPromptForm: personalPromptForm,
             visibleNav: visibleNav,
             pageTitle: pageTitle,
             filteredTemplates: filteredTemplates,
             availableAiProviders: availableAiProviders,
             selectedTemplate: selectedTemplate,
+            selectedWhiteImage: selectedWhiteImage,
+            resourceOwners: resourceOwners,
             selectedMaterialAssets: selectedMaterialAssets,
             filteredMaterialAssets: filteredMaterialAssets,
             materialDraftTemplate: materialDraftTemplate,
@@ -4232,6 +4739,17 @@ const __VLS_self = (await import('vue')).defineComponent({
             selectedTemplateAiPrompts: selectedTemplateAiPrompts,
             applyTemplateAiPrompt: applyTemplateAiPrompt,
             onCreativeTemplateChange: onCreativeTemplateChange,
+            loadManagedTemplateResources: loadManagedTemplateResources,
+            openPersonalResourcesDialog: openPersonalResourcesDialog,
+            resetWhiteImageForm: resetWhiteImageForm,
+            editWhiteImage: editWhiteImage,
+            onWhiteImageFileChange: onWhiteImageFileChange,
+            saveWhiteImage: saveWhiteImage,
+            deleteWhiteImage: deleteWhiteImage,
+            resetPersonalPromptForm: resetPersonalPromptForm,
+            editPersonalPrompt: editPersonalPrompt,
+            savePersonalPrompt: savePersonalPrompt,
+            deletePersonalPrompt: deletePersonalPrompt,
             onCoverChange: onCoverChange,
             onSizeChartChange: onSizeChartChange,
             createTemplate: createTemplate,
