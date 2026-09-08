@@ -13,7 +13,7 @@ from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
 from app.models import AIProviderSetting, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential, UserTemplateWhiteImage
-from app.schemas import AIProviderCredentialUpdate, DraftUpdate, MaterialAssetsTemplateUpdate, PodTaskCreate, UserTemplatePromptCreate
+from app.schemas import AIProviderCredentialUpdate, ClaimMaterials, DraftUpdate, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
 
 
 class TaskJobTests(unittest.TestCase):
@@ -26,10 +26,10 @@ class TaskJobTests(unittest.TestCase):
                 TaskQueueSetting(id=1, submit_interval_seconds=1, result_interval_seconds=5),
                 AIProviderSetting(provider="grsai", display_name="Grsai", model="nano", enabled=True, is_default=True, images_per_task=2),
                 AIProviderSetting(provider="seedream", display_name="Seedream", model="seed", enabled=True, is_default=False, images_per_task=1),
-                ProductTemplate(id=1, company_id=1, name="Template", cover_url="https://img.example/template.png"),
-                User(id=1, company_id=1, email="operator@example.com", name="Operator", password_hash="x", role=Role.MEMBER),
-                User(id=2, company_id=1, email="admin@example.com", name="Admin", password_hash="x", role=Role.COMPANY_ADMIN),
-                User(id=3, company_id=1, email="other@example.com", name="Other", password_hash="x", role=Role.MEMBER),
+                ProductTemplate(id=1, company_id=1, name="M05L", cover_url="https://img.example/template.png"),
+                User(id=1, company_id=1, email="operator@example.com", name="Operator", user_code="AA", password_hash="x", role=Role.MEMBER),
+                User(id=2, company_id=1, email="admin@example.com", name="Admin", user_code="AB", password_hash="x", role=Role.COMPANY_ADMIN),
+                User(id=3, company_id=1, email="other@example.com", name="Other", user_code="AC", password_hash="x", role=Role.MEMBER),
                 UserAIProviderCredential(company_id=1, user_id=1, provider="grsai", secret_encrypted=encrypt_secret("member-key")),
                 UserAIProviderCredential(company_id=1, user_id=1, provider="seedream", secret_encrypted=encrypt_secret("seedream-member-key")),
                 UserTemplateWhiteImage(id=1, company_id=1, user_id=1, template_id=1, name="Front", image_url="https://img.example/template-white/1.png"),
@@ -261,7 +261,7 @@ class TaskJobTests(unittest.TestCase):
             self.assertFalse(main.can_access_task(other_task, db.get(User, 1)))
             self.assertTrue(main.can_access_task(other_task, db.get(User, 2)))
 
-    def test_members_only_see_and_modify_their_materials(self) -> None:
+    def test_members_only_see_their_materials_and_template_update_route_is_removed(self) -> None:
         with self.session_factory() as db:
             own = MaterialAsset(company_id=1, template_id=1, url="https://img.example/own.png", name="own", claimed_by=1)
             own_newer = MaterialAsset(company_id=1, template_id=1, url="https://img.example/own-newer.png", name="own-newer", claimed_by=1)
@@ -278,11 +278,66 @@ class TaskJobTests(unittest.TestCase):
             self.assertEqual(admin_assets["items"][0]["source_type"], "local_upload")
             self.assertEqual(admin_assets["total"], 1)
 
-            with self.assertRaisesRegex(Exception, "无权设置"):
-                main.update_material_assets_template(
-                    MaterialAssetsTemplateUpdate(material_asset_ids=[other.id], template_id=1),
+            route_paths = {route.path for route in main.app.routes}
+            self.assertNotIn("/material-assets/template", route_paths)
+
+    def test_template_name_is_normalized_for_sku_prefix(self) -> None:
+        payload = TemplateCreate(name="y1", group_id=1)
+        self.assertEqual(payload.name, "Y1")
+        self.assertEqual(MaterialAsset.__table__.c.sku.type.length, 24)
+        for invalid_name in ("中文", "M-05", "ABCDEF"):
+            with self.assertRaises(Exception):
+                TemplateCreate(name=invalid_name, group_id=1)
+
+    def test_material_sku_retries_database_collision(self) -> None:
+        with self.session_factory() as db:
+            db.add(MaterialAsset(
+                company_id=1, template_id=1, url="https://img.example/existing.png",
+                name="existing", sku="M05LAAAAAAAA", claimed_by=1,
+            ))
+            db.commit()
+            with patch.object(main.secrets, "choice", side_effect=list("AAAAAABBBBBB")):
+                asset = main.add_material_asset_with_sku(
+                    db, template=db.get(ProductTemplate, 1), owner=db.get(User, 1), company_id=1,
+                    source_task_id=None, url="https://img.example/new.png", name="new",
+                )
+                db.commit()
+            self.assertEqual(asset.sku, "M05LAABBBBBB")
+
+    def test_claimed_material_gets_permanent_sku_and_duplicate_claim_reuses_it(self) -> None:
+        task_id = self.add_task(status=TaskStatus.AWAITING_SELECTION)
+        result_url = "https://img.example/result.png"
+        with self.session_factory() as db:
+            task = db.get(PodTask, task_id)
+            task.result_urls = [result_url]
+            db.commit()
+            payload = ClaimMaterials(result_urls=[result_url])
+            first = main.claim_task_materials(task_id, payload, user=db.get(User, 1), db=db)
+            asset = db.scalar(select(MaterialAsset).where(MaterialAsset.source_task_id == task_id))
+            original_sku = asset.sku
+            second = main.claim_task_materials(task_id, payload, user=db.get(User, 1), db=db)
+            self.assertRegex(original_sku, r"^M05LAA[A-Z0-9]{6}$")
+            self.assertEqual(first["claimed"], 1)
+            self.assertEqual(second["claimed"], 0)
+            self.assertEqual(asset.sku, original_sku)
+
+    def test_material_draft_reuses_skus_and_rejects_legacy_assets(self) -> None:
+        with self.session_factory() as db:
+            current = MaterialAsset(company_id=1, template_id=1, url="https://img.example/current.png", name="current", sku="M05LAA123456", claimed_by=1)
+            legacy = MaterialAsset(company_id=1, template_id=1, url="https://img.example/legacy.png", name="legacy", claimed_by=1)
+            db.add_all([current, legacy]); db.commit(); db.refresh(current); db.refresh(legacy)
+            payload = MaterialDraftCreate(template_id=1, material_asset_ids=[current.id], title="draft")
+            draft = main.create_draft_from_material_assets(payload, user=db.get(User, 1), db=db)
+            self.assertEqual(draft["sku_items"], [{"image_url": current.url, "size": None, "sku": current.sku}])
+            with self.assertRaisesRegex(Exception, "无 SKU"):
+                main.create_draft_from_material_assets(
+                    MaterialDraftCreate(template_id=1, material_asset_ids=[legacy.id], title="legacy"),
                     user=db.get(User, 1), db=db,
                 )
+
+    def test_task_draft_route_is_removed(self) -> None:
+        route_paths = {route.path for route in main.app.routes}
+        self.assertNotIn("/tasks/{task_id}/draft", route_paths)
 
     def test_members_only_see_and_modify_their_drafts(self) -> None:
         with self.session_factory() as db:

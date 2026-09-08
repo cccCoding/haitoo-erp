@@ -156,12 +156,14 @@ class PodTask(Base):
 class MaterialAsset(Base):
     """公司级素材库中的 AI 领取或本地上传图片。"""
     __tablename__ = "material_assets"
+    __table_args__ = (UniqueConstraint("sku", name="uq_material_assets_sku"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     source_task_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
     template_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
     url: Mapped[str] = mapped_column(String(500))
     name: Mapped[str] = mapped_column(String(180))
+    sku: Mapped[str | None] = mapped_column(String(24), nullable=True)
     claimed_by: Mapped[int] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

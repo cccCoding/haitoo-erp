@@ -53,7 +53,7 @@ class TemplateAiPrompt(BaseModel):
 
 
 class TemplateCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=5)
     group_id: int | None = None
     cover_url: str | None = None
     description: str | None = Field(default=None, max_length=500)
@@ -69,9 +69,17 @@ class TemplateCreate(BaseModel):
     color_count: int = 1
     sku_count: int = 1
 
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        value = value.strip().upper()
+        if not value or not value.isascii() or not value.isalnum():
+            raise ValueError("模板名称同时作为 SKU 前缀，仅支持 1-5 位字母或数字")
+        return value
+
 
 class TemplateUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=120)
+    name: str | None = Field(default=None, min_length=1, max_length=5)
     group_id: int | None = None
     cover_url: str | None = None
     description: str | None = Field(default=None, max_length=500)
@@ -84,6 +92,16 @@ class TemplateUpdate(BaseModel):
     package_height: float | None = Field(default=None, gt=0)
     sku_specifications: dict | None = None
     ai_prompts: list[TemplateAiPrompt] | None = Field(default=None, max_length=50)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().upper()
+        if not value or not value.isascii() or not value.isalnum():
+            raise ValueError("模板名称同时作为 SKU 前缀，仅支持 1-5 位字母或数字")
+        return value
 
 
 class TemplateGroupCreate(BaseModel):
@@ -216,28 +234,9 @@ class ClaimMaterials(BaseModel):
     result_urls: list[str] = Field(min_length=1, max_length=1000)
 
 
-class MaterialAssetsTemplateUpdate(BaseModel):
-    material_asset_ids: list[int] = Field(min_length=1, max_length=100)
-    template_id: int
-
-
-class DraftSkuItem(BaseModel):
-    image_url: str = Field(min_length=1, max_length=500)
-    size: str | None = Field(default=None, max_length=50)
-    sku: str = Field(min_length=1, max_length=32)
-
-
-class TaskDraftCreate(BaseModel):
-    title: str = Field(min_length=1, max_length=180)
-    product_description: str | None = Field(default=None, max_length=5000)
-    size_chart_url: str | None = Field(default=None, max_length=500)
-    sku_items: list[DraftSkuItem] = Field(default_factory=list, max_length=1000)
-
-
 class MaterialDraftCreate(BaseModel):
     template_id: int
     material_asset_ids: list[int] = Field(min_length=1, max_length=100)
-    sku_items: list[DraftSkuItem] = Field(default_factory=list, max_length=1000)
     title: str = Field(min_length=1, max_length=180)
     product_description: str | None = Field(default=None, max_length=5000)
     size_chart_url: str | None = Field(default=None, max_length=500)

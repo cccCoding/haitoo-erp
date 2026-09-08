@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
 from .models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
-from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LoginInput, MaterialAssetsTemplateUpdate, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskDraftCreate, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
+from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, LoginInput, MaterialDraftCreate, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
@@ -209,6 +209,21 @@ def ensure_schema() -> None:
         material_columns = {column["name"]: column for column in inspect(connection).get_columns("material_assets")}
         if "template_id" not in material_columns:
             connection.execute(text("ALTER TABLE material_assets ADD COLUMN template_id INTEGER"))
+        if "sku" not in material_columns:
+            connection.execute(text("ALTER TABLE material_assets ADD COLUMN sku VARCHAR(24)"))
+        material_indexes = inspect(connection).get_indexes("material_assets")
+        material_constraints = inspect(connection).get_unique_constraints("material_assets")
+        has_material_sku_unique_index = any(
+            index.get("name") == "uq_material_assets_sku" or (
+                index.get("unique") and index.get("column_names") == ["sku"]
+            )
+            for index in material_indexes
+        ) or any(
+            constraint.get("name") == "uq_material_assets_sku" or constraint.get("column_names") == ["sku"]
+            for constraint in material_constraints
+        )
+        if not has_material_sku_unique_index:
+            connection.execute(text("CREATE UNIQUE INDEX uq_material_assets_sku ON material_assets (sku)"))
         if connection.dialect.name == "mysql" and not material_columns["source_task_id"]["nullable"]:
             connection.execute(text("ALTER TABLE material_assets MODIFY COLUMN source_task_id INTEGER NULL"))
         # AI 生成素材归属任务创作人；本地上传素材继续归属上传人。
@@ -829,34 +844,41 @@ def delete_user_template_prompt(item_id: int, user: User = Depends(current_user)
     return {"deleted": True}
 
 
-def build_draft_sku_items(template: ProductTemplate, user: User, image_urls: list[str]) -> list[dict]:
-    """按「每张图片一条」生成草稿基础 SKU；发布时再拼接模板尺码。"""
-    if not user.user_code:
-        raise HTTPException(400, "请先在账号设置中填写两位用户代码，再创建商品草稿")
-    alphabet = string.ascii_uppercase + string.digits
-    sku_items, generated_skus = [], set()
-    for image_url in image_urls:
-        random_part = "".join(secrets.choice(alphabet) for _ in range(6))
-        while random_part in generated_skus:
-            random_part = "".join(secrets.choice(alphabet) for _ in range(6))
-        generated_skus.add(random_part)
-        sku_items.append({"image_url": image_url, "size": None, "sku": f"M05L{user.user_code.upper()}{random_part}"})
-    return sku_items
+SKU_TEMPLATE_PATTERN = re.compile(r"^[A-Z0-9]{1,5}$")
+SKU_ALPHABET = string.ascii_uppercase + string.digits
 
 
-def validate_draft_sku_items(template: ProductTemplate, user: User, image_urls: list[str], sku_items: list) -> list[dict]:
-    """验证前端预览的 SKU，保证保存内容和弹窗中展示的列表一致。"""
-    if not sku_items:
-        return build_draft_sku_items(template, user, image_urls)
-    if not user.user_code:
-        raise HTTPException(400, "请先在账号设置中填写两位用户代码，再创建商品草稿")
-    expected_pairs = {(image_url, None) for image_url in image_urls}
-    submitted_items = [item.model_dump() for item in sku_items]
-    submitted_pairs = {(item["image_url"], item["size"]) for item in submitted_items}
-    sku_pattern = re.compile(rf"^M05L{re.escape(user.user_code.upper())}[A-Z0-9]{{6}}$")
-    if len(submitted_items) != len(expected_pairs) or submitted_pairs != expected_pairs or len({item["sku"] for item in submitted_items}) != len(submitted_items) or any(not sku_pattern.fullmatch(item["sku"]) for item in submitted_items):
-        raise HTTPException(400, "SKU 列表已失效，请重新选择产品模板")
-    return submitted_items
+def validate_material_sku_source(template: ProductTemplate, owner: User) -> tuple[str, str]:
+    """校验素材入库时生成永久 SKU 所需的模板名称和用户代码。"""
+    template_name = (template.name or "").strip().upper()
+    if not SKU_TEMPLATE_PATTERN.fullmatch(template_name):
+        raise HTTPException(400, "模板名称同时作为 SKU 前缀，仅支持 1-5 位字母或数字，请先修改模板名称")
+    if not owner.user_code or len(owner.user_code.strip()) != 2:
+        raise HTTPException(400, "请先在账号设置中填写两位用户代码，再上传或领取素材")
+    return template_name, owner.user_code.strip().upper()
+
+
+def add_material_asset_with_sku(
+    db: Session, *, template: ProductTemplate, owner: User, company_id: int,
+    source_task_id: int | None, url: str, name: str,
+) -> MaterialAsset:
+    """写入带永久 SKU 的素材；唯一索引冲突时在保存点内重新生成。"""
+    template_name, user_code = validate_material_sku_source(template, owner)
+    for _ in range(10):
+        random_part = "".join(secrets.choice(SKU_ALPHABET) for _ in range(6))
+        asset = MaterialAsset(
+            company_id=company_id, source_task_id=source_task_id, template_id=template.id,
+            url=url, name=name, sku=f"{template_name}{user_code}{random_part}", claimed_by=owner.id,
+        )
+        try:
+            with db.begin_nested():
+                db.add(asset)
+                db.flush()
+            return asset
+        except IntegrityError as exc:
+            if "sku" not in str(exc.orig).lower():
+                raise
+    raise HTTPException(503, "SKU 生成失败，请重试")
 
 
 def miaoshou_request_signature(app_secret: str, path: str, timestamp: str, app_key: str, body_json: str) -> str:
@@ -1045,20 +1067,16 @@ async def upload_material_assets(files: list[UploadFile] = File(...), template_i
     if len(files) > 100:
         raise HTTPException(400, "单次最多上传 100 张图片")
     template = get_company_template(db, user, template_id)
+    validate_material_sku_source(template, user)
 
     assets: list[MaterialAsset] = []
     for file in files:
         uploaded = await save_image_upload(file, user.company_id, "material")
         name = Path(file.filename or "本地素材").name.rsplit(".", 1)[0] or "本地素材"
-        asset = MaterialAsset(
-            company_id=user.company_id,
-            source_task_id=None,
-            template_id=template.id,
-            url=uploaded["url"],
-            name=name[:180],
-            claimed_by=user.id,
+        asset = add_material_asset_with_sku(
+            db, template=template, owner=user, company_id=user.company_id,
+            source_task_id=None, url=uploaded["url"], name=name[:180],
         )
-        db.add(asset)
         assets.append(asset)
     db.commit()
     for asset in assets:
@@ -1205,22 +1223,6 @@ def list_material_assets(
         "page": page,
         "page_size": page_size,
     }
-
-
-@app.put("/material-assets/template")
-def update_material_assets_template(payload: MaterialAssetsTemplateUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    asset_ids = list(dict.fromkeys(payload.material_asset_ids))
-    filters = [MaterialAsset.company_id == user.company_id, MaterialAsset.id.in_(asset_ids)]
-    if user.role == Role.MEMBER:
-        filters.append(MaterialAsset.claimed_by == user.id)
-    assets = db.scalars(select(MaterialAsset).where(*filters)).all()
-    if len(assets) != len(asset_ids):
-        raise HTTPException(400, "包含不存在或无权设置的素材")
-    template = get_company_template(db, user, payload.template_id)
-    for asset in assets:
-        asset.template_id = template.id
-    db.commit()
-    return {"updated": len(assets)}
 
 
 @app.delete("/material-assets/{asset_id}")
@@ -1515,43 +1517,26 @@ def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Dep
     selected_urls = list(dict.fromkeys(payload.result_urls))
     if any(url not in task.result_urls for url in selected_urls):
         raise HTTPException(400, "包含不属于该任务的图片")
+    template = db.get(ProductTemplate, task.template_id)
+    owner = db.get(User, task.created_by)
+    if not template or not owner:
+        raise HTTPException(400, "任务缺少产品模板或创作人信息")
+    validate_material_sku_source(template, owner)
     existing_urls = set(db.scalars(select(MaterialAsset.url).where(MaterialAsset.company_id == task.company_id, MaterialAsset.source_task_id == task.id)).all())
     claimed_count = 0
     for index, url in enumerate(selected_urls, start=1):
         if url not in existing_urls:
-            db.add(MaterialAsset(company_id=task.company_id, source_task_id=task.id, template_id=task.template_id, url=url, name=f"AI 创作 #{task.id} · 结果 {index}", claimed_by=task.created_by))
+            add_material_asset_with_sku(
+                db, template=template, owner=owner, company_id=task.company_id,
+                source_task_id=task.id, url=url, name=f"AI 创作 #{task.id} · 结果 {index}",
+            )
             claimed_count += 1
-    # 首次领取同时完成任务，并将第一张领取图作为任务草稿的默认图。
+    # 首次领取同时完成任务，并保留第一张领取图作为任务的已选结果。
     if task.status == TaskStatus.AWAITING_SELECTION:
         task.selected_result_url = selected_urls[0]
         task.status = TaskStatus.COMPLETED
     db.commit()
     return {"claimed": claimed_count, "message": "已领取到素材库"}
-
-
-@app.post("/tasks/{task_id}/draft")
-def create_draft(task_id: int, payload: TaskDraftCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    task = db.get(PodTask, task_id)
-    if not can_access_task(task, user) or task.status != TaskStatus.COMPLETED:
-        raise HTTPException(400, "请先完成任务并选择产品图")
-    template = db.get(ProductTemplate, task.template_id)
-    if not template or not task.selected_result_url:
-        raise HTTPException(400, "任务缺少产品模板或已选结果图")
-    image_urls = [task.selected_result_url]
-    draft = ProductDraft(
-        company_id=task.company_id,
-        shop_id=None,
-        template_id=template.id,
-        source_task_id=task.id,
-        title=payload.title.strip(),
-        product_description=payload.product_description.strip() if payload.product_description else None,
-        size_chart_url=payload.size_chart_url,
-        image_urls=image_urls,
-        sku_items=validate_draft_sku_items(template, user, image_urls, payload.sku_items),
-        created_by=user.id,
-        updated_by=user.id,
-    )
-    db.add(draft); db.commit(); db.refresh(draft); return serialize_record(draft)
 
 
 @app.post("/drafts/from-material-assets")
@@ -1565,10 +1550,17 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
     )).all()
     if len(assets) != len(asset_ids):
         raise HTTPException(400, "包含不存在或无权使用的素材")
+    assets_by_id = {asset.id: asset for asset in assets}
+    assets = [assets_by_id[asset_id] for asset_id in asset_ids]
+    if any(not asset.sku for asset in assets):
+        raise HTTPException(400, "包含无 SKU 的历史素材，请重新上传或领取后再创建商品草稿")
     template = get_company_template(db, user, payload.template_id)
+    if any(asset.template_id != template.id for asset in assets):
+        raise HTTPException(400, "创建商品草稿时只能使用属于所选产品模板的素材")
     source_task_ids = {asset.source_task_id for asset in assets}
     source_task_id = source_task_ids.pop() if len(source_task_ids) == 1 else None
     image_urls = [asset.url for asset in assets]
+    sku_items = [{"image_url": asset.url, "size": None, "sku": asset.sku} for asset in assets]
     draft = ProductDraft(
         company_id=user.company_id,
         shop_id=None,
@@ -1578,7 +1570,7 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
         product_description=payload.product_description.strip() if payload.product_description else None,
         size_chart_url=payload.size_chart_url,
         image_urls=image_urls,
-        sku_items=validate_draft_sku_items(template, user, image_urls, payload.sku_items),
+        sku_items=sku_items,
         created_by=user.id,
         updated_by=user.id,
     )
