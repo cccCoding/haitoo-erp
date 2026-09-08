@@ -35,7 +35,7 @@ const taskListRefreshing = ref(false), retryingTaskId = ref(null);
 const showClaimMaterialsDialog = ref(false), claimingTask = ref(null), selectedClaimResultUrls = ref([]), claimingMaterials = ref(false);
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
 const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2 };
-const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativePromptIndex = ref(''), creativeProvider = ref(''), creativeRatio = ref('1:1'), creativeQuality = ref('1K'), creativeUploading = ref(false), creativeUploadedCount = ref(0);
+const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeSubmitError = ref(''), creativeRequirement = ref(''), creativePromptIndex = ref(''), creativeProvider = ref(''), creativeRatio = ref('1:1'), creativeQuality = ref('1K'), creativeUploading = ref(false), creativeUploadedCount = ref(0);
 const personalWhiteImages = ref([]), personalPrompts = ref([]), selectedWhiteImageId = ref(null), personalResourcesLoading = ref(false);
 const showPersonalResourcesDialog = ref(false), personalResourceTab = ref('white-images'), managedResourceUserId = ref(null), managedWhiteImages = ref([]), managedPrompts = ref([]), personalResourceSaving = ref(false);
 const showTeamResourcesDialog = ref(false), teamResourceTab = ref('white-images'), teamResourceUserId = ref(null), teamWhiteImages = ref([]), teamPrompts = ref([]), teamResourcesLoading = ref(false), teamResourceQuery = ref('');
@@ -48,6 +48,10 @@ const pageTitle = computed(() => nav.find(x => x.key === page.value)?.label || '
 const filteredTemplates = computed(() => templates.value.filter(t => (!activeGroupId.value || t.group_id === activeGroupId.value) && t.name.toLowerCase().includes(templateQuery.value.trim().toLowerCase())));
 // 运营端接口只返回后台已启用的模型；这里再保留一次筛选，避免接口数据异常时将停用模型带入任务。
 const availableAiProviders = computed(() => aiProviders.value.filter(provider => provider.enabled !== false));
+const selectedCreativeProvider = computed(() => availableAiProviders.value.find(provider => provider.provider === creativeProvider.value));
+const creativeCredentialError = computed(() => selectedCreativeProvider.value?.credential_configured === false
+    ? `尚未配置个人 ${selectedCreativeProvider.value.display_name} 平台密钥，请联系公司管理员配置`
+    : '');
 const selectedTemplate = computed(() => templates.value.find(t => t.id === selectedTemplateId.value));
 const selectedWhiteImage = computed(() => personalWhiteImages.value.find(item => item.id === selectedWhiteImageId.value));
 const otherResourceOwners = computed(() => user.value?.role === 'company_admin' ? members.value.filter(owner => owner.id !== user.value.id) : []);
@@ -222,35 +226,50 @@ async function uploadCreativeAssets() {
         throw failedWorker.reason;
     return urls;
 }
-async function createTask() { if (!creativeAssets.value.length) {
-    creativeAssetError.value = '请先上传至少一张印花图，再开始印花贴合。';
-    return;
-} if (!selectedWhiteImageId.value) {
-    showToast(personalWhiteImages.value.length ? '请选择产品白底图' : '请先设置该模板的产品白底图');
-    return;
-} if (!creativeRequirement.value.trim()) {
-    showToast('请填写创作要求');
-    return;
-} if (!selectedTemplateId.value)
-    return; if (!creativeProvider.value || !availableAiProviders.value.some(item => item.provider === creativeProvider.value)) {
-    showToast('暂无可用的 AI 模型，请联系超级管理员在后台启用模型');
-    return;
-} try {
-    creativeAssetError.value = '';
-    creativeUploading.value = true;
-    const print_urls = await uploadCreativeAssets();
-    const { data } = await api.post('/tasks', { template_id: selectedTemplateId.value, white_image_id: selectedWhiteImageId.value, provider: creativeProvider.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() }, { headers: headers.value });
-    currentTaskPage.value = 1;
-    await refresh();
-    page.value = 'tasks';
-    showToast(`已创建 ${data.total} 条任务，共 ${print_urls.length} 张印花`);
+async function createTask() {
+    creativeSubmitError.value = '';
+    if (!creativeAssets.value.length) {
+        creativeAssetError.value = '请先上传至少一张印花图，再开始印花贴合。';
+        return;
+    }
+    if (!selectedWhiteImageId.value) {
+        showToast(personalWhiteImages.value.length ? '请选择产品白底图' : '请先设置该模板的产品白底图');
+        return;
+    }
+    if (!creativeRequirement.value.trim()) {
+        showToast('请填写创作要求');
+        return;
+    }
+    if (!selectedTemplateId.value)
+        return;
+    if (!creativeProvider.value || !availableAiProviders.value.some(item => item.provider === creativeProvider.value)) {
+        showToast('暂无可用的 AI 模型，请联系超级管理员在后台启用模型');
+        return;
+    }
+    if (creativeCredentialError.value) {
+        creativeSubmitError.value = creativeCredentialError.value;
+        showToast(creativeCredentialError.value);
+        return;
+    }
+    try {
+        creativeAssetError.value = '';
+        creativeUploading.value = true;
+        const print_urls = await uploadCreativeAssets();
+        const { data } = await api.post('/tasks', { template_id: selectedTemplateId.value, white_image_id: selectedWhiteImageId.value, provider: creativeProvider.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() }, { headers: headers.value });
+        currentTaskPage.value = 1;
+        await refresh();
+        page.value = 'tasks';
+        showToast(`已创建 ${data.total} 条任务，共 ${print_urls.length} 张印花`);
+    }
+    catch (e) {
+        const reason = e.response?.data?.detail || '创建 AI 任务失败';
+        creativeSubmitError.value = reason;
+        showToast(reason);
+    }
+    finally {
+        creativeUploading.value = false;
+    }
 }
-catch (e) {
-    error.value = e.response?.data?.detail || '创建 AI 任务失败';
-}
-finally {
-    creativeUploading.value = false;
-} }
 async function createGroup() { if (!newGroupName.value.trim())
     return; try {
     await api.post('/template-groups', { name: newGroupName.value.trim() }, { headers: headers.value });
@@ -1619,6 +1638,7 @@ else {
             });
             (provider.display_name);
             (provider.model);
+            (provider.credential_configured ? '' : ' · 未配置密钥');
         }
         if (!__VLS_ctx.availableAiProviders.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
@@ -1660,9 +1680,16 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.createTask) },
             ...{ class: "primary full" },
-            disabled: (!__VLS_ctx.availableAiProviders.length || __VLS_ctx.creativeUploading || !__VLS_ctx.selectedWhiteImageId),
+            disabled: (!__VLS_ctx.availableAiProviders.length || __VLS_ctx.creativeUploading || !__VLS_ctx.selectedWhiteImageId || Boolean(__VLS_ctx.creativeCredentialError)),
         });
         (__VLS_ctx.creativeUploading ? `上传中 ${__VLS_ctx.creativeUploadedCount}/${__VLS_ctx.creativeAssets.length}` : '✦ 开始印花贴合');
+        if (__VLS_ctx.creativeCredentialError || __VLS_ctx.creativeSubmitError) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "creative-submit-error" },
+                role: "alert",
+            });
+            (__VLS_ctx.creativeCredentialError || __VLS_ctx.creativeSubmitError);
+        }
     }
     else if (__VLS_ctx.page === 'tasks') {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
@@ -4524,6 +4551,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['upload-progress']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['full']} */ ;
+/** @type {__VLS_StyleScopedClasses['creative-submit-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-template-filter']} */ ;
@@ -4915,6 +4943,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             creativeAssets: creativeAssets,
             showCreativeAssetsDialog: showCreativeAssetsDialog,
             creativeAssetError: creativeAssetError,
+            creativeSubmitError: creativeSubmitError,
             creativeRequirement: creativeRequirement,
             creativePromptIndex: creativePromptIndex,
             creativeProvider: creativeProvider,
@@ -4946,6 +4975,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             pageTitle: pageTitle,
             filteredTemplates: filteredTemplates,
             availableAiProviders: availableAiProviders,
+            creativeCredentialError: creativeCredentialError,
             selectedTemplate: selectedTemplate,
             selectedWhiteImage: selectedWhiteImage,
             otherResourceOwners: otherResourceOwners,

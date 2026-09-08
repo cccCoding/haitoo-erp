@@ -104,6 +104,15 @@ class TaskJobTests(unittest.TestCase):
         self.assertEqual(response, {"member_id": 1, "provider": "grsai", "configured": True})
         self.assertNotIn("replacement-key", stored.secret_encrypted)
 
+    def test_available_providers_include_current_users_credential_status_without_secret(self) -> None:
+        with self.session_factory() as db:
+            member_rows = main.list_available_ai_providers(user=db.get(User, 1), db=db)
+            admin_rows = main.list_available_ai_providers(user=db.get(User, 2), db=db)
+
+        self.assertTrue(all(row["credential_configured"] for row in member_rows))
+        self.assertTrue(all(not row["credential_configured"] for row in admin_rows))
+        self.assertTrue(all("api_key" not in row and "secret_encrypted" not in row for row in member_rows))
+
     def test_task_creation_requires_its_creators_credential(self) -> None:
         payload = PodTaskCreate(
             template_id=1, white_image_id=1, provider="grsai", creative_requirement="test",

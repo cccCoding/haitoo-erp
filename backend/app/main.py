@@ -1502,9 +1502,20 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
 
 @app.get("/ai-providers")
 def list_available_ai_providers(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """运营端仅能查看可用模型及默认模型，不暴露任何凭据配置。"""
+    """运营端查看可用模型及个人密钥配置状态，不暴露任何凭据内容。"""
+    configured_providers = set(db.scalars(select(UserAIProviderCredential.provider).where(
+        UserAIProviderCredential.company_id == user.company_id,
+        UserAIProviderCredential.user_id == user.id,
+    )).all())
     return [
-        {"provider": setting.provider, "display_name": setting.display_name, "model": setting.model, "is_default": setting.is_default, "images_per_task": setting.images_per_task}
+        {
+            "provider": setting.provider,
+            "display_name": setting.display_name,
+            "model": setting.model,
+            "is_default": setting.is_default,
+            "images_per_task": setting.images_per_task,
+            "credential_configured": setting.provider in configured_providers,
+        }
         for setting in db.scalars(select(AIProviderSetting).where(AIProviderSetting.enabled.is_(True)).order_by(AIProviderSetting.provider)).all()
     ]
 
