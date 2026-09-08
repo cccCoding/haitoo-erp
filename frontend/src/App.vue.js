@@ -60,6 +60,8 @@ const filteredTeamPrompts = computed(() => {
 });
 const selectedMaterialAssets = computed(() => materialAssets.value.filter(asset => selectedMaterialAssetIds.value.includes(asset.id)));
 const filteredMaterialAssets = computed(() => materialAssets.value);
+const allCurrentMaterialAssetsSelected = computed(() => Boolean(filteredMaterialAssets.value.length) && filteredMaterialAssets.value.every(asset => selectedMaterialAssetIds.value.includes(asset.id)));
+const someCurrentMaterialAssetsSelected = computed(() => !allCurrentMaterialAssetsSelected.value && filteredMaterialAssets.value.some(asset => selectedMaterialAssetIds.value.includes(asset.id)));
 const selectedMaterialTemplateId = computed(() => {
     const templateIds = [...new Set(selectedMaterialAssets.value.map(asset => asset.template_id).filter(Boolean))];
     return templateIds.length === 1 ? templateIds[0] : null;
@@ -534,6 +536,7 @@ function templateCoverUrl(template) { if (template?.cover_url)
 function hasTemplateCover(template) { return Boolean(template?.cover_url || template?.name === '白色 T恤正面'); }
 function useTemplate(template) { selectedTemplateId.value = template.id; page.value = 'pod'; }
 function toggleMaterialAsset(assetId) { selectedMaterialAssetIds.value = selectedMaterialAssetIds.value.includes(assetId) ? selectedMaterialAssetIds.value.filter(id => id !== assetId) : [...selectedMaterialAssetIds.value, assetId]; }
+function toggleAllCurrentMaterialAssets() { selectedMaterialAssetIds.value = allCurrentMaterialAssetsSelected.value ? [] : filteredMaterialAssets.value.map(asset => asset.id); }
 function materialTemplateName(asset) { return templates.value.find(template => template.id === asset.template_id)?.name || '未设置模板'; }
 function draftTemplateName(draft) { return templates.value.find(template => template.id === draft.template_id)?.name || '历史模板已删除'; }
 function randomSkuSuffix() { const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; return Array.from(crypto.getRandomValues(new Uint8Array(6)), value => alphabet[value % alphabet.length]).join(''); }
@@ -2097,6 +2100,17 @@ else {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "thead material-thead" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "material-checkbox material-select-all" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            ...{ onChange: (__VLS_ctx.toggleAllCurrentMaterialAssets) },
+            type: "checkbox",
+            checked: (__VLS_ctx.allCurrentMaterialAssetsSelected),
+            indeterminate: (__VLS_ctx.someCurrentMaterialAssetsSelected),
+            disabled: (!__VLS_ctx.filteredMaterialAssets.length),
+            'aria-label': "全选本页素材",
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -4722,6 +4736,8 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['material-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-checkbox']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-select-all']} */ ;
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-trow']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-checkbox']} */ ;
@@ -5140,6 +5156,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             filteredTeamPrompts: filteredTeamPrompts,
             selectedMaterialAssets: selectedMaterialAssets,
             filteredMaterialAssets: filteredMaterialAssets,
+            allCurrentMaterialAssetsSelected: allCurrentMaterialAssetsSelected,
+            someCurrentMaterialAssetsSelected: someCurrentMaterialAssetsSelected,
             materialDraftTemplate: materialDraftTemplate,
             materialDraftSizes: materialDraftSizes,
             materialDraftSkuCount: materialDraftSkuCount,
@@ -5199,6 +5217,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             hasTemplateCover: hasTemplateCover,
             useTemplate: useTemplate,
             toggleMaterialAsset: toggleMaterialAsset,
+            toggleAllCurrentMaterialAssets: toggleAllCurrentMaterialAssets,
             materialTemplateName: materialTemplateName,
             draftTemplateName: draftTemplateName,
             onMaterialDraftTemplateChange: onMaterialDraftTemplateChange,
