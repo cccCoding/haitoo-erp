@@ -264,6 +264,24 @@ class TaskJobTests(unittest.TestCase):
         with self.assertRaises(ProviderTaskTerminalError):
             asyncio.run(GrsaiProvider().poll_once("provider-1", "test", Settings(), client))
 
+    def test_grsai_invalid_json_logs_complete_raw_response(self) -> None:
+        raw_body = "event: error\ndata: upstream returned HTML <bad gateway>\n"
+        response = httpx.Response(
+            200,
+            request=httpx.Request("POST", "https://grsai.example/generate"),
+            headers={"content-type": "text/event-stream"},
+            text=raw_body,
+        )
+
+        with self.assertLogs("app.ai_providers", level="ERROR") as captured:
+            with self.assertRaisesRegex(ProviderError, "无效的 JSON 响应"):
+                GrsaiProvider._response_data(response)
+
+        message = "\n".join(captured.output)
+        self.assertIn("status_code=200", message)
+        self.assertIn("content_type=text/event-stream", message)
+        self.assertIn(repr(raw_body), message)
+
     def test_task_summary_omits_bulk_payload_and_has_no_batches(self) -> None:
         task_id = self.add_task()
         with self.session_factory() as db:

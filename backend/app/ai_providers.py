@@ -6,6 +6,7 @@
 """
 import base64
 import binascii
+import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -13,6 +14,9 @@ import httpx
 
 from .config import Settings, get_settings
 from .storage import StorageError, is_public_r2_url, upload_image_bytes_async
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderError(Exception):
@@ -192,6 +196,12 @@ class GrsaiProvider:
         try:
             data = response.json()
         except ValueError as exc:
+            logger.error(
+                "grsai 响应 JSON 解析失败 | status_code=%s content_type=%s raw_body=%r",
+                response.status_code,
+                response.headers.get("content-type"),
+                response.text,
+            )
             raise ProviderError("grsai 返回了无效的 JSON 响应") from exc
         if not isinstance(data, dict):
             raise ProviderError("grsai 返回了无效的响应格式")
