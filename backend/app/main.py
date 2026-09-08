@@ -211,6 +211,20 @@ def ensure_schema() -> None:
             connection.execute(text("ALTER TABLE material_assets ADD COLUMN template_id INTEGER"))
         if connection.dialect.name == "mysql" and not material_columns["source_task_id"]["nullable"]:
             connection.execute(text("ALTER TABLE material_assets MODIFY COLUMN source_task_id INTEGER NULL"))
+        # AI 生成素材归属任务创作人；本地上传素材继续归属上传人。
+        # 同步修正历史上由管理员代为领取、但任务实际由员工创作的素材。
+        connection.execute(text("""
+            UPDATE material_assets
+            SET claimed_by = (
+                SELECT created_by FROM pod_tasks
+                WHERE pod_tasks.id = material_assets.source_task_id
+            )
+            WHERE source_task_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM pod_tasks
+                  WHERE pod_tasks.id = material_assets.source_task_id
+              )
+        """))
         draft_columns = {column["name"]: column for column in inspect(connection).get_columns("product_drafts")}
         if connection.dialect.name == "mysql" and not draft_columns["source_task_id"]["nullable"]:
             connection.execute(text("ALTER TABLE product_drafts MODIFY COLUMN source_task_id INTEGER NULL"))
@@ -303,7 +317,11 @@ def ensure_shop(db: Session, user: User, shop_id: int) -> Shop:
 
 
 def can_access_task(task: PodTask | None, user: User) -> bool:
-    return bool(task and (user.role == Role.SUPER_ADMIN or task.company_id == user.company_id))
+    return bool(task and (
+        user.role == Role.SUPER_ADMIN
+        or task.company_id == user.company_id
+        and (user.role == Role.COMPANY_ADMIN or task.created_by == user.id)
+    ))
 
 
 def user_code_in_use(db: Session, company_id: int | None, user_code: str, excluding_user_id: int | None = None) -> bool:
@@ -1071,31 +1089,38 @@ def serialize_task_view(task: PodTask, creator_name: str, template_name: str, vi
 def list_tasks(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    creator_id: int | None = Query(default=None, ge=1),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    scope = PodTask.company_id == user.company_id if user.role != Role.SUPER_ADMIN else None
+    filters = []
+    if user.role != Role.SUPER_ADMIN:
+        filters.append(PodTask.company_id == user.company_id)
+    if user.role == Role.MEMBER:
+        filters.append(PodTask.created_by == user.id)
+    elif creator_id is not None:
+        filters.append(PodTask.created_by == creator_id)
     total_stmt = select(func.count()).select_from(PodTask)
-    if scope is not None:
-        total_stmt = total_stmt.where(scope)
+    if filters:
+        total_stmt = total_stmt.where(*filters)
     total = db.scalar(total_stmt) or 0
     page_count = max(1, (total + page_size - 1) // page_size)
     page = min(page, page_count)
     stmt = select(PodTask)
-    if scope is not None:
-        stmt = stmt.where(scope)
+    if filters:
+        stmt = stmt.where(*filters)
     tasks = db.scalars(stmt.order_by(PodTask.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     creator_ids = {task.created_by for task in tasks}
     creator_names = {member.id: member.name for member in db.scalars(select(User).where(User.id.in_(creator_ids))).all()} if creator_ids else {}
     template_ids = {task.template_id for task in tasks}
     template_names = {template.id: template.name for template in db.scalars(select(ProductTemplate).where(ProductTemplate.id.in_(template_ids))).all()} if template_ids else {}
     status_stmt = select(PodTask.status, func.count()).group_by(PodTask.status)
-    if scope is not None:
-        status_stmt = status_stmt.where(scope)
+    if filters:
+        status_stmt = status_stmt.where(*filters)
     status_counts = {status.value: count for status, count in db.execute(status_stmt).all()}
     active_stmt = select(func.count()).select_from(PodTask).where(PodTask.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]))
-    if scope is not None:
-        active_stmt = active_stmt.where(scope)
+    if filters:
+        active_stmt = active_stmt.where(*filters)
     return {
         "items": [
             serialize_task_view(task, creator_names.get(task.created_by, "历史记录缺失"), template_names.get(task.template_id, "历史模板已删除"), user, include_details=False)
@@ -1120,17 +1145,40 @@ def get_task_detail(task_id: int, user: User = Depends(current_user), db: Sessio
 
 
 @app.get("/material-assets")
-def list_material_assets(user: User = Depends(current_user), db: Session = Depends(get_db)):
+def list_material_assets(
+    creator_id: int | None = Query(default=None, ge=1),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
     stmt = select(MaterialAsset)
     if user.role != Role.SUPER_ADMIN:
         stmt = stmt.where(MaterialAsset.company_id == user.company_id)
-    return [serialize_record(asset) for asset in db.scalars(stmt.order_by(MaterialAsset.id.desc())).all()]
+    if user.role == Role.MEMBER:
+        stmt = stmt.where(MaterialAsset.claimed_by == user.id)
+    elif creator_id is not None:
+        stmt = stmt.where(MaterialAsset.claimed_by == creator_id)
+    assets = db.scalars(stmt.order_by(MaterialAsset.id.desc())).all()
+    creator_ids = {asset.claimed_by for asset in assets}
+    creator_names = {
+        creator.id: creator.name
+        for creator in db.scalars(select(User).where(User.id.in_(creator_ids))).all()
+    } if creator_ids else {}
+    return [
+        serialize_record(asset) | {
+            "created_by": asset.claimed_by,
+            "created_by_name": creator_names.get(asset.claimed_by, "历史记录缺失"),
+        }
+        for asset in assets
+    ]
 
 
 @app.put("/material-assets/template")
 def update_material_assets_template(payload: MaterialAssetsTemplateUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     asset_ids = list(dict.fromkeys(payload.material_asset_ids))
-    assets = db.scalars(select(MaterialAsset).where(MaterialAsset.company_id == user.company_id, MaterialAsset.id.in_(asset_ids))).all()
+    filters = [MaterialAsset.company_id == user.company_id, MaterialAsset.id.in_(asset_ids)]
+    if user.role == Role.MEMBER:
+        filters.append(MaterialAsset.claimed_by == user.id)
+    assets = db.scalars(select(MaterialAsset).where(*filters)).all()
     if len(assets) != len(asset_ids):
         raise HTTPException(400, "包含不存在或无权设置的素材")
     template = get_company_template(db, user, payload.template_id)
@@ -1146,6 +1194,8 @@ def delete_material_asset(asset_id: int, user: User = Depends(current_user), db:
     stmt = select(MaterialAsset).where(MaterialAsset.id == asset_id)
     if user.role != Role.SUPER_ADMIN:
         stmt = stmt.where(MaterialAsset.company_id == user.company_id)
+    if user.role == Role.MEMBER:
+        stmt = stmt.where(MaterialAsset.claimed_by == user.id)
     asset = db.scalar(stmt)
     if not asset:
         raise HTTPException(404, "素材不存在或无权删除")
@@ -1434,7 +1484,7 @@ def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Dep
     claimed_count = 0
     for index, url in enumerate(selected_urls, start=1):
         if url not in existing_urls:
-            db.add(MaterialAsset(company_id=task.company_id, source_task_id=task.id, template_id=task.template_id, url=url, name=f"AI 创作 #{task.id} · 结果 {index}", claimed_by=user.id))
+            db.add(MaterialAsset(company_id=task.company_id, source_task_id=task.id, template_id=task.template_id, url=url, name=f"AI 创作 #{task.id} · 结果 {index}", claimed_by=task.created_by))
             claimed_count += 1
     # 首次领取同时完成任务，并将第一张领取图作为任务草稿的默认图。
     if task.status == TaskStatus.AWAITING_SELECTION:
@@ -1476,6 +1526,7 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
     assets = db.scalars(select(MaterialAsset).where(
         MaterialAsset.company_id == user.company_id,
         MaterialAsset.id.in_(asset_ids),
+        *([MaterialAsset.claimed_by == user.id] if user.role == Role.MEMBER else []),
     )).all()
     if len(assets) != len(asset_ids):
         raise HTTPException(400, "包含不存在或无权使用的素材")
@@ -1505,7 +1556,10 @@ async def generate_material_draft_title(template_id: int, payload: DraftTitleGen
     template = get_company_template(db, user, template_id)
     if not template.title_template:
         raise HTTPException(400, "该产品模版尚未填写 AI生成标题约束")
-    asset = db.scalar(select(MaterialAsset).where(MaterialAsset.company_id == user.company_id, MaterialAsset.url == payload.image_url))
+    asset_filters = [MaterialAsset.company_id == user.company_id, MaterialAsset.url == payload.image_url]
+    if user.role == Role.MEMBER:
+        asset_filters.append(MaterialAsset.claimed_by == user.id)
+    asset = db.scalar(select(MaterialAsset).where(*asset_filters))
     if not asset:
         raise HTTPException(400, "请使用当前公司素材库中的首图生成标题")
     try:

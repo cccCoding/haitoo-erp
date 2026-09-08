@@ -23,7 +23,7 @@ const materialDraftSkuPreviewItems = ref([]);
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('');
 const publishingDraftId = ref(null);
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null);
-const taskPageSize = ref(20), currentTaskPage = ref(1), taskTotal = ref(0), taskActiveCount = ref(0), taskStatusCounts = ref({});
+const taskPageSize = ref(20), currentTaskPage = ref(1), taskTotal = ref(0), taskActiveCount = ref(0), taskStatusCounts = ref({}), taskCreatorFilterId = ref(null), materialCreatorFilterId = ref(null);
 const previewImageUrl = ref(''), previewImageAlt = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
 const showTaskDetailDialog = ref(false), viewingTask = ref(null), taskDetailLoading = ref(false);
@@ -35,6 +35,7 @@ const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2
 const creativeAssets = ref([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeRequirement = ref(''), creativePromptIndex = ref(''), creativeProvider = ref(''), creativeRatio = ref('1:1'), creativeQuality = ref('1K'), creativeUploading = ref(false), creativeUploadedCount = ref(0);
 const personalWhiteImages = ref([]), personalPrompts = ref([]), selectedWhiteImageId = ref(null), personalResourcesLoading = ref(false);
 const showPersonalResourcesDialog = ref(false), personalResourceTab = ref('white-images'), managedResourceUserId = ref(null), managedWhiteImages = ref([]), managedPrompts = ref([]), personalResourceSaving = ref(false);
+const showTeamResourcesDialog = ref(false), teamResourceTab = ref('white-images'), teamResourceUserId = ref(null), teamWhiteImages = ref([]), teamPrompts = ref([]), teamResourcesLoading = ref(false), teamResourceQuery = ref('');
 const editingWhiteImage = ref(null), whiteImageForm = ref({ name: '', file: null });
 const editingPersonalPrompt = ref(null), personalPromptForm = ref({ name: '', content: '' });
 const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'materials', icon: '◈', label: '素材库' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }];
@@ -46,7 +47,15 @@ const filteredTemplates = computed(() => templates.value.filter(t => (!activeGro
 const availableAiProviders = computed(() => aiProviders.value.filter(provider => provider.enabled !== false));
 const selectedTemplate = computed(() => templates.value.find(t => t.id === selectedTemplateId.value));
 const selectedWhiteImage = computed(() => personalWhiteImages.value.find(item => item.id === selectedWhiteImageId.value));
-const resourceOwners = computed(() => user.value?.role === 'company_admin' ? members.value : user.value ? [user.value] : []);
+const otherResourceOwners = computed(() => user.value?.role === 'company_admin' ? members.value.filter(owner => owner.id !== user.value.id) : []);
+const filteredTeamWhiteImages = computed(() => {
+    const query = teamResourceQuery.value.trim().toLowerCase();
+    return query ? teamWhiteImages.value.filter(item => item.name.toLowerCase().includes(query)) : teamWhiteImages.value;
+});
+const filteredTeamPrompts = computed(() => {
+    const query = teamResourceQuery.value.trim().toLowerCase();
+    return query ? teamPrompts.value.filter(item => `${item.name} ${item.content}`.toLowerCase().includes(query)) : teamPrompts.value;
+});
 const selectedMaterialAssets = computed(() => materialAssets.value.filter(asset => selectedMaterialAssetIds.value.includes(asset.id)));
 const filteredMaterialAssets = computed(() => materialTemplateFilterId.value ? materialAssets.value.filter(asset => asset.template_id === materialTemplateFilterId.value) : materialAssets.value);
 const selectedMaterialTemplateId = computed(() => {
@@ -73,6 +82,12 @@ const pagedTasks = computed(() => tasks.value);
 function applyTaskPage(data) { tasks.value = data.items || []; taskTotal.value = data.total || 0; taskActiveCount.value = data.active_count || 0; taskStatusCounts.value = data.status_counts || {}; currentTaskPage.value = data.page || 1; }
 async function changeTaskPageSize() { currentTaskPage.value = 1; await refreshTaskList(); }
 async function changeTaskPage(targetPage) { currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); await refreshTaskList(); }
+async function changeTaskCreatorFilter() { currentTaskPage.value = 1; await refreshTaskList(); }
+async function refreshMaterialList() {
+    selectedMaterialAssetIds.value = [];
+    const { data } = await api.get('/material-assets', { headers: headers.value, params: { creator_id: materialCreatorFilterId.value } });
+    materialAssets.value = data;
+}
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
 const nativeToLocaleString = Date.prototype.toLocaleString;
 const nativeToLocaleDateString = Date.prototype.toLocaleDateString;
@@ -86,7 +101,7 @@ Date.prototype.toLocaleDateString = function (...args) {
 };
 async function refresh() {
     const h = { headers: headers.value };
-    const [me, s, t, g, task, material, d, providers] = await Promise.all([api.get('/me', h), api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: { page: currentTaskPage.value, page_size: taskPageSize.value } }), api.get('/material-assets', h), api.get('/drafts', h), api.get('/ai-providers', h)]);
+    const [me, s, t, g, task, material, d, providers] = await Promise.all([api.get('/me', h), api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: { page: currentTaskPage.value, page_size: taskPageSize.value, creator_id: taskCreatorFilterId.value } }), api.get('/material-assets', { ...h, params: { creator_id: materialCreatorFilterId.value } }), api.get('/drafts', h), api.get('/ai-providers', h)]);
     user.value = me.data.user;
     company.value = me.data.company;
     shops.value = s.data;
@@ -283,6 +298,40 @@ async function openPersonalResourcesDialog(tab = 'white-images') {
     showPersonalResourcesDialog.value = true;
     await loadManagedTemplateResources();
 }
+async function loadTeamTemplateResources() {
+    if (!selectedTemplateId.value || !teamResourceUserId.value) {
+        teamWhiteImages.value = [];
+        teamPrompts.value = [];
+        return;
+    }
+    try {
+        teamResourcesLoading.value = true;
+        const { data } = await api.get('/user-template-resources', { headers: headers.value, params: { template_id: selectedTemplateId.value, user_id: teamResourceUserId.value } });
+        teamWhiteImages.value = data.white_images || [];
+        teamPrompts.value = data.prompts || [];
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '加载成员自定义内容失败');
+    }
+    finally {
+        teamResourcesLoading.value = false;
+    }
+}
+async function openTeamResourcesDialog() {
+    if (user.value?.role !== 'company_admin')
+        return;
+    if (!selectedTemplateId.value) {
+        showToast('请先选择产品模板');
+        return;
+    }
+    teamResourceTab.value = 'white-images';
+    teamResourceQuery.value = '';
+    teamResourceUserId.value = otherResourceOwners.value[0]?.id || null;
+    teamWhiteImages.value = [];
+    teamPrompts.value = [];
+    showTeamResourcesDialog.value = true;
+    await loadTeamTemplateResources();
+}
 function resetWhiteImageForm() { editingWhiteImage.value = null; whiteImageForm.value = { name: '', file: null }; }
 function editWhiteImage(item) { editingWhiteImage.value = item; whiteImageForm.value = { name: item.name, file: null }; }
 function onWhiteImageFileChange(event) { whiteImageForm.value.file = event.target.files?.[0] || null; }
@@ -431,7 +480,7 @@ function taskStatusClass(status) { return status === 'awaiting_selection' ? 'pur
 async function refreshTaskList() {
     try {
         taskListRefreshing.value = true;
-        const { data } = await api.get('/tasks', { headers: headers.value, params: { page: currentTaskPage.value, page_size: taskPageSize.value } });
+        const { data } = await api.get('/tasks', { headers: headers.value, params: { page: currentTaskPage.value, page_size: taskPageSize.value, creator_id: taskCreatorFilterId.value } });
         applyTaskPage(data);
         if (showTaskDetailDialog.value && viewingTask.value)
             viewingTask.value = (await api.get(`/tasks/${viewingTask.value.id}`, { headers: headers.value })).data;
@@ -898,7 +947,7 @@ async function refreshPendingTaskResults() {
     if (!token.value || !taskActiveCount.value)
         return;
     try {
-        applyTaskPage((await api.get('/tasks', { headers: headers.value, params: { page: currentTaskPage.value, page_size: taskPageSize.value } })).data);
+        applyTaskPage((await api.get('/tasks', { headers: headers.value, params: { page: currentTaskPage.value, page_size: taskPageSize.value, creator_id: taskCreatorFilterId.value } })).data);
     }
     catch { /* 保留上一次任务状态，等待下次轮询。 */ }
 }
@@ -1306,6 +1355,9 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "personal-resource-actions" },
+        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
                     if (!!(!__VLS_ctx.token))
@@ -1320,6 +1372,12 @@ else {
                 } },
             ...{ class: "secondary" },
         });
+        if (__VLS_ctx.user?.role === 'company_admin') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.openTeamResourcesDialog) },
+                ...{ class: "secondary" },
+            });
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "requirement-label" },
         });
@@ -1590,6 +1648,25 @@ else {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        if (__VLS_ctx.user?.role === 'company_admin') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+                ...{ class: "material-template-filter" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                ...{ onChange: (__VLS_ctx.changeTaskCreatorFilter) },
+                value: (__VLS_ctx.taskCreatorFilterId),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (null),
+            });
+            for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    key: (member.id),
+                    value: (member.id),
+                });
+                (member.name);
+            }
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.refreshTaskList) },
             ...{ class: "secondary" },
@@ -1899,6 +1976,9 @@ else {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "material-filter-row" },
+        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "material-template-filter" },
         });
@@ -1914,6 +1994,25 @@ else {
                 value: (template.id),
             });
             (template.name);
+        }
+        if (__VLS_ctx.user?.role === 'company_admin') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+                ...{ class: "material-template-filter" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                ...{ onChange: (__VLS_ctx.refreshMaterialList) },
+                value: (__VLS_ctx.materialCreatorFilterId),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (null),
+            });
+            for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    key: (member.id),
+                    value: (member.id),
+                });
+                (member.name);
+            }
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "primary material-upload-button" },
@@ -2009,6 +2108,10 @@ else {
             (asset.name);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
             (__VLS_ctx.materialTemplateName(asset));
+            if (__VLS_ctx.user?.role === 'company_admin') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+                (asset.created_by_name || '历史记录缺失');
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
             (asset.source_task_id ? `来源任务 #${asset.source_task_id}` : '本地上传');
             (new Date(asset.created_at).toLocaleDateString());
@@ -2894,31 +2997,6 @@ if (__VLS_ctx.showPersonalResourcesDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     (__VLS_ctx.selectedTemplate?.name);
-    if (__VLS_ctx.user?.role === 'company_admin') {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
-            ...{ class: "resource-owner-picker" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            ...{ onChange: (...[$event]) => {
-                    if (!(__VLS_ctx.showPersonalResourcesDialog))
-                        return;
-                    if (!(__VLS_ctx.user?.role === 'company_admin'))
-                        return;
-                    __VLS_ctx.resetWhiteImageForm();
-                    __VLS_ctx.resetPersonalPromptForm();
-                    __VLS_ctx.loadManagedTemplateResources();
-                } },
-            value: (__VLS_ctx.managedResourceUserId),
-        });
-        for (const [owner] of __VLS_getVForSourceType((__VLS_ctx.resourceOwners))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                key: (owner.id),
-                value: (owner.id),
-            });
-            (owner.name);
-            (owner.email);
-        }
-    }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
         ...{ class: "resource-tabs" },
     });
@@ -3089,6 +3167,160 @@ if (__VLS_ctx.showPersonalResourcesDialog) {
                 ...{ class: "empty" },
             });
         }
+    }
+}
+if (__VLS_ctx.showTeamResourcesDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTeamResourcesDialog))
+                    return;
+                __VLS_ctx.showTeamResourcesDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card personal-resources-dialog team-resources-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTeamResourcesDialog))
+                    return;
+                __VLS_ctx.showTeamResourcesDialog = false;
+            } },
+        ...{ class: "modal-close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.selectedTemplate?.name);
+    if (__VLS_ctx.otherResourceOwners.length) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "team-resource-filters" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "resource-owner-picker" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (...[$event]) => {
+                    if (!(__VLS_ctx.showTeamResourcesDialog))
+                        return;
+                    if (!(__VLS_ctx.otherResourceOwners.length))
+                        return;
+                    __VLS_ctx.teamResourceQuery = '';
+                    __VLS_ctx.loadTeamTemplateResources();
+                } },
+            value: (__VLS_ctx.teamResourceUserId),
+        });
+        for (const [owner] of __VLS_getVForSourceType((__VLS_ctx.otherResourceOwners))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (owner.id),
+                value: (owner.id),
+            });
+            (owner.name);
+            (owner.email);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "resource-query-picker" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            placeholder: "搜索名称或创作要求",
+        });
+        (__VLS_ctx.teamResourceQuery);
+    }
+    if (__VLS_ctx.otherResourceOwners.length) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
+            ...{ class: "resource-tabs" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.showTeamResourcesDialog))
+                        return;
+                    if (!(__VLS_ctx.otherResourceOwners.length))
+                        return;
+                    __VLS_ctx.teamResourceTab = 'white-images';
+                } },
+            ...{ class: ({ active: __VLS_ctx.teamResourceTab === 'white-images' }) },
+        });
+        (__VLS_ctx.teamWhiteImages.length);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.showTeamResourcesDialog))
+                        return;
+                    if (!(__VLS_ctx.otherResourceOwners.length))
+                        return;
+                    __VLS_ctx.teamResourceTab = 'prompts';
+                } },
+            ...{ class: ({ active: __VLS_ctx.teamResourceTab === 'prompts' }) },
+        });
+        (__VLS_ctx.teamPrompts.length);
+    }
+    if (__VLS_ctx.teamResourcesLoading) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "empty" },
+        });
+    }
+    else if (__VLS_ctx.otherResourceOwners.length && __VLS_ctx.teamResourceTab === 'white-images') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "resource-list team-resource-list" },
+        });
+        for (const [item] of __VLS_getVForSourceType((__VLS_ctx.filteredTeamWhiteImages))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+                key: (item.id),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showTeamResourcesDialog))
+                            return;
+                        if (!!(__VLS_ctx.teamResourcesLoading))
+                            return;
+                        if (!(__VLS_ctx.otherResourceOwners.length && __VLS_ctx.teamResourceTab === 'white-images'))
+                            return;
+                        __VLS_ctx.openImagePreview(item.image_url, item.name);
+                    } },
+                ...{ class: "team-white-image" },
+                title: "查看大图",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                src: (__VLS_ctx.imageUrl(item.image_url)),
+                alt: (item.name),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            (item.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (new Date(item.updated_at).toLocaleString());
+        }
+        if (!__VLS_ctx.filteredTeamWhiteImages.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
+        }
+    }
+    else if (__VLS_ctx.otherResourceOwners.length) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "resource-list prompt-resource-list team-resource-list" },
+        });
+        for (const [item] of __VLS_getVForSourceType((__VLS_ctx.filteredTeamPrompts))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+                key: (item.id),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            (item.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+            (item.content);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (new Date(item.updated_at).toLocaleString());
+        }
+        if (!__VLS_ctx.filteredTeamPrompts.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
+        }
+    }
+    else {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "empty" },
+        });
     }
 }
 if (__VLS_ctx.showMyAccountDialog) {
@@ -4274,6 +4506,8 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['pod-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['pod-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['personal-resource-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['personal-resource-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['requirement-label']} */ ;
 /** @type {__VLS_StyleScopedClasses['prompt-picker']} */ ;
@@ -4300,6 +4534,7 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['full']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-template-filter']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-table']} */ ;
@@ -4321,6 +4556,8 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-filter-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-template-filter']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-template-filter']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-upload-button']} */ ;
@@ -4419,7 +4656,6 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['personal-resources-dialog']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
-/** @type {__VLS_StyleScopedClasses['resource-owner-picker']} */ ;
 /** @type {__VLS_StyleScopedClasses['resource-tabs']} */ ;
 /** @type {__VLS_StyleScopedClasses['resource-pane']} */ ;
 /** @type {__VLS_StyleScopedClasses['resource-editor']} */ ;
@@ -4435,6 +4671,25 @@ if (__VLS_ctx.showMaterialTemplateDialog) {
 /** @type {__VLS_StyleScopedClasses['resource-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['prompt-resource-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['danger']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['personal-resources-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['team-resources-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['team-resource-filters']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-owner-picker']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-query-picker']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-tabs']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['team-resource-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['team-white-image']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['resource-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['prompt-resource-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['team-resource-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
@@ -4657,6 +4912,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             taskPageSize: taskPageSize,
             taskTotal: taskTotal,
             taskStatusCounts: taskStatusCounts,
+            taskCreatorFilterId: taskCreatorFilterId,
+            materialCreatorFilterId: materialCreatorFilterId,
             previewImageUrl: previewImageUrl,
             previewImageAlt: previewImageAlt,
             showShopManagersDialog: showShopManagersDialog,
@@ -4696,10 +4953,16 @@ const __VLS_self = (await import('vue')).defineComponent({
             personalResourcesLoading: personalResourcesLoading,
             showPersonalResourcesDialog: showPersonalResourcesDialog,
             personalResourceTab: personalResourceTab,
-            managedResourceUserId: managedResourceUserId,
             managedWhiteImages: managedWhiteImages,
             managedPrompts: managedPrompts,
             personalResourceSaving: personalResourceSaving,
+            showTeamResourcesDialog: showTeamResourcesDialog,
+            teamResourceTab: teamResourceTab,
+            teamResourceUserId: teamResourceUserId,
+            teamWhiteImages: teamWhiteImages,
+            teamPrompts: teamPrompts,
+            teamResourcesLoading: teamResourcesLoading,
+            teamResourceQuery: teamResourceQuery,
             editingWhiteImage: editingWhiteImage,
             whiteImageForm: whiteImageForm,
             editingPersonalPrompt: editingPersonalPrompt,
@@ -4710,7 +4973,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             availableAiProviders: availableAiProviders,
             selectedTemplate: selectedTemplate,
             selectedWhiteImage: selectedWhiteImage,
-            resourceOwners: resourceOwners,
+            otherResourceOwners: otherResourceOwners,
+            filteredTeamWhiteImages: filteredTeamWhiteImages,
+            filteredTeamPrompts: filteredTeamPrompts,
             selectedMaterialAssets: selectedMaterialAssets,
             filteredMaterialAssets: filteredMaterialAssets,
             materialDraftTemplate: materialDraftTemplate,
@@ -4726,6 +4991,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             pagedTasks: pagedTasks,
             changeTaskPageSize: changeTaskPageSize,
             changeTaskPage: changeTaskPage,
+            changeTaskCreatorFilter: changeTaskCreatorFilter,
+            refreshMaterialList: refreshMaterialList,
             login: login,
             onCreativeAssetChange: onCreativeAssetChange,
             removeCreativeAsset: removeCreativeAsset,
@@ -4739,8 +5006,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             selectedTemplateAiPrompts: selectedTemplateAiPrompts,
             applyTemplateAiPrompt: applyTemplateAiPrompt,
             onCreativeTemplateChange: onCreativeTemplateChange,
-            loadManagedTemplateResources: loadManagedTemplateResources,
             openPersonalResourcesDialog: openPersonalResourcesDialog,
+            loadTeamTemplateResources: loadTeamTemplateResources,
+            openTeamResourcesDialog: openTeamResourcesDialog,
             resetWhiteImageForm: resetWhiteImageForm,
             editWhiteImage: editWhiteImage,
             onWhiteImageFileChange: onWhiteImageFileChange,

@@ -13,7 +13,7 @@ from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
 from app.models import AIProviderSetting, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential, UserTemplateWhiteImage
-from app.schemas import AIProviderCredentialUpdate, PodTaskCreate, UserTemplatePromptCreate
+from app.schemas import AIProviderCredentialUpdate, MaterialAssetsTemplateUpdate, PodTaskCreate, UserTemplatePromptCreate
 
 
 class TaskJobTests(unittest.TestCase):
@@ -243,6 +243,41 @@ class TaskJobTests(unittest.TestCase):
         self.assertNotIn("print_urls", summary["parameters"])
         self.assertNotIn("batches", summary)
         self.assertEqual(len(detail["parameters"]["print_urls"]), 1)
+
+    def test_members_only_see_their_tasks_and_admin_can_filter_by_creator(self) -> None:
+        own_task_id = self.add_task()
+        with self.session_factory() as db:
+            other_task = PodTask(
+                company_id=1, template_id=1, created_by=3, status=TaskStatus.QUEUED,
+                parameters={}, result_urls=[], result_map=[], provider="grsai", provider_model="nano",
+            )
+            db.add(other_task); db.commit(); db.refresh(other_task)
+
+            member_page = main.list_tasks(page=1, page_size=20, creator_id=None, user=db.get(User, 1), db=db)
+            admin_page = main.list_tasks(page=1, page_size=20, creator_id=3, user=db.get(User, 2), db=db)
+
+            self.assertEqual([item["id"] for item in member_page["items"]], [own_task_id])
+            self.assertEqual([item["id"] for item in admin_page["items"]], [other_task.id])
+            self.assertFalse(main.can_access_task(other_task, db.get(User, 1)))
+            self.assertTrue(main.can_access_task(other_task, db.get(User, 2)))
+
+    def test_members_only_see_and_modify_their_materials(self) -> None:
+        with self.session_factory() as db:
+            own = MaterialAsset(company_id=1, template_id=1, url="https://img.example/own.png", name="own", claimed_by=1)
+            other = MaterialAsset(company_id=1, template_id=1, url="https://img.example/other.png", name="other", claimed_by=3)
+            db.add_all([own, other]); db.commit(); db.refresh(own); db.refresh(other)
+
+            member_assets = main.list_material_assets(creator_id=None, user=db.get(User, 1), db=db)
+            admin_assets = main.list_material_assets(creator_id=3, user=db.get(User, 2), db=db)
+            self.assertEqual([item["id"] for item in member_assets], [own.id])
+            self.assertEqual([item["id"] for item in admin_assets], [other.id])
+            self.assertEqual(admin_assets[0]["created_by_name"], "Other")
+
+            with self.assertRaisesRegex(Exception, "无权设置"):
+                main.update_material_assets_template(
+                    MaterialAssetsTemplateUpdate(material_asset_ids=[other.id], template_id=1),
+                    user=db.get(User, 1), db=db,
+                )
 
     def test_manual_retry_resets_failed_task(self) -> None:
         task_id = self.add_task(status=TaskStatus.FAILED, provider_task_id="provider-1")
