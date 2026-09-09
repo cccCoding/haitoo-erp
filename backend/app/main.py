@@ -1,17 +1,21 @@
 from contextlib import asynccontextmanager
 import hashlib
 import hmac
+from io import BytesIO
 import json
 import logging
+import mimetypes
 import re
 import secrets
 import string
 import time
+from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
+import zipfile
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -19,7 +23,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import Base, engine, get_db
 from .models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
-from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, ImageUploadPresignInput, LoginInput, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
+from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, ImageUploadPresignInput, LoginInput, MaterialDownloadInput, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
@@ -274,7 +278,14 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Haitoro POD API", version="0.1.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=get_settings().cors_origins.split(","), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_settings().cors_origins.split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
+)
 
 
 @app.middleware("http")
@@ -1286,6 +1297,64 @@ def delete_material_asset(asset_id: int, user: User = Depends(current_user), db:
     db.delete(asset)
     db.commit()
     return {"deleted": True}
+
+
+def _download_filename(asset: MaterialAsset, content_type: str | None = None) -> str:
+    """使用永久唯一的素材 SKU 生成下载文件名。"""
+    name = re.sub(r'[^A-Za-z0-9_-]', "_", asset.sku or "") or f"material-{asset.id}"
+    url_suffix = Path(unquote(urlsplit(asset.url).path)).suffix
+    guessed_suffix = mimetypes.guess_extension((content_type or "").split(";", 1)[0].strip()) or ""
+    suffix = url_suffix if url_suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} else guessed_suffix
+    return f"{name}{suffix or '.jpg'}"
+
+
+@app.post("/material-assets/download")
+async def download_material_assets(
+    payload: MaterialDownloadInput,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """下载有权限访问的素材；单张返回原图，多张打包为 ZIP。"""
+    requested_ids = list(dict.fromkeys(payload.material_asset_ids))
+    stmt = select(MaterialAsset).where(MaterialAsset.id.in_(requested_ids))
+    if user.role != Role.SUPER_ADMIN:
+        stmt = stmt.where(MaterialAsset.company_id == user.company_id)
+    if user.role == Role.MEMBER:
+        stmt = stmt.where(MaterialAsset.claimed_by == user.id)
+    assets_by_id = {asset.id: asset for asset in db.scalars(stmt).all()}
+    if len(assets_by_id) != len(requested_ids):
+        raise HTTPException(404, "素材不存在或无权下载")
+    assets = [assets_by_id[asset_id] for asset_id in requested_ids]
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+            downloads = []
+            for asset in assets:
+                remote = await client.get(asset.url)
+                remote.raise_for_status()
+                downloads.append((asset, remote.content, remote.headers.get("content-type")))
+    except httpx.HTTPError as exc:
+        logger.warning("下载素材源文件失败：%s", exc)
+        raise HTTPException(502, "读取素材源文件失败，请稍后重试") from exc
+
+    if len(downloads) == 1:
+        asset, content, content_type = downloads[0]
+        filename = _download_filename(asset, content_type)
+        return Response(
+            content=content,
+            media_type=(content_type or "application/octet-stream").split(";", 1)[0],
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+        )
+
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
+        for asset, content, content_type in downloads:
+            bundle.writestr(_download_filename(asset, content_type), content)
+    return Response(
+        content=archive.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=haitoro-materials.zip"},
+    )
 
 
 @app.get("/admin/ai-providers")

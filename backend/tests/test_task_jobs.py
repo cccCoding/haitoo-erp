@@ -1,8 +1,11 @@
 import asyncio
+from io import BytesIO
 import unittest
 from unittest.mock import AsyncMock, patch
+import zipfile
 
 import httpx
+from fastapi import HTTPException
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -13,7 +16,7 @@ from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
 from app.models import AIProviderSetting, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential, UserTemplatePrompt, UserTemplateWhiteImage
-from app.schemas import AIProviderCredentialUpdate, ClaimMaterials, DraftUpdate, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
+from app.schemas import AIProviderCredentialUpdate, ClaimMaterials, DraftUpdate, MaterialDownloadInput, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
 
 
 class TaskJobTests(unittest.TestCase):
@@ -329,6 +332,34 @@ class TaskJobTests(unittest.TestCase):
 
             route_paths = {route.path for route in main.app.routes}
             self.assertNotIn("/material-assets/template", route_paths)
+
+    def test_material_download_uses_sku_as_single_image_and_zip_filenames(self) -> None:
+        with self.session_factory() as db:
+            first = MaterialAsset(company_id=1, template_id=1, url="https://img.example/first.png", name="效果图", sku="M05LAA111111", claimed_by=1)
+            second = MaterialAsset(company_id=1, template_id=1, url="https://img.example/second.png", name="效果图", sku="M05LAA222222", claimed_by=1)
+            db.add_all([first, second]); db.commit(); db.refresh(first); db.refresh(second)
+            member = db.get(User, 1)
+
+            transport = httpx.MockTransport(lambda request: httpx.Response(200, content=request.url.path.encode(), headers={"content-type": "image/png"}))
+            real_async_client = httpx.AsyncClient
+            with patch.object(main.httpx, "AsyncClient", side_effect=lambda **kwargs: real_async_client(transport=transport, **kwargs)):
+                single = asyncio.run(main.download_material_assets(MaterialDownloadInput(material_asset_ids=[first.id]), user=member, db=db))
+                bundled = asyncio.run(main.download_material_assets(MaterialDownloadInput(material_asset_ids=[first.id, second.id]), user=member, db=db))
+
+            self.assertEqual(single.media_type, "image/png")
+            self.assertEqual(single.body, b"/first.png")
+            self.assertIn("M05LAA111111.png", single.headers["content-disposition"])
+            self.assertEqual(bundled.media_type, "application/zip")
+            with zipfile.ZipFile(BytesIO(bundled.body)) as archive:
+                self.assertEqual(archive.namelist(), ["M05LAA111111.png", "M05LAA222222.png"])
+                self.assertEqual(archive.read("M05LAA111111.png"), b"/first.png")
+
+    def test_material_download_rejects_assets_outside_member_scope(self) -> None:
+        with self.session_factory() as db:
+            other = MaterialAsset(company_id=1, template_id=1, url="https://img.example/other.png", name="other", sku="M05LAA333333", claimed_by=3)
+            db.add(other); db.commit(); db.refresh(other)
+            with self.assertRaisesRegex(HTTPException, "素材不存在或无权下载"):
+                asyncio.run(main.download_material_assets(MaterialDownloadInput(material_asset_ids=[other.id]), user=db.get(User, 1), db=db))
 
     def test_template_name_is_normalized_for_sku_prefix(self) -> None:
         payload = TemplateCreate(name="y1", group_id=1)

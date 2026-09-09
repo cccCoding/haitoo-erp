@@ -212,6 +212,10 @@ class MaterialUploadCommitInput(BaseModel):
     items: list[MaterialUploadCommitItem] = Field(min_length=1, max_length=100)
 
 
+class MaterialDownloadInput(BaseModel):
+    material_asset_ids: list[int] = Field(min_length=1, max_length=100)
+
+
 class AIProviderSettingUpdate(BaseModel):
     model: str = Field(min_length=1, max_length=120)
     enabled: bool

@@ -16,6 +16,7 @@ const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), 
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
 const showMiaoshouDialog = ref(false), miaoshouForm = ref({ app_id: '', app_secret: '' }), miaoshouSaving = ref(false);
 const materialUploading = ref(false), materialUploadError = ref('');
+const materialDownloading = ref(false);
 const selectedMaterialAssetIds = ref([]), materialTemplateFilterId = ref(null), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false);
 const pendingMaterialUploadFiles = ref([]), showMaterialUploadDialog = ref(false), materialUploadTemplateId = ref(null);
 const materialUploadedCount = ref(0), materialUploadTotal = ref(0), pendingMaterialUploadUrls = ref([]);
@@ -817,6 +818,35 @@ async function deleteSelectedMaterialAssets() {
     catch (e) {
         await refreshMaterialList();
         showToast(e.response?.data?.detail || '删除素材失败，请稍后重试');
+    }
+}
+async function downloadSelectedMaterialAssets() {
+    if (!selectedMaterialAssetIds.value.length)
+        return;
+    try {
+        materialDownloading.value = true;
+        const response = await api.post('/material-assets/download', {
+            material_asset_ids: selectedMaterialAssetIds.value,
+        }, { headers: headers.value, responseType: 'blob' });
+        const disposition = String(response.headers['content-disposition'] || '');
+        const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+        const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+        const filename = utf8Name ? decodeURIComponent(utf8Name) : plainName || (selectedMaterialAssetIds.value.length === 1 ? 'material.jpg' : 'haitoro-materials.zip');
+        const url = URL.createObjectURL(response.data);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        showToast(`已开始下载 ${selectedMaterialAssetIds.value.length} 张素材`);
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '下载素材失败，请稍后重试');
+    }
+    finally {
+        materialDownloading.value = false;
     }
 }
 function openMemberDialog(member) { editingMember.value = member || null; memberForm.value = { name: member?.name || '', user_code: member?.user_code || '', email: member?.email || '', password: '', is_active: member?.is_active ?? true }; memberFormError.value = ''; showMemberDialog.value = true; }
@@ -2085,8 +2115,15 @@ else {
                 ...{ class: "primary" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.downloadSelectedMaterialAssets) },
+                ...{ class: "secondary" },
+                disabled: (__VLS_ctx.materialDownloading),
+            });
+            (__VLS_ctx.materialDownloading ? '下载中…' : '下载到本地');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (__VLS_ctx.deleteSelectedMaterialAssets) },
                 ...{ class: "negative" },
+                disabled: (__VLS_ctx.materialDownloading),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
@@ -2107,6 +2144,7 @@ else {
                         __VLS_ctx.selectedMaterialAssetIds = [];
                     } },
                 ...{ class: "ghost" },
+                disabled: (__VLS_ctx.materialDownloading),
             });
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
@@ -4667,6 +4705,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['material-upload-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-bar']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['negative']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
@@ -4979,6 +5018,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             miaoshouSaving: miaoshouSaving,
             materialUploading: materialUploading,
             materialUploadError: materialUploadError,
+            materialDownloading: materialDownloading,
             selectedMaterialAssetIds: selectedMaterialAssetIds,
             materialTemplateFilterId: materialTemplateFilterId,
             showMaterialDraftDialog: showMaterialDraftDialog,
@@ -5148,6 +5188,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             chooseMaterialUploadFiles: chooseMaterialUploadFiles,
             uploadMaterialAssets: uploadMaterialAssets,
             deleteSelectedMaterialAssets: deleteSelectedMaterialAssets,
+            downloadSelectedMaterialAssets: downloadSelectedMaterialAssets,
             openMemberDialog: openMemberDialog,
             openMyAccountDialog: openMyAccountDialog,
             saveMyUserCode: saveMyUserCode,

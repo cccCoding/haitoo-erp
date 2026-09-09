@@ -18,6 +18,7 @@ const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), 
 const managedShops = ref<any[]>([]), shopLoading = ref(false), shopError = ref('')
 const showMiaoshouDialog = ref(false), miaoshouForm = ref({ app_id: '', app_secret: '' }), miaoshouSaving = ref(false)
 const materialUploading = ref(false), materialUploadError = ref('')
+const materialDownloading = ref(false)
 const selectedMaterialAssetIds = ref<number[]>([]), materialTemplateFilterId = ref<number | null>(null), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref<number | null>(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false)
 const pendingMaterialUploadFiles = ref<File[]>([]), showMaterialUploadDialog = ref(false), materialUploadTemplateId = ref<number | null>(null)
 const materialUploadedCount = ref(0), materialUploadTotal = ref(0), pendingMaterialUploadUrls = ref<string[]>([])
@@ -510,6 +511,32 @@ async function deleteSelectedMaterialAssets() {
     showToast(e.response?.data?.detail || '删除素材失败，请稍后重试')
   }
 }
+async function downloadSelectedMaterialAssets() {
+  if (!selectedMaterialAssetIds.value.length) return
+  try {
+    materialDownloading.value = true
+    const response = await api.post('/material-assets/download', {
+      material_asset_ids: selectedMaterialAssetIds.value,
+    }, { headers: headers.value, responseType: 'blob' })
+    const disposition = String(response.headers['content-disposition'] || '')
+    const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+    const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+    const filename = utf8Name ? decodeURIComponent(utf8Name) : plainName || (selectedMaterialAssetIds.value.length === 1 ? 'material.jpg' : 'haitoro-materials.zip')
+    const url = URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    showToast(`已开始下载 ${selectedMaterialAssetIds.value.length} 张素材`)
+  } catch (e: any) {
+    showToast(e.response?.data?.detail || '下载素材失败，请稍后重试')
+  } finally {
+    materialDownloading.value = false
+  }
+}
 function openMemberDialog(member?: any) { editingMember.value=member || null; memberForm.value={name:member?.name || '',user_code:member?.user_code || '',email:member?.email || '',password:'',is_active:member?.is_active ?? true}; memberFormError.value=''; showMemberDialog.value=true }
 function openMyAccountDialog() { myName.value=user.value?.name || ''; myUserCode.value=user.value?.user_code || ''; showMyAccountDialog.value=true }
 async function saveMyUserCode() { const name=myName.value.trim(), userCode=myUserCode.value.trim(); if (!name) { showToast('请输入管理员名称'); return } if (userCode && [...userCode].length !== 2) { showToast('用户代码必须恰好为两个字符'); return } try { myAccountSaving.value=true; const {data}=await api.patch('/me',{name,user_code:userCode || null},{headers:headers.value}); user.value=data; showMyAccountDialog.value=false; showToast('账户设置已保存') } catch(e:any) { showToast(e.response?.data?.detail || '保存账户设置失败') } finally { myAccountSaving.value=false } }
@@ -592,7 +619,7 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
       <section v-else-if="page==='materials'" class="page">
         <div class="section-heading"><div><span>素材入库后将永久绑定产品模板和 SKU；请选择同一模板的素材创建商品草稿。</span><div class="material-filter-row"><label class="material-template-filter">产品模板<select v-model="materialTemplateFilterId" @change="changeMaterialFilter"><option :value="null">全部模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><label v-if="user?.role==='company_admin'" class="material-template-filter">创作人<select v-model="materialCreatorFilterId" @change="changeMaterialFilter"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label></div></div><label class="primary material-upload-button" :class="{disabled: materialUploading}"><input type="file" multiple accept="image/png,image/jpeg,image/webp" :disabled="materialUploading" @change="chooseMaterialUploadFiles"/>{{materialUploading ? '上传中…' : '上传本地素材'}}</label></div>
         <p v-if="materialUploadError" class="error material-upload-error">{{materialUploadError}}</p>
-        <section v-if="selectedMaterialAssetIds.length" class="material-draft-bar"><strong>已选 {{selectedMaterialAssetIds.length}} 张素材</strong><button class="primary" @click="openMaterialDraftDialog">创建商品草稿</button><button class="negative" @click="deleteSelectedMaterialAssets">删除选中素材</button><button class="ghost" @click="selectedMaterialAssetIds=[]">取消选择</button></section>
+        <section v-if="selectedMaterialAssetIds.length" class="material-draft-bar"><strong>已选 {{selectedMaterialAssetIds.length}} 张素材</strong><button class="primary" @click="openMaterialDraftDialog">创建商品草稿</button><button class="secondary" :disabled="materialDownloading" @click="downloadSelectedMaterialAssets">{{materialDownloading ? '下载中…' : '下载到本地'}}</button><button class="negative" :disabled="materialDownloading" @click="deleteSelectedMaterialAssets">删除选中素材</button><button class="ghost" :disabled="materialDownloading" @click="selectedMaterialAssetIds=[]">取消选择</button></section>
         <section class="draft-table material-list">
           <div class="thead material-thead"><label class="material-checkbox material-select-all"><input type="checkbox" :checked="allCurrentMaterialAssetsSelected" :indeterminate="someCurrentMaterialAssetsSelected" :disabled="!filteredMaterialAssets.some(asset=>asset.sku)" aria-label="全选本页可用素材" @change="toggleAllCurrentMaterialAssets"/><span>全选</span></label><span>缩略图</span><span>SKU</span><span>模板</span><span>类型</span><span>创建时间</span><span>创建人</span></div>
           <div v-for="asset in filteredMaterialAssets" :key="asset.id" class="trow material-trow" :class="{selected: selectedMaterialAssetIds.includes(asset.id)}"><label class="material-checkbox" :aria-label="`选择素材 ${asset.name}`"><input type="checkbox" :checked="selectedMaterialAssetIds.includes(asset.id)" :disabled="!asset.sku" @change="toggleMaterialAsset(asset.id)"/></label><button type="button" class="material-list-thumbnail" :title="asset.name" :aria-label="`预览素材 ${asset.name}`" @click="openImagePreview(asset.url, asset.name)"><img :src="imageUrl(asset.url)" :alt="asset.name"/></button><code :class="{error:!asset.sku}">{{asset.sku || '无 SKU，请重新上传或领取'}}</code><span>{{asset.template_name || materialTemplateName(asset)}}</span><span><i class="chip" :class="asset.source_type === 'ai_created' ? 'purple' : 'blue'">{{asset.source_type === 'ai_created' ? 'AI创作' : '本地上传'}}</i><small v-if="asset.source_task_id" class="material-source-task">任务 #{{asset.source_task_id}}</small></span><span>{{new Date(asset.created_at).toLocaleString()}}</span><span>{{asset.created_by_name || '历史记录缺失'}}</span></div>
