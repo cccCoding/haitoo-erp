@@ -1174,9 +1174,16 @@ def list_tasks(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     creator_id: int | None = Query(default=None, ge=1),
+    status: TaskStatus | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
+    normalized_created_from = created_from.astimezone(timezone.utc).replace(tzinfo=None) if created_from and created_from.tzinfo else created_from
+    normalized_created_to = created_to.astimezone(timezone.utc).replace(tzinfo=None) if created_to and created_to.tzinfo else created_to
+    if normalized_created_from and normalized_created_to and normalized_created_from > normalized_created_to:
+        raise HTTPException(400, "创建开始时间不能晚于结束时间")
     filters = []
     if user.role != Role.SUPER_ADMIN:
         filters.append(PodTask.company_id == user.company_id)
@@ -1184,6 +1191,12 @@ def list_tasks(
         filters.append(PodTask.created_by == user.id)
     elif creator_id is not None:
         filters.append(PodTask.created_by == creator_id)
+    if status is not None:
+        filters.append(PodTask.status == status)
+    if normalized_created_from is not None:
+        filters.append(PodTask.created_at >= normalized_created_from)
+    if normalized_created_to is not None:
+        filters.append(PodTask.created_at <= normalized_created_to)
     total_stmt = select(func.count()).select_from(PodTask)
     if filters:
         total_stmt = total_stmt.where(*filters)

@@ -27,6 +27,9 @@ const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle
 const publishingDraftId = ref(null);
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null);
 const taskPageSize = ref(20), currentTaskPage = ref(1), taskTotal = ref(0), taskActiveCount = ref(0), taskStatusCounts = ref({}), taskCreatorFilterId = ref(null);
+const taskStatusFilter = ref('awaiting_selection'), taskCreatedFrom = ref(''), taskCreatedTo = ref('');
+const appliedTaskFilters = ref({ creator_id: null, status: 'awaiting_selection', created_from: '', created_to: '' });
+const selectedTaskIds = ref([]), showBatchClaimDialog = ref(false), batchClaimItems = ref([]), batchClaimLoading = ref(false), batchClaiming = ref(false), batchClaimCompleted = ref(0), batchClaimTotal = ref(0), batchClaimFailed = ref(0);
 const materialPageSize = ref(20), currentMaterialPage = ref(1), materialTotal = ref(0), materialCreatorFilterId = ref(null);
 const creatorFiltersInitialized = ref(false);
 const previewImageUrl = ref(''), previewImageAlt = ref('');
@@ -94,10 +97,38 @@ async function refreshDraftList() {
 const taskPageCount = computed(() => Math.max(1, Math.ceil(taskTotal.value / taskPageSize.value)));
 const visibleTaskPage = computed(() => Math.min(currentTaskPage.value, taskPageCount.value));
 const pagedTasks = computed(() => tasks.value);
+const claimablePagedTasks = computed(() => pagedTasks.value.filter(task => ['awaiting_selection', 'completed'].includes(task.status) && (task.result_count || task.result_urls?.length)));
+const allClaimableTasksSelected = computed(() => Boolean(claimablePagedTasks.value.length) && claimablePagedTasks.value.every(task => selectedTaskIds.value.includes(task.id)));
+const someClaimableTasksSelected = computed(() => !allClaimableTasksSelected.value && claimablePagedTasks.value.some(task => selectedTaskIds.value.includes(task.id)));
+const groupedBatchClaimItems = computed(() => {
+    const groups = new Map();
+    batchClaimItems.value.forEach(item => {
+        const group = groups.get(item.taskId) || { taskId: item.taskId, taskLabel: item.taskLabel, urls: [] };
+        group.urls.push(item.url);
+        groups.set(item.taskId, group);
+    });
+    return [...groups.values()];
+});
 function applyTaskPage(data) { tasks.value = data.items || []; taskTotal.value = data.total || 0; taskActiveCount.value = data.active_count || 0; taskStatusCounts.value = data.status_counts || {}; currentTaskPage.value = data.page || 1; }
-async function changeTaskPageSize() { currentTaskPage.value = 1; await refreshTaskList(); }
-async function changeTaskPage(targetPage) { currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); await refreshTaskList(); }
-async function changeTaskCreatorFilter() { currentTaskPage.value = 1; await refreshTaskList(); }
+async function changeTaskPageSize() { currentTaskPage.value = 1; selectedTaskIds.value = []; await refreshTaskList(); }
+async function changeTaskPage(targetPage) { currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); selectedTaskIds.value = []; await refreshTaskList(); }
+function taskQueryParams() { return { page: currentTaskPage.value, page_size: taskPageSize.value, creator_id: appliedTaskFilters.value.creator_id ?? undefined, status: appliedTaskFilters.value.status || undefined, created_from: appliedTaskFilters.value.created_from || undefined, created_to: appliedTaskFilters.value.created_to || undefined }; }
+function toUtcIso(value, endOfDay = false) {
+    if (!value)
+        return '';
+    const date = new Date(`${value}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}`);
+    return date.toISOString();
+}
+async function searchTasks() {
+    if (taskCreatedFrom.value && taskCreatedTo.value && new Date(taskCreatedFrom.value) > new Date(taskCreatedTo.value)) {
+        showToast('创建开始时间不能晚于结束时间');
+        return;
+    }
+    appliedTaskFilters.value = { creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: toUtcIso(taskCreatedFrom.value), created_to: toUtcIso(taskCreatedTo.value, true) };
+    currentTaskPage.value = 1;
+    selectedTaskIds.value = [];
+    await refreshTaskList();
+}
 const materialPageCount = computed(() => Math.max(1, Math.ceil(materialTotal.value / materialPageSize.value)));
 const visibleMaterialPage = computed(() => Math.min(currentMaterialPage.value, materialPageCount.value));
 function applyMaterialPage(data) { materialAssets.value = data.items || []; materialTotal.value = data.total || 0; currentMaterialPage.value = data.page || 1; }
@@ -127,11 +158,12 @@ async function refresh() {
     company.value = me.data.company;
     if (!creatorFiltersInitialized.value) {
         taskCreatorFilterId.value = user.value.id;
+        appliedTaskFilters.value.creator_id = user.value.id;
         materialCreatorFilterId.value = user.value.id;
         draftCreatorFilterId.value = user.value.id;
         creatorFiltersInitialized.value = true;
     }
-    const [s, t, g, task, material, d, providers] = await Promise.all([api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: { page: currentTaskPage.value, page_size: taskPageSize.value, creator_id: taskCreatorFilterId.value } }), api.get('/material-assets', { ...h, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value } }), api.get('/drafts', { ...h, params: { creator_id: draftCreatorFilterId.value } }), api.get('/ai-providers', h)]);
+    const [s, t, g, task, material, d, providers] = await Promise.all([api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: taskQueryParams() }), api.get('/material-assets', { ...h, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value } }), api.get('/drafts', { ...h, params: { creator_id: draftCreatorFilterId.value } }), api.get('/ai-providers', h)]);
     shops.value = s.data;
     templates.value = t.data;
     templateGroups.value = g.data;
@@ -555,7 +587,7 @@ function taskStatusClass(status) { return status === 'awaiting_selection' ? 'pur
 async function refreshTaskList() {
     try {
         taskListRefreshing.value = true;
-        const { data } = await api.get('/tasks', { headers: headers.value, params: { page: currentTaskPage.value, page_size: taskPageSize.value, creator_id: taskCreatorFilterId.value } });
+        const { data } = await api.get('/tasks', { headers: headers.value, params: taskQueryParams() });
         applyTaskPage(data);
         if (showTaskDetailDialog.value && viewingTask.value)
             viewingTask.value = (await api.get(`/tasks/${viewingTask.value.id}`, { headers: headers.value })).data;
@@ -705,6 +737,7 @@ async function claimMaterials() {
         claimingMaterials.value = true;
         await api.post(`/tasks/${claimingTask.value.id}/claim-materials`, { result_urls: selectedClaimResultUrls.value }, { headers: headers.value });
         showClaimMaterialsDialog.value = false;
+        selectedTaskIds.value = [];
         await refresh();
         showToast('领取成功，可在素材库查看');
     }
@@ -714,6 +747,62 @@ async function claimMaterials() {
     finally {
         claimingMaterials.value = false;
     }
+}
+function toggleTaskSelection(taskId) { selectedTaskIds.value = selectedTaskIds.value.includes(taskId) ? selectedTaskIds.value.filter(id => id !== taskId) : [...selectedTaskIds.value, taskId]; }
+function toggleAllClaimableTasks() { selectedTaskIds.value = allClaimableTasksSelected.value ? [] : claimablePagedTasks.value.map(task => task.id); }
+function removeBatchClaimImage(taskId, url) { if (!batchClaiming.value)
+    batchClaimItems.value = batchClaimItems.value.filter(item => item.taskId !== taskId || item.url !== url); }
+async function openBatchClaimDialog() {
+    if (!selectedTaskIds.value.length) {
+        showToast('请至少选择一个可领取任务');
+        return;
+    }
+    showBatchClaimDialog.value = true;
+    batchClaimLoading.value = true;
+    batchClaimItems.value = [];
+    batchClaimCompleted.value = 0;
+    batchClaimFailed.value = 0;
+    try {
+        const details = await Promise.all(selectedTaskIds.value.map(id => api.get(`/tasks/${id}`, { headers: headers.value }).then(response => response.data)));
+        batchClaimItems.value = details.flatMap(task => (task.result_urls || []).map((url) => ({ taskId: task.id, taskLabel: `任务 #${task.id}`, url })));
+        if (!batchClaimItems.value.length)
+            showToast('所选任务没有可领取图片');
+    }
+    catch (e) {
+        showBatchClaimDialog.value = false;
+        showToast(e.response?.data?.detail || '加载批量领取内容失败');
+    }
+    finally {
+        batchClaimLoading.value = false;
+    }
+}
+async function confirmBatchClaim() {
+    const groups = groupedBatchClaimItems.value;
+    if (!groups.length) {
+        showToast('请至少保留一张图片');
+        return;
+    }
+    batchClaiming.value = true;
+    batchClaimCompleted.value = 0;
+    batchClaimFailed.value = 0;
+    batchClaimTotal.value = groups.length;
+    for (const group of groups) {
+        try {
+            await api.post(`/tasks/${group.taskId}/claim-materials`, { result_urls: group.urls }, { headers: headers.value });
+        }
+        catch {
+            batchClaimFailed.value++;
+        }
+        finally {
+            batchClaimCompleted.value++;
+        }
+    }
+    batchClaiming.value = false;
+    if (!batchClaimFailed.value)
+        showBatchClaimDialog.value = false;
+    selectedTaskIds.value = [];
+    await refreshTaskList();
+    showToast(batchClaimFailed.value ? `批量领取完成，${batchClaimFailed.value} 个任务失败，可保留弹窗后重试` : `批量领取成功，共处理 ${batchClaimTotal.value} 个任务`);
 }
 async function retryTaskResult(task) {
     try {
@@ -1030,7 +1119,7 @@ async function refreshPendingTaskResults() {
     if (!token.value || !taskActiveCount.value)
         return;
     try {
-        applyTaskPage((await api.get('/tasks', { headers: headers.value, params: { page: currentTaskPage.value, page_size: taskPageSize.value, creator_id: taskCreatorFilterId.value } })).data);
+        applyTaskPage((await api.get('/tasks', { headers: headers.value, params: taskQueryParams() })).data);
     }
     catch { /* 保留上一次任务状态，等待下次轮询。 */ }
 }
@@ -1735,16 +1824,30 @@ else {
             ...{ class: "page" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "section-heading" },
+            ...{ class: "section-heading task-center-heading" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        if (__VLS_ctx.user?.role === 'company_admin') {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
-                ...{ class: "material-template-filter" },
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "task-filter-row" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.taskStatusFilter),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "",
+        });
+        for (const [label, status] of __VLS_getVForSourceType((__VLS_ctx.taskStatusLabel))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (status),
+                value: (status),
             });
+            (label);
+        }
+        if (__VLS_ctx.user?.role === 'company_admin') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-                ...{ onChange: (__VLS_ctx.changeTaskCreatorFilter) },
                 value: (__VLS_ctx.taskCreatorFilterId),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
@@ -1758,19 +1861,64 @@ else {
                 (member.name);
             }
         }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "task-date-filter" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "task-date-range" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "calendar-mark" },
+            'aria-hidden': "true",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            type: "date",
+            'aria-label': "创建开始日期",
+        });
+        (__VLS_ctx.taskCreatedFrom);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            type: "date",
+            'aria-label': "创建结束日期",
+        });
+        (__VLS_ctx.taskCreatedTo);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (__VLS_ctx.refreshTaskList) },
-            ...{ class: "secondary" },
+            ...{ onClick: (__VLS_ctx.searchTasks) },
+            ...{ class: "primary task-search-button" },
             disabled: (__VLS_ctx.taskListRefreshing),
         });
-        (__VLS_ctx.taskListRefreshing ? '刷新中…' : '↻ 刷新列表');
+        (__VLS_ctx.taskListRefreshing ? '搜索中…' : '搜索');
+        if (__VLS_ctx.selectedTaskIds.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "task-batch-bar" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            (__VLS_ctx.selectedTaskIds.length);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.openBatchClaimDialog) },
+                ...{ class: "primary" },
+                disabled: (__VLS_ctx.batchClaimLoading || __VLS_ctx.batchClaiming),
+            });
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
             ...{ class: "draft-table task-table" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "thead" },
-            ...{ style: {} },
+            ...{ class: "thead task-list-grid" },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "material-checkbox material-select-all" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            ...{ onChange: (__VLS_ctx.toggleAllClaimableTasks) },
+            type: "checkbox",
+            checked: (__VLS_ctx.allClaimableTasksSelected),
+            indeterminate: (__VLS_ctx.someClaimableTasksSelected),
+            disabled: (!__VLS_ctx.claimablePagedTasks.length),
+            'aria-label': "全选本页可领取任务",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -1786,8 +1934,30 @@ else {
         for (const [task] of __VLS_getVForSourceType((__VLS_ctx.pagedTasks))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 key: (task.id),
-                ...{ class: "trow" },
-                ...{ style: {} },
+                ...{ class: "trow task-list-grid" },
+                ...{ class: ({ selected: __VLS_ctx.selectedTaskIds.includes(task.id) }) },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+                ...{ class: "material-checkbox" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                ...{ onChange: (...[$event]) => {
+                        if (!!(!__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        __VLS_ctx.toggleTaskSelection(task.id);
+                    } },
+                type: "checkbox",
+                checked: (__VLS_ctx.selectedTaskIds.includes(task.id)),
+                disabled: (!['awaiting_selection', 'completed'].includes(task.status) || !(task.result_count || task.result_urls?.length)),
+                'aria-label': (`选择任务 ${task.id}`),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (task.id);
@@ -2945,6 +3115,119 @@ if (__VLS_ctx.showClaimMaterialsDialog) {
         disabled: (__VLS_ctx.claimingMaterials || !__VLS_ctx.selectedClaimResultUrls.length),
     });
     (__VLS_ctx.claimingMaterials ? '领取中…' : '领取');
+}
+if (__VLS_ctx.showBatchClaimDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showBatchClaimDialog))
+                    return;
+                !__VLS_ctx.batchClaiming && (__VLS_ctx.showBatchClaimDialog = false);
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card batch-claim-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showBatchClaimDialog))
+                    return;
+                __VLS_ctx.showBatchClaimDialog = false;
+            } },
+        ...{ class: "modal-close" },
+        disabled: (__VLS_ctx.batchClaiming),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    if (__VLS_ctx.batchClaimLoading) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "empty" },
+        });
+    }
+    else {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "batch-claim-table" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "batch-claim-head" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        for (const [group] of __VLS_getVForSourceType((__VLS_ctx.groupedBatchClaimItems))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                key: (group.taskId),
+                ...{ class: "batch-claim-row" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            (group.taskLabel);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (group.urls.length);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "batch-claim-images" },
+            });
+            for (const [url] of __VLS_getVForSourceType((group.urls))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.figure, __VLS_intrinsicElements.figure)({
+                    key: (url),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                    src: (__VLS_ctx.imageUrl(url)),
+                    alt: (`${group.taskLabel} 结果图`),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.showBatchClaimDialog))
+                                return;
+                            if (!!(__VLS_ctx.batchClaimLoading))
+                                return;
+                            __VLS_ctx.removeBatchClaimImage(group.taskId, url);
+                        } },
+                    type: "button",
+                    title: "移除此图",
+                    disabled: (__VLS_ctx.batchClaiming),
+                });
+            }
+        }
+        if (!__VLS_ctx.groupedBatchClaimItems.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
+        }
+    }
+    if (__VLS_ctx.batchClaiming || __VLS_ctx.batchClaimCompleted) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "batch-claim-progress" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (__VLS_ctx.batchClaimCompleted);
+        (__VLS_ctx.batchClaimTotal);
+        if (__VLS_ctx.batchClaimFailed) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            (__VLS_ctx.batchClaimFailed);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.progress, __VLS_intrinsicElements.progress)({
+            max: (__VLS_ctx.batchClaimTotal || 1),
+            value: (__VLS_ctx.batchClaimCompleted),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showBatchClaimDialog))
+                    return;
+                __VLS_ctx.showBatchClaimDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.batchClaiming),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.confirmBatchClaim) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.batchClaimLoading || __VLS_ctx.batchClaiming || !__VLS_ctx.groupedBatchClaimItems.length),
+    });
+    (__VLS_ctx.batchClaiming ? `领取中 ${__VLS_ctx.batchClaimCompleted}/${__VLS_ctx.batchClaimTotal}` : __VLS_ctx.batchClaimFailed ? '重试领取' : '确认批量领取');
 }
 if (__VLS_ctx.showTaskDetailDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -4675,12 +4958,24 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['creative-submit-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
-/** @type {__VLS_StyleScopedClasses['material-template-filter']} */ ;
-/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-center-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-filter-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-date-filter']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-date-range']} */ ;
+/** @type {__VLS_StyleScopedClasses['calendar-mark']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-search-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-batch-bar']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-list-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-checkbox']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-select-all']} */ ;
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-list-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-checkbox']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-material-thumbnail']} */ ;
 /** @type {__VLS_StyleScopedClasses['ai-model-cell']} */ ;
 /** @type {__VLS_StyleScopedClasses['provider-task-id']} */ ;
@@ -4772,6 +5067,20 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['material-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-select-mark']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-claim-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-claim-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-claim-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-claim-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-claim-images']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-claim-progress']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -5048,6 +5357,16 @@ const __VLS_self = (await import('vue')).defineComponent({
             taskTotal: taskTotal,
             taskStatusCounts: taskStatusCounts,
             taskCreatorFilterId: taskCreatorFilterId,
+            taskStatusFilter: taskStatusFilter,
+            taskCreatedFrom: taskCreatedFrom,
+            taskCreatedTo: taskCreatedTo,
+            selectedTaskIds: selectedTaskIds,
+            showBatchClaimDialog: showBatchClaimDialog,
+            batchClaimLoading: batchClaimLoading,
+            batchClaiming: batchClaiming,
+            batchClaimCompleted: batchClaimCompleted,
+            batchClaimTotal: batchClaimTotal,
+            batchClaimFailed: batchClaimFailed,
             materialPageSize: materialPageSize,
             materialTotal: materialTotal,
             materialCreatorFilterId: materialCreatorFilterId,
@@ -5122,9 +5441,13 @@ const __VLS_self = (await import('vue')).defineComponent({
             taskPageCount: taskPageCount,
             visibleTaskPage: visibleTaskPage,
             pagedTasks: pagedTasks,
+            claimablePagedTasks: claimablePagedTasks,
+            allClaimableTasksSelected: allClaimableTasksSelected,
+            someClaimableTasksSelected: someClaimableTasksSelected,
+            groupedBatchClaimItems: groupedBatchClaimItems,
             changeTaskPageSize: changeTaskPageSize,
             changeTaskPage: changeTaskPage,
-            changeTaskCreatorFilter: changeTaskCreatorFilter,
+            searchTasks: searchTasks,
             materialPageCount: materialPageCount,
             visibleMaterialPage: visibleMaterialPage,
             changeMaterialPageSize: changeMaterialPageSize,
@@ -5163,7 +5486,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             imageUrl: imageUrl,
             taskStatusLabel: taskStatusLabel,
             taskStatusClass: taskStatusClass,
-            refreshTaskList: refreshTaskList,
             copyProviderTaskId: copyProviderTaskId,
             openTaskDetail: openTaskDetail,
             templateCoverUrl: templateCoverUrl,
@@ -5184,6 +5506,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             openClaimMaterialsDialog: openClaimMaterialsDialog,
             toggleClaimResult: toggleClaimResult,
             claimMaterials: claimMaterials,
+            toggleTaskSelection: toggleTaskSelection,
+            toggleAllClaimableTasks: toggleAllClaimableTasks,
+            removeBatchClaimImage: removeBatchClaimImage,
+            openBatchClaimDialog: openBatchClaimDialog,
+            confirmBatchClaim: confirmBatchClaim,
             retryTaskResult: retryTaskResult,
             chooseMaterialUploadFiles: chooseMaterialUploadFiles,
             uploadMaterialAssets: uploadMaterialAssets,

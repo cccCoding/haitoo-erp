@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -312,6 +313,36 @@ class TaskJobTests(unittest.TestCase):
             self.assertEqual([item["id"] for item in admin_page["items"]], [other_task.id])
             self.assertFalse(main.can_access_task(other_task, db.get(User, 1)))
             self.assertTrue(main.can_access_task(other_task, db.get(User, 2)))
+
+    def test_task_list_filters_by_status_and_created_time_range(self) -> None:
+        older_id = self.add_task(status=TaskStatus.AWAITING_SELECTION)
+        newer_id = self.add_task(status=TaskStatus.COMPLETED)
+        with self.session_factory() as db:
+            db.get(PodTask, older_id).created_at = datetime(2026, 9, 8, 1, 0)
+            db.get(PodTask, newer_id).created_at = datetime(2026, 9, 9, 2, 30)
+            db.commit()
+            utc_plus_8 = timezone(timedelta(hours=8))
+            result = main.list_tasks(
+                page=1,
+                page_size=20,
+                creator_id=None,
+                status=TaskStatus.COMPLETED,
+                created_from=datetime(2026, 9, 9, 10, 0, tzinfo=utc_plus_8),
+                created_to=datetime(2026, 9, 9, 11, 0, tzinfo=utc_plus_8),
+                user=db.get(User, 1),
+                db=db,
+            )
+
+            self.assertEqual([item["id"] for item in result["items"]], [newer_id])
+            self.assertEqual(result["total"], 1)
+            self.assertEqual(result["status_counts"], {"completed": 1})
+
+            with self.assertRaisesRegex(HTTPException, "开始时间不能晚于结束时间"):
+                main.list_tasks(
+                    page=1, page_size=20, creator_id=None, status=None,
+                    created_from=datetime(2026, 9, 10), created_to=datetime(2026, 9, 9),
+                    user=db.get(User, 1), db=db,
+                )
 
     def test_members_only_see_their_materials_and_template_update_route_is_removed(self) -> None:
         with self.session_factory() as db:
