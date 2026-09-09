@@ -268,8 +268,16 @@ class MaterialDraftCreate(BaseModel):
     """尺码图不再随草稿提交，一律沿用所选产品模版的尺码图。"""
     template_id: int
     material_asset_ids: list[int] = Field(min_length=1, max_length=100)
-    title: str = Field(min_length=1, max_length=180)
+    title: str = Field(min_length=25, max_length=255)
     product_description: str | None = Field(default=None, max_length=5000)
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        value = value.strip()
+        if not 25 <= len(value) <= 255:
+            raise ValueError("商品标题长度须为 25-255 个字符")
+        return value
 
 
 class DraftTitleGenerate(BaseModel):
@@ -277,8 +285,16 @@ class DraftTitleGenerate(BaseModel):
 
 
 class DraftUpdate(BaseModel):
-    title: str = Field(min_length=1, max_length=180)
+    title: str = Field(min_length=25, max_length=255)
     product_description: str | None = Field(default=None, max_length=5000)
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        value = value.strip()
+        if not 25 <= len(value) <= 255:
+            raise ValueError("商品标题长度须为 25-255 个字符")
+        return value
 
 
 class MemberCreate(BaseModel):

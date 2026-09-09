@@ -278,7 +278,7 @@ async def generate_draft_title(title_constraint: str, image_url: str) -> str:
     prompt = (
         "你是跨境电商商品标题助手。请识别商品首图中的商品、款式、颜色、材质、图案和可见细节，"
         "并严格遵守以下标题约束生成一个中文商品标题。"
-        "只输出标题本身，不要解释、不要引号、不要 Markdown；标题不超过 180 个字符。\n"
+        "只输出标题本身，不要解释、不要引号、不要 Markdown；标题长度必须为 25-255 个字符。\n"
         f"标题约束：{title_constraint}"
     )
     async with httpx.AsyncClient(timeout=45) as client:
@@ -302,4 +302,6 @@ async def generate_draft_title(title_constraint: str, image_url: str) -> str:
     title = str(response.json().get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
     if not title:
         raise ProviderError("DeepSeek 未返回标题")
-    return title[:180]
+    if len(title) < 25:
+        raise ProviderError("DeepSeek 返回的标题少于 25 个字符，请重试或手动填写")
+    return title[:255]

@@ -97,6 +97,8 @@ export AI_GENERATED_IMAGE_UPLOAD_TO_R2='true'
 
 **商品草稿没有独立的尺码图上传。** 草稿一律沿用所选产品模版的 `size_chart_url`，由 `POST /drafts/from-material-assets` 在服务端从模板取值写入，前端不再提交该字段；如需更换尺码图，请修改产品模版。
 
+商品标题去除首尾空白后必须为 25-255 个字符。创建商品草稿只保存本地记录，不会自动调用妙手；用户需要在商品草稿列表点击“发布至妙手”，系统才会创建妙手公共草稿箱商品并继续认领到 TikTok 采集箱。任一步失败时本地草稿都会保留，可从列表重试。
+
 直传后图片地址由前端提交，服务端在落库处兜底校验：`/material-assets/commit` 校验地址落在当前公司 `material/company/{id}/` 下；模板新增/更新校验 `cover_url`、`size_chart_url` 落在当前公司 `template/` 或 `template-size-chart/` 下。为兼容 R2 之前的历史地址，更新时若字段值与库中现有值一致则直接放行，不强制回溯改造。
 
 `POST /uploads/presign` 的 `category` 走服务端白名单（当前为 `template`、`template-size-chart`、`template-white`），签名本身始终绑定调用方公司。

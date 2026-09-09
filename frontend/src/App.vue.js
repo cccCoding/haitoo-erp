@@ -113,18 +113,13 @@ function applyTaskPage(data) { tasks.value = data.items || []; taskTotal.value =
 async function changeTaskPageSize() { currentTaskPage.value = 1; selectedTaskIds.value = []; await refreshTaskList(); }
 async function changeTaskPage(targetPage) { currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); selectedTaskIds.value = []; await refreshTaskList(); }
 function taskQueryParams() { return { page: currentTaskPage.value, page_size: taskPageSize.value, creator_id: appliedTaskFilters.value.creator_id ?? undefined, status: appliedTaskFilters.value.status || undefined, created_from: appliedTaskFilters.value.created_from || undefined, created_to: appliedTaskFilters.value.created_to || undefined }; }
-function toUtcIso(value, endOfDay = false) {
-    if (!value)
-        return '';
-    const date = new Date(`${value}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}`);
-    return date.toISOString();
-}
+function toUtcIso(value) { return value ? new Date(value).toISOString() : ''; }
 async function searchTasks() {
     if (taskCreatedFrom.value && taskCreatedTo.value && new Date(taskCreatedFrom.value) > new Date(taskCreatedTo.value)) {
         showToast('创建开始时间不能晚于结束时间');
         return;
     }
-    appliedTaskFilters.value = { creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: toUtcIso(taskCreatedFrom.value), created_to: toUtcIso(taskCreatedTo.value, true) };
+    appliedTaskFilters.value = { creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: toUtcIso(taskCreatedFrom.value), created_to: toUtcIso(taskCreatedTo.value) };
     currentTaskPage.value = 1;
     selectedTaskIds.value = [];
     await refreshTaskList();
@@ -629,7 +624,7 @@ function materialTemplateName(asset) { return templates.value.find(template => t
 function draftTemplateName(draft) { return templates.value.find(template => template.id === draft.template_id)?.name || '历史模板已删除'; }
 function onMaterialDraftTemplateChange() {
     const template = materialDraftTemplate.value;
-    materialDraftTitle.value = template ? `${template.name} POD 商品` : '';
+    materialDraftTitle.value = '';
     materialDraftProductDescription.value = template?.product_description || '';
     materialDraftSizeChartPreview.value = imageUrl(template?.size_chart_url);
 }
@@ -659,23 +654,22 @@ async function createDraftFromMaterialAssets() {
         showToast('请选择产品模板');
         return;
     }
-    if (!materialDraftTitle.value.trim()) {
-        showToast('请生成或填写商品标题');
+    const title = materialDraftTitle.value.trim();
+    if (title.length < 25 || title.length > 255) {
+        showToast('商品标题长度须为 25-255 个字符');
         return;
     }
     try {
         materialDraftSaving.value = true;
-        const size_chart_url = materialDraftTemplate.value?.size_chart_url ?? null;
-        const { data: draft } = await api.post('/drafts/from-material-assets', { material_asset_ids: selectedMaterialAssetIds.value, template_id: materialDraftTemplateId.value, title: materialDraftTitle.value.trim(), product_description: materialDraftProductDescription.value.trim() || null, size_chart_url }, { headers: headers.value });
-        const { data: publishResult } = await api.post(`/drafts/${draft.id}/claim-to-tiktok`, {}, { headers: headers.value });
+        await api.post('/drafts/from-material-assets', { material_asset_ids: selectedMaterialAssetIds.value, template_id: materialDraftTemplateId.value, title, product_description: materialDraftProductDescription.value.trim() || null }, { headers: headers.value });
         selectedMaterialAssetIds.value = [];
         showMaterialDraftDialog.value = false;
         await refresh();
         page.value = 'drafts';
-        showToast(`已发布公共草稿箱并认领到 TikTok（编号：${publishResult.tiktok_collect_box_detail_id}）`);
+        showToast('商品草稿已创建，请在列表中手动发布至妙手');
     }
     catch (e) {
-        showToast(e.response?.data?.detail || '创建、发布或认领 TikTok 失败；草稿已保留，可在商品待发布页重试');
+        showToast(e.response?.data?.detail || '创建商品草稿失败，请稍后重试');
     }
     finally {
         materialDraftSaving.value = false;
@@ -685,14 +679,15 @@ function openDraftEditDialog(draft) { editingDraft.value = draft; draftEditTitle
 function draftSkuForImage(draft, imageUrl) { return draft?.sku_items?.find((item) => item.image_url === imageUrl)?.sku || '—'; }
 function openImagePreview(url, alt) { previewImageUrl.value = imageUrl(url); previewImageAlt.value = alt; }
 async function saveDraftEdit() {
-    if (!editingDraft.value || !draftEditTitle.value.trim()) {
-        draftEditError.value = '请输入商品标题';
+    const title = draftEditTitle.value.trim();
+    if (!editingDraft.value || title.length < 25 || title.length > 255) {
+        draftEditError.value = '商品标题长度须为 25-255 个字符';
         return;
     }
     try {
         draftEditSaving.value = true;
         draftEditError.value = '';
-        await api.put(`/drafts/${editingDraft.value.id}`, { title: draftEditTitle.value.trim(), product_description: draftEditProductDescription.value.trim() || null }, { headers: headers.value });
+        await api.put(`/drafts/${editingDraft.value.id}`, { title, product_description: draftEditProductDescription.value.trim() || null }, { headers: headers.value });
         showDraftEditDialog.value = false;
         await refresh();
     }
@@ -713,7 +708,8 @@ async function publishDraftToMiaoshou(draft) {
         showToast(data.already_claimed ? '该商品已认领到 TikTok 采集箱' : `已发布公共草稿箱并认领到 TikTok（编号：${data.tiktok_collect_box_detail_id}）`);
     }
     catch (e) {
-        showToast(e.response?.data?.detail || '发布并认领 TikTok 失败，请稍后重试');
+        const detail = e.response?.data?.detail || '发布至妙手或认领 TikTok 失败';
+        showToast(`${detail}；草稿已保留，可稍后重试`);
     }
     finally {
         publishingDraftId.value = null;
@@ -1861,26 +1857,14 @@ else {
                 (member.name);
             }
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
-            ...{ class: "task-date-filter" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-            ...{ class: "task-date-range" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-            ...{ class: "calendar-mark" },
-            'aria-hidden': "true",
-        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-            type: "date",
-            'aria-label': "创建开始日期",
+            type: "datetime-local",
         });
         (__VLS_ctx.taskCreatedFrom);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-            type: "date",
-            'aria-label': "创建结束日期",
+            type: "datetime-local",
         });
         (__VLS_ctx.taskCreatedTo);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
@@ -2695,7 +2679,7 @@ else {
                     ...{ class: "primary compact-action" },
                     disabled: (__VLS_ctx.publishingDraftId === draft.id),
                 });
-                (__VLS_ctx.publishingDraftId === draft.id ? '处理中…' : '发布并认领 TikTok');
+                (__VLS_ctx.publishingDraftId === draft.id ? '处理中…' : '发布至妙手');
             }
             else {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
@@ -3996,8 +3980,9 @@ if (__VLS_ctx.showMaterialDraftDialog) {
             ...{ class: "material-draft-title-row" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-            maxlength: "180",
-            placeholder: "请生成或填写商品标题",
+            minlength: "25",
+            maxlength: "255",
+            placeholder: "请输入 25-255 个字符，或使用 AI 生成",
         });
         (__VLS_ctx.materialDraftTitle);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
@@ -4091,8 +4076,9 @@ if (__VLS_ctx.showDraftEditDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-        maxlength: "180",
-        placeholder: "请输入商品标题",
+        minlength: "25",
+        maxlength: "255",
+        placeholder: "请输入 25-255 个字符",
     });
     (__VLS_ctx.draftEditTitle);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
@@ -4960,9 +4946,6 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-center-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-filter-row']} */ ;
-/** @type {__VLS_StyleScopedClasses['task-date-filter']} */ ;
-/** @type {__VLS_StyleScopedClasses['task-date-range']} */ ;
-/** @type {__VLS_StyleScopedClasses['calendar-mark']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-search-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-batch-bar']} */ ;

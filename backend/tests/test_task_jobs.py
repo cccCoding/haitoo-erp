@@ -16,7 +16,7 @@ from app.ai_providers import GrsaiProvider, ProviderError, ProviderTaskTerminalE
 from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
-from app.models import AIProviderSetting, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential, UserTemplatePrompt, UserTemplateWhiteImage
+from app.models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential, UserTemplatePrompt, UserTemplateWhiteImage
 from app.schemas import AIProviderCredentialUpdate, ClaimMaterials, DraftUpdate, MaterialDownloadInput, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
 
 
@@ -27,6 +27,7 @@ class TaskJobTests(unittest.TestCase):
         self.session_factory = sessionmaker(bind=self.engine)
         with self.session_factory() as db:
             db.add_all([
+                Company(id=1, name="Test Company", miaoshou_app_id="app-id", miaoshou_secret_encrypted="encrypted-secret"),
                 TaskQueueSetting(id=1, submit_interval_seconds=1, result_interval_seconds=5),
                 AIProviderSetting(provider="grsai", display_name="Grsai", model="nano", enabled=True, is_default=True, images_per_task=2),
                 AIProviderSetting(provider="seedream", display_name="Seedream", model="seed", enabled=True, is_default=False, images_per_task=1),
@@ -437,14 +438,50 @@ class TaskJobTests(unittest.TestCase):
             current = MaterialAsset(company_id=1, template_id=1, url="https://img.example/current.png", name="current", sku="M05LAA123456", claimed_by=1)
             legacy = MaterialAsset(company_id=1, template_id=1, url="https://img.example/legacy.png", name="legacy", claimed_by=1)
             db.add_all([current, legacy]); db.commit(); db.refresh(current); db.refresh(legacy)
-            payload = MaterialDraftCreate(template_id=1, material_asset_ids=[current.id], title="draft")
+            payload = MaterialDraftCreate(template_id=1, material_asset_ids=[current.id], title="D" * 25)
             draft = main.create_draft_from_material_assets(payload, user=db.get(User, 1), db=db)
             self.assertEqual(draft["sku_items"], [{"image_url": current.url, "size": None, "sku": current.sku}])
+            self.assertEqual(draft["status"], "pending_publish")
+            self.assertIsNone(draft["miaoshou_collect_box_id"])
+            self.assertIsNone(draft["tiktok_collect_box_id"])
             with self.assertRaisesRegex(Exception, "无 SKU"):
                 main.create_draft_from_material_assets(
-                    MaterialDraftCreate(template_id=1, material_asset_ids=[legacy.id], title="legacy"),
+                    MaterialDraftCreate(template_id=1, material_asset_ids=[legacy.id], title="L" * 25),
                     user=db.get(User, 1), db=db,
                 )
+
+    def test_draft_title_requires_25_to_255_trimmed_characters(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least 25 characters"):
+            MaterialDraftCreate(template_id=1, material_asset_ids=[1], title="短标题")
+        with self.assertRaisesRegex(ValueError, "at most 255 characters"):
+            DraftUpdate(title="T" * 256, product_description=None)
+        payload = DraftUpdate(title=f"  {'T' * 25}  ", product_description=None)
+        self.assertEqual(payload.title, "T" * 25)
+
+    def test_tiktok_claim_persists_miaoshou_id_before_claiming(self) -> None:
+        with self.session_factory() as db:
+            draft = ProductDraft(
+                company_id=1, template_id=1, title="T" * 25,
+                image_urls=["https://img.example/product.png"],
+                sku_items=[{"image_url": "https://img.example/product.png", "size": None, "sku": "M05LAA123456"}],
+                created_by=1, updated_by=1,
+            )
+            db.add(draft); db.commit(); db.refresh(draft)
+
+            async def create_common(current_draft, _company, _template):
+                current_draft.miaoshou_collect_box_id = "123"
+                return "123"
+
+            async def fail_claim(current_draft, _company):
+                with self.session_factory() as other_db:
+                    persisted = other_db.get(ProductDraft, current_draft.id)
+                    self.assertEqual(persisted.miaoshou_collect_box_id, "123")
+                    self.assertEqual(persisted.status, "published_to_miaoshou")
+                raise HTTPException(502, "认领失败")
+
+            with patch.object(main, "create_common_collect_box_detail", side_effect=create_common), patch.object(main, "claim_common_collect_box_to_tiktok", side_effect=fail_claim):
+                with self.assertRaisesRegex(HTTPException, "认领失败"):
+                    asyncio.run(main.claim_draft_to_tiktok(draft.id, user=db.get(User, 1), db=db))
 
     def test_task_draft_route_is_removed(self) -> None:
         route_paths = {route.path for route in main.app.routes}
@@ -466,7 +503,7 @@ class TaskJobTests(unittest.TestCase):
 
             with self.assertRaisesRegex(Exception, "商品草稿不存在"):
                 main.update_draft(
-                    other.id, DraftUpdate(title="changed", product_description=None),
+                    other.id, DraftUpdate(title="Changed product draft title", product_description=None),
                     user=db.get(User, 1), db=db,
                 )
 

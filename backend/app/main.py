@@ -118,6 +118,16 @@ def ensure_schema() -> None:
         if "ai_prompts" not in columns:
             connection.execute(text("ALTER TABLE product_templates ADD COLUMN ai_prompts JSON"))
         draft_columns = {column["name"] for column in inspect(connection).get_columns("product_drafts")}
+        draft_title_column = next(
+            (column for column in inspect(connection).get_columns("product_drafts") if column["name"] == "title"),
+            None,
+        )
+        if (
+            draft_title_column
+            and getattr(draft_title_column["type"], "length", None) != 255
+            and connection.dialect.name in {"mysql", "mariadb"}
+        ):
+            connection.execute(text("ALTER TABLE product_drafts MODIFY COLUMN title VARCHAR(255) NOT NULL"))
         if "sku_items" not in draft_columns:
             connection.execute(text("ALTER TABLE product_drafts ADD COLUMN sku_items JSON"))
         if "template_id" not in draft_columns:
@@ -1705,7 +1715,7 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
         shop_id=None,
         template_id=template.id,
         source_task_id=source_task_id,
-        title=payload.title.strip(),
+        title=payload.title,
         product_description=payload.product_description.strip() if payload.product_description else None,
         size_chart_url=template.size_chart_url,
         image_urls=image_urls,
@@ -1739,7 +1749,7 @@ def update_draft(draft_id: int, payload: DraftUpdate, user: User = Depends(curre
     draft = db.get(ProductDraft, draft_id)
     if not can_access_draft(draft, user) or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
         raise HTTPException(404, "商品草稿不存在")
-    draft.title = payload.title.strip()
+    draft.title = payload.title
     draft.product_description = payload.product_description.strip() if payload.product_description else None
     draft.updated_by = user.id
     db.commit(); db.refresh(draft)
@@ -1783,6 +1793,11 @@ async def claim_draft_to_tiktok(draft_id: int, user: User = Depends(current_user
     if not template:
         raise HTTPException(400, "该商品草稿缺少产品模板信息，无法生成公共采集箱商品")
     await create_common_collect_box_detail(draft, company, template)
+    # 公共草稿箱创建成功后立即持久化编号。后续 TikTok 认领失败时，
+    # 重试只会继续认领，不会在妙手重复创建商品。
+    draft.status = "published_to_miaoshou"
+    draft.updated_by = user.id
+    db.commit()
     await claim_common_collect_box_to_tiktok(draft, company)
     draft.status = "claimed_to_tiktok"
     draft.updated_by = user.id
