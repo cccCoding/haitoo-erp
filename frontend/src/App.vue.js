@@ -15,6 +15,9 @@ const showMemberCredentialDialog = ref(false), credentialMember = ref(null), cre
 const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), myAccountSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
 const showMiaoshouDialog = ref(false), miaoshouForm = ref({ app_id: '', app_secret: '' }), miaoshouSaving = ref(false);
+const tiktokCatalogs = ref([]), tiktokCatalogLoading = ref(false), tiktokCatalogError = ref('');
+const showTiktokCatalogDialog = ref(false), tiktokCatalogName = ref(''), tiktokCatalogFile = ref(null);
+const showTiktokCatalogDetailDialog = ref(false), managingTiktokCatalog = ref(null), managingTiktokCatalogOptions = ref(null), managingTiktokCategory = ref('');
 const materialUploading = ref(false), materialUploadError = ref('');
 const materialDownloading = ref(false);
 const selectedMaterialAssetIds = ref([]), materialTemplateFilterId = ref(null), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false);
@@ -25,6 +28,9 @@ const templateSaving = ref(false);
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'], MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('');
 const publishingDraftId = ref(null);
+const selectedDraftIds = ref([]), showTiktokExportDialog = ref(false), tiktokExportOptions = ref(null), tiktokExportLoading = ref(false), tiktokExportError = ref('');
+const MAX_TIKTOK_EXPORT_DRAFTS = 50;
+const tiktokExportCatalogId = ref(null), tiktokExportCategory = ref(''), tiktokExportDefaultPrice = ref(null), tiktokExportDefaultQuantity = ref(999), tiktokExportCod = ref('Y'), tiktokExportAttributes = ref({}), tiktokExportOverrides = ref({});
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null);
 const taskPageSize = ref(20), currentTaskPage = ref(1), taskTotal = ref(0), taskActiveCount = ref(0), taskStatusCounts = ref({}), taskCreatorFilterId = ref(null);
 const taskStatusFilter = ref('awaiting_selection'), taskCreatedFrom = ref(''), taskCreatedTo = ref('');
@@ -45,7 +51,7 @@ const showPersonalResourcesDialog = ref(false), personalResourceTab = ref('white
 const showTeamResourcesDialog = ref(false), teamResourceTab = ref('white-images'), teamResourceUserId = ref(null), teamResourceTemplateId = ref(null), teamWhiteImages = ref([]), teamPrompts = ref([]), teamResourcesLoading = ref(false), teamResourceQuery = ref('');
 const editingWhiteImage = ref(null), whiteImageForm = ref({ template_id: null, name: '', file: null });
 const editingPersonalPrompt = ref(null), personalPromptForm = ref({ template_id: null, name: '', content: '' });
-const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'materials', icon: '◈', label: '素材库' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }];
+const nav = [{ key: 'dashboard', icon: '◈', label: '工作台' }, { key: 'templates', icon: '▦', label: '产品模板' }, { key: 'pod', icon: '✦', label: 'AI创作' }, { key: 'tasks', icon: '◌', label: '任务中心' }, { key: 'materials', icon: '◈', label: '素材库' }, { key: 'drafts', icon: '▤', label: '商品草稿' }, { key: 'members', icon: '♙', label: '成员管理', adminOnly: true }, { key: 'shops', icon: '▣', label: '店铺管理', adminOnly: true }, { key: 'tiktok-catalogs', icon: '▧', label: 'TK类目管理', adminOnly: true }];
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }));
 const visibleNav = computed(() => nav.filter(item => !item.adminOnly || user.value?.role === 'company_admin'));
 const pageTitle = computed(() => nav.find(x => x.key === page.value)?.label || '');
@@ -88,11 +94,42 @@ const pagedDrafts = computed(() => {
     const start = (visibleDraftPage.value - 1) * draftPageSize.value;
     return filteredDrafts.value.slice(start, start + draftPageSize.value);
 });
+const selectedDrafts = computed(() => drafts.value.filter(draft => selectedDraftIds.value.includes(draft.id)));
+const allPagedDraftsSelected = computed(() => Boolean(pagedDrafts.value.length) && pagedDrafts.value.every(draft => selectedDraftIds.value.includes(draft.id)));
+const selectedTiktokCategoryAttributes = computed(() => tiktokExportOptions.value?.attributes_by_category?.[tiktokExportCategory.value] || []);
+const managingTiktokCategoryAttributes = computed(() => managingTiktokCatalogOptions.value?.attributes_by_category?.[managingTiktokCategory.value] || []);
 function changeDraftPageSize() { currentDraftPage.value = 1; }
-async function changeDraftCreatorFilter() { currentDraftPage.value = 1; await refreshDraftList(); }
+function toggleDraftSelection(draftId) {
+    if (selectedDraftIds.value.includes(draftId)) {
+        selectedDraftIds.value = selectedDraftIds.value.filter(id => id !== draftId);
+        return;
+    }
+    if (selectedDraftIds.value.length >= MAX_TIKTOK_EXPORT_DRAFTS) {
+        showToast(`一次最多选择 ${MAX_TIKTOK_EXPORT_DRAFTS} 条商品草稿`);
+        return;
+    }
+    selectedDraftIds.value = [...selectedDraftIds.value, draftId];
+}
+function togglePagedDrafts() {
+    const pageIds = pagedDrafts.value.map(draft => draft.id);
+    if (allPagedDraftsSelected.value) {
+        selectedDraftIds.value = selectedDraftIds.value.filter(id => !pageIds.includes(id));
+        return;
+    }
+    const remaining = MAX_TIKTOK_EXPORT_DRAFTS - selectedDraftIds.value.length;
+    const candidates = pageIds.filter(id => !selectedDraftIds.value.includes(id));
+    const additions = candidates.slice(0, remaining);
+    selectedDraftIds.value = [...selectedDraftIds.value, ...additions];
+    if (additions.length < candidates.length) {
+        showToast(`一次最多选择 ${MAX_TIKTOK_EXPORT_DRAFTS} 条商品草稿`);
+    }
+}
+function changeDraftTemplateFilter() { currentDraftPage.value = 1; selectedDraftIds.value = []; }
+async function changeDraftCreatorFilter() { currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
 async function refreshDraftList() {
     const { data } = await api.get('/drafts', { headers: headers.value, params: { creator_id: draftCreatorFilterId.value } });
     drafts.value = data;
+    selectedDraftIds.value = selectedDraftIds.value.filter(id => data.some((draft) => draft.id === id));
 }
 const taskPageCount = computed(() => Math.max(1, Math.ceil(taskTotal.value / taskPageSize.value)));
 const visibleTaskPage = computed(() => Math.min(currentTaskPage.value, taskPageCount.value));
@@ -158,7 +195,7 @@ async function refresh() {
         draftCreatorFilterId.value = user.value.id;
         creatorFiltersInitialized.value = true;
     }
-    const [s, t, g, task, material, d, providers] = await Promise.all([api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: taskQueryParams() }), api.get('/material-assets', { ...h, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value } }), api.get('/drafts', { ...h, params: { creator_id: draftCreatorFilterId.value } }), api.get('/ai-providers', h)]);
+    const [s, t, g, task, material, d, providers, catalogs] = await Promise.all([api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: taskQueryParams() }), api.get('/material-assets', { ...h, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value } }), api.get('/drafts', { ...h, params: { creator_id: draftCreatorFilterId.value } }), api.get('/ai-providers', h), api.get('/tiktok-category-catalogs', h)]);
     shops.value = s.data;
     templates.value = t.data;
     templateGroups.value = g.data;
@@ -166,6 +203,7 @@ async function refresh() {
     applyMaterialPage(material.data);
     drafts.value = d.data;
     aiProviders.value = providers.data;
+    tiktokCatalogs.value = catalogs.data;
     // 后台停用当前所选模型后，刷新时立即切换到仍启用的默认模型，避免提交已停用的值。
     if (!availableAiProviders.value.some(item => item.provider === creativeProvider.value)) {
         creativeProvider.value = availableAiProviders.value.find(item => item.is_default)?.provider || availableAiProviders.value[0]?.provider || '';
@@ -715,6 +753,248 @@ async function publishDraftToMiaoshou(draft) {
         publishingDraftId.value = null;
     }
 }
+async function openTiktokExportDialog() {
+    if (!selectedDrafts.value.length)
+        return;
+    const templateIds = new Set(selectedDrafts.value.map(draft => draft.template_id));
+    if (templateIds.size !== 1 || templateIds.has(null)) {
+        showToast('一次只能导出属于同一产品模板的商品草稿');
+        return;
+    }
+    showTiktokExportDialog.value = true;
+    tiktokExportLoading.value = true;
+    tiktokExportError.value = '';
+    tiktokExportCatalogId.value = tiktokCatalogs.value[0]?.id || null;
+    tiktokExportCategory.value = '';
+    tiktokExportDefaultPrice.value = null;
+    tiktokExportDefaultQuantity.value = 999;
+    tiktokExportCod.value = 'Y';
+    tiktokExportAttributes.value = {};
+    tiktokExportOptions.value = null;
+    tiktokExportOverrides.value = Object.fromEntries(selectedDrafts.value.map(draft => [draft.id, { price: null, quantity: null }]));
+    try {
+        if (!tiktokExportCatalogId.value)
+            throw new Error('请先由管理员新增 TK 类目库');
+        tiktokExportOptions.value = (await api.get('/tiktok-export/options', { headers: headers.value, params: { category_catalog_id: tiktokExportCatalogId.value } })).data;
+    }
+    catch (e) {
+        tiktokExportError.value = e.response?.data?.detail || e.message || '加载 TikTok 模板选项失败';
+    }
+    finally {
+        tiktokExportLoading.value = false;
+    }
+}
+function changeTiktokExportCategory() { tiktokExportAttributes.value = {}; }
+async function changeTiktokExportCatalog() {
+    tiktokExportCategory.value = '';
+    tiktokExportAttributes.value = {};
+    tiktokExportOptions.value = null;
+    if (!tiktokExportCatalogId.value)
+        return;
+    try {
+        tiktokExportLoading.value = true;
+        tiktokExportError.value = '';
+        tiktokExportOptions.value = (await api.get('/tiktok-export/options', { headers: headers.value, params: { category_catalog_id: tiktokExportCatalogId.value } })).data;
+    }
+    catch (e) {
+        tiktokExportError.value = e.response?.data?.detail || '加载 TK 类目库失败';
+    }
+    finally {
+        tiktokExportLoading.value = false;
+    }
+}
+function hasTiktokAttributeValue(value) { return Boolean(value?.trim()); }
+function tiktokAttributeMode(field) {
+    const mode = ['single', 'multiple'].includes(field.input_mode) ? 'select' : field.input_mode || (!field.options?.length ? 'text' : field.allow_custom ? 'select_or_text' : 'select');
+    return { text: '手动填写', select: '选择', select_or_text: '选择或手动填写' }[mode] || '手动填写';
+}
+function tiktokAttributePlaceholder(field) {
+    if (field.input_type === 'url')
+        return '请输入 http:// 或 https:// 开头的 URL';
+    const mode = ['single', 'multiple'].includes(field.input_mode) ? 'select' : field.input_mode || (!field.options?.length ? 'text' : field.allow_custom ? 'select_or_text' : 'select');
+    if (mode === 'select')
+        return '输入模板支持的属性值；多个值用英文逗号分隔';
+    if (mode === 'select_or_text')
+        return '输入支持的属性值，或手动填写其他值';
+    return '请输入属性值';
+}
+async function exportSelectedDrafts() {
+    const defaultPrice = Number(tiktokExportDefaultPrice.value);
+    const defaultQuantity = Number(tiktokExportDefaultQuantity.value);
+    if (!tiktokExportCatalogId.value) {
+        tiktokExportError.value = '请选择 TK 类目库';
+        return;
+    }
+    if (!tiktokExportCategory.value) {
+        tiktokExportError.value = '请选择 TikTok 商品类目';
+        return;
+    }
+    if (!Number.isFinite(defaultPrice) || defaultPrice < 0.01 || defaultPrice > 999999) {
+        tiktokExportError.value = '默认售价须为 0.01–999999';
+        return;
+    }
+    if (!Number.isInteger(defaultQuantity) || defaultQuantity < 0 || defaultQuantity > 999999) {
+        tiktokExportError.value = '默认库存须为 0–999999 的整数';
+        return;
+    }
+    const productOverrides = [];
+    for (const draft of selectedDrafts.value) {
+        const value = tiktokExportOverrides.value[draft.id] || {};
+        const item = { draft_id: draft.id };
+        if (value.price !== null && value.price !== '') {
+            const price = Number(value.price);
+            if (!Number.isFinite(price) || price < 0.01 || price > 999999) {
+                tiktokExportError.value = `商品草稿 #${draft.id} 的售价覆盖值无效`;
+                return;
+            }
+            item.price = price;
+        }
+        if (value.quantity !== null && value.quantity !== '') {
+            const quantity = Number(value.quantity);
+            if (!Number.isInteger(quantity) || quantity < 0 || quantity > 999999) {
+                tiktokExportError.value = `商品草稿 #${draft.id} 的库存覆盖值无效`;
+                return;
+            }
+            item.quantity = quantity;
+        }
+        if (Object.keys(item).length > 1)
+            productOverrides.push(item);
+    }
+    try {
+        tiktokExportLoading.value = true;
+        tiktokExportError.value = '';
+        const response = await api.post('/drafts/export-tiktok', {
+            draft_ids: selectedDraftIds.value,
+            category_catalog_id: tiktokExportCatalogId.value,
+            category: tiktokExportCategory.value,
+            default_price: defaultPrice,
+            default_quantity: defaultQuantity,
+            cod: tiktokExportCod.value,
+            attributes: Object.fromEntries(Object.entries(tiktokExportAttributes.value).filter(([, value]) => hasTiktokAttributeValue(value))),
+            product_overrides: productOverrides,
+        }, { headers: headers.value, responseType: 'blob' });
+        const disposition = String(response.headers['content-disposition'] || '');
+        const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+        const filename = utf8Name ? decodeURIComponent(utf8Name) : 'TikTok批量上传.xlsx';
+        const url = URL.createObjectURL(response.data);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        showTiktokExportDialog.value = false;
+        selectedDraftIds.value = [];
+        await refreshDraftList();
+        showToast('TikTok 批量上传表格已生成');
+    }
+    catch (e) {
+        if (e.response?.data instanceof Blob) {
+            try {
+                tiktokExportError.value = JSON.parse(await e.response.data.text()).detail || '导出失败';
+            }
+            catch {
+                tiktokExportError.value = '导出 TikTok 表格失败';
+            }
+        }
+        else
+            tiktokExportError.value = e.response?.data?.detail || '导出 TikTok 表格失败';
+    }
+    finally {
+        tiktokExportLoading.value = false;
+    }
+}
+function openTiktokCatalogCreateDialog() {
+    tiktokCatalogName.value = '';
+    tiktokCatalogFile.value = null;
+    tiktokCatalogError.value = '';
+    showTiktokCatalogDialog.value = true;
+}
+function onTiktokCatalogFileChange(event) {
+    tiktokCatalogFile.value = event.target.files?.[0] || null;
+}
+async function createTiktokCatalog() {
+    const name = tiktokCatalogName.value.trim();
+    if (!name || !tiktokCatalogFile.value) {
+        tiktokCatalogError.value = '请填写类目库名称并选择 TikTok XLSX 模板';
+        return;
+    }
+    const form = new FormData();
+    form.append('name', name);
+    form.append('file', tiktokCatalogFile.value);
+    try {
+        tiktokCatalogLoading.value = true;
+        tiktokCatalogError.value = '';
+        await api.post('/tiktok-category-catalogs', form, { headers: headers.value });
+        showTiktokCatalogDialog.value = false;
+        tiktokCatalogs.value = (await api.get('/tiktok-category-catalogs', { headers: headers.value })).data;
+        showToast('TK 类目库已导入');
+    }
+    catch (e) {
+        tiktokCatalogError.value = e.response?.data?.detail || '导入 TK 类目库失败';
+    }
+    finally {
+        tiktokCatalogLoading.value = false;
+    }
+}
+async function openTiktokCatalogDetail(catalog) {
+    try {
+        tiktokCatalogLoading.value = true;
+        tiktokCatalogError.value = '';
+        const { data } = await api.get('/tiktok-export/options', { headers: headers.value, params: { category_catalog_id: catalog.id } });
+        managingTiktokCatalog.value = catalog;
+        managingTiktokCatalogOptions.value = data;
+        managingTiktokCategory.value = data.categories?.[0]?.name || '';
+        showTiktokCatalogDetailDialog.value = true;
+    }
+    catch (e) {
+        tiktokCatalogError.value = e.response?.data?.detail || '读取 TK 类目库失败';
+    }
+    finally {
+        tiktokCatalogLoading.value = false;
+    }
+}
+async function setTiktokAttributeInputMode(field, inputMode) {
+    if (!managingTiktokCatalog.value)
+        return;
+    try {
+        tiktokCatalogLoading.value = true;
+        tiktokCatalogError.value = '';
+        const { data } = await api.patch(`/tiktok-category-catalogs/${managingTiktokCatalog.value.id}`, {
+            attribute_input_modes: [{ category: managingTiktokCategory.value, field: field.field, input_mode: inputMode }],
+        }, { headers: headers.value });
+        managingTiktokCatalogOptions.value = data.options || managingTiktokCatalogOptions.value;
+        tiktokExportOptions.value = null;
+        showToast(`${field.label} 已设置为${tiktokAttributeMode({ ...field, input_mode: inputMode })}`);
+    }
+    catch (e) {
+        tiktokCatalogError.value = e.response?.data?.detail || '保存属性选择方式失败';
+    }
+    finally {
+        tiktokCatalogLoading.value = false;
+    }
+}
+function onTiktokInputModeChange(field, event) {
+    setTiktokAttributeInputMode(field, event.target.value);
+}
+async function deleteTiktokCatalog(catalog) {
+    if (!confirm(`确定删除 TK 类目库“${catalog.name}”吗？`))
+        return;
+    try {
+        tiktokCatalogLoading.value = true;
+        tiktokCatalogError.value = '';
+        await api.delete(`/tiktok-category-catalogs/${catalog.id}`, { headers: headers.value });
+        tiktokCatalogs.value = tiktokCatalogs.value.filter(item => item.id !== catalog.id);
+        showToast('TK 类目库已删除');
+    }
+    catch (e) {
+        tiktokCatalogError.value = e.response?.data?.detail || '删除 TK 类目库失败';
+    }
+    finally {
+        tiktokCatalogLoading.value = false;
+    }
+}
 async function openClaimMaterialsDialog(task) { try {
     claimingTask.value = (await api.get(`/tasks/${task.id}`, { headers: headers.value })).data;
     selectedClaimResultUrls.value = [];
@@ -1168,7 +1448,171 @@ if (!__VLS_ctx.token) {
         (__VLS_ctx.error);
     }
 }
-else {
+if (__VLS_ctx.showTiktokCatalogDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTiktokCatalogDialog))
+                    return;
+                !__VLS_ctx.tiktokCatalogLoading && (__VLS_ctx.showTiktokCatalogDialog = false);
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card tiktok-catalog-create-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTiktokCatalogDialog))
+                    return;
+                __VLS_ctx.showTiktokCatalogDialog = false;
+            } },
+        ...{ class: "modal-close" },
+        disabled: (__VLS_ctx.tiktokCatalogLoading),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+        ...{ class: "required" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "120",
+        placeholder: "例如：穆斯林服装",
+    });
+    (__VLS_ctx.tiktokCatalogName);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+        ...{ class: "required" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        ...{ onChange: (__VLS_ctx.onTiktokCatalogFileChange) },
+        type: "file",
+        accept: ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+    if (__VLS_ctx.tiktokCatalogError) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "error material-draft-error" },
+        });
+        (__VLS_ctx.tiktokCatalogError);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTiktokCatalogDialog))
+                    return;
+                __VLS_ctx.showTiktokCatalogDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.tiktokCatalogLoading),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.createTiktokCatalog) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.tiktokCatalogLoading),
+    });
+    (__VLS_ctx.tiktokCatalogLoading ? '解析中…' : '上传并解析');
+}
+if (__VLS_ctx.showTiktokCatalogDetailDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTiktokCatalogDetailDialog))
+                    return;
+                __VLS_ctx.showTiktokCatalogDetailDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card tiktok-catalog-detail-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTiktokCatalogDetailDialog))
+                    return;
+                __VLS_ctx.showTiktokCatalogDetailDialog = false;
+            } },
+        ...{ class: "modal-close" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    (__VLS_ctx.managingTiktokCatalog?.name);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.managingTiktokCategory),
+    });
+    for (const [category] of __VLS_getVForSourceType((__VLS_ctx.managingTiktokCatalogOptions?.categories || []))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (category.name),
+            value: (category.name),
+        });
+        (category.name);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "tiktok-property-list" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "tiktok-property-head" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    for (const [field] of __VLS_getVForSourceType((__VLS_ctx.managingTiktokCategoryAttributes))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            key: (field.field),
+            ...{ class: "tiktok-property-row" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        (field.label);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        (field.field);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (field.required ? '必填' : '可选');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (field.options?.length || 0);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (...[$event]) => {
+                    if (!(__VLS_ctx.showTiktokCatalogDetailDialog))
+                        return;
+                    __VLS_ctx.onTiktokInputModeChange(field, $event);
+                } },
+            ...{ class: "tiktok-input-mode-select" },
+            value: (['single', 'multiple'].includes(field.input_mode) ? 'select' : field.input_mode || (!field.options?.length ? 'text' : field.allow_custom ? 'select_or_text' : 'select')),
+            disabled: (__VLS_ctx.tiktokCatalogLoading),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "text",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "select",
+            disabled: (!field.options?.length),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "select_or_text",
+            disabled: (!field.options?.length),
+        });
+    }
+    if (!__VLS_ctx.managingTiktokCategoryAttributes.length) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "empty" },
+        });
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTiktokCatalogDetailDialog))
+                    return;
+                __VLS_ctx.showTiktokCatalogDetailDialog = false;
+            } },
+        ...{ class: "primary" },
+    });
+}
+if (__VLS_ctx.token) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.main, __VLS_intrinsicElements.main)({
         ...{ class: "app-shell" },
     });
@@ -1182,7 +1626,7 @@ else {
     for (const [item] of __VLS_getVForSourceType((__VLS_ctx.visibleNav))) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
-                    if (!!(!__VLS_ctx.token))
+                    if (!(__VLS_ctx.token))
                         return;
                     __VLS_ctx.page = item.key;
                 } },
@@ -1227,7 +1671,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
-                    if (!!(!__VLS_ctx.token))
+                    if (!(__VLS_ctx.token))
                         return;
                     if (!(__VLS_ctx.page === 'dashboard'))
                         return;
@@ -1262,7 +1706,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
-                    if (!!(!__VLS_ctx.token))
+                    if (!(__VLS_ctx.token))
                         return;
                     if (!(__VLS_ctx.page === 'dashboard'))
                         return;
@@ -1300,7 +1744,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
-                    if (!!(!__VLS_ctx.token))
+                    if (!(__VLS_ctx.token))
                         return;
                     if (!(__VLS_ctx.page === 'dashboard'))
                         return;
@@ -1311,7 +1755,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
-                    if (!!(!__VLS_ctx.token))
+                    if (!(__VLS_ctx.token))
                         return;
                     if (!(__VLS_ctx.page === 'dashboard'))
                         return;
@@ -1338,7 +1782,7 @@ else {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -1364,7 +1808,7 @@ else {
         if (__VLS_ctx.user?.role === 'company_admin') {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -1379,7 +1823,7 @@ else {
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
-                    if (!!(!__VLS_ctx.token))
+                    if (!(__VLS_ctx.token))
                         return;
                     if (!!(__VLS_ctx.page === 'dashboard'))
                         return;
@@ -1392,7 +1836,7 @@ else {
         for (const [group] of __VLS_getVForSourceType((__VLS_ctx.templateGroups))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -1457,7 +1901,7 @@ else {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -1469,7 +1913,7 @@ else {
             if (!t.is_platform && __VLS_ctx.user?.role === 'company_admin') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -1482,7 +1926,7 @@ else {
                 });
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -1528,7 +1972,7 @@ else {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
-                    if (!!(!__VLS_ctx.token))
+                    if (!(__VLS_ctx.token))
                         return;
                     if (!!(__VLS_ctx.page === 'dashboard'))
                         return;
@@ -1621,7 +2065,7 @@ else {
         if (__VLS_ctx.creativeAssets.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -1648,7 +2092,7 @@ else {
         if (__VLS_ctx.creativeAssets.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -1716,7 +2160,7 @@ else {
             if (!__VLS_ctx.personalWhiteImages.length) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -1926,7 +2370,7 @@ else {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
                 ...{ onChange: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -1950,7 +2394,7 @@ else {
             if (task.parameters?.print_url) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -2000,7 +2444,7 @@ else {
             if (task.provider_task_id) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -2033,7 +2477,7 @@ else {
             if (task.result_urls?.[0]) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -2069,7 +2513,7 @@ else {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -2086,7 +2530,7 @@ else {
             if (task.status === 'failed') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -2108,7 +2552,7 @@ else {
             if (task.result_count || task.result_urls?.length) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -2153,7 +2597,7 @@ else {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -2174,7 +2618,7 @@ else {
             (__VLS_ctx.taskPageCount);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -2281,7 +2725,7 @@ else {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -2337,7 +2781,7 @@ else {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
                 ...{ onChange: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -2357,7 +2801,7 @@ else {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -2431,7 +2875,7 @@ else {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -2454,7 +2898,7 @@ else {
             (__VLS_ctx.materialPageCount);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -2479,7 +2923,7 @@ else {
             ...{ class: "page" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "section-heading" },
+            ...{ class: "section-heading draft-heading" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -2490,23 +2934,7 @@ else {
             ...{ class: "draft-template-filter" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            ...{ onChange: (...[$event]) => {
-                    if (!!(!__VLS_ctx.token))
-                        return;
-                    if (!!(__VLS_ctx.page === 'dashboard'))
-                        return;
-                    if (!!(__VLS_ctx.page === 'templates'))
-                        return;
-                    if (!!(__VLS_ctx.page === 'pod'))
-                        return;
-                    if (!!(__VLS_ctx.page === 'tasks'))
-                        return;
-                    if (!!(__VLS_ctx.page === 'materials'))
-                        return;
-                    if (!(__VLS_ctx.page === 'drafts'))
-                        return;
-                    __VLS_ctx.currentDraftPage = 1;
-                } },
+            ...{ onChange: (__VLS_ctx.changeDraftTemplateFilter) },
             value: (__VLS_ctx.draftTemplateFilterId),
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
@@ -2538,9 +2966,12 @@ else {
                 (member.name);
             }
         }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "draft-heading-actions" },
+        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
-                    if (!!(!__VLS_ctx.token))
+                    if (!(__VLS_ctx.token))
                         return;
                     if (!!(__VLS_ctx.page === 'dashboard'))
                         return;
@@ -2558,12 +2989,56 @@ else {
                 } },
             ...{ class: "primary" },
         });
+        if (__VLS_ctx.selectedDraftIds.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+                ...{ class: "draft-export-bar" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            (__VLS_ctx.selectedDraftIds.length);
+            (__VLS_ctx.MAX_TIKTOK_EXPORT_DRAFTS);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.openTiktokExportDialog) },
+                ...{ class: "primary" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!(__VLS_ctx.selectedDraftIds.length))
+                            return;
+                        __VLS_ctx.selectedDraftIds = [];
+                    } },
+                ...{ class: "ghost" },
+            });
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "draft-table" },
+            ...{ class: "draft-table task-table" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "thead draft-thead" },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "material-checkbox" },
+            'aria-label': "选择当前页商品草稿",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            ...{ onChange: (__VLS_ctx.togglePagedDrafts) },
+            type: "checkbox",
+            checked: (__VLS_ctx.allPagedDraftsSelected),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -2579,11 +3054,38 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 key: (draft.id),
                 ...{ class: "trow draft-trow" },
+                ...{ class: ({ selected: __VLS_ctx.selectedDraftIds.includes(draft.id) }) },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+                ...{ class: "material-checkbox" },
+                'aria-label': (`选择商品草稿 ${draft.id}`),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                ...{ onChange: (...[$event]) => {
+                        if (!(__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        __VLS_ctx.toggleDraftSelection(draft.id);
+                    } },
+                type: "checkbox",
+                checked: (__VLS_ctx.selectedDraftIds.includes(draft.id)),
+                disabled: (__VLS_ctx.selectedDraftIds.length >= __VLS_ctx.MAX_TIKTOK_EXPORT_DRAFTS && !__VLS_ctx.selectedDraftIds.includes(draft.id)),
             });
             if (draft.image_urls?.[0]) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -2630,6 +3132,8 @@ else {
             (new Date(draft.updated_at || draft.created_at).toLocaleString());
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (draft.updated_by_name || '历史记录缺失');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (draft.export_count || 0);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "chip" },
                 ...{ class: (draft.tiktok_collect_box_id ? 'blue' : 'orange') },
@@ -2638,7 +3142,7 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -2658,7 +3162,7 @@ else {
             if (!draft.tiktok_collect_box_id) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -2720,7 +3224,7 @@ else {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -2745,7 +3249,7 @@ else {
             (__VLS_ctx.draftPageCount);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -2778,7 +3282,7 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
-                    if (!!(!__VLS_ctx.token))
+                    if (!(__VLS_ctx.token))
                         return;
                     if (!!(__VLS_ctx.page === 'dashboard'))
                         return;
@@ -2840,7 +3344,7 @@ else {
             if (member.role === 'member') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -2863,7 +3367,7 @@ else {
                 });
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -2890,7 +3394,7 @@ else {
             for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.aiProviders))) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
-                            if (!!(!__VLS_ctx.token))
+                            if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
                                 return;
@@ -3002,7 +3506,7 @@ else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.token))
+                        if (!(__VLS_ctx.token))
                             return;
                         if (!!(__VLS_ctx.page === 'dashboard'))
                             return;
@@ -3029,6 +3533,115 @@ else {
                 ...{ class: "empty" },
             });
             (__VLS_ctx.company?.miaoshou_configured ? '暂无已同步店铺，点击“同步妙手店铺”开始获取。' : '配置妙手 API Key 后即可同步店铺。');
+        }
+    }
+    else if (__VLS_ctx.page === 'tiktok-catalogs' && __VLS_ctx.user?.role === 'company_admin') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "page" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "section-heading" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.openTiktokCatalogCreateDialog) },
+            ...{ class: "primary" },
+        });
+        if (__VLS_ctx.tiktokCatalogError) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "error" },
+            });
+            (__VLS_ctx.tiktokCatalogError);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "draft-table" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "thead tiktok-catalog-grid" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        for (const [catalog] of __VLS_getVForSourceType((__VLS_ctx.tiktokCatalogs))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                key: (catalog.id),
+                ...{ class: "trow tiktok-catalog-grid" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            (catalog.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (catalog.template_version || '—');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (catalog.source_filename);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (catalog.category_count);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (new Date(catalog.updated_at).toLocaleString());
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "tiktok-catalog-actions" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        if (!(__VLS_ctx.page === 'tiktok-catalogs' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        __VLS_ctx.openTiktokCatalogDetail(catalog);
+                    } },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        if (!(__VLS_ctx.page === 'tiktok-catalogs' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        __VLS_ctx.deleteTiktokCatalog(catalog);
+                    } },
+                ...{ class: "negative" },
+                disabled: (__VLS_ctx.tiktokCatalogLoading),
+            });
+        }
+        if (!__VLS_ctx.tiktokCatalogs.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
         }
     }
 }
@@ -4052,6 +4665,220 @@ if (__VLS_ctx.showMaterialDraftDialog) {
     });
     (__VLS_ctx.materialDraftSaving ? '创建中…' : '确认创建');
 }
+if (__VLS_ctx.showTiktokExportDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTiktokExportDialog))
+                    return;
+                !__VLS_ctx.tiktokExportLoading && (__VLS_ctx.showTiktokExportDialog = false);
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card tiktok-export-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTiktokExportDialog))
+                    return;
+                __VLS_ctx.showTiktokExportDialog = false;
+            } },
+        ...{ class: "modal-close" },
+        disabled: (__VLS_ctx.tiktokExportLoading),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.selectedDrafts.length);
+    if (__VLS_ctx.tiktokExportLoading && !__VLS_ctx.tiktokExportOptions) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "empty" },
+        });
+    }
+    else {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "tiktok-export-grid" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+            ...{ class: "required" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (__VLS_ctx.changeTiktokExportCatalog) },
+            value: (__VLS_ctx.tiktokExportCatalogId),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: (null),
+            disabled: true,
+        });
+        for (const [catalog] of __VLS_getVForSourceType((__VLS_ctx.tiktokCatalogs))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (catalog.id),
+                value: (catalog.id),
+            });
+            (catalog.name);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+            ...{ class: "required" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (__VLS_ctx.changeTiktokExportCategory) },
+            value: (__VLS_ctx.tiktokExportCategory),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "",
+            disabled: true,
+        });
+        for (const [category] of __VLS_getVForSourceType((__VLS_ctx.tiktokExportOptions?.categories || []))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (category.name),
+                value: (category.name),
+            });
+            (category.name);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+            ...{ class: "required" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            type: "number",
+            min: "0.01",
+            max: "999999",
+            step: "0.01",
+            placeholder: "请输入售价",
+        });
+        (__VLS_ctx.tiktokExportDefaultPrice);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+            ...{ class: "required" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            type: "number",
+            min: "0",
+            max: "999999",
+            step: "1",
+        });
+        (__VLS_ctx.tiktokExportDefaultQuantity);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+            ...{ class: "required" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.tiktokExportCod),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "Y",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "N",
+        });
+        if (__VLS_ctx.selectedTiktokCategoryAttributes.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+                ...{ class: "tiktok-attribute-section" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "tiktok-export-grid" },
+            });
+            for (const [field] of __VLS_getVForSourceType((__VLS_ctx.selectedTiktokCategoryAttributes))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+                    key: (field.field),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "tiktok-attribute-label" },
+                });
+                (field.label);
+                if (field.required) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+                        ...{ class: "required" },
+                    });
+                }
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
+                    ...{ class: "multi-value-hint" },
+                });
+                (__VLS_ctx.tiktokAttributeMode(field));
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                    value: (__VLS_ctx.tiktokExportAttributes[field.field]),
+                    type: "text",
+                    maxlength: "500",
+                    placeholder: (__VLS_ctx.tiktokAttributePlaceholder(field)),
+                });
+                if (field.options?.length) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
+                        ...{ class: "tiktok-supported-values" },
+                    });
+                    (field.options.join('、'));
+                }
+                else {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
+                        ...{ class: "tiktok-supported-values" },
+                    });
+                }
+            }
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "tiktok-product-overrides" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "tiktok-override-head" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        for (const [draft] of __VLS_getVForSourceType((__VLS_ctx.selectedDrafts))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                key: (draft.id),
+                ...{ class: "tiktok-override-row" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            (draft.id);
+            (draft.title);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                type: "number",
+                min: "0.01",
+                max: "999999",
+                step: "0.01",
+                placeholder: "使用默认售价",
+            });
+            (__VLS_ctx.tiktokExportOverrides[draft.id].price);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                type: "number",
+                min: "0",
+                max: "999999",
+                step: "1",
+                placeholder: "使用默认库存",
+            });
+            (__VLS_ctx.tiktokExportOverrides[draft.id].quantity);
+        }
+    }
+    if (__VLS_ctx.tiktokExportError) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "error material-draft-error" },
+        });
+        (__VLS_ctx.tiktokExportError);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showTiktokExportDialog))
+                    return;
+                __VLS_ctx.showTiktokExportDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.tiktokExportLoading),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.exportSelectedDrafts) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.tiktokExportLoading || !__VLS_ctx.tiktokExportOptions),
+    });
+    (__VLS_ctx.tiktokExportLoading ? '生成中…' : '生成并下载');
+}
 if (__VLS_ctx.showDraftEditDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
@@ -4872,6 +5699,28 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['full']} */ ;
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-catalog-create-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-error']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-catalog-detail-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-property-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-property-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-property-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-input-mode-select']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['app-shell']} */ ;
 /** @type {__VLS_StyleScopedClasses['logo']} */ ;
 /** @type {__VLS_StyleScopedClasses['content']} */ ;
@@ -5002,15 +5851,23 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-filter-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-template-filter']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-template-filter']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-heading-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-export-bar']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-checkbox']} */ ;
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-checkbox']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-thumbnail']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-product-title']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
@@ -5039,6 +5896,18 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['page']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-catalog-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-catalog-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-catalog-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['negative']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
@@ -5154,6 +6023,32 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['material-draft-sku-summary']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-sku-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-size-chart']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-export-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-export-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-attribute-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-export-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-attribute-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['multi-value-hint']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-supported-values']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-supported-values']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-product-overrides']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-override-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-override-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -5308,6 +6203,15 @@ const __VLS_self = (await import('vue')).defineComponent({
             showMiaoshouDialog: showMiaoshouDialog,
             miaoshouForm: miaoshouForm,
             miaoshouSaving: miaoshouSaving,
+            tiktokCatalogs: tiktokCatalogs,
+            tiktokCatalogLoading: tiktokCatalogLoading,
+            tiktokCatalogError: tiktokCatalogError,
+            showTiktokCatalogDialog: showTiktokCatalogDialog,
+            tiktokCatalogName: tiktokCatalogName,
+            showTiktokCatalogDetailDialog: showTiktokCatalogDetailDialog,
+            managingTiktokCatalog: managingTiktokCatalog,
+            managingTiktokCatalogOptions: managingTiktokCatalogOptions,
+            managingTiktokCategory: managingTiktokCategory,
             materialUploading: materialUploading,
             materialUploadError: materialUploadError,
             materialDownloading: materialDownloading,
@@ -5332,6 +6236,19 @@ const __VLS_self = (await import('vue')).defineComponent({
             draftEditSaving: draftEditSaving,
             draftEditError: draftEditError,
             publishingDraftId: publishingDraftId,
+            selectedDraftIds: selectedDraftIds,
+            showTiktokExportDialog: showTiktokExportDialog,
+            tiktokExportOptions: tiktokExportOptions,
+            tiktokExportLoading: tiktokExportLoading,
+            tiktokExportError: tiktokExportError,
+            MAX_TIKTOK_EXPORT_DRAFTS: MAX_TIKTOK_EXPORT_DRAFTS,
+            tiktokExportCatalogId: tiktokExportCatalogId,
+            tiktokExportCategory: tiktokExportCategory,
+            tiktokExportDefaultPrice: tiktokExportDefaultPrice,
+            tiktokExportDefaultQuantity: tiktokExportDefaultQuantity,
+            tiktokExportCod: tiktokExportCod,
+            tiktokExportAttributes: tiktokExportAttributes,
+            tiktokExportOverrides: tiktokExportOverrides,
             draftPageSize: draftPageSize,
             currentDraftPage: currentDraftPage,
             draftTemplateFilterId: draftTemplateFilterId,
@@ -5419,7 +6336,14 @@ const __VLS_self = (await import('vue')).defineComponent({
             draftPageCount: draftPageCount,
             visibleDraftPage: visibleDraftPage,
             pagedDrafts: pagedDrafts,
+            selectedDrafts: selectedDrafts,
+            allPagedDraftsSelected: allPagedDraftsSelected,
+            selectedTiktokCategoryAttributes: selectedTiktokCategoryAttributes,
+            managingTiktokCategoryAttributes: managingTiktokCategoryAttributes,
             changeDraftPageSize: changeDraftPageSize,
+            toggleDraftSelection: toggleDraftSelection,
+            togglePagedDrafts: togglePagedDrafts,
+            changeDraftTemplateFilter: changeDraftTemplateFilter,
             changeDraftCreatorFilter: changeDraftCreatorFilter,
             taskPageCount: taskPageCount,
             visibleTaskPage: visibleTaskPage,
@@ -5486,6 +6410,18 @@ const __VLS_self = (await import('vue')).defineComponent({
             openImagePreview: openImagePreview,
             saveDraftEdit: saveDraftEdit,
             publishDraftToMiaoshou: publishDraftToMiaoshou,
+            openTiktokExportDialog: openTiktokExportDialog,
+            changeTiktokExportCategory: changeTiktokExportCategory,
+            changeTiktokExportCatalog: changeTiktokExportCatalog,
+            tiktokAttributeMode: tiktokAttributeMode,
+            tiktokAttributePlaceholder: tiktokAttributePlaceholder,
+            exportSelectedDrafts: exportSelectedDrafts,
+            openTiktokCatalogCreateDialog: openTiktokCatalogCreateDialog,
+            onTiktokCatalogFileChange: onTiktokCatalogFileChange,
+            createTiktokCatalog: createTiktokCatalog,
+            openTiktokCatalogDetail: openTiktokCatalogDetail,
+            onTiktokInputModeChange: onTiktokInputModeChange,
+            deleteTiktokCatalog: deleteTiktokCatalog,
             openClaimMaterialsDialog: openClaimMaterialsDialog,
             toggleClaimResult: toggleClaimResult,
             claimMaterials: claimMaterials,

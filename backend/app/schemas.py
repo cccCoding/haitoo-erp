@@ -297,6 +297,44 @@ class DraftUpdate(BaseModel):
         return value
 
 
+class TiktokDraftProductOverride(BaseModel):
+    draft_id: int = Field(ge=1)
+    price: float | None = Field(default=None, ge=0.01, le=999999)
+    quantity: int | None = Field(default=None, ge=0, le=999999)
+
+
+class TiktokDraftExportInput(BaseModel):
+    draft_ids: list[int] = Field(min_length=1, max_length=50)
+    category_catalog_id: int = Field(ge=1)
+    category: str = Field(min_length=1, max_length=255)
+    default_price: float = Field(ge=0.01, le=999999)
+    default_quantity: int = Field(default=999, ge=0, le=999999)
+    cod: Literal["Y", "N"] = "Y"
+    attributes: dict[str, str | list[str]] = Field(default_factory=dict, max_length=14)
+    product_overrides: list[TiktokDraftProductOverride] = Field(default_factory=list, max_length=50)
+
+
+class TiktokCategoryAttributeInputModeUpdate(BaseModel):
+    category: str = Field(min_length=1, max_length=255)
+    field: str = Field(min_length=1, max_length=255)
+    input_mode: Literal["text", "select", "select_or_text"]
+
+
+class TiktokCategoryCatalogUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    attribute_input_modes: list[TiktokCategoryAttributeInputModeUpdate] = Field(default_factory=list, max_length=1000)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("类目库名称不能为空")
+        return value
+
+
 class MemberCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     user_code: str = Field(min_length=2, max_length=2)

@@ -17,6 +17,9 @@ const showMemberCredentialDialog = ref(false), credentialMember = ref<any>(null)
 const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), myAccountSaving = ref(false)
 const managedShops = ref<any[]>([]), shopLoading = ref(false), shopError = ref('')
 const showMiaoshouDialog = ref(false), miaoshouForm = ref({ app_id: '', app_secret: '' }), miaoshouSaving = ref(false)
+const tiktokCatalogs = ref<any[]>([]), tiktokCatalogLoading = ref(false), tiktokCatalogError = ref('')
+const showTiktokCatalogDialog = ref(false), tiktokCatalogName = ref(''), tiktokCatalogFile = ref<File | null>(null)
+const showTiktokCatalogDetailDialog = ref(false), managingTiktokCatalog = ref<any>(null), managingTiktokCatalogOptions = ref<any>(null), managingTiktokCategory = ref('')
 const materialUploading = ref(false), materialUploadError = ref('')
 const materialDownloading = ref(false)
 const selectedMaterialAssetIds = ref<number[]>([]), materialTemplateFilterId = ref<number | null>(null), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref<number | null>(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false)
@@ -27,6 +30,9 @@ const templateSaving = ref(false)
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'], MAX_IMAGE_BYTES = 5 * 1024 * 1024
 const showDraftEditDialog = ref(false), editingDraft = ref<any>(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('')
 const publishingDraftId = ref<number | null>(null)
+const selectedDraftIds = ref<number[]>([]), showTiktokExportDialog = ref(false), tiktokExportOptions = ref<any>(null), tiktokExportLoading = ref(false), tiktokExportError = ref('')
+const MAX_TIKTOK_EXPORT_DRAFTS = 50
+const tiktokExportCatalogId = ref<number | null>(null), tiktokExportCategory = ref(''), tiktokExportDefaultPrice = ref<number | null>(null), tiktokExportDefaultQuantity = ref<number>(999), tiktokExportCod = ref<'Y' | 'N'>('Y'), tiktokExportAttributes = ref<Record<string, string>>({}), tiktokExportOverrides = ref<Record<number, {price:number | null; quantity:number | null}>>({})
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref<number | null>(null), draftCreatorFilterId = ref<number | null>(null)
 const taskPageSize = ref(20), currentTaskPage = ref(1), taskTotal = ref(0), taskActiveCount = ref(0), taskStatusCounts = ref<Record<string, number>>({}), taskCreatorFilterId = ref<number | null>(null)
 const taskStatusFilter = ref('awaiting_selection'), taskCreatedFrom = ref(''), taskCreatedTo = ref('')
@@ -48,7 +54,7 @@ const showPersonalResourcesDialog = ref(false), personalResourceTab = ref<'white
 const showTeamResourcesDialog = ref(false), teamResourceTab = ref<'white-images' | 'prompts'>('white-images'), teamResourceUserId = ref<number | null>(null), teamResourceTemplateId = ref<number | null>(null), teamWhiteImages = ref<any[]>([]), teamPrompts = ref<any[]>([]), teamResourcesLoading = ref(false), teamResourceQuery = ref('')
 const editingWhiteImage = ref<any>(null), whiteImageForm = ref({ template_id: null as number | null, name: '', file: null as File | null })
 const editingPersonalPrompt = ref<any>(null), personalPromptForm = ref({ template_id: null as number | null, name: '', content: '' })
-const nav = [{key:'dashboard', icon:'◈', label:'工作台'}, {key:'templates', icon:'▦', label:'产品模板'}, {key:'pod', icon:'✦', label:'AI创作'}, {key:'tasks', icon:'◌', label:'任务中心'}, {key:'materials', icon:'◈', label:'素材库'}, {key:'drafts', icon:'▤', label:'商品草稿'}, {key:'members', icon:'♙', label:'成员管理', adminOnly:true}, {key:'shops', icon:'▣', label:'店铺管理', adminOnly:true}]
+const nav = [{key:'dashboard', icon:'◈', label:'工作台'}, {key:'templates', icon:'▦', label:'产品模板'}, {key:'pod', icon:'✦', label:'AI创作'}, {key:'tasks', icon:'◌', label:'任务中心'}, {key:'materials', icon:'◈', label:'素材库'}, {key:'drafts', icon:'▤', label:'商品草稿'}, {key:'members', icon:'♙', label:'成员管理', adminOnly:true}, {key:'shops', icon:'▣', label:'店铺管理', adminOnly:true}, {key:'tiktok-catalogs', icon:'▧', label:'TK类目管理', adminOnly:true}]
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }))
 const visibleNav = computed(() => nav.filter(item => !item.adminOnly || user.value?.role === 'company_admin'))
 const pageTitle = computed(() => nav.find(x => x.key === page.value)?.label || '')
@@ -91,11 +97,42 @@ const pagedDrafts = computed(() => {
   const start = (visibleDraftPage.value - 1) * draftPageSize.value
   return filteredDrafts.value.slice(start, start + draftPageSize.value)
 })
+const selectedDrafts = computed(() => drafts.value.filter(draft => selectedDraftIds.value.includes(draft.id)))
+const allPagedDraftsSelected = computed(() => Boolean(pagedDrafts.value.length) && pagedDrafts.value.every(draft => selectedDraftIds.value.includes(draft.id)))
+const selectedTiktokCategoryAttributes = computed(() => tiktokExportOptions.value?.attributes_by_category?.[tiktokExportCategory.value] || [])
+const managingTiktokCategoryAttributes = computed(() => managingTiktokCatalogOptions.value?.attributes_by_category?.[managingTiktokCategory.value] || [])
 function changeDraftPageSize() { currentDraftPage.value = 1 }
-async function changeDraftCreatorFilter() { currentDraftPage.value = 1; await refreshDraftList() }
+function toggleDraftSelection(draftId: number) {
+  if (selectedDraftIds.value.includes(draftId)) {
+    selectedDraftIds.value = selectedDraftIds.value.filter(id => id !== draftId)
+    return
+  }
+  if (selectedDraftIds.value.length >= MAX_TIKTOK_EXPORT_DRAFTS) {
+    showToast(`一次最多选择 ${MAX_TIKTOK_EXPORT_DRAFTS} 条商品草稿`)
+    return
+  }
+  selectedDraftIds.value = [...selectedDraftIds.value, draftId]
+}
+function togglePagedDrafts() {
+  const pageIds = pagedDrafts.value.map(draft => draft.id)
+  if (allPagedDraftsSelected.value) {
+    selectedDraftIds.value = selectedDraftIds.value.filter(id => !pageIds.includes(id))
+    return
+  }
+  const remaining = MAX_TIKTOK_EXPORT_DRAFTS - selectedDraftIds.value.length
+  const candidates = pageIds.filter(id => !selectedDraftIds.value.includes(id))
+  const additions = candidates.slice(0, remaining)
+  selectedDraftIds.value = [...selectedDraftIds.value, ...additions]
+  if (additions.length < candidates.length) {
+    showToast(`一次最多选择 ${MAX_TIKTOK_EXPORT_DRAFTS} 条商品草稿`)
+  }
+}
+function changeDraftTemplateFilter() { currentDraftPage.value = 1; selectedDraftIds.value = [] }
+async function changeDraftCreatorFilter() { currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList() }
 async function refreshDraftList() {
   const { data } = await api.get('/drafts', { headers: headers.value, params: { creator_id: draftCreatorFilterId.value } })
   drafts.value = data
+  selectedDraftIds.value = selectedDraftIds.value.filter(id => data.some((draft:any) => draft.id === id))
 }
 const taskPageCount = computed(() => Math.max(1, Math.ceil(taskTotal.value / taskPageSize.value)))
 const visibleTaskPage = computed(() => Math.min(currentTaskPage.value, taskPageCount.value))
@@ -158,8 +195,8 @@ async function refresh() {
     draftCreatorFilterId.value = user.value.id
     creatorFiltersInitialized.value = true
   }
-  const [s, t, g, task, material, d, providers] = await Promise.all([api.get('/shops',h), api.get('/templates',h), api.get('/template-groups',h), api.get('/tasks',{...h,params:taskQueryParams()}), api.get('/material-assets',{...h,params:{page:currentMaterialPage.value,page_size:materialPageSize.value,creator_id:materialCreatorFilterId.value,template_id:materialTemplateFilterId.value}}), api.get('/drafts',{...h,params:{creator_id:draftCreatorFilterId.value}}), api.get('/ai-providers',h)])
-  shops.value=s.data; templates.value=t.data; templateGroups.value=g.data; applyTaskPage(task.data); applyMaterialPage(material.data); drafts.value=d.data; aiProviders.value=providers.data
+  const [s, t, g, task, material, d, providers, catalogs] = await Promise.all([api.get('/shops',h), api.get('/templates',h), api.get('/template-groups',h), api.get('/tasks',{...h,params:taskQueryParams()}), api.get('/material-assets',{...h,params:{page:currentMaterialPage.value,page_size:materialPageSize.value,creator_id:materialCreatorFilterId.value,template_id:materialTemplateFilterId.value}}), api.get('/drafts',{...h,params:{creator_id:draftCreatorFilterId.value}}), api.get('/ai-providers',h), api.get('/tiktok-category-catalogs',h)])
+  shops.value=s.data; templates.value=t.data; templateGroups.value=g.data; applyTaskPage(task.data); applyMaterialPage(material.data); drafts.value=d.data; aiProviders.value=providers.data; tiktokCatalogs.value=catalogs.data
   // 后台停用当前所选模型后，刷新时立即切换到仍启用的默认模型，避免提交已停用的值。
   if (!availableAiProviders.value.some(item => item.provider === creativeProvider.value)) {
     creativeProvider.value = availableAiProviders.value.find(item => item.is_default)?.provider || availableAiProviders.value[0]?.provider || ''
@@ -439,6 +476,173 @@ async function publishDraftToMiaoshou(draft: any) {
     publishingDraftId.value = null
   }
 }
+async function openTiktokExportDialog() {
+  if (!selectedDrafts.value.length) return
+  const templateIds = new Set(selectedDrafts.value.map(draft => draft.template_id))
+  if (templateIds.size !== 1 || templateIds.has(null)) { showToast('一次只能导出属于同一产品模板的商品草稿'); return }
+  showTiktokExportDialog.value = true
+  tiktokExportLoading.value = true
+  tiktokExportError.value = ''
+  tiktokExportCatalogId.value = tiktokCatalogs.value[0]?.id || null
+  tiktokExportCategory.value = ''
+  tiktokExportDefaultPrice.value = null
+  tiktokExportDefaultQuantity.value = 999
+  tiktokExportCod.value = 'Y'
+  tiktokExportAttributes.value = {}
+  tiktokExportOptions.value = null
+  tiktokExportOverrides.value = Object.fromEntries(selectedDrafts.value.map(draft => [draft.id, { price: null, quantity: null }]))
+  try {
+    if (!tiktokExportCatalogId.value) throw new Error('请先由管理员新增 TK 类目库')
+    tiktokExportOptions.value = (await api.get('/tiktok-export/options', { headers: headers.value, params: { category_catalog_id: tiktokExportCatalogId.value } })).data
+  } catch (e:any) {
+    tiktokExportError.value = e.response?.data?.detail || e.message || '加载 TikTok 模板选项失败'
+  } finally {
+    tiktokExportLoading.value = false
+  }
+}
+function changeTiktokExportCategory() { tiktokExportAttributes.value = {} }
+async function changeTiktokExportCatalog() {
+  tiktokExportCategory.value = ''
+  tiktokExportAttributes.value = {}
+  tiktokExportOptions.value = null
+  if (!tiktokExportCatalogId.value) return
+  try {
+    tiktokExportLoading.value = true
+    tiktokExportError.value = ''
+    tiktokExportOptions.value = (await api.get('/tiktok-export/options', { headers: headers.value, params: { category_catalog_id: tiktokExportCatalogId.value } })).data
+  } catch (e:any) { tiktokExportError.value = e.response?.data?.detail || '加载 TK 类目库失败' }
+  finally { tiktokExportLoading.value = false }
+}
+function hasTiktokAttributeValue(value: string) { return Boolean(value?.trim()) }
+function tiktokAttributeMode(field:any) {
+  const mode = ['single', 'multiple'].includes(field.input_mode) ? 'select' : field.input_mode || (!field.options?.length ? 'text' : field.allow_custom ? 'select_or_text' : 'select')
+  return ({ text: '手动填写', select: '选择', select_or_text: '选择或手动填写' } as Record<string,string>)[mode] || '手动填写'
+}
+function tiktokAttributePlaceholder(field:any) {
+  if (field.input_type === 'url') return '请输入 http:// 或 https:// 开头的 URL'
+  const mode = ['single', 'multiple'].includes(field.input_mode) ? 'select' : field.input_mode || (!field.options?.length ? 'text' : field.allow_custom ? 'select_or_text' : 'select')
+  if (mode === 'select') return '输入模板支持的属性值；多个值用英文逗号分隔'
+  if (mode === 'select_or_text') return '输入支持的属性值，或手动填写其他值'
+  return '请输入属性值'
+}
+async function exportSelectedDrafts() {
+  const defaultPrice = Number(tiktokExportDefaultPrice.value)
+  const defaultQuantity = Number(tiktokExportDefaultQuantity.value)
+  if (!tiktokExportCatalogId.value) { tiktokExportError.value = '请选择 TK 类目库'; return }
+  if (!tiktokExportCategory.value) { tiktokExportError.value = '请选择 TikTok 商品类目'; return }
+  if (!Number.isFinite(defaultPrice) || defaultPrice < 0.01 || defaultPrice > 999999) { tiktokExportError.value = '默认售价须为 0.01–999999'; return }
+  if (!Number.isInteger(defaultQuantity) || defaultQuantity < 0 || defaultQuantity > 999999) { tiktokExportError.value = '默认库存须为 0–999999 的整数'; return }
+  const productOverrides:any[] = []
+  for (const draft of selectedDrafts.value) {
+    const value:any = tiktokExportOverrides.value[draft.id] || {}
+    const item:any = { draft_id: draft.id }
+    if (value.price !== null && value.price !== '') {
+      const price = Number(value.price)
+      if (!Number.isFinite(price) || price < 0.01 || price > 999999) { tiktokExportError.value = `商品草稿 #${draft.id} 的售价覆盖值无效`; return }
+      item.price = price
+    }
+    if (value.quantity !== null && value.quantity !== '') {
+      const quantity = Number(value.quantity)
+      if (!Number.isInteger(quantity) || quantity < 0 || quantity > 999999) { tiktokExportError.value = `商品草稿 #${draft.id} 的库存覆盖值无效`; return }
+      item.quantity = quantity
+    }
+    if (Object.keys(item).length > 1) productOverrides.push(item)
+  }
+  try {
+    tiktokExportLoading.value = true
+    tiktokExportError.value = ''
+    const response = await api.post('/drafts/export-tiktok', {
+      draft_ids: selectedDraftIds.value,
+      category_catalog_id: tiktokExportCatalogId.value,
+      category: tiktokExportCategory.value,
+      default_price: defaultPrice,
+      default_quantity: defaultQuantity,
+      cod: tiktokExportCod.value,
+      attributes: Object.fromEntries(Object.entries(tiktokExportAttributes.value).filter(([, value]) => hasTiktokAttributeValue(value))),
+      product_overrides: productOverrides,
+    }, { headers: headers.value, responseType: 'blob' })
+    const disposition = String(response.headers['content-disposition'] || '')
+    const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+    const filename = utf8Name ? decodeURIComponent(utf8Name) : 'TikTok批量上传.xlsx'
+    const url = URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    showTiktokExportDialog.value = false
+    selectedDraftIds.value = []
+    await refreshDraftList()
+    showToast('TikTok 批量上传表格已生成')
+  } catch (e:any) {
+    if (e.response?.data instanceof Blob) {
+      try { tiktokExportError.value = JSON.parse(await e.response.data.text()).detail || '导出失败' }
+      catch { tiktokExportError.value = '导出 TikTok 表格失败' }
+    } else tiktokExportError.value = e.response?.data?.detail || '导出 TikTok 表格失败'
+  } finally {
+    tiktokExportLoading.value = false
+  }
+}
+
+function openTiktokCatalogCreateDialog() {
+  tiktokCatalogName.value = ''
+  tiktokCatalogFile.value = null
+  tiktokCatalogError.value = ''
+  showTiktokCatalogDialog.value = true
+}
+function onTiktokCatalogFileChange(event: Event) {
+  tiktokCatalogFile.value = (event.target as HTMLInputElement).files?.[0] || null
+}
+async function createTiktokCatalog() {
+  const name = tiktokCatalogName.value.trim()
+  if (!name || !tiktokCatalogFile.value) { tiktokCatalogError.value = '请填写类目库名称并选择 TikTok XLSX 模板'; return }
+  const form = new FormData()
+  form.append('name', name)
+  form.append('file', tiktokCatalogFile.value)
+  try {
+    tiktokCatalogLoading.value = true; tiktokCatalogError.value = ''
+    await api.post('/tiktok-category-catalogs', form, { headers: headers.value })
+    showTiktokCatalogDialog.value = false
+    tiktokCatalogs.value = (await api.get('/tiktok-category-catalogs', { headers: headers.value })).data
+    showToast('TK 类目库已导入')
+  } catch (e:any) { tiktokCatalogError.value = e.response?.data?.detail || '导入 TK 类目库失败' }
+  finally { tiktokCatalogLoading.value = false }
+}
+async function openTiktokCatalogDetail(catalog:any) {
+  try {
+    tiktokCatalogLoading.value = true; tiktokCatalogError.value = ''
+    const { data } = await api.get('/tiktok-export/options', { headers: headers.value, params: { category_catalog_id: catalog.id } })
+    managingTiktokCatalog.value = catalog
+    managingTiktokCatalogOptions.value = data
+    managingTiktokCategory.value = data.categories?.[0]?.name || ''
+    showTiktokCatalogDetailDialog.value = true
+  } catch (e:any) { tiktokCatalogError.value = e.response?.data?.detail || '读取 TK 类目库失败' }
+  finally { tiktokCatalogLoading.value = false }
+}
+async function setTiktokAttributeInputMode(field:any, inputMode:string) {
+  if (!managingTiktokCatalog.value) return
+  try {
+    tiktokCatalogLoading.value = true; tiktokCatalogError.value = ''
+    const { data } = await api.patch(`/tiktok-category-catalogs/${managingTiktokCatalog.value.id}`, {
+      attribute_input_modes: [{ category: managingTiktokCategory.value, field: field.field, input_mode: inputMode }],
+    }, { headers: headers.value })
+    managingTiktokCatalogOptions.value = data.options || managingTiktokCatalogOptions.value
+    tiktokExportOptions.value = null
+    showToast(`${field.label} 已设置为${tiktokAttributeMode({...field, input_mode: inputMode})}`)
+  } catch (e:any) { tiktokCatalogError.value = e.response?.data?.detail || '保存属性选择方式失败' }
+  finally { tiktokCatalogLoading.value = false }
+}
+function onTiktokInputModeChange(field:any, event:Event) {
+  setTiktokAttributeInputMode(field, (event.target as HTMLSelectElement).value)
+}
+async function deleteTiktokCatalog(catalog:any) {
+  if (!confirm(`确定删除 TK 类目库“${catalog.name}”吗？`)) return
+  try {
+    tiktokCatalogLoading.value = true; tiktokCatalogError.value = ''
+    await api.delete(`/tiktok-category-catalogs/${catalog.id}`, { headers: headers.value })
+    tiktokCatalogs.value = tiktokCatalogs.value.filter(item => item.id !== catalog.id)
+    showToast('TK 类目库已删除')
+  } catch (e:any) { tiktokCatalogError.value = e.response?.data?.detail || '删除 TK 类目库失败' }
+  finally { tiktokCatalogLoading.value = false }
+}
 async function openClaimMaterialsDialog(task: any) { try { claimingTask.value = (await api.get(`/tasks/${task.id}`, { headers: headers.value })).data; selectedClaimResultUrls.value = []; showClaimMaterialsDialog.value = true } catch (e:any) { showToast(e.response?.data?.detail || '加载任务结果失败') } }
 function toggleClaimResult(url: string) { selectedClaimResultUrls.value = selectedClaimResultUrls.value.includes(url) ? selectedClaimResultUrls.value.filter(item => item !== url) : [...selectedClaimResultUrls.value, url] }
 async function claimMaterials() {
@@ -655,7 +859,9 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
   <main v-if="!token" class="login-shell">
     <section class="login-card"><div class="brand-mark">H</div><p class="eyebrow">Haitoro AI POD 工作台</p><h1>欢迎回到 POD 工作台</h1><p>登录后仅可访问所属公司及已授权店铺。</p><label>邮箱<input v-model="email" type="email" /></label><label>密码<input v-model="password" type="password" /></label><button class="primary full" :disabled="loading" @click="login">{{ loading ? '登录中…' : '登录' }}</button><small>演示账号：operator@haitoro-demo.com / ChangeMe123!</small><p v-if="error" class="error">{{ error }}</p></section>
   </main>
-  <main v-else class="app-shell">
+  <div v-if="showTiktokCatalogDialog" class="modal-backdrop" @click.self="!tiktokCatalogLoading && (showTiktokCatalogDialog=false)"><section class="modal-card tiktok-catalog-create-dialog"><button class="modal-close" :disabled="tiktokCatalogLoading" @click="showTiktokCatalogDialog=false">×</button><h2>新增 TK 类目库</h2><p>填写店铺类型名称，并上传从对应 TikTok 店铺下载的批量上传 XLSX 模板。系统会解析类目、属性状态和选项。</p><label>类目库名称 <b class="required">*</b><input v-model="tiktokCatalogName" maxlength="120" placeholder="例如：穆斯林服装"/></label><label>模板文件 <b class="required">*</b><input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="onTiktokCatalogFileChange"/><small>仅支持 .xlsx，最大 10MB。</small></label><p v-if="tiktokCatalogError" class="error material-draft-error">{{tiktokCatalogError}}</p><div class="modal-actions"><button class="ghost" :disabled="tiktokCatalogLoading" @click="showTiktokCatalogDialog=false">取消</button><button class="primary" :disabled="tiktokCatalogLoading" @click="createTiktokCatalog">{{tiktokCatalogLoading ? '解析中…' : '上传并解析'}}</button></div></section></div>
+  <div v-if="showTiktokCatalogDetailDialog" class="modal-backdrop" @click.self="showTiktokCatalogDetailDialog=false"><section class="modal-card tiktok-catalog-detail-dialog"><button class="modal-close" @click="showTiktokCatalogDetailDialog=false">×</button><h2>{{managingTiktokCatalog?.name}} · 属性设置</h2><p>导入后仅支持修正属性的输入方式；属性名称、状态和候选值保持模板原始内容。</p><label>商品类目<select v-model="managingTiktokCategory"><option v-for="category in managingTiktokCatalogOptions?.categories || []" :key="category.name" :value="category.name">{{category.name}}</option></select></label><div class="tiktok-property-list"><div class="tiktok-property-head"><span>属性</span><span>状态</span><span>选项数</span><span>输入方式</span></div><div v-for="field in managingTiktokCategoryAttributes" :key="field.field" class="tiktok-property-row"><span><b>{{field.label}}</b><small>{{field.field}}</small></span><span>{{field.required ? '必填' : '可选'}}</span><span>{{field.options?.length || 0}}</span><select class="tiktok-input-mode-select" :value="['single','multiple'].includes(field.input_mode) ? 'select' : field.input_mode || (!field.options?.length ? 'text' : field.allow_custom ? 'select_or_text' : 'select')" :disabled="tiktokCatalogLoading" @change="onTiktokInputModeChange(field,$event)"><option value="text">手动填写</option><option value="select" :disabled="!field.options?.length">选择</option><option value="select_or_text" :disabled="!field.options?.length">选择或手动填写</option></select></div><p v-if="!managingTiktokCategoryAttributes.length" class="empty">该类目没有可填写属性。</p></div><div class="modal-actions"><button class="primary" @click="showTiktokCatalogDetailDialog=false">完成</button></div></section></div>
+  <main v-if="token" class="app-shell">
     <aside><div class="logo"><span>H</span><b>Haitoro AI</b></div><nav><button v-for="item in visibleNav" :key="item.key" :class="{active: page===item.key}" @click="page=item.key"><i>{{item.icon}}</i>{{item.label}}</button></nav></aside>
     <section class="content"><header><div><h1>{{ pageTitle }}</h1></div><div class="context"><button class="member account-button" @click="openMyAccountDialog">{{user?.name}} · {{ user?.role === 'company_admin' ? '管理员' : '运营成员' }}{{user?.user_code ? ` · ${user.user_code}` : ''}}</button><button class="ghost" @click="logout">退出</button></div></header>
       <section v-if="page==='dashboard'" class="page"><div class="hero"><div><p>POD 商品工作台</p><h2>今天要先处理什么？</h2><span>从 AI创作到待发布商品，所有进度都在这里。</span></div><button class="primary" @click="page='pod'">✦ 开始 AI创作</button></div><div class="metrics"><article><span>待领取任务</span><b>{{taskStatusCounts.awaiting_selection || 0}}</b><em>请选择要领取的图片</em></article><article><span>待发布商品</span><b>{{drafts.length}}</b><em>妙手接口待接入</em></article><article><span>素材库</span><b>{{materialTotal}}</b><em>已保存的商品素材</em></article></div><div class="two-col"><section class="panel"><h3>最近任务 <button @click="page='tasks'">查看全部</button></h3><div v-for="task in tasks.slice(0,3)" :key="task.id" class="task-row"><span class="thumb">✦</span><div><strong>AI创作 #{{task.id}}</strong><small>{{task.parameters?.task_type || '替换印花'}} · {{new Date(task.created_at).toLocaleString()}}</small></div><span class="chip" :class="taskStatusClass(task.status)">{{taskStatusLabel[task.status] || task.status || '—'}}</span></div><p v-if="!tasks.length" class="empty">暂无 AI 创作任务。</p></section><section class="panel"><h3>快捷操作</h3><button class="quick" @click="page='templates'">▦ 浏览产品模板 <span>→</span></button><button class="quick" @click="page='tasks'">◌ 查看任务中心 <span>→</span></button></section></div></section>
@@ -680,9 +886,22 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
           <div v-if="!filteredMaterialAssets.length" class="empty">{{materialTotal ? '没有符合筛选条件的素材。' : '暂无素材。可上传本地图片，或在任务中心领取生成图片。'}}</div><footer v-if="materialTotal" class="draft-pagination"><span>共 {{materialTotal}} 条</span><label>每页 <select v-model.number="materialPageSize" @change="changeMaterialPageSize"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 条</label><button :disabled="visibleMaterialPage===1" @click="changeMaterialPage(visibleMaterialPage-1)">上一页</button><span>第 {{visibleMaterialPage}} / {{materialPageCount}} 页</span><button :disabled="visibleMaterialPage===materialPageCount" @click="changeMaterialPage(visibleMaterialPage+1)">下一页</button></footer>
         </section>
       </section>
-      <section v-else-if="page==='drafts'" class="page"><div class="section-heading"><div><span>本地草稿创建后不会自动发布；手动发布至妙手后，将自动认领到 TikTok 采集箱。</span><div class="material-filter-row"><label class="draft-template-filter">产品模板<select v-model="draftTemplateFilterId" @change="currentDraftPage=1"><option :value="null">全部模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><label v-if="user?.role==='company_admin'" class="draft-template-filter">创作人<select v-model="draftCreatorFilterId" @change="changeDraftCreatorFilter"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label></div></div><button class="primary" @click="page='materials'">新建商品草稿</button></div><div class="draft-table"><div class="thead draft-thead"><span>商品</span><span>模板</span><span>商品标题</span><span>SKU 数量</span><span>来源任务</span><span>创建时间</span><span>创作人</span><span>更新时间</span><span>最新修改用户</span><span>状态</span><span>操作</span></div><div v-for="draft in pagedDrafts" :key="draft.id" class="trow draft-trow"><button v-if="draft.image_urls?.[0]" class="draft-thumbnail" title="查看大图" @click="openImagePreview(draft.image_urls[0], draft.title)"><img :src="imageUrl(draft.image_urls[0])" :alt="draft.title"/></button><span v-else></span><span>{{draftTemplateName(draft)}}</span><b class="draft-product-title">{{draft.title}}</b><span>{{draft.sku_items?.length || 1}}</span><span>{{draft.source_task_id ? `#${draft.source_task_id}` : '素材库'}}</span><span>{{new Date(draft.created_at).toLocaleString()}}</span><span>{{draft.created_by_name || '历史记录缺失'}}</span><span>{{new Date(draft.updated_at || draft.created_at).toLocaleString()}}</span><span>{{draft.updated_by_name || '历史记录缺失'}}</span><span class="chip" :class="draft.tiktok_collect_box_id ? 'blue' : 'orange'">{{draft.tiktok_collect_box_id ? '已认领到 TikTok' : draft.miaoshou_collect_box_id ? '待认领到 TikTok' : '待发布'}}</span><span><button @click="openDraftEditDialog(draft)">编辑</button> <button v-if="!draft.tiktok_collect_box_id" class="primary compact-action" :disabled="publishingDraftId===draft.id" @click="publishDraftToMiaoshou(draft)">{{publishingDraftId===draft.id ? '处理中…' : '发布至妙手'}}</button><small v-else>TikTok #{{draft.tiktok_collect_box_id}}</small></span></div><div v-if="!filteredDrafts.length" class="empty">{{drafts.length ? '没有符合筛选条件的商品草稿。' : '暂无商品草稿，请先在任务中心领取素材，或上传本地素材。'}}</div><footer v-else class="draft-pagination"><span>共 {{filteredDrafts.length}} 条</span><label>每页 <select v-model.number="draftPageSize" @change="changeDraftPageSize"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option><option :value="500">500</option><option :value="1000">1000</option></select> 条</label><button :disabled="visibleDraftPage===1" @click="currentDraftPage=visibleDraftPage-1">上一页</button><span>第 {{visibleDraftPage}} / {{draftPageCount}} 页</span><button :disabled="visibleDraftPage===draftPageCount" @click="currentDraftPage=visibleDraftPage+1">下一页</button></footer></div></section>
+      <section v-else-if="page==='drafts'" class="page">
+        <div class="section-heading draft-heading"><div><span>本地草稿可批量导出 TikTok 表格，或手动发布至妙手后认领到 TikTok 采集箱。</span><div class="material-filter-row"><label class="draft-template-filter">产品模板<select v-model="draftTemplateFilterId" @change="changeDraftTemplateFilter"><option :value="null">全部模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><label v-if="user?.role==='company_admin'" class="draft-template-filter">创作人<select v-model="draftCreatorFilterId" @change="changeDraftCreatorFilter"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label></div></div><div class="draft-heading-actions"><button class="primary" @click="page='materials'">新建商品草稿</button></div></div>
+        <section v-if="selectedDraftIds.length" class="draft-export-bar"><strong>已选择 {{selectedDraftIds.length}} / {{MAX_TIKTOK_EXPORT_DRAFTS}} 条商品草稿</strong><button class="primary" @click="openTiktokExportDialog">导出 TikTok 表格</button><button class="ghost" @click="selectedDraftIds=[]">取消选择</button></section>
+        <div class="draft-table task-table"><div class="thead draft-thead"><label class="material-checkbox" aria-label="选择当前页商品草稿"><input type="checkbox" :checked="allPagedDraftsSelected" @change="togglePagedDrafts"/></label><span>商品</span><span>模板</span><span>商品标题</span><span>SKU 数量</span><span>来源任务</span><span>创建时间</span><span>创作人</span><span>更新时间</span><span>最新修改用户</span><span>导出次数</span><span>状态</span><span>操作</span></div><div v-for="draft in pagedDrafts" :key="draft.id" class="trow draft-trow" :class="{selected:selectedDraftIds.includes(draft.id)}"><label class="material-checkbox" :aria-label="`选择商品草稿 ${draft.id}`"><input type="checkbox" :checked="selectedDraftIds.includes(draft.id)" :disabled="selectedDraftIds.length >= MAX_TIKTOK_EXPORT_DRAFTS && !selectedDraftIds.includes(draft.id)" @change="toggleDraftSelection(draft.id)"/></label><button v-if="draft.image_urls?.[0]" class="draft-thumbnail" title="查看大图" @click="openImagePreview(draft.image_urls[0], draft.title)"><img :src="imageUrl(draft.image_urls[0])" :alt="draft.title"/></button><span v-else></span><span>{{draftTemplateName(draft)}}</span><b class="draft-product-title">{{draft.title}}</b><span>{{draft.sku_items?.length || 1}}</span><span>{{draft.source_task_id ? `#${draft.source_task_id}` : '素材库'}}</span><span>{{new Date(draft.created_at).toLocaleString()}}</span><span>{{draft.created_by_name || '历史记录缺失'}}</span><span>{{new Date(draft.updated_at || draft.created_at).toLocaleString()}}</span><span>{{draft.updated_by_name || '历史记录缺失'}}</span><span>{{draft.export_count || 0}}</span><span class="chip" :class="draft.tiktok_collect_box_id ? 'blue' : 'orange'">{{draft.tiktok_collect_box_id ? '已认领到 TikTok' : draft.miaoshou_collect_box_id ? '待认领到 TikTok' : '待发布'}}</span><span><button @click="openDraftEditDialog(draft)">编辑</button> <button v-if="!draft.tiktok_collect_box_id" class="primary compact-action" :disabled="publishingDraftId===draft.id" @click="publishDraftToMiaoshou(draft)">{{publishingDraftId===draft.id ? '处理中…' : '发布至妙手'}}</button><small v-else>TikTok #{{draft.tiktok_collect_box_id}}</small></span></div><div v-if="!filteredDrafts.length" class="empty">{{drafts.length ? '没有符合筛选条件的商品草稿。' : '暂无商品草稿，请先在任务中心领取素材，或上传本地素材。'}}</div><footer v-else class="draft-pagination"><span>共 {{filteredDrafts.length}} 条</span><label>每页 <select v-model.number="draftPageSize" @change="changeDraftPageSize"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option><option :value="500">500</option><option :value="1000">1000</option></select> 条</label><button :disabled="visibleDraftPage===1" @click="currentDraftPage=visibleDraftPage-1">上一页</button><span>第 {{visibleDraftPage}} / {{draftPageCount}} 页</span><button :disabled="visibleDraftPage===draftPageCount" @click="currentDraftPage=visibleDraftPage+1">下一页</button></footer></div>
+      </section>
       <section v-else-if="page==='members' && user?.role==='company_admin'" class="page"><div class="section-heading"><div><span>管理本公司成员账号，并为包括公司管理员在内的每位员工配置独立模型平台密钥。</span></div><button class="primary" @click="openMemberDialog()">新增成员</button></div><section class="draft-table"><div class="thead" style="grid-template-columns:1fr .65fr .8fr .9fr .7fr .85fr 1.6fr"><span>成员</span><span>用户代码</span><span>账号类型</span><span>邮箱</span><span>状态</span><span>加入时间</span><span>操作</span></div><div v-for="member in members" :key="member.id" class="trow" style="grid-template-columns:1fr .65fr .8fr .9fr .7fr .85fr 1.6fr"><span><b>{{member.name}}</b></span><span>{{member.user_code || '—'}}</span><span>{{member.role === 'company_admin' ? '公司管理员' : '普通成员'}}</span><span>{{member.email}}</span><span class="chip" :class="member.is_active ? 'blue' : 'orange'">{{member.is_active ? '启用中' : '已停用'}}</span><span>{{new Date(member.created_at).toLocaleDateString()}}</span><span class="member-row-actions"><template v-if="member.role === 'member'"><button @click="openMemberDialog(member)">编辑</button><button :class="member.is_active ? 'negative' : 'positive'" @click="toggleMember(member)">{{member.is_active ? '停用' : '启用'}}</button></template><button v-for="provider in aiProviders" :key="provider.provider" class="credential-button" :class="member.ai_provider_credentials?.[provider.provider] ? 'configured' : 'missing'" @click="openMemberCredentialDialog(member, provider)">{{provider.display_name}} 密钥 · {{member.ai_provider_credentials?.[provider.provider] ? '已配置' : '待配置'}}</button></span></div><p v-if="!members.length" class="empty">暂无公司成员。</p></section></section>
-      <section v-else-if="page==='shops' && user?.role==='company_admin'" class="page"><div class="section-heading"><div><span>已同步的妙手店铺会保存在数据库中，可为每个店铺分配多个普通成员。</span><span class="miaoshou-status" :class="company?.miaoshou_configured?'configured':'missing'">{{company?.miaoshou_configured?'妙手 API Key 已配置':'请先配置妙手 API Key'}}</span></div><div class="shop-actions"><button class="secondary" :disabled="miaoshouSaving || shopLoading" @click="openMiaoshouDialog">{{company?.miaoshou_configured?'更新 API Key':'配置 API Key'}}</button><button class="primary" :disabled="shopLoading || miaoshouSaving || !company?.miaoshou_configured" @click="loadMiaoshouShops">{{shopLoading ? '同步中…' : '↻ 同步妙手店铺'}}</button></div></div><p v-if="shopError" class="error">{{shopError}}</p><section class="draft-table"><div class="thead" style="grid-template-columns:.65fr 1.2fr 1fr .75fr .7fr .9fr .9fr 1.3fr .75fr"><span>店铺 ID</span><span>店铺名称</span><span>店铺昵称</span><span>平台</span><span>站点</span><span>授权状态</span><span>授权到期</span><span>管理人员</span><span>操作</span></div><div v-for="shop in managedShops" :key="shop.id" class="trow" style="grid-template-columns:.65fr 1.2fr 1fr .75fr .7fr .9fr .9fr 1.3fr .75fr"><span>#{{shop.external_shop_id || shop.id}}</span><span><b>{{shop.name || '—'}}</b></span><span>{{shop.nickname || '—'}}</span><span>{{shop.platform || '—'}}</span><span>{{shop.region || '—'}}</span><span class="chip" :class="shop.auth_status ? 'blue' : 'orange'">{{shop.auth_status || '未知'}}</span><span>{{shop.auth_expires_at || '—'}}</span><span>{{shop.manager_users.length ? shop.manager_users.map((member:any)=>member.name).join('、') : '暂未分配'}}</span><span><button @click="openShopManagersDialog(shop)">分配人员</button></span></div><p v-if="!managedShops.length && !shopLoading" class="empty">{{company?.miaoshou_configured?'暂无已同步店铺，点击“同步妙手店铺”开始获取。':'配置妙手 API Key 后即可同步店铺。'}}</p></section></section>
+      <section v-else-if="page==='shops' && user?.role==='company_admin'" class="page">
+        <div class="section-heading"><div><span>已同步的妙手店铺会保存在数据库中，可为每个店铺分配多个普通成员。</span><span class="miaoshou-status" :class="company?.miaoshou_configured?'configured':'missing'">{{company?.miaoshou_configured?'妙手 API Key 已配置':'请先配置妙手 API Key'}}</span></div><div class="shop-actions"><button class="secondary" :disabled="miaoshouSaving || shopLoading" @click="openMiaoshouDialog">{{company?.miaoshou_configured?'更新 API Key':'配置 API Key'}}</button><button class="primary" :disabled="shopLoading || miaoshouSaving || !company?.miaoshou_configured" @click="loadMiaoshouShops">{{shopLoading ? '同步中…' : '↻ 同步妙手店铺'}}</button></div></div>
+        <p v-if="shopError" class="error">{{shopError}}</p>
+        <section class="draft-table"><div class="thead" style="grid-template-columns:.65fr 1.2fr 1fr .75fr .7fr .9fr .9fr 1.3fr .75fr"><span>店铺 ID</span><span>店铺名称</span><span>店铺昵称</span><span>平台</span><span>站点</span><span>授权状态</span><span>授权到期</span><span>管理人员</span><span>操作</span></div><div v-for="shop in managedShops" :key="shop.id" class="trow" style="grid-template-columns:.65fr 1.2fr 1fr .75fr .7fr .9fr .9fr 1.3fr .75fr"><span>#{{shop.external_shop_id || shop.id}}</span><span><b>{{shop.name || '—'}}</b></span><span>{{shop.nickname || '—'}}</span><span>{{shop.platform || '—'}}</span><span>{{shop.region || '—'}}</span><span class="chip" :class="shop.auth_status ? 'blue' : 'orange'">{{shop.auth_status || '未知'}}</span><span>{{shop.auth_expires_at || '—'}}</span><span>{{shop.manager_users.length ? shop.manager_users.map((member:any)=>member.name).join('、') : '暂未分配'}}</span><span><button @click="openShopManagersDialog(shop)">分配人员</button></span></div><p v-if="!managedShops.length && !shopLoading" class="empty">{{company?.miaoshou_configured?'暂无已同步店铺，点击“同步妙手店铺”开始获取。':'配置妙手 API Key 后即可同步店铺。'}}</p></section>
+      </section>
+      <section v-else-if="page==='tiktok-catalogs' && user?.role==='company_admin'" class="page">
+        <div class="section-heading"><div><span>按店铺类型保存不同的 TikTok 类目模板，例如“穆斯林服装”或“女士服装”。</span></div><button class="primary" @click="openTiktokCatalogCreateDialog">新增 TK 类目</button></div>
+        <p v-if="tiktokCatalogError" class="error">{{tiktokCatalogError}}</p>
+        <div class="draft-table"><div class="thead tiktok-catalog-grid"><span>类目库名称</span><span>模板版本</span><span>来源文件</span><span>类目数</span><span>更新时间</span><span>操作</span></div><div v-for="catalog in tiktokCatalogs" :key="catalog.id" class="trow tiktok-catalog-grid"><span><b>{{catalog.name}}</b></span><span>{{catalog.template_version || '—'}}</span><span>{{catalog.source_filename}}</span><span>{{catalog.category_count}}</span><span>{{new Date(catalog.updated_at).toLocaleString()}}</span><span class="tiktok-catalog-actions"><button @click="openTiktokCatalogDetail(catalog)">属性设置</button><button class="negative" :disabled="tiktokCatalogLoading" @click="deleteTiktokCatalog(catalog)">删除</button></span></div><p v-if="!tiktokCatalogs.length" class="empty">暂无 TK 类目库，请先点击“新增 TK 类目”导入店铺模板。</p></div>
+      </section>
     </section>
   </main>
   <div v-if="showClaimMaterialsDialog" class="modal-backdrop" @click.self="showClaimMaterialsDialog=false"><section class="modal-card material-draft-dialog claim-materials-dialog"><button class="modal-close" @click="showClaimMaterialsDialog=false">×</button><h2>领取素材</h2><p>请选择要领取到素材库的图片。</p><div class="material-grid claim-result-grid"><button v-for="url in claimingTask?.result_urls || []" :key="url" class="material-card" :class="{selected:selectedClaimResultUrls.includes(url)}" @click="toggleClaimResult(url)"><span class="material-select-mark">{{selectedClaimResultUrls.includes(url) ? '✓' : ''}}</span><img :src="imageUrl(url)" alt="生成结果图"/></button></div><p v-if="!(claimingTask?.result_urls?.length)" class="empty">暂无可领取图片。</p><div class="modal-actions"><button class="ghost" @click="showClaimMaterialsDialog=false">取消</button><button class="primary" :disabled="claimingMaterials || !selectedClaimResultUrls.length" @click="claimMaterials">{{claimingMaterials ? '领取中…' : '领取'}}</button></div></section></div>
@@ -724,6 +943,7 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
   </div>
   <div v-if="showMyAccountDialog" class="modal-backdrop" @click.self="showMyAccountDialog=false"><section class="modal-card"><h2>账号设置</h2><p>可修改当前管理员名称和用户代码；用户代码留空可清除，且在本公司内不可重复。</p><label>管理员名称<input v-model="myName" maxlength="80" placeholder="请输入管理员名称" /></label><label>用户代码 <small>（两个字符）</small><input v-model="myUserCode" maxlength="2" placeholder="例如：CN" /></label><div class="modal-actions"><button class="ghost" @click="showMyAccountDialog=false">取消</button><button class="primary" :disabled="myAccountSaving" @click="saveMyUserCode">{{myAccountSaving ? '保存中…' : '保存'}}</button></div></section></div>
   <div v-if="showMaterialDraftDialog" class="modal-backdrop" @click.self="showMaterialDraftDialog=false"><section class="modal-card material-draft-dialog"><button class="modal-close" @click="showMaterialDraftDialog=false">×</button><h2>创建商品草稿</h2><p>将使用已选的 {{selectedMaterialAssetIds.length}} 张素材创建商品草稿。</p><label>产品模板<input :value="materialDraftTemplate?.name || '—'" readonly/></label><section class="material-draft-preview"><div class="material-draft-preview-heading"><strong>图片预览</strong><span>{{selectedMaterialAssets.length}} 张</span></div><div class="material-draft-preview-images"><img v-for="asset in selectedMaterialAssets" :key="asset.id" :src="imageUrl(asset.url)" :alt="asset.name"/></div></section><section v-if="materialDraftTemplate" class="material-draft-details"><label>商品标题<div class="material-draft-title-row"><input v-model="materialDraftTitle" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符，或使用 AI 生成"/><button class="secondary" :disabled="materialDraftTitleGenerating" @click="generateMaterialDraftTitle">{{materialDraftTitleGenerating ? '生成中…' : 'AI 生成标题'}}</button></div><small>将使用此模版的 AI生成标题约束和首张素材图生成标题。</small></label><label>产品描述<textarea v-model="materialDraftProductDescription" maxlength="5000" placeholder="默认使用产品模版描述，可按商品修改"></textarea></label></section><section v-if="materialDraftTemplate" class="material-draft-sku-summary"><strong>基础 SKU 列表</strong><p>直接使用素材入库时生成的永久 SKU；发布妙手时会拼接模板尺码：{{materialDraftSizes.length ? materialDraftSizes.join('、') : '默认规格'}}。</p><b>共 {{materialDraftSkuCount}} 个基础 SKU</b><small>格式：模板名称 + 用户代码 + 6 位随机字符串</small><div class="material-draft-sku-list"><div v-for="asset in selectedMaterialAssets" :key="asset.id"><span>图片 SKU</span><code>{{asset.sku}}</code></div></div><label class="material-draft-size-chart">尺码图<small>直接使用产品模版的尺码图；如需更换，请到产品模版中修改。</small><img v-if="materialDraftSizeChartPreview" :src="materialDraftSizeChartPreview" alt="尺码图预览"/><small v-else>该产品模版尚未上传尺码图</small></label></section><div class="modal-actions"><button class="ghost" @click="showMaterialDraftDialog=false">取消</button><button class="primary" :disabled="materialDraftSaving" @click="createDraftFromMaterialAssets">{{materialDraftSaving ? '创建中…' : '确认创建'}}</button></div></section></div>
+  <div v-if="showTiktokExportDialog" class="modal-backdrop" @click.self="!tiktokExportLoading && (showTiktokExportDialog=false)"><section class="modal-card tiktok-export-dialog"><button class="modal-close" :disabled="tiktokExportLoading" @click="showTiktokExportDialog=false">×</button><h2>导出 TikTok 批量上传表格</h2><p>已选择 {{selectedDrafts.length}} 条同一产品模板的商品草稿。下列设置仅用于本次导出。</p><div v-if="tiktokExportLoading && !tiktokExportOptions" class="empty">正在读取 TikTok 模板选项…</div><template v-else><section class="tiktok-export-grid"><label>TK 类目库 / 店铺类型 <b class="required">*</b><select v-model="tiktokExportCatalogId" @change="changeTiktokExportCatalog"><option :value="null" disabled>请选择类目库</option><option v-for="catalog in tiktokCatalogs" :key="catalog.id" :value="catalog.id">{{catalog.name}}</option></select></label><label>商品类目 <b class="required">*</b><select v-model="tiktokExportCategory" @change="changeTiktokExportCategory"><option value="" disabled>请选择商品类目</option><option v-for="category in tiktokExportOptions?.categories || []" :key="category.name" :value="category.name">{{category.name}}</option></select></label><label>默认售价 <b class="required">*</b><input v-model.number="tiktokExportDefaultPrice" type="number" min="0.01" max="999999" step="0.01" placeholder="请输入售价"/></label><label>默认库存 <b class="required">*</b><input v-model.number="tiktokExportDefaultQuantity" type="number" min="0" max="999999" step="1"/></label><label>货到付款（COD） <b class="required">*</b><select v-model="tiktokExportCod"><option value="Y">Y</option><option value="N">N</option></select></label></section><section v-if="selectedTiktokCategoryAttributes.length" class="tiktok-attribute-section"><h3>类目属性</h3><p>所有属性统一直接输入。“选择”仅校验模板支持值；填写多个值时用英文逗号分隔。</p><div class="tiktok-export-grid"><label v-for="field in selectedTiktokCategoryAttributes" :key="field.field"><span class="tiktok-attribute-label">{{field.label}} <b v-if="field.required" class="required">*</b><small class="multi-value-hint">{{tiktokAttributeMode(field)}}</small></span><input v-model="tiktokExportAttributes[field.field]" type="text" maxlength="500" :placeholder="tiktokAttributePlaceholder(field)"/><small v-if="field.options?.length" class="tiktok-supported-values">支持值：{{field.options.join('、')}}</small><small v-else class="tiktok-supported-values">请根据商品实际信息手动填写。</small></label></div></section><section class="tiktok-product-overrides"><h3>单品售价与库存</h3><p>留空时使用上方默认值。</p><div class="tiktok-override-head"><span>商品</span><span>售价覆盖</span><span>库存覆盖</span></div><div v-for="draft in selectedDrafts" :key="draft.id" class="tiktok-override-row"><strong>#{{draft.id}} {{draft.title}}</strong><input v-model.number="tiktokExportOverrides[draft.id].price" type="number" min="0.01" max="999999" step="0.01" placeholder="使用默认售价"/><input v-model.number="tiktokExportOverrides[draft.id].quantity" type="number" min="0" max="999999" step="1" placeholder="使用默认库存"/></div></section></template><p v-if="tiktokExportError" class="error material-draft-error">{{tiktokExportError}}</p><div class="modal-actions"><button class="ghost" :disabled="tiktokExportLoading" @click="showTiktokExportDialog=false">取消</button><button class="primary" :disabled="tiktokExportLoading || !tiktokExportOptions" @click="exportSelectedDrafts">{{tiktokExportLoading ? '生成中…' : '生成并下载'}}</button></div></section></div>
   <div v-if="showDraftEditDialog" class="modal-backdrop" @click.self="showDraftEditDialog=false"><section class="modal-card material-draft-dialog"><button class="modal-close" @click="showDraftEditDialog=false">×</button><h2>编辑商品草稿</h2><p>可修改商品标题和产品描述。</p><label>产品标题<input v-model="draftEditTitle" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符"/></label><label>产品描述<textarea v-model="draftEditProductDescription" class="draft-edit-description" maxlength="5000" placeholder="请输入产品描述"></textarea></label><section class="draft-edit-section"><strong>产品图片</strong><div class="draft-edit-preview"><div v-for="url in editingDraft?.image_urls" :key="url" class="draft-edit-image-item"><code>{{draftSkuForImage(editingDraft, url)}}</code><button title="放大查看" @click="openImagePreview(url, editingDraft?.title || '商品素材')"><img :src="imageUrl(url)" :alt="editingDraft?.title || '商品素材'"/></button></div></div></section><section v-if="editingDraft?.size_chart_url" class="draft-edit-section"><strong>尺码图</strong><button class="draft-edit-size-chart-button" title="放大查看" @click="openImagePreview(editingDraft.size_chart_url, '尺码图')"><img class="draft-edit-size-chart" :src="imageUrl(editingDraft.size_chart_url)" alt="尺码图"/></button></section><p v-if="draftEditError" class="error material-draft-error">{{draftEditError}}</p><div class="modal-actions"><button class="ghost" @click="showDraftEditDialog=false">取消</button><button class="primary" :disabled="draftEditSaving" @click="saveDraftEdit">{{draftEditSaving ? '保存中…' : '保存修改'}}</button></div></section></div>
   <div v-if="showGroupDialog" class="modal-backdrop" @click.self="showGroupDialog=false">
     <section v-if="showGroupDialog" class="modal-card"><h2>新增模板分类</h2><label>分类名称<input v-model="newGroupName" placeholder="例如：夏季服装" @keyup.enter="createGroup" /></label><div class="modal-actions"><button class="ghost" @click="showGroupDialog=false">取消</button><button class="primary" @click="createGroup">确认新增</button></div></section>

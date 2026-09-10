@@ -1,6 +1,7 @@
 import enum
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, Enum, Float, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, Float, Index, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy.dialects.mysql import MEDIUMBLOB
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
@@ -62,6 +63,27 @@ class UserShop(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(index=True)
     shop_id: Mapped[int] = mapped_column(index=True)
+
+
+class TiktokCategoryCatalog(Base):
+    """一套具名 TikTok 店铺类目及其原始批量上传模板。"""
+    __tablename__ = "tiktok_category_catalogs"
+    __table_args__ = (
+        UniqueConstraint("company_id", "name", name="uq_tiktok_category_catalog_company_name"),
+        Index("ix_tiktok_category_catalog_company", "company_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(nullable=False)
+    name: Mapped[str] = mapped_column(String(120))
+    source_filename: Mapped[str] = mapped_column(String(255))
+    template_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    template_blob: Mapped[bytes] = mapped_column(
+        LargeBinary().with_variant(MEDIUMBLOB(), "mysql").with_variant(MEDIUMBLOB(), "mariadb")
+    )
+    parsed_options: Mapped[dict] = mapped_column(JSON)
+    created_by: Mapped[int | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class TemplateGroup(Base):
@@ -187,6 +209,8 @@ class ProductDraft(Base):
     miaoshou_collect_box_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # 公共采集箱商品认领至 TikTok 后的采集箱详情 ID，用于幂等重试。
     tiktok_collect_box_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # 成功生成并返回 TikTok 批量上传表格的累计次数。
+    export_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # 审计字段用于在待发布列表中显示草稿的创建与最后修改信息。
     created_by: Mapped[int | None] = mapped_column(nullable=True)
     updated_by: Mapped[int | None] = mapped_column(nullable=True)
