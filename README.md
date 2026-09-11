@@ -10,25 +10,6 @@
 
 妙手接入标准：妙手 App ID 和 App Secret 归属公司级妙手账号，密钥加密后存储；店铺是通过该账号 API 同步的资源，上架也使用公司级妙手账号调用 API。
 
-## JWT 与第三方凭据密钥
-
-JWT 签名和数据库中的妙手/员工 AI 密钥必须使用两个互不相同的随机密钥：
-
-```dotenv
-SECRET_KEY=<JWT 签名密钥>
-CREDENTIAL_ENCRYPTION_KEY=<第三方凭据加密密钥>
-```
-
-两项均可使用 `openssl rand -hex 32` 分别生成。轮换 JWT 的 `SECRET_KEY` 不影响数据库密文。轮换凭据加密密钥或从旧版（曾使用 `SECRET_KEY` 加密凭据）升级时：
-
-1. 备份数据库并确认可恢复。
-2. 将新的随机值写入 `CREDENTIAL_ENCRYPTION_KEY`。
-3. 临时设置 `LEGACY_CREDENTIAL_ENCRYPTION_KEY` 为旧凭据密钥；从旧版升级时就是当时的 `SECRET_KEY`。
-4. 重建 API/Worker 后执行 `docker compose exec api python -m app.credential_key_cli`。
-5. 验证妙手和 AI 任务正常，再删除 `LEGACY_CREDENTIAL_ENCRYPTION_KEY` 并重建服务。
-
-轮换命令在一个数据库事务中处理全部密文；任意一条无法解密时会整体回滚，且不会输出任何密钥原文。
-
 ## 本地启动
 
 ```bash

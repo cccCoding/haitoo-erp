@@ -42,8 +42,6 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
-      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?请在 .env 中配置独立的 CREDENTIAL_ENCRYPTION_KEY}
-      LEGACY_CREDENTIAL_ENCRYPTION_KEY: ${LEGACY_CREDENTIAL_ENCRYPTION_KEY:-}
       ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-4320}
       SUPER_ADMIN_ACCESS_TOKEN_MINUTES: ${SUPER_ADMIN_ACCESS_TOKEN_MINUTES:-480}
       # 生产隧道启动时，在 .env 中设置为 https://erp.haitoro.com。
@@ -80,8 +78,6 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
-      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?请在 .env 中配置独立的 CREDENTIAL_ENCRYPTION_KEY}
-      LEGACY_CREDENTIAL_ENCRYPTION_KEY: ${LEGACY_CREDENTIAL_ENCRYPTION_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
     volumes:
@@ -97,8 +93,6 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
-      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?请在 .env 中配置独立的 CREDENTIAL_ENCRYPTION_KEY}
-      LEGACY_CREDENTIAL_ENCRYPTION_KEY: ${LEGACY_CREDENTIAL_ENCRYPTION_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
@@ -122,8 +116,6 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
-      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?请在 .env 中配置独立的 CREDENTIAL_ENCRYPTION_KEY}
-      LEGACY_CREDENTIAL_ENCRYPTION_KEY: ${LEGACY_CREDENTIAL_ENCRYPTION_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
