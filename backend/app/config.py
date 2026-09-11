@@ -1,10 +1,16 @@
 from functools import lru_cache
+from typing import Self
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     database_url: str = "sqlite:///./haitoro.db"
+    # JWT 签名与第三方凭据加密必须使用不同密钥；本地默认值仅用于测试开发。
     secret_key: str = "local-development-secret"
+    credential_encryption_key: str = "local-development-credential-secret"
+    # 仅在轮换凭据密钥时临时配置；完成重加密后必须删除。
+    legacy_credential_encryption_key: str | None = None
     access_token_minutes: int = 3 * 24 * 60
     super_admin_access_token_minutes: int = 8 * 60
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
@@ -30,6 +36,12 @@ class Settings(BaseSettings):
     # Gemini 只返回内嵌图片，仍必须上传 R2 才能供后续选图和发布使用。
     ai_generated_image_upload_to_r2: bool = True
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @model_validator(mode="after")
+    def validate_independent_secrets(self) -> Self:
+        if self.secret_key == self.credential_encryption_key:
+            raise ValueError("SECRET_KEY 与 CREDENTIAL_ENCRYPTION_KEY 不能相同")
+        return self
 
 
 @lru_cache
