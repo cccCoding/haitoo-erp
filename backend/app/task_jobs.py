@@ -51,11 +51,17 @@ def task_snapshot(status: TaskStatus) -> list[int]:
 
 def _request_for(task: PodTask, template: ProductTemplate) -> GenerationRequest:
     parameters = task.parameters or {}
-    print_urls = list(parameters.get("print_urls") or ([parameters["print_url"]] if parameters.get("print_url") else []))
+    if task.task_type == "sku_image":
+        print_urls = list(parameters.get("print_urls") or ([parameters["print_url"]] if parameters.get("print_url") else []))
+        template_url = parameters.get("white_image_url") or template.cover_url or ""
+    else:
+        references = list(parameters.get("reference_urls") or [])
+        template_url = references[0] if references else ""
+        print_urls = references[1:]
     return GenerationRequest(
         model=task.provider_model or "",
         prompt=build_prompt(parameters, template.name),
-        template_url=parameters.get("white_image_url") or template.cover_url or "",
+        template_url=template_url,
         print_urls=print_urls,
         ratio=parameters["ratio"],
         quality=parameters["quality"],
@@ -101,7 +107,7 @@ async def submit_task_once(task_id: int) -> str:
             "印花任务开始提交 | task_id=%s provider=%s model=%s attempt=%s",
             task_id, task.provider, task.provider_model, task.submit_attempts,
         )
-        if not template or not ((task.parameters or {}).get("white_image_url") or template.cover_url):
+        if not template or not ((task.parameters or {}).get("white_image_url") or (task.parameters or {}).get("reference_urls") or template.cover_url):
             raise ProviderError("产品模板不存在或任务缺少产品白底图")
         if not setting or not setting.enabled:
             raise ProviderError("任务所选模型已停用或不存在")

@@ -113,7 +113,7 @@ class PodTaskCreate(BaseModel):
     white_image_id: int
     # 不传时沿用平台后台配置的默认模型。
     provider: str | None = Field(default=None, max_length=40)
-    task_type: str = Field(default="替换印花", min_length=1, max_length=80)
+    task_type: Literal["sku_image"] = "sku_image"
     ratio: Literal["1:1", "3:4"] = "1:1"
     quality: Literal["1K", "2K"] = "1K"
     print_url: str | None = None
@@ -295,6 +295,36 @@ class DraftUpdate(BaseModel):
         if not 25 <= len(value) <= 255:
             raise ValueError("商品标题长度须为 25-255 个字符")
         return value
+
+
+class DraftImageTaskCreate(BaseModel):
+    task_type: Literal["carousel", "main_image"]
+    source_skus: list[str] = Field(default_factory=list, max_length=9)
+    reference_mode: Literal["random", "manual"] = "random"
+    reference_urls: list[str] = Field(default_factory=list, max_length=9)
+    provider: str | None = Field(default=None, max_length=40)
+    ratio: Literal["1:1", "3:4"] = "1:1"
+    quality: Literal["1K", "2K"] = "1K"
+    creative_requirement: str = Field(min_length=1, max_length=1000)
+
+
+class DraftImageApply(BaseModel):
+    result_url: str = Field(min_length=1, max_length=500)
+    remove_carousel_sku: str | None = Field(default=None, max_length=24)
+
+
+class DraftOrderedImageSelection(BaseModel):
+    result_url: str = Field(min_length=1, max_length=500)
+    sku: str | None = Field(default=None, max_length=24)
+    task_id: int | None = Field(default=None, ge=1)
+
+
+class DraftImagesConfirm(BaseModel):
+    image_items: list[DraftOrderedImageSelection] | None = Field(default=None, max_length=9)
+
+
+class DraftCarouselOrderUpdate(BaseModel):
+    skus: list[str] = Field(max_length=9)
 
 
 class TiktokDraftProductOverride(BaseModel):

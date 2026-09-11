@@ -160,6 +160,8 @@ class PodTask(Base):
     company_id: Mapped[int] = mapped_column(index=True)
     template_id: Mapped[int] = mapped_column()
     created_by: Mapped[int] = mapped_column()
+    # 稳定的内部任务类型：sku_image、carousel、main_image。
+    task_type: Mapped[str] = mapped_column(String(30), default="sku_image", index=True)
     status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.QUEUED)
     parameters: Mapped[dict] = mapped_column(JSON, default=dict)
     result_urls: Mapped[dict] = mapped_column(JSON, default=list)
@@ -205,6 +207,8 @@ class ProductDraft(Base):
     size_chart_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="pending_publish")
     image_urls: Mapped[dict] = mapped_column(JSON, default=list)
+    # 最终商品图片的完整有序列表；第 1 张是首图，为空时回退 SKU 图。
+    carousel_items: Mapped[list] = mapped_column(JSON, default=list)
     # 每个图片 × 模板尺码对应一条 SKU 明细：{image_url, size, sku}。
     sku_items: Mapped[dict] = mapped_column(JSON, default=list)
     miaoshou_collect_box_id: Mapped[str | None] = mapped_column(String(120), nullable=True)

@@ -219,9 +219,13 @@ def build_workbook(*, template, category: str, cod: str, attributes: dict[str, s
     for product in products:
         image_urls = list(dict.fromkeys(product["image_urls"]))
         gallery = image_urls[:9]
-        base_sku_by_image = product["base_sku_by_image"]
-        for image_url in image_urls:
-            base_sku = base_sku_by_image[image_url]
+        sku_images = product.get("sku_images") or [
+            {"image_url": image_url, "sku": product["base_sku_by_image"][image_url]}
+            for image_url in image_urls
+        ]
+        for sku_image in sku_images:
+            image_url = sku_image["image_url"]
+            base_sku = sku_image["sku"]
             for size in sizes:
                 if row_number > DATA_END_ROW:
                     raise ValueError("导出数据超过 TikTok 模板 5000 行限制")

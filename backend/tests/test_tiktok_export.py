@@ -120,6 +120,23 @@ class TiktokExportTests(unittest.TestCase):
             self.assertEqual(db.get(ProductDraft, 1).export_count, 2)
             self.assertEqual(db.get(ProductDraft, 2).export_count, 2)
 
+    def test_generated_main_and_carousel_are_gallery_while_sku_images_stay_variants(self) -> None:
+        payload = self.payload().model_copy(update={"draft_ids": [1], "product_overrides": []})
+        with self.session_factory() as db:
+            draft = db.get(ProductDraft, 1)
+            draft.carousel_items = [
+                {"sku": None, "image_url": "https://img.example/main.jpg", "task_id": 11, "source_type": "main_image"},
+                {"sku": "Y1AA000001", "image_url": "https://img.example/carousel.jpg", "task_id": 10},
+            ]
+            draft.image_urls = [item["image_url"] for item in draft.carousel_items]
+            db.commit()
+            response = main.export_drafts_to_tiktok(payload, user=db.get(User, 1), db=db)
+        sheet = load_workbook(BytesIO(response.body), data_only=False)["Template"]
+        self.assertEqual(sheet["E7"].value, "https://img.example/main.jpg")
+        self.assertEqual(sheet["F7"].value, "https://img.example/carousel.jpg")
+        self.assertEqual(sheet["P7"].value, "https://img.example/one.jpg")
+        self.assertEqual(sheet["P9"].value, "https://img.example/two.jpg")
+
     def test_validation_and_generation_failures_do_not_increment(self) -> None:
         with self.session_factory() as db:
             user = db.get(User, 1)

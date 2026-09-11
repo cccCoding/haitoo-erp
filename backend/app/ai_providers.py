@@ -50,8 +50,12 @@ class ImageGenerationProvider(Protocol):
 
 def build_prompt(parameters: dict, template_name: str) -> str:
     requirement = parameters.get("creative_requirement") or ""
+    output_name = {
+        "carousel": "电商商品轮播图",
+        "main_image": "电商商品首图",
+    }.get(parameters.get("task_type"), "带指定印花的 SKU 商品图")
     return (
-        f"{requirement}。输出电商商品主图，比例 {parameters['ratio']}，清晰度 {parameters['quality']}。"
+        f"{requirement}。输出{output_name}，比例 {parameters['ratio']}，清晰度 {parameters['quality']}。"
     )
 
 
