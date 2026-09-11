@@ -21,7 +21,7 @@ from sqlalchemy import delete, func, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import get_settings
-from .database import Base, engine, get_db
+from .database import engine, get_db
 from .models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
 from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, ClaimMaterials, DraftTitleGenerate, DraftUpdate, ImageUploadPresignInput, LoginInput, MaterialDownloadInput, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
@@ -60,9 +60,13 @@ def initialize_system_defaults(db: Session) -> None:
     db.commit()
 
 
-def ensure_schema() -> None:
-    """轻量兼容迁移。关系一致性由应用层维护；MySQL 不使用外键。"""
-    with engine.begin() as connection:
+def ensure_schema(connection=None) -> None:
+    """首个 Alembic 基线版本专用的旧数据库兼容逻辑，请勿用于应用启动。"""
+    if connection is None:
+        with engine.begin() as owned_connection:
+            ensure_schema(owned_connection)
+        return
+    if connection is not None:
         # 一次性清理已经下线的旧计费数据结构；重复启动时无副作用。
         inspector = inspect(connection)
         columns = {column["name"] for column in inspector.get_columns("product_templates")}
@@ -260,13 +264,9 @@ def ensure_schema() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("应用初始化开始")
-    Base.metadata.create_all(bind=engine)
-    ensure_schema()
-    db = next(get_db())
-    try:
-        initialize_system_defaults(db)
-    finally:
-        db.close()
+    from .schema_version import assert_schema_current
+
+    assert_schema_current(engine)
     logger.info("应用初始化完成")
     try:
         yield

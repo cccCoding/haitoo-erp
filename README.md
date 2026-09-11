@@ -16,6 +16,27 @@
 docker compose up --build
 ```
 
+Compose 会先运行一次 `migrate` 服务，将数据库升级到代码要求的 Alembic 版本；成功后才启动 API。API 和 Worker 自身只检查版本，不会在启动时建表或执行 DDL。生产部署应在迁移前完成数据库备份，也可显式执行并检查迁移结果：
+
+```bash
+docker compose run --rm migrate
+docker compose run --rm api alembic current
+```
+
+从旧版启动期自动建表流程升级时，迁移服务会拒绝直接接管没有 `alembic_version` 的既有数据库。确认数据库备份可恢复后，显式执行一次：
+
+```bash
+docker compose run --rm migrate python -m app.db_migrate --adopt-legacy
+```
+
+成功后再正常执行 `docker compose up -d`。不要对全新数据库或已纳入 Alembic 的数据库使用 `--adopt-legacy`。
+
+以后每次修改 ORM 表结构，都必须创建新的版本文件，禁止继续修改已有基线迁移：
+
+```bash
+docker compose run --rm api alembic revision --autogenerate -m "变更说明"
+```
+
 API 文档：`http://localhost:8001/docs`。
 
 系统启动时不会创建公司、演示账号或默认超级管理员。首次部署后，通过容器内的一次性命令创建平台超级管理员；密码将在终端中安全输入两次，不会进入命令历史或环境变量：

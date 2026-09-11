@@ -8,3 +8,4 @@ dist/
 mysql_data/
 backend/uploads/
 .workbuddy-ai/
+backend/haitoro.db

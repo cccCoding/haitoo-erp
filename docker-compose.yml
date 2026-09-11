@@ -67,9 +67,25 @@ services:
     volumes:
       - ./backend:/app
     depends_on:
-      db-init:
+      migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+
+  # 独立、串行的版本化数据库迁移；API 和 Worker 不在启动时修改表结构。
+  migrate:
+    build: ./backend
+    command: python -m app.db_migrate
+    environment:
+      DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
+      SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    restart: "no"
 
   submit-worker:
     build: ./backend

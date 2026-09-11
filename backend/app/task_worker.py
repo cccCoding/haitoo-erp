@@ -3,7 +3,9 @@ import argparse
 import asyncio
 import logging
 
+from .database import engine
 from .logging_config import configure_logging
+from .schema_version import assert_schema_current
 from .task_jobs import queue_interval, run_cycle
 
 
@@ -19,6 +21,7 @@ def main() -> None:
     parser.add_argument("kind", choices=("submit", "result"))
     args = parser.parse_args()
     configure_logging()
+    assert_schema_current(engine)
     logging.getLogger(__name__).info("任务 Worker 启动 | kind=%s", args.kind)
     asyncio.run(run_forever(args.kind))
 
