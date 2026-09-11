@@ -37,29 +37,8 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 
-def seed(db: Session) -> None:
-    company = db.scalar(select(Company).where(Company.name == "星潮跨境有限公司"))
-    if not company:
-        company = Company(name="星潮跨境有限公司")
-        db.add(company); db.flush()
-
-    def ensure_demo_user(email: str, name: str, role: Role, company_id: int | None = None) -> User:
-        user = db.scalar(select(User).where(User.email == email))
-        if not user:
-            user = User(company_id=company_id, email=email, name=name, password_hash=hash_password("ChangeMe123!"), role=role)
-            db.add(user); db.flush()
-        return user
-
-    ensure_demo_user("owner@haitoro-demo.com", "平台超级管理员", Role.SUPER_ADMIN)
-    ensure_demo_user("admin@haitoro-demo.com", "演示公司管理员", Role.COMPANY_ADMIN, company.id)
-    ensure_demo_user("operator@haitoro-demo.com", "陈宁", Role.MEMBER, company.id)
-    # 仅清理无业务记录的早期内置演示店铺；实际店铺统一由妙手同步创建。
-    builtin_shop = db.scalar(select(Shop).where(
-        Shop.company_id == company.id, Shop.name == "MY TikTok Shop", Shop.external_shop_id.is_(None)
-    ))
-    if builtin_shop and not db.scalar(select(ProductDraft.id).where(ProductDraft.shop_id == builtin_shop.id).limit(1)):
-        db.execute(delete(UserShop).where(UserShop.shop_id == builtin_shop.id))
-        db.delete(builtin_shop)
+def initialize_system_defaults(db: Session) -> None:
+    """幂等补齐平台运行所需配置，不创建任何公司或用户。"""
     if not db.get(AIProviderSetting, "seedream"):
         db.add(AIProviderSetting(provider="seedream", display_name="Seedream", model="doubao-seedream-4-0-250828", enabled=True, is_default=False))
     if not db.get(AIProviderSetting, "qwen"):
@@ -77,7 +56,7 @@ def seed(db: Session) -> None:
         db.add(TaskQueueSetting(id=1, submit_interval_seconds=1, result_interval_seconds=5))
     # 类目库全部由公司管理员上传创建；清理早期版本自动生成的全局默认类目库。
     db.execute(delete(TiktokCategoryCatalog).where(TiktokCategoryCatalog.company_id.is_(None)))
-    # 启动时只补齐必要的演示配置，绝不删除用户的模板、分类或历史数据。
+    # 启动时只补齐必要的系统配置，绝不创建业务账号或公司。
     db.commit()
 
 
@@ -212,6 +191,8 @@ def ensure_schema() -> None:
         user_columns = {column["name"] for column in inspect(connection).get_columns("users")}
         if "user_code" not in user_columns:
             connection.execute(text("ALTER TABLE users ADD COLUMN user_code VARCHAR(2)"))
+        if "token_version" not in user_columns:
+            connection.execute(text("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"))
         user_indexes = inspect(connection).get_indexes("users")
         user_constraints = inspect(connection).get_unique_constraints("users")
         has_user_code_unique_index = any(
@@ -283,7 +264,7 @@ async def lifespan(_: FastAPI):
     ensure_schema()
     db = next(get_db())
     try:
-        seed(db)
+        initialize_system_defaults(db)
     finally:
         db.close()
     logger.info("应用初始化完成")

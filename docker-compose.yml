@@ -42,6 +42,8 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+      ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-4320}
+      SUPER_ADMIN_ACCESS_TOKEN_MINUTES: ${SUPER_ADMIN_ACCESS_TOKEN_MINUTES:-480}
       # 生产隧道启动时，在 .env 中设置为 https://erp.haitoro.com。
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:5174}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

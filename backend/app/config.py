@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./haitoro.db"
     secret_key: str = "local-development-secret"
     access_token_minutes: int = 3 * 24 * 60
+    super_admin_access_token_minutes: int = 8 * 60
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
     log_level: str = "INFO"
     log_timezone: str = "Asia/Hong_Kong"

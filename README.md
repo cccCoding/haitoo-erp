@@ -16,17 +16,36 @@
 docker compose up --build
 ```
 
-打开 `http://localhost:5173`。以下演示账号的密码均为 `ChangeMe123!`：
-
-| 角色 | 账号 |
-| --- | --- |
-| 超级管理员 | `owner@haitoro-demo.com` |
-| 公司管理员 | `admin@haitoro-demo.com` |
-| 运营成员 | `operator@haitoro-demo.com` |
-
 API 文档：`http://localhost:8001/docs`。
 
-超级管理员后台是独立前端项目，启动后访问 `http://localhost:5174`，使用 `owner@haitoro-demo.com` 登录。
+系统启动时不会创建公司、演示账号或默认超级管理员。首次部署后，通过容器内的一次性命令创建平台超级管理员；密码将在终端中安全输入两次，不会进入命令历史或环境变量：
+
+```bash
+docker compose exec api python -m app.admin_cli create-super-admin \
+  --email owner@example.com \
+  --name "平台管理员"
+```
+
+超级管理员后台是独立前端项目，启动后访问 `http://localhost:5174`。登录后可开通公司及其首位公司管理员，公司管理员再从运营端创建普通成员。
+
+平台超级管理员的其他运维命令：
+
+```bash
+# 查看全部平台超级管理员
+docker compose exec api python -m app.admin_cli list-super-admins
+
+# 重置密码；成功后该账号原有登录令牌立即失效
+docker compose exec api python -m app.admin_cli reset-super-admin-password \
+  --email owner@example.com
+
+# 启用或停用；系统禁止停用最后一个有效的超级管理员
+docker compose exec api python -m app.admin_cli disable-super-admin \
+  --email owner@example.com
+docker compose exec api python -m app.admin_cli enable-super-admin \
+  --email owner@example.com
+```
+
+超级管理员密码至少 12 个字符，并且必须包含字母、数字和特殊字符。已有数据库升级时，应用不会自动删除历史演示账号或公司；应先创建并验证正式超级管理员，再人工停用历史演示账号，确认其没有业务数据后另行清理。
 
 ## 通过 Cloudflare Tunnel 暴露 ERP（无需公网 IP）
 

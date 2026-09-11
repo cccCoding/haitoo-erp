@@ -39,6 +39,7 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(80))
     user_code: Mapped[str | None] = mapped_column(String(2), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    token_version: Mapped[int] = mapped_column(Integer, default=0)
     role: Mapped[Role] = mapped_column(Enum(Role), default=Role.MEMBER)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

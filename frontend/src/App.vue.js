@@ -3,8 +3,8 @@ import axios from 'axios';
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' });
 const token = ref(localStorage.getItem('haitoro_token') || '');
 const page = ref('dashboard');
-const email = ref('operator@haitoro-demo.com');
-const password = ref('ChangeMe123!');
+const email = ref('');
+const password = ref('');
 const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), materialAssets = ref([]), drafts = ref([]), members = ref([]), aiProviders = ref([]);
 const loading = ref(false), error = ref('');
 const toast = ref('');
@@ -1427,11 +1427,13 @@ if (!__VLS_ctx.token) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
         type: "email",
+        autocomplete: "username",
     });
     (__VLS_ctx.email);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
         type: "password",
+        autocomplete: "current-password",
     });
     (__VLS_ctx.password);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
@@ -1440,7 +1442,6 @@ if (!__VLS_ctx.token) {
         disabled: (__VLS_ctx.loading),
     });
     (__VLS_ctx.loading ? '登录中…' : '登录');
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
     if (__VLS_ctx.error) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
             ...{ class: "error" },

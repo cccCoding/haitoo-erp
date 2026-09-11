@@ -2,7 +2,7 @@ import { computed, onMounted, ref } from 'vue';
 import axios from 'axios';
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8001' });
 const token = ref(localStorage.getItem('haitoro_admin_token') || '');
-const email = ref('owner@haitoro-demo.com'), password = ref('ChangeMe123!');
+const email = ref(''), password = ref('');
 const user = ref(null), overview = ref(null), providers = ref([]), companies = ref([]);
 const queueSettings = ref({ submit_interval_seconds: 1, result_interval_seconds: 5 });
 const loading = ref(false), saving = ref(''), error = ref('');
@@ -150,12 +150,14 @@ if (!__VLS_ctx.token) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
         type: "email",
+        autocomplete: "username",
     });
     (__VLS_ctx.email);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
         ...{ onKeyup: (__VLS_ctx.login) },
         type: "password",
+        autocomplete: "current-password",
     });
     (__VLS_ctx.password);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({

@@ -4,7 +4,7 @@ import axios from 'axios'
 
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8001' })
 const token = ref(localStorage.getItem('haitoro_admin_token') || '')
-const email = ref('owner@haitoro-demo.com'), password = ref('ChangeMe123!')
+const email = ref(''), password = ref('')
 const user = ref<any>(null), overview = ref<any>(null), providers = ref<any[]>([]), companies = ref<any[]>([])
 const queueSettings = ref({ submit_interval_seconds: 1, result_interval_seconds: 5 })
 const loading = ref(false), saving = ref(''), error = ref('')
@@ -78,7 +78,7 @@ onMounted(() => token.value && loadAdmin().catch(logout))
 
 <template>
   <main v-if="!token" class="login-page">
-    <section class="login-card"><div class="mark">H</div><p class="eyebrow">Haitoro PLATFORM</p><h1>超级管理员后台</h1><p>管理平台运行概况和印花贴合模型。</p><label>邮箱<input v-model="email" type="email" /></label><label>密码<input v-model="password" type="password" @keyup.enter="login" /></label><button class="primary" :disabled="loading" @click="login">{{ loading ? '登录中…' : '登录后台' }}</button><small>仅超级管理员可访问</small><p v-if="error" class="error">{{ error }}</p></section>
+    <section class="login-card"><div class="mark">H</div><p class="eyebrow">Haitoro PLATFORM</p><h1>超级管理员后台</h1><p>管理平台运行概况和印花贴合模型。</p><label>邮箱<input v-model="email" type="email" autocomplete="username" /></label><label>密码<input v-model="password" type="password" autocomplete="current-password" @keyup.enter="login" /></label><button class="primary" :disabled="loading" @click="login">{{ loading ? '登录中…' : '登录后台' }}</button><small>仅超级管理员可访问</small><p v-if="error" class="error">{{ error }}</p></section>
   </main>
   <main v-else class="shell">
     <aside><div class="brand"><span>H</span> Haitoro</div><p>平台后台</p><nav><button :class="{active:activePage==='overview'}" @click="activePage='overview'">概览</button><button :class="{active:activePage==='companies'}" @click="activePage='companies'">公司管理</button><button :class="{active:activePage==='models'}" @click="activePage='models'">模型管理</button></nav><div class="operator"><b>{{ user?.name }}</b><small>超级管理员</small><button @click="logout">退出登录</button></div></aside>
