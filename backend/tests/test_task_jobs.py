@@ -769,7 +769,7 @@ class TaskJobTests(unittest.TestCase):
         task_id = self.add_task()
         with self.session_factory() as db:
             db.add(MaterialAsset(company_id=1, source_task_id=task_id, url="https://img.example/material.png", name="material", claimed_by=1))
-            db.add(ProductDraft(company_id=1, source_task_id=task_id, title="draft", image_urls=[], sku_items=[]))
+            db.add(ProductDraft(company_id=1, title="draft", image_urls=[], sku_items=[]))
             db.commit()
         with self.engine.begin() as connection:
             connection.execute(text("CREATE TABLE pod_task_batches (id INTEGER PRIMARY KEY)"))
@@ -778,7 +778,6 @@ class TaskJobTests(unittest.TestCase):
         with self.session_factory() as db:
             self.assertEqual(db.scalar(select(PodTask.id)), None)
             self.assertIsNone(db.scalar(select(MaterialAsset.source_task_id)))
-            self.assertIsNone(db.scalar(select(ProductDraft.source_task_id)))
         self.assertNotIn("pod_task_batches", inspect(self.engine).get_table_names())
 
 

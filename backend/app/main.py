@@ -137,28 +137,15 @@ def ensure_schema(connection=None) -> None:
         if "updated_at" not in draft_columns:
             connection.execute(text("ALTER TABLE product_drafts ADD COLUMN updated_at DATETIME"))
             connection.execute(text("UPDATE product_drafts SET updated_at = created_at WHERE updated_at IS NULL"))
-        # 历史 AI 任务草稿可从来源任务回填操作人；素材库旧草稿没有可靠来源时保留为空。
-        connection.execute(text("""
-            UPDATE product_drafts
-            SET created_by = (SELECT created_by FROM pod_tasks WHERE pod_tasks.id = product_drafts.source_task_id)
-            WHERE created_by IS NULL AND source_task_id IS NOT NULL
-        """))
         connection.execute(text("""
             UPDATE product_drafts
             SET updated_by = created_by
             WHERE updated_by IS NULL AND created_by IS NOT NULL
         """))
-        # 兼容上线前由 AI 任务创建的商品草稿；素材库旧草稿无法可靠推断模板，发布时会提示重新创建。
-        connection.execute(text("""
-            UPDATE product_drafts
-            SET template_id = (SELECT template_id FROM pod_tasks WHERE pod_tasks.id = product_drafts.source_task_id)
-            WHERE template_id IS NULL AND source_task_id IS NOT NULL
-        """))
         # 旧批次结构只在首次升级时存在。按已确认的迁移策略清空历史任务，
         # 并先解除素材和草稿引用，避免新任务复用旧 ID 后产生错误关联。
         if "pod_task_batches" in table_names:
             connection.execute(text("UPDATE material_assets SET source_task_id = NULL WHERE source_task_id IS NOT NULL"))
-            connection.execute(text("UPDATE product_drafts SET source_task_id = NULL WHERE source_task_id IS NOT NULL"))
             connection.execute(text("DELETE FROM pod_tasks"))
             connection.execute(text(f"DROP TABLE {quote('pod_task_batches')}"))
         task_columns = {column["name"] for column in inspect(connection).get_columns("pod_tasks")}
@@ -247,8 +234,6 @@ def ensure_schema(connection=None) -> None:
               )
         """))
         draft_columns = {column["name"]: column for column in inspect(connection).get_columns("product_drafts")}
-        if connection.dialect.name == "mysql" and not draft_columns["source_task_id"]["nullable"]:
-            connection.execute(text("ALTER TABLE product_drafts MODIFY COLUMN source_task_id INTEGER NULL"))
         if connection.dialect.name == "mysql" and not draft_columns["shop_id"]["nullable"]:
             connection.execute(text("ALTER TABLE product_drafts MODIFY COLUMN shop_id INTEGER NULL"))
         # 项目标准：MySQL 所有关系仅保存 ID，不建立数据库外键。兼容清理旧库。
@@ -1705,15 +1690,12 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
     template = get_company_template(db, user, payload.template_id)
     if any(asset.template_id != template.id for asset in assets):
         raise HTTPException(400, "创建商品草稿时只能使用属于所选产品模板的素材")
-    source_task_ids = {asset.source_task_id for asset in assets}
-    source_task_id = source_task_ids.pop() if len(source_task_ids) == 1 else None
     image_urls = [asset.url for asset in assets[:9]]
     sku_items = [{"image_url": asset.url, "size": None, "sku": asset.sku} for asset in assets]
     draft = ProductDraft(
         company_id=user.company_id,
         shop_id=None,
         template_id=template.id,
-        source_task_id=source_task_id,
         title=payload.title,
         product_description=payload.product_description.strip() if payload.product_description else None,
         size_chart_url=template.size_chart_url,

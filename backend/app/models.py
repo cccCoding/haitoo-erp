@@ -201,7 +201,6 @@ class ProductDraft(Base):
     shop_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
     # 创建公共采集箱产品需要使用模板中的包装与规格信息。
     template_id: Mapped[int | None] = mapped_column(nullable=True)
-    source_task_id: Mapped[int | None] = mapped_column(nullable=True)
     title: Mapped[str] = mapped_column(String(255))
     product_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     size_chart_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
