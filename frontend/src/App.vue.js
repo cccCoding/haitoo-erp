@@ -1736,7 +1736,6 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-info']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-sku-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-params']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-settings-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-create-button']} */ ;
@@ -5672,12 +5671,6 @@ if (__VLS_ctx.showDraftImageDialog) {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
             (item.sku);
-            if (!__VLS_ctx.imageDraft.carousel_items?.some((carousel) => carousel.sku === item.sku)) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
-                    ...{ class: "workspace-sku-status pending" },
-                });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
-            }
         }
         if (!__VLS_ctx.imageDraftSkus.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
@@ -7522,8 +7515,6 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['workspace-sku-check']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-image']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-info']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-sku-status']} */ ;
-/** @type {__VLS_StyleScopedClasses['pending']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-params']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-settings-grid']} */ ;

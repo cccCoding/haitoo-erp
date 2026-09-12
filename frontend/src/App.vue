@@ -1218,7 +1218,6 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
                     <span class="workspace-sku-image"><img :src="imageUrl(item.image_url)" :alt="item.sku"/></span>
                     <span class="workspace-sku-info">
                       <b>{{item.sku}}</b>
-                    <small v-if="!imageDraft.carousel_items?.some((carousel:any)=>carousel.sku===item.sku)" class="workspace-sku-status pending"><i></i>可生成</small>
                     </span>
                   </label>
                   <p v-if="!imageDraftSkus.length" class="workspace-sku-empty">该草稿暂无 SKU 素材。</p>
@@ -1444,12 +1443,11 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
   box-sizing: border-box;
   height: 32px;
   min-height: 0;
-  align-content: start;
+  align-content: center;
   overflow: hidden;
 }
 
-.workspace-sku-card .workspace-sku-info b,
-.workspace-sku-card .workspace-sku-status {
+.workspace-sku-card .workspace-sku-info b {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
