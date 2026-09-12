@@ -3448,6 +3448,7 @@ if (__VLS_ctx.token) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         for (const [draft] of __VLS_getVForSourceType((__VLS_ctx.pagedDrafts))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 key: (draft.id),
@@ -3480,6 +3481,8 @@ if (__VLS_ctx.token) {
                 checked: (__VLS_ctx.selectedDraftIds.includes(draft.id)),
                 disabled: (__VLS_ctx.selectedDraftIds.length >= __VLS_ctx.MAX_TIKTOK_EXPORT_DRAFTS && !__VLS_ctx.selectedDraftIds.includes(draft.id)),
             });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            (draft.id);
             if (draft.image_urls?.[0]) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
@@ -3516,6 +3519,7 @@ if (__VLS_ctx.token) {
             (__VLS_ctx.draftTemplateName(draft));
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
                 ...{ class: "draft-product-title" },
+                title: (draft.title),
             });
             (draft.title);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
