@@ -56,11 +56,11 @@ const showDraftImageDialog = ref(false), imageDraft = ref(null), imageWorkspaceL
 const selectedImageSkus = ref([]), selectedMainReferences = ref([]), mainReferenceMode = ref('random');
 // 轮播图与首图任务使用各自独立的一套生成参数，互不干扰。
 const carouselParams = ref({ prompt: '', provider: '', ratio: '1:1', quality: '1K' }), mainParams = ref({ prompt: '', provider: '', ratio: '1:1', quality: '1K' });
-const draggedCarouselSku = ref(''), stagedFinalImageItems = ref(null), draggedFinalImageUrl = ref('');
+const stagedFinalImageItems = ref(null), draggedFinalImageUrl = ref('');
 const showMainApplyDialog = ref(false), pendingMainApply = ref(null), mainRemoveSku = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
 const showTaskDetailDialog = ref(false), viewingTask = ref(null), taskDetailLoading = ref(false);
-const taskListRefreshing = ref(false), retryingTaskId = ref(null);
+const taskListRefreshing = ref(false), retryingTaskId = ref(null), retryingWorkspaceTaskId = ref(null);
 const showClaimMaterialsDialog = ref(false), claimingTask = ref(null), selectedClaimResultUrls = ref([]), claimingMaterials = ref(false);
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
 const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2 };
@@ -806,6 +806,7 @@ const draftFinalImageItems = computed(() => {
     return (imageDraft.value.carousel_items || []).filter((item) => item?.image_url && !seen.has(item.image_url) && seen.add(item.image_url));
 });
 const draftImagePreviewUrls = computed(() => draftFinalImageItems.value.map((item) => item.image_url));
+const adoptedCarouselItems = computed(() => (imageDraft.value?.carousel_items || []).filter((item) => item.source_type !== 'main_image'));
 const currentGeneratedMainImage = computed(() => (imageDraft.value?.carousel_items || []).find((item) => item.source_type === 'main_image') || null);
 function resetFinalImageOrder() { stagedFinalImageItems.value = null; draggedFinalImageUrl.value = ''; }
 async function loadImageWorkspace(draftId, tasksOnly = false) {
@@ -852,13 +853,13 @@ function toggleImageSku(sku) {
 }
 function toggleMainReference(url) { selectedMainReferences.value = selectedMainReferences.value.includes(url) ? selectedMainReferences.value.filter(item => item !== url) : [...selectedMainReferences.value, url]; }
 async function createDraftImageTasks(type) {
-    if (!imageDraft.value || imageDraft.value.locked)
+    if (!imageDraft.value)
         return;
     if (type === 'carousel' && !selectedImageSkus.value.length) {
         showToast('请至少选择一个 SKU');
         return;
     }
-    if (type === 'main_image' && !(imageDraft.value.carousel_items?.length)) {
+    if (type === 'main_image' && !adoptedCarouselItems.value.length) {
         showToast('请先保留至少一张 SKU 图或轮播图');
         return;
     }
@@ -873,7 +874,7 @@ async function createDraftImageTasks(type) {
     }
     try {
         imageTaskCreatingType.value = type;
-        const mainReferenceUrls = mainReferenceMode.value === 'manual' ? selectedMainReferences.value : (imageDraft.value.carousel_items || []).map((item) => item.image_url);
+        const mainReferenceUrls = mainReferenceMode.value === 'manual' ? selectedMainReferences.value : adoptedCarouselItems.value.map((item) => item.image_url);
         const { data } = await api.post(`/drafts/${imageDraft.value.id}/image-tasks`, { task_type: type, source_skus: type === 'carousel' ? selectedImageSkus.value : [], reference_mode: mainReferenceMode.value, reference_urls: type === 'main_image' ? mainReferenceUrls : [], provider: params.provider, ratio: params.ratio, quality: params.quality, creative_requirement: params.prompt.trim() }, { headers: headers.value });
         const taskKey = type === 'carousel' ? 'carousel_tasks' : 'main_image_tasks';
         imageDraft.value[taskKey] = [...(data.items || []).reverse(), ...(imageDraft.value[taskKey] || [])];
@@ -902,15 +903,16 @@ function isTaskResultSelected(task, url) {
         ? isWorkspaceTaskSelected(task, url)
         : task.selected_result_url === url;
 }
+function taskHasSuccessfulResult(task) { return ['awaiting_selection', 'completed'].includes(task?.status) && !!task?.result_urls?.[0]; }
 function stageCarouselTaskResult(task, url) {
-    if (!imageDraft.value || imageDraft.value.locked)
+    if (!imageDraft.value)
         return;
     const sku = String(task.parameters?.source_sku || '');
     if (!sku) {
         showToast('该任务缺少来源 SKU');
         return;
     }
-    const existing = (imageDraft.value.carousel_items || []).filter((item) => item.sku !== sku);
+    const existing = [...(imageDraft.value.carousel_items || [])];
     if (existing.length >= 9) {
         showToast('商品最终图片最多 9 张，请先移除一张轮播图');
         return;
@@ -922,7 +924,7 @@ function stageCarouselTaskResult(task, url) {
     showToast('已暂存为轮播图，确认后保存到草稿');
 }
 function stageMainTaskResult(task, url, removeSku) {
-    if (!imageDraft.value || imageDraft.value.locked)
+    if (!imageDraft.value)
         return;
     const existing = (imageDraft.value.carousel_items || []).filter((item) => item.source_type !== 'main_image');
     if (!removeSku && existing.length === 9) {
@@ -955,9 +957,7 @@ async function applyImageTaskResult(task, url, removeSku) {
     else
         stageCarouselTaskResult(task, url);
 }
-function removeCarouselImage(imageUrl) { if (!imageDraft.value || imageDraft.value.locked)
-    return; resetFinalImageOrder(); const remaining = (imageDraft.value.carousel_items || []).filter((item) => item.image_url !== imageUrl); imageDraft.value.carousel_items = remaining.length ? remaining : skuFallbackCarouselItems(imageDraft.value); imageDraft.value.using_sku_fallback = !remaining.length; selectedMainReferences.value = selectedMainReferences.value.filter(url => (imageDraft.value.carousel_items || []).some((item) => item.image_url === url)); }
-function removeMainImage() { if (!imageDraft.value || imageDraft.value.locked)
+function removeMainImage() { if (!imageDraft.value)
     return; resetFinalImageOrder(); const remaining = (imageDraft.value.carousel_items || []).filter((item) => item.source_type !== 'main_image'); imageDraft.value.carousel_items = remaining.length ? remaining : skuFallbackCarouselItems(imageDraft.value); imageDraft.value.using_sku_fallback = !remaining.length; }
 function workspaceCarouselTasks() { return (imageDraft.value?.carousel_tasks || []).filter((task) => task && task.id); }
 async function refreshWorkspaceTasks() { if (!imageDraft.value)
@@ -967,46 +967,44 @@ async function refreshWorkspaceTasks() { if (!imageDraft.value)
 catch (e) {
     showToast(e.response?.data?.detail || '刷新任务失败');
 } }
-function applyWorkspaceCarouselTask(task) {
-    if (!imageDraft.value || imageDraft.value.locked)
+function toggleWorkspaceCarouselTask(task) {
+    if (!imageDraft.value)
         return;
     const url = task?.result_urls?.[0];
-    if (!url) {
-        showToast('该任务还没有可采用的生成结果');
+    if (!taskHasSuccessfulResult(task) || !url)
+        return;
+    if (isWorkspaceTaskSelected(task, url)) {
+        resetFinalImageOrder();
+        const remaining = (imageDraft.value.carousel_items || []).filter((item) => !(item.task_id === task.id && item.image_url === url));
+        imageDraft.value.carousel_items = remaining.length ? remaining : skuFallbackCarouselItems(imageDraft.value);
+        imageDraft.value.using_sku_fallback = !remaining.length;
+        selectedMainReferences.value = selectedMainReferences.value.filter(referenceUrl => (imageDraft.value.carousel_items || []).some((item) => item.image_url === referenceUrl));
+        showToast('已取消采用该轮播图，确认后保存到草稿');
         return;
     }
     stageCarouselTaskResult(task, url);
 }
 function workspaceMainTasks() { return (imageDraft.value?.main_image_tasks || []).filter((task) => task && task.id); }
-function applyWorkspaceMainTask(task) {
-    if (!imageDraft.value || imageDraft.value.locked)
+function toggleWorkspaceMainTask(task) {
+    if (!imageDraft.value)
         return;
     const url = task?.result_urls?.[0];
-    if (!url) {
-        showToast('该任务还没有可采用的生成结果');
+    if (!taskHasSuccessfulResult(task) || !url)
+        return;
+    if (isWorkspaceTaskSelected(task, url)) {
+        removeMainImage();
+        showToast('已取消采用该首图，确认后保存到草稿');
         return;
     }
     stageMainTaskResult(task, url);
 }
-function dropCarousel(targetUrl) { if (!imageDraft.value || !draggedCarouselSku.value || draggedCarouselSku.value === targetUrl)
-    return; const sourceUrl = draggedCarouselSku.value; resetFinalImageOrder(); const items = [...(imageDraft.value.carousel_items || [])]; const from = items.findIndex((item) => item.image_url === sourceUrl), to = items.findIndex((item) => item.image_url === targetUrl); if (from < 0 || to < 0)
-    return; const [moved] = items.splice(from, 1); items.splice(to, 0, moved); imageDraft.value.carousel_items = items; imageDraft.value.using_sku_fallback = false; }
 function dropFinalImage(targetUrl) { if (!draggedFinalImageUrl.value || draggedFinalImageUrl.value === targetUrl)
     return; const items = [...draftFinalImageItems.value]; const from = items.findIndex((item) => item.image_url === draggedFinalImageUrl.value), to = items.findIndex((item) => item.image_url === targetUrl); if (from < 0 || to < 0)
     return; const [moved] = items.splice(from, 1); items.splice(to, 0, moved); stagedFinalImageItems.value = items; draggedFinalImageUrl.value = ''; }
-async function duplicateDraftForImages(draft) { try {
-    const { data } = await api.post(`/drafts/${draft.id}/duplicate`, {}, { headers: headers.value });
-    await refreshDraftList();
-    await openDraftImageWorkspace(data);
-    showToast('已复制为新版草稿');
-}
-catch (e) {
-    showToast(e.response?.data?.detail || '复制草稿失败');
-} }
 async function openImageWorkspaceFromTask(task) { const draftId = task?.parameters?.draft_id; if (!draftId)
     return; showTaskDetailDialog.value = false; page.value = 'drafts'; await openDraftImageWorkspace({ id: draftId }); if (task.task_type === 'carousel' && task.parameters?.source_sku)
     selectedImageSkus.value = [task.parameters.source_sku]; await nextTick(); document.getElementById(task.task_type === 'main_image' ? 'main-image-workspace-section' : 'carousel-workspace-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
-async function confirmDraftImages() { if (!imageDraft.value || imageDraft.value.locked)
+async function confirmDraftImages() { if (!imageDraft.value)
     return; if (!draftFinalImageItems.value.length) {
     showToast('请至少保留一张 SKU 图或轮播图后再保存');
     return;
@@ -1402,6 +1400,20 @@ async function retryTaskResult(task) {
         retryingTaskId.value = null;
     }
 }
+async function retryWorkspaceTask(task) {
+    try {
+        retryingWorkspaceTaskId.value = task.id;
+        await api.post(`/tasks/${task.id}/retry`, {}, { headers: headers.value });
+        await refreshWorkspaceTasks();
+        showToast('失败任务已重新入队');
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '重试任务失败');
+    }
+    finally {
+        retryingWorkspaceTaskId.value = null;
+    }
+}
 function chooseMaterialUploadFiles(event) {
     const input = event.target;
     const files = Array.from(input.files || []);
@@ -1717,6 +1729,19 @@ debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
 let __VLS_components;
 let __VLS_directives;
+/** @type {__VLS_StyleScopedClasses['workspace-sku-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-sku-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-sku-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-sku-image']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-sku-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-sku-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-sku-info']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-sku-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-params']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-settings-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-create-button']} */ ;
+// CSS variable injection 
+// CSS variable injection end 
 if (!__VLS_ctx.token) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.main, __VLS_intrinsicElements.main)({
         ...{ class: "login-shell" },
@@ -3371,32 +3396,6 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (__VLS_ctx.selectedDraftIds.length);
             (__VLS_ctx.MAX_TIKTOK_EXPORT_DRAFTS);
-            if (__VLS_ctx.selectedDraftIds.length === 1) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                    ...{ onClick: (...[$event]) => {
-                            if (!(__VLS_ctx.token))
-                                return;
-                            if (!!(__VLS_ctx.page === 'dashboard'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'templates'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'pod'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'tasks'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'materials'))
-                                return;
-                            if (!(__VLS_ctx.page === 'drafts'))
-                                return;
-                            if (!(__VLS_ctx.selectedDraftIds.length))
-                                return;
-                            if (!(__VLS_ctx.selectedDraftIds.length === 1))
-                                return;
-                            __VLS_ctx.openDraftImageWorkspace(__VLS_ctx.selectedDrafts[0]);
-                        } },
-                    ...{ class: "secondary" },
-                });
-            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (__VLS_ctx.openTiktokExportDialog) },
                 ...{ class: "primary" },
@@ -3439,7 +3438,6 @@ if (__VLS_ctx.token) {
             type: "checkbox",
             checked: (__VLS_ctx.allPagedDraftsSelected),
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -3529,18 +3527,28 @@ if (__VLS_ctx.token) {
             (new Date(draft.created_at).toLocaleString());
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (draft.created_by_name || '历史记录缺失');
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (new Date(draft.updated_at || draft.created_at).toLocaleString());
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (draft.updated_by_name || '历史记录缺失');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "draft-carousel-flag" },
+                ...{ class: (draft.carousel_items?.length ? 'has' : 'none') },
+            });
+            (draft.carousel_items?.length ? '有' : '无');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (draft.export_count || 0);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "draft-status-cell" },
+            });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "chip" },
                 ...{ class: (draft.tiktok_collect_box_id ? 'blue' : 'orange') },
             });
             (draft.tiktok_collect_box_id ? '已认领到 TikTok' : draft.miaoshou_collect_box_id ? '待认领到 TikTok' : '待发布');
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            if (draft.tiktok_collect_box_id) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+                (draft.tiktok_collect_box_id);
+            }
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "draft-trow-actions" },
+            });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!(__VLS_ctx.token))
@@ -3558,6 +3566,25 @@ if (__VLS_ctx.token) {
                         if (!(__VLS_ctx.page === 'drafts'))
                             return;
                         __VLS_ctx.openDraftEditDialog(draft);
+                    } },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        __VLS_ctx.openDraftImageWorkspace(draft);
                     } },
             });
             if (!draft.tiktok_collect_box_id) {
@@ -3585,10 +3612,6 @@ if (__VLS_ctx.token) {
                     disabled: (__VLS_ctx.publishingDraftId === draft.id),
                 });
                 (__VLS_ctx.publishingDraftId === draft.id ? '处理中…' : '发布至妙手');
-            }
-            else {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-                (draft.tiktok_collect_box_id);
             }
         }
         if (!__VLS_ctx.filteredDrafts.length) {
@@ -5534,17 +5557,16 @@ if (__VLS_ctx.showDraftImageDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     (__VLS_ctx.imageDraft?.title);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-        ...{ class: "chip" },
-        ...{ class: (__VLS_ctx.imageDraft?.locked ? 'orange' : 'purple') },
+        ...{ class: "chip purple" },
     });
-    (__VLS_ctx.imageDraft?.locked ? '图片已锁定' : `${__VLS_ctx.draftImagePreviewUrls.length} / 9 张`);
+    (__VLS_ctx.draftImagePreviewUrls.length);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
         ...{ class: "workspace-steps" },
         'aria-label': "制作流程",
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
         ...{ class: "workspace-step" },
-        ...{ class: ({ active: true, done: __VLS_ctx.selectedImageSkus.length || __VLS_ctx.imageDraft?.carousel_items?.length }) },
+        ...{ class: ({ active: true, done: __VLS_ctx.imageDraft?.carousel_items?.length }) },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -5553,16 +5575,7 @@ if (__VLS_ctx.showDraftImageDialog) {
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
         ...{ class: "workspace-step" },
-        ...{ class: ({ active: __VLS_ctx.imageDraft?.carousel_items?.length, done: __VLS_ctx.imageDraft?.carousel_items?.length }) },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-        ...{ class: "workspace-step-divider" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-        ...{ class: "workspace-step" },
-        ...{ class: ({ active: __VLS_ctx.currentGeneratedMainImage }) },
+        ...{ class: ({ active: __VLS_ctx.imageDraft?.carousel_items?.length, done: __VLS_ctx.currentGeneratedMainImage }) },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -5581,25 +5594,11 @@ if (__VLS_ctx.showDraftImageDialog) {
         });
     }
     else if (__VLS_ctx.imageDraft) {
-        if (__VLS_ctx.imageDraft.locked) {
+        if (__VLS_ctx.imageDraft.published) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
                 ...{ class: "image-lock-notice" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!(__VLS_ctx.showDraftImageDialog))
-                            return;
-                        if (!!(__VLS_ctx.imageWorkspaceLoading))
-                            return;
-                        if (!(__VLS_ctx.imageDraft))
-                            return;
-                        if (!(__VLS_ctx.imageDraft.locked))
-                            return;
-                        __VLS_ctx.duplicateDraftForImages(__VLS_ctx.imageDraft);
-                    } },
-                ...{ class: "primary" },
-            });
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "image-workspace-grid" },
@@ -5608,7 +5607,8 @@ if (__VLS_ctx.showDraftImageDialog) {
             ...{ class: "image-workspace-main" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "workspace-card workspace-sku-card-section" },
+            id: "carousel-workspace-section",
+            ...{ class: "workspace-card" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "workspace-card-header" },
@@ -5621,6 +5621,17 @@ if (__VLS_ctx.showDraftImageDialog) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
             ...{ class: "workspace-card-action-hint" },
+        });
+        (__VLS_ctx.imageDraft.using_sku_fallback ? '当前使用 SKU 图回退' : `当前 ${__VLS_ctx.imageDraft.carousel_items?.length || 0} 张`);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "workspace-subsection" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "workspace-subsection-head" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "workspace-subsection-count" },
         });
         (__VLS_ctx.selectedImageSkus.length);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -5646,7 +5657,7 @@ if (__VLS_ctx.showDraftImageDialog) {
                         __VLS_ctx.toggleImageSku(item.sku);
                     } },
                 type: "checkbox",
-                disabled: (__VLS_ctx.imageDraft.locked || (!__VLS_ctx.selectedImageSkus.includes(item.sku) && __VLS_ctx.selectedImageSkus.length >= 9)),
+                disabled: (!__VLS_ctx.selectedImageSkus.includes(item.sku) && __VLS_ctx.selectedImageSkus.length >= 9),
                 checked: (__VLS_ctx.selectedImageSkus.includes(item.sku)),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
@@ -5661,96 +5672,75 @@ if (__VLS_ctx.showDraftImageDialog) {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
             (item.sku);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
-                ...{ class: "workspace-sku-status" },
-                ...{ class: (__VLS_ctx.imageDraft.carousel_items?.some((carousel) => carousel.sku === item.sku) ? 'done' : 'pending') },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
-            (__VLS_ctx.imageDraft.carousel_items?.some((carousel) => carousel.sku === item.sku) ? '当前轮播图' : '可生成');
+            if (!__VLS_ctx.imageDraft.carousel_items?.some((carousel) => carousel.sku === item.sku)) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
+                    ...{ class: "workspace-sku-status pending" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+            }
         }
         if (!__VLS_ctx.imageDraftSkus.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "workspace-sku-empty" },
             });
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            id: "carousel-workspace-section",
-            ...{ class: "workspace-card" },
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "workspace-params" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-card-header" },
+            ...{ class: "workspace-settings-grid" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-            ...{ class: "workspace-step-badge" },
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "workspace-prompt-field" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-            ...{ class: "workspace-card-action-hint" },
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+            value: (__VLS_ctx.carouselParams.prompt),
+            rows: "2",
+            maxlength: "1000",
+            placeholder: "例如：保持服装款式、颜色和印花准确，生成自然真实、适合电商展示的商品场景图",
         });
-        (__VLS_ctx.imageDraft.using_sku_fallback ? '当前使用 SKU 图回退' : `当前 ${__VLS_ctx.imageDraft.carousel_items?.length || 0} 张`);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "carousel-strip" },
+            ...{ class: "workspace-settings-row" },
         });
-        for (const [item, index] of __VLS_getVForSourceType((__VLS_ctx.imageDraft.carousel_items || []))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-                ...{ onDragstart: (...[$event]) => {
-                        if (!(__VLS_ctx.showDraftImageDialog))
-                            return;
-                        if (!!(__VLS_ctx.imageWorkspaceLoading))
-                            return;
-                        if (!(__VLS_ctx.imageDraft))
-                            return;
-                        __VLS_ctx.draggedCarouselSku = item.image_url;
-                    } },
-                ...{ onDragover: () => { } },
-                ...{ onDrop: (...[$event]) => {
-                        if (!(__VLS_ctx.showDraftImageDialog))
-                            return;
-                        if (!!(__VLS_ctx.imageWorkspaceLoading))
-                            return;
-                        if (!(__VLS_ctx.imageDraft))
-                            return;
-                        __VLS_ctx.dropCarousel(item.image_url);
-                    } },
-                key: (item.image_url),
-                draggable: "true",
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.carouselParams.provider),
+        });
+        for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.availableAiProviders))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (provider.provider),
+                value: (provider.provider),
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "carousel-strip-index" },
-            });
-            (index + 1);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                src: (__VLS_ctx.imageUrl(item.image_url)),
-                alt: (item.sku || 'AI 首图'),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-            (item.sku || 'AI 首图');
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!(__VLS_ctx.showDraftImageDialog))
-                            return;
-                        if (!!(__VLS_ctx.imageWorkspaceLoading))
-                            return;
-                        if (!(__VLS_ctx.imageDraft))
-                            return;
-                        __VLS_ctx.removeCarouselImage(item.image_url);
-                    } },
-                disabled: (__VLS_ctx.imageDraft.locked),
-            });
+            (provider.display_name);
+            (provider.model);
         }
-        if (!__VLS_ctx.imageDraft.carousel_items?.length) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "carousel-empty" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "carousel-empty-icon" },
-                'aria-hidden': "true",
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.carouselParams.ratio),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.carouselParams.quality),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.showDraftImageDialog))
+                        return;
+                    if (!!(__VLS_ctx.imageWorkspaceLoading))
+                        return;
+                    if (!(__VLS_ctx.imageDraft))
+                        return;
+                    __VLS_ctx.createDraftImageTasks('carousel');
+                } },
+            ...{ class: "primary workspace-create-button" },
+            disabled: (!!__VLS_ctx.imageTaskCreatingType || !__VLS_ctx.selectedImageSkus.length),
+        });
+        (__VLS_ctx.imageTaskCreatingType === 'carousel' ? '创建中…' : '开始创作轮播图');
         if (__VLS_ctx.workspaceCarouselTasks().length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "workspace-task-panel" },
@@ -5864,103 +5854,85 @@ if (__VLS_ctx.showDraftImageDialog) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                     ...{ class: "workspace-task-actions" },
                 });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                    ...{ onClick: (...[$event]) => {
-                            if (!(__VLS_ctx.showDraftImageDialog))
-                                return;
-                            if (!!(__VLS_ctx.imageWorkspaceLoading))
-                                return;
-                            if (!(__VLS_ctx.imageDraft))
-                                return;
-                            if (!(__VLS_ctx.workspaceCarouselTasks().length))
-                                return;
-                            __VLS_ctx.applyWorkspaceCarouselTask(task);
-                        } },
-                    ...{ class: "primary" },
-                    disabled: (__VLS_ctx.imageDraft.locked || !task.result_urls?.length || __VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0])),
-                });
-                (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls?.[0]) ? '已采用' : '采用');
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                    ...{ onClick: (...[$event]) => {
-                            if (!(__VLS_ctx.showDraftImageDialog))
-                                return;
-                            if (!!(__VLS_ctx.imageWorkspaceLoading))
-                                return;
-                            if (!(__VLS_ctx.imageDraft))
-                                return;
-                            if (!(__VLS_ctx.workspaceCarouselTasks().length))
-                                return;
-                            __VLS_ctx.openTaskDetail(task);
-                        } },
-                    ...{ class: "secondary" },
-                });
+                if (__VLS_ctx.taskHasSuccessfulResult(task)) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!(__VLS_ctx.showDraftImageDialog))
+                                    return;
+                                if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                    return;
+                                if (!(__VLS_ctx.imageDraft))
+                                    return;
+                                if (!(__VLS_ctx.workspaceCarouselTasks().length))
+                                    return;
+                                if (!(__VLS_ctx.taskHasSuccessfulResult(task)))
+                                    return;
+                                __VLS_ctx.toggleWorkspaceCarouselTask(task);
+                            } },
+                        ...{ class: (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0]) ? 'secondary' : 'primary') },
+                        title: (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0]) ? '点击取消采用' : '点击采用'),
+                    });
+                    (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0]) ? '已采用' : '采用');
+                }
+                if (task.status === 'failed') {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!(__VLS_ctx.showDraftImageDialog))
+                                    return;
+                                if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                    return;
+                                if (!(__VLS_ctx.imageDraft))
+                                    return;
+                                if (!(__VLS_ctx.workspaceCarouselTasks().length))
+                                    return;
+                                if (!(task.status === 'failed'))
+                                    return;
+                                __VLS_ctx.retryWorkspaceTask(task);
+                            } },
+                        ...{ class: "secondary" },
+                        disabled: (__VLS_ctx.retryingWorkspaceTaskId === task.id),
+                    });
+                    (__VLS_ctx.retryingWorkspaceTaskId === task.id ? '重试中…' : '重试');
+                }
             }
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-params" },
+            ...{ class: "workspace-subsection" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-params-head" },
+            ...{ class: "workspace-subsection-head" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-settings-grid" },
+            ...{ class: "carousel-strip generated-carousel-strip" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
-            ...{ class: "workspace-prompt-field" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
-            value: (__VLS_ctx.carouselParams.prompt),
-            rows: "2",
-            maxlength: "1000",
-            placeholder: "例如：保持服装款式、颜色和印花准确，生成自然真实、适合电商展示的商品场景图",
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-settings-row" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.carouselParams.provider),
-        });
-        for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.availableAiProviders))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                key: (provider.provider),
-                value: (provider.provider),
+        for (const [item, index] of __VLS_getVForSourceType((__VLS_ctx.adoptedCarouselItems))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+                key: (item.image_url),
             });
-            (provider.display_name);
-            (provider.model);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "carousel-strip-index" },
+            });
+            (index + 1);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                src: (__VLS_ctx.imageUrl(item.image_url)),
+                alt: (item.sku || 'AI 首图'),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            (item.sku || 'AI 首图');
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.carouselParams.ratio),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.carouselParams.quality),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-card-footer" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (...[$event]) => {
-                    if (!(__VLS_ctx.showDraftImageDialog))
-                        return;
-                    if (!!(__VLS_ctx.imageWorkspaceLoading))
-                        return;
-                    if (!(__VLS_ctx.imageDraft))
-                        return;
-                    __VLS_ctx.createDraftImageTasks('carousel');
-                } },
-            ...{ class: "primary" },
-            disabled: (__VLS_ctx.imageDraft.locked || !!__VLS_ctx.imageTaskCreatingType || !__VLS_ctx.selectedImageSkus.length),
-        });
-        (__VLS_ctx.imageTaskCreatingType === 'carousel' ? '创建中…' : '开始创作轮播图');
+        if (!__VLS_ctx.adoptedCarouselItems.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "carousel-empty" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "carousel-empty-icon" },
+                'aria-hidden': "true",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
             id: "main-image-workspace-section",
             ...{ class: "workspace-card" },
@@ -5974,23 +5946,6 @@ if (__VLS_ctx.showDraftImageDialog) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        if (__VLS_ctx.currentGeneratedMainImage) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (__VLS_ctx.removeMainImage) },
-                ...{ class: "ghost workspace-card-action" },
-                disabled: (__VLS_ctx.imageDraft.locked),
-            });
-        }
-        if (__VLS_ctx.currentGeneratedMainImage) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "main-image-preview" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                src: (__VLS_ctx.imageUrl(__VLS_ctx.currentGeneratedMainImage.image_url)),
-                alt: "AI 生成图片",
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "reference-mode-tabs" },
             role: "tablist",
@@ -6039,7 +5994,7 @@ if (__VLS_ctx.showDraftImageDialog) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "reference-picker" },
             });
-            for (const [item] of __VLS_getVForSourceType((__VLS_ctx.imageDraft.carousel_items || []))) {
+            for (const [item] of __VLS_getVForSourceType((__VLS_ctx.adoptedCarouselItems))) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
                     key: (item.image_url),
                     ...{ class: ({ selected: __VLS_ctx.selectedMainReferences.includes(item.image_url) }) },
@@ -6066,12 +6021,69 @@ if (__VLS_ctx.showDraftImageDialog) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
                 (item.sku || 'AI 首图');
             }
-            if (!(__VLS_ctx.imageDraft.carousel_items?.length)) {
+            if (!__VLS_ctx.adoptedCarouselItems.length) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                     ...{ class: "empty" },
                 });
             }
         }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "workspace-params" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "workspace-settings-grid" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "workspace-prompt-field" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+            value: (__VLS_ctx.mainParams.prompt),
+            rows: "2",
+            maxlength: "1000",
+            placeholder: "例如：以参考图为基础生成突出商品主体的电商首图，背景简洁、光线自然",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "workspace-settings-row" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.mainParams.provider),
+        });
+        for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.availableAiProviders))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (provider.provider),
+                value: (provider.provider),
+            });
+            (provider.display_name);
+            (provider.model);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.mainParams.ratio),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.mainParams.quality),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.showDraftImageDialog))
+                        return;
+                    if (!!(__VLS_ctx.imageWorkspaceLoading))
+                        return;
+                    if (!(__VLS_ctx.imageDraft))
+                        return;
+                    __VLS_ctx.createDraftImageTasks('main_image');
+                } },
+            ...{ class: "primary workspace-create-button" },
+            disabled: (!!__VLS_ctx.imageTaskCreatingType || !__VLS_ctx.adoptedCarouselItems.length),
+        });
+        (__VLS_ctx.imageTaskCreatingType === 'main_image' ? '创建中…' : '开始创作首图');
         if (__VLS_ctx.workspaceMainTasks().length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "workspace-task-panel" },
@@ -6090,8 +6102,9 @@ if (__VLS_ctx.showDraftImageDialog) {
                 ...{ class: "workspace-task-list" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "workspace-task-row workspace-task-row-head" },
+                ...{ class: "workspace-task-row workspace-task-row-head carousel-task-row" },
             });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -6100,7 +6113,7 @@ if (__VLS_ctx.showDraftImageDialog) {
             for (const [task] of __VLS_getVForSourceType((__VLS_ctx.workspaceMainTasks()))) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                     key: (task.id),
-                    ...{ class: "workspace-task-row" },
+                    ...{ class: "workspace-task-row carousel-task-row" },
                 });
                 if (task.parameters?.print_url) {
                     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
@@ -6131,6 +6144,11 @@ if (__VLS_ctx.showDraftImageDialog) {
                         ...{ class: "workspace-task-dash" },
                     });
                 }
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "workspace-task-prompt" },
+                    title: (task.parameters?.creative_requirement || ''),
+                });
+                (task.parameters?.creative_requirement || '—');
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                     ...{ class: "workspace-task-status" },
                 });
@@ -6179,103 +6197,58 @@ if (__VLS_ctx.showDraftImageDialog) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                     ...{ class: "workspace-task-actions" },
                 });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                    ...{ onClick: (...[$event]) => {
-                            if (!(__VLS_ctx.showDraftImageDialog))
-                                return;
-                            if (!!(__VLS_ctx.imageWorkspaceLoading))
-                                return;
-                            if (!(__VLS_ctx.imageDraft))
-                                return;
-                            if (!(__VLS_ctx.workspaceMainTasks().length))
-                                return;
-                            __VLS_ctx.applyWorkspaceMainTask(task);
-                        } },
-                    ...{ class: "primary" },
-                    disabled: (__VLS_ctx.imageDraft.locked || !task.result_urls?.length || __VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0])),
-                });
-                (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls?.[0]) ? '已采用' : '采用');
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                    ...{ onClick: (...[$event]) => {
-                            if (!(__VLS_ctx.showDraftImageDialog))
-                                return;
-                            if (!!(__VLS_ctx.imageWorkspaceLoading))
-                                return;
-                            if (!(__VLS_ctx.imageDraft))
-                                return;
-                            if (!(__VLS_ctx.workspaceMainTasks().length))
-                                return;
-                            __VLS_ctx.openTaskDetail(task);
-                        } },
-                    ...{ class: "secondary" },
-                });
+                if (__VLS_ctx.taskHasSuccessfulResult(task)) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!(__VLS_ctx.showDraftImageDialog))
+                                    return;
+                                if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                    return;
+                                if (!(__VLS_ctx.imageDraft))
+                                    return;
+                                if (!(__VLS_ctx.workspaceMainTasks().length))
+                                    return;
+                                if (!(__VLS_ctx.taskHasSuccessfulResult(task)))
+                                    return;
+                                __VLS_ctx.toggleWorkspaceMainTask(task);
+                            } },
+                        ...{ class: (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0]) ? 'secondary' : 'primary') },
+                        title: (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0]) ? '点击取消采用' : '点击采用'),
+                    });
+                    (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0]) ? '已采用' : '采用');
+                }
+                if (task.status === 'failed') {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!(__VLS_ctx.showDraftImageDialog))
+                                    return;
+                                if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                    return;
+                                if (!(__VLS_ctx.imageDraft))
+                                    return;
+                                if (!(__VLS_ctx.workspaceMainTasks().length))
+                                    return;
+                                if (!(task.status === 'failed'))
+                                    return;
+                                __VLS_ctx.retryWorkspaceTask(task);
+                            } },
+                        ...{ class: "secondary" },
+                        disabled: (__VLS_ctx.retryingWorkspaceTaskId === task.id),
+                    });
+                    (__VLS_ctx.retryingWorkspaceTaskId === task.id ? '重试中…' : '重试');
+                }
             }
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-params" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-params-head" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-settings-grid" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
-            ...{ class: "workspace-prompt-field" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
-            value: (__VLS_ctx.mainParams.prompt),
-            rows: "2",
-            maxlength: "1000",
-            placeholder: "例如：以参考图为基础生成突出商品主体的电商首图，背景简洁、光线自然",
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-settings-row" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.mainParams.provider),
-        });
-        for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.availableAiProviders))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                key: (provider.provider),
-                value: (provider.provider),
+        if (__VLS_ctx.currentGeneratedMainImage) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "main-image-preview adopted-main-image-preview" },
             });
-            (provider.display_name);
-            (provider.model);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                src: (__VLS_ctx.imageUrl(__VLS_ctx.currentGeneratedMainImage.image_url)),
+                alt: "AI 生成图片",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.mainParams.ratio),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.mainParams.quality),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-card-footer" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (...[$event]) => {
-                    if (!(__VLS_ctx.showDraftImageDialog))
-                        return;
-                    if (!!(__VLS_ctx.imageWorkspaceLoading))
-                        return;
-                    if (!(__VLS_ctx.imageDraft))
-                        return;
-                    __VLS_ctx.createDraftImageTasks('main_image');
-                } },
-            ...{ class: "primary" },
-            disabled: (__VLS_ctx.imageDraft.locked || !!__VLS_ctx.imageTaskCreatingType || !__VLS_ctx.imageDraft.carousel_items?.length),
-        });
-        (__VLS_ctx.imageTaskCreatingType === 'main_image' ? '创建中…' : '开始创作首图');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
             ...{ class: "workspace-card final-image-preview-card" },
         });
@@ -6359,9 +6332,9 @@ if (__VLS_ctx.showDraftImageDialog) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.confirmDraftImages) },
             ...{ class: "primary" },
-            disabled: (__VLS_ctx.imageDraft.locked || __VLS_ctx.imageConfirmSaving || !!__VLS_ctx.imageTaskCreatingType),
+            disabled: (__VLS_ctx.imageConfirmSaving || !!__VLS_ctx.imageTaskCreatingType),
         });
-        (__VLS_ctx.imageConfirmSaving ? '保存中…' : '确认并保存到草稿');
+        (__VLS_ctx.imageConfirmSaving ? '保存中…' : '保存到草稿');
     }
 }
 if (__VLS_ctx.showMainApplyDialog && __VLS_ctx.pendingMainApply) {
@@ -7288,7 +7261,6 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['draft-heading-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-export-bar']} */ ;
-/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
@@ -7301,7 +7273,10 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['material-checkbox']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-thumbnail']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-product-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-carousel-flag']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-status-cell']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-trow-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['compact-action']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
@@ -7524,9 +7499,8 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['image-workspace-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['image-workspace-header-text']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['purple']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-steps']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-step']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-step-divider']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-step']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-step-divider']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-step']} */ ;
@@ -7534,29 +7508,29 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['workspace-step']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['image-lock-notice']} */ ;
-/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['image-workspace-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['image-workspace-main']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-card']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-sku-card-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-card-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-step-badge']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-card-action-hint']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-subsection']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-subsection-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-subsection-count']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-scroll']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-check']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-image']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-info']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-status']} */ ;
+/** @type {__VLS_StyleScopedClasses['pending']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-sku-empty']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-card']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-card-header']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-step-badge']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-card-action-hint']} */ ;
-/** @type {__VLS_StyleScopedClasses['carousel-strip']} */ ;
-/** @type {__VLS_StyleScopedClasses['carousel-strip-index']} */ ;
-/** @type {__VLS_StyleScopedClasses['carousel-empty']} */ ;
-/** @type {__VLS_StyleScopedClasses['carousel-empty-icon']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-params']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-settings-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-prompt-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-settings-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-create-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-panel-head']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
@@ -7576,26 +7550,28 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['workspace-task-dash']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-message']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-actions']} */ ;
-/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-params']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-params-head']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-settings-grid']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-prompt-field']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-settings-row']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-card-footer']} */ ;
-/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-subsection']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-subsection-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['carousel-strip']} */ ;
+/** @type {__VLS_StyleScopedClasses['generated-carousel-strip']} */ ;
+/** @type {__VLS_StyleScopedClasses['carousel-strip-index']} */ ;
+/** @type {__VLS_StyleScopedClasses['carousel-empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['carousel-empty-icon']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-card-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-step-badge']} */ ;
-/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-card-action']} */ ;
-/** @type {__VLS_StyleScopedClasses['main-image-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['reference-mode-tabs']} */ ;
 /** @type {__VLS_StyleScopedClasses['reference-mode-icon']} */ ;
 /** @type {__VLS_StyleScopedClasses['reference-mode-icon']} */ ;
 /** @type {__VLS_StyleScopedClasses['reference-picker']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-params']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-settings-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-prompt-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-settings-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-create-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-panel-head']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
@@ -7603,24 +7579,21 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['workspace-task-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-row-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['carousel-task-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['carousel-task-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-thumb']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-dash']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-task-prompt']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-status']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-thumb']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-dash']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-message']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-task-actions']} */ ;
-/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-params']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-params-head']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-settings-grid']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-prompt-field']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-settings-row']} */ ;
-/** @type {__VLS_StyleScopedClasses['workspace-card-footer']} */ ;
-/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['main-image-preview']} */ ;
+/** @type {__VLS_StyleScopedClasses['adopted-main-image-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['final-image-preview-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-card-header']} */ ;
@@ -7858,7 +7831,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             mainReferenceMode: mainReferenceMode,
             carouselParams: carouselParams,
             mainParams: mainParams,
-            draggedCarouselSku: draggedCarouselSku,
             draggedFinalImageUrl: draggedFinalImageUrl,
             showMainApplyDialog: showMainApplyDialog,
             pendingMainApply: pendingMainApply,
@@ -7871,6 +7843,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             viewingTask: viewingTask,
             taskListRefreshing: taskListRefreshing,
             retryingTaskId: retryingTaskId,
+            retryingWorkspaceTaskId: retryingWorkspaceTaskId,
             showClaimMaterialsDialog: showClaimMaterialsDialog,
             claimingTask: claimingTask,
             selectedClaimResultUrls: selectedClaimResultUrls,
@@ -8005,6 +7978,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             imageDraftSkus: imageDraftSkus,
             draftFinalImageItems: draftFinalImageItems,
             draftImagePreviewUrls: draftImagePreviewUrls,
+            adoptedCarouselItems: adoptedCarouselItems,
             currentGeneratedMainImage: currentGeneratedMainImage,
             openDraftImageWorkspace: openDraftImageWorkspace,
             toggleImageSku: toggleImageSku,
@@ -8012,17 +7986,14 @@ const __VLS_self = (await import('vue')).defineComponent({
             createDraftImageTasks: createDraftImageTasks,
             isWorkspaceTaskSelected: isWorkspaceTaskSelected,
             isTaskResultSelected: isTaskResultSelected,
+            taskHasSuccessfulResult: taskHasSuccessfulResult,
             applyImageTaskResult: applyImageTaskResult,
-            removeCarouselImage: removeCarouselImage,
-            removeMainImage: removeMainImage,
             workspaceCarouselTasks: workspaceCarouselTasks,
             refreshWorkspaceTasks: refreshWorkspaceTasks,
-            applyWorkspaceCarouselTask: applyWorkspaceCarouselTask,
+            toggleWorkspaceCarouselTask: toggleWorkspaceCarouselTask,
             workspaceMainTasks: workspaceMainTasks,
-            applyWorkspaceMainTask: applyWorkspaceMainTask,
-            dropCarousel: dropCarousel,
+            toggleWorkspaceMainTask: toggleWorkspaceMainTask,
             dropFinalImage: dropFinalImage,
-            duplicateDraftForImages: duplicateDraftForImages,
             openImageWorkspaceFromTask: openImageWorkspaceFromTask,
             confirmDraftImages: confirmDraftImages,
             saveDraftEdit: saveDraftEdit,
@@ -8048,6 +8019,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             openBatchClaimDialog: openBatchClaimDialog,
             confirmBatchClaim: confirmBatchClaim,
             retryTaskResult: retryTaskResult,
+            retryWorkspaceTask: retryWorkspaceTask,
             chooseMaterialUploadFiles: chooseMaterialUploadFiles,
             uploadMaterialAssets: uploadMaterialAssets,
             deleteSelectedMaterialAssets: deleteSelectedMaterialAssets,

@@ -59,11 +59,11 @@ const showDraftImageDialog = ref(false), imageDraft = ref<any>(null), imageWorks
 const selectedImageSkus = ref<string[]>([]), selectedMainReferences = ref<string[]>([]), mainReferenceMode = ref<'random'|'manual'>('random')
 // 轮播图与首图任务使用各自独立的一套生成参数，互不干扰。
 const carouselParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:'1K'|'2K'}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'}), mainParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:'1K'|'2K'}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'})
-const draggedCarouselSku = ref(''), stagedFinalImageItems = ref<any[] | null>(null), draggedFinalImageUrl = ref('')
+const stagedFinalImageItems = ref<any[] | null>(null), draggedFinalImageUrl = ref('')
 const showMainApplyDialog = ref(false), pendingMainApply = ref<{task:any;url:string}|null>(null), mainRemoveSku = ref('')
 const showShopManagersDialog = ref(false), managingShop = ref<any>(null), selectedManagerIds = ref<number[]>([]), shopManagersSaving = ref(false)
 const showTaskDetailDialog = ref(false), viewingTask = ref<any>(null), taskDetailLoading = ref(false)
-const taskListRefreshing = ref(false), retryingTaskId = ref<number | null>(null)
+const taskListRefreshing = ref(false), retryingTaskId = ref<number | null>(null), retryingWorkspaceTaskId = ref<number | null>(null)
 const showClaimMaterialsDialog = ref(false), claimingTask = ref<any>(null), selectedClaimResultUrls = ref<string[]>([]), claimingMaterials = ref(false)
 type CreativeAsset = { id: string; file: File; preview: string; uploadedUrl?: string }
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL']
@@ -520,6 +520,7 @@ const draftFinalImageItems = computed(() => {
   return (imageDraft.value.carousel_items || []).filter((item:any)=>item?.image_url && !seen.has(item.image_url) && seen.add(item.image_url))
 })
 const draftImagePreviewUrls = computed(() => draftFinalImageItems.value.map((item:any)=>item.image_url))
+const adoptedCarouselItems = computed(() => (imageDraft.value?.carousel_items || []).filter((item:any)=>item.source_type!=='main_image'))
 const currentGeneratedMainImage = computed(() => (imageDraft.value?.carousel_items || []).find((item:any)=>item.source_type==='main_image') || null)
 function resetFinalImageOrder(){stagedFinalImageItems.value=null;draggedFinalImageUrl.value=''}
 async function loadImageWorkspace(draftId:number, tasksOnly=false) {
@@ -548,15 +549,15 @@ function toggleImageSku(sku:string) {
 }
 function toggleMainReference(url:string) { selectedMainReferences.value=selectedMainReferences.value.includes(url) ? selectedMainReferences.value.filter(item=>item!==url) : [...selectedMainReferences.value,url] }
 async function createDraftImageTasks(type:'carousel'|'main_image') {
-  if(!imageDraft.value || imageDraft.value.locked) return
+  if(!imageDraft.value) return
   if(type==='carousel' && !selectedImageSkus.value.length){showToast('请至少选择一个 SKU');return}
-  if(type==='main_image' && !(imageDraft.value.carousel_items?.length)){showToast('请先保留至少一张 SKU 图或轮播图');return}
+  if(type==='main_image' && !adoptedCarouselItems.value.length){showToast('请先保留至少一张 SKU 图或轮播图');return}
   if(type==='main_image' && mainReferenceMode.value==='manual' && !selectedMainReferences.value.length){showToast('请手动选择首图参考图');return}
   const params = type==='carousel' ? carouselParams.value : mainParams.value
   if(!params.prompt.trim()){showToast(type==='carousel'?'请填写轮播图的创作要求':'请填写首图的创作要求');return}
   try {
     imageTaskCreatingType.value=type
-    const mainReferenceUrls=mainReferenceMode.value==='manual' ? selectedMainReferences.value : (imageDraft.value.carousel_items || []).map((item:any)=>item.image_url)
+    const mainReferenceUrls=mainReferenceMode.value==='manual' ? selectedMainReferences.value : adoptedCarouselItems.value.map((item:any)=>item.image_url)
     const {data}=await api.post(`/drafts/${imageDraft.value.id}/image-tasks`,{task_type:type,source_skus:type==='carousel'?selectedImageSkus.value:[],reference_mode:mainReferenceMode.value,reference_urls:type==='main_image'?mainReferenceUrls:[],provider:params.provider,ratio:params.ratio,quality:params.quality,creative_requirement:params.prompt.trim()},{headers:headers.value})
     const taskKey=type==='carousel'?'carousel_tasks':'main_image_tasks'
     imageDraft.value[taskKey]=[...(data.items || []).reverse(),...(imageDraft.value[taskKey] || [])]
@@ -575,11 +576,12 @@ function isTaskResultSelected(task:any,url:string) {
     ? isWorkspaceTaskSelected(task,url)
     : task.selected_result_url===url
 }
+function taskHasSuccessfulResult(task:any) { return ['awaiting_selection','completed'].includes(task?.status) && !!task?.result_urls?.[0] }
 function stageCarouselTaskResult(task:any,url:string) {
-  if(!imageDraft.value || imageDraft.value.locked) return
+  if(!imageDraft.value) return
   const sku=String(task.parameters?.source_sku || '')
   if(!sku){showToast('该任务缺少来源 SKU');return}
-  const existing=(imageDraft.value.carousel_items || []).filter((item:any)=>item.sku!==sku)
+  const existing=[...(imageDraft.value.carousel_items || [])]
   if(existing.length >= 9){showToast('商品最终图片最多 9 张，请先移除一张轮播图');return}
   resetFinalImageOrder()
   imageDraft.value.carousel_items=[...existing,{sku,image_url:url,task_id:task.id}]
@@ -588,7 +590,7 @@ function stageCarouselTaskResult(task:any,url:string) {
   showToast('已暂存为轮播图，确认后保存到草稿')
 }
 function stageMainTaskResult(task:any,url:string,removeSku?:string) {
-  if(!imageDraft.value || imageDraft.value.locked) return
+  if(!imageDraft.value) return
   const existing=(imageDraft.value.carousel_items || []).filter((item:any)=>item.source_type!=='main_image')
   if(!removeSku && existing.length===9){
     pendingMainApply.value={task,url}
@@ -616,28 +618,39 @@ async function applyImageTaskResult(task:any,url:string,removeSku?:string) {
   if(task.task_type==='main_image') stageMainTaskResult(task,url,removeSku)
   else stageCarouselTaskResult(task,url)
 }
-function removeCarouselImage(imageUrl:string) { if(!imageDraft.value || imageDraft.value.locked)return;resetFinalImageOrder();const remaining=(imageDraft.value.carousel_items || []).filter((item:any)=>item.image_url!==imageUrl);imageDraft.value.carousel_items=remaining.length?remaining:skuFallbackCarouselItems(imageDraft.value);imageDraft.value.using_sku_fallback=!remaining.length;selectedMainReferences.value=selectedMainReferences.value.filter(url=>(imageDraft.value.carousel_items || []).some((item:any)=>item.image_url===url)) }
-function removeMainImage(){if(!imageDraft.value || imageDraft.value.locked)return;resetFinalImageOrder();const remaining=(imageDraft.value.carousel_items || []).filter((item:any)=>item.source_type!=='main_image');imageDraft.value.carousel_items=remaining.length?remaining:skuFallbackCarouselItems(imageDraft.value);imageDraft.value.using_sku_fallback=!remaining.length}
+function removeMainImage(){if(!imageDraft.value)return;resetFinalImageOrder();const remaining=(imageDraft.value.carousel_items || []).filter((item:any)=>item.source_type!=='main_image');imageDraft.value.carousel_items=remaining.length?remaining:skuFallbackCarouselItems(imageDraft.value);imageDraft.value.using_sku_fallback=!remaining.length}
 function workspaceCarouselTasks():any[] { return (imageDraft.value?.carousel_tasks || []).filter((task:any)=>task && task.id) }
 async function refreshWorkspaceTasks() { if(!imageDraft.value) return; try { await loadImageWorkspace(imageDraft.value.id,true) } catch(e:any){showToast(e.response?.data?.detail || '刷新任务失败')} }
-function applyWorkspaceCarouselTask(task:any) {
-  if(!imageDraft.value || imageDraft.value.locked) return
+function toggleWorkspaceCarouselTask(task:any) {
+  if(!imageDraft.value) return
   const url = task?.result_urls?.[0]
-  if(!url){ showToast('该任务还没有可采用的生成结果'); return }
+  if(!taskHasSuccessfulResult(task) || !url) return
+  if(isWorkspaceTaskSelected(task,url)){
+    resetFinalImageOrder()
+    const remaining=(imageDraft.value.carousel_items || []).filter((item:any)=>!(item.task_id===task.id && item.image_url===url))
+    imageDraft.value.carousel_items=remaining.length?remaining:skuFallbackCarouselItems(imageDraft.value)
+    imageDraft.value.using_sku_fallback=!remaining.length
+    selectedMainReferences.value=selectedMainReferences.value.filter(referenceUrl=>(imageDraft.value.carousel_items || []).some((item:any)=>item.image_url===referenceUrl))
+    showToast('已取消采用该轮播图，确认后保存到草稿')
+    return
+  }
   stageCarouselTaskResult(task,url)
 }
 function workspaceMainTasks():any[] { return (imageDraft.value?.main_image_tasks || []).filter((task:any)=>task && task.id) }
-function applyWorkspaceMainTask(task:any) {
-  if(!imageDraft.value || imageDraft.value.locked) return
+function toggleWorkspaceMainTask(task:any) {
+  if(!imageDraft.value) return
   const url = task?.result_urls?.[0]
-  if(!url){ showToast('该任务还没有可采用的生成结果'); return }
+  if(!taskHasSuccessfulResult(task) || !url) return
+  if(isWorkspaceTaskSelected(task,url)){
+    removeMainImage()
+    showToast('已取消采用该首图，确认后保存到草稿')
+    return
+  }
   stageMainTaskResult(task,url)
 }
-function dropCarousel(targetUrl:string){if(!imageDraft.value || !draggedCarouselSku.value || draggedCarouselSku.value===targetUrl)return;const sourceUrl=draggedCarouselSku.value;resetFinalImageOrder();const items=[...(imageDraft.value.carousel_items||[])];const from=items.findIndex((item:any)=>item.image_url===sourceUrl),to=items.findIndex((item:any)=>item.image_url===targetUrl);if(from<0 || to<0)return;const [moved]=items.splice(from,1);items.splice(to,0,moved);imageDraft.value.carousel_items=items;imageDraft.value.using_sku_fallback=false}
 function dropFinalImage(targetUrl:string){if(!draggedFinalImageUrl.value || draggedFinalImageUrl.value===targetUrl)return;const items=[...draftFinalImageItems.value];const from=items.findIndex((item:any)=>item.image_url===draggedFinalImageUrl.value),to=items.findIndex((item:any)=>item.image_url===targetUrl);if(from<0 || to<0)return;const [moved]=items.splice(from,1);items.splice(to,0,moved);stagedFinalImageItems.value=items;draggedFinalImageUrl.value=''}
-async function duplicateDraftForImages(draft:any){try{const {data}=await api.post(`/drafts/${draft.id}/duplicate`,{},{headers:headers.value});await refreshDraftList();await openDraftImageWorkspace(data);showToast('已复制为新版草稿')}catch(e:any){showToast(e.response?.data?.detail || '复制草稿失败')}}
 async function openImageWorkspaceFromTask(task:any){const draftId=task?.parameters?.draft_id;if(!draftId)return;showTaskDetailDialog.value=false;page.value='drafts';await openDraftImageWorkspace({id:draftId});if(task.task_type==='carousel' && task.parameters?.source_sku)selectedImageSkus.value=[task.parameters.source_sku];await nextTick();document.getElementById(task.task_type==='main_image'?'main-image-workspace-section':'carousel-workspace-section')?.scrollIntoView({behavior:'smooth',block:'start'})}
-async function confirmDraftImages(){if(!imageDraft.value || imageDraft.value.locked)return;if(!draftFinalImageItems.value.length){showToast('请至少保留一张 SKU 图或轮播图后再保存');return}try{imageConfirmSaving.value=true;const payload={image_items:draftFinalImageItems.value.map((item:any)=>({result_url:item.image_url,sku:item.sku || null,task_id:item.task_id || null}))};imageDraft.value=(await api.post(`/drafts/${imageDraft.value.id}/images/confirm`,payload,{headers:headers.value})).data;await refreshDraftList();showDraftImageDialog.value=false;showToast('商品图片已保存到草稿')}catch(e:any){showToast(e.response?.data?.detail || '保存商品图片失败')}finally{imageConfirmSaving.value=false}}
+async function confirmDraftImages(){if(!imageDraft.value)return;if(!draftFinalImageItems.value.length){showToast('请至少保留一张 SKU 图或轮播图后再保存');return}try{imageConfirmSaving.value=true;const payload={image_items:draftFinalImageItems.value.map((item:any)=>({result_url:item.image_url,sku:item.sku || null,task_id:item.task_id || null}))};imageDraft.value=(await api.post(`/drafts/${imageDraft.value.id}/images/confirm`,payload,{headers:headers.value})).data;await refreshDraftList();showDraftImageDialog.value=false;showToast('商品图片已保存到草稿')}catch(e:any){showToast(e.response?.data?.detail || '保存商品图片失败')}finally{imageConfirmSaving.value=false}}
 async function saveDraftEdit() {
   const title = draftEditTitle.value.trim()
   if (!editingDraft.value || title.length < 25 || title.length > 255) { draftEditError.value = '商品标题长度须为 25-255 个字符'; return }
@@ -885,6 +898,15 @@ async function retryTaskResult(task: any) {
   } catch (e: any) { showToast(e.response?.data?.detail || '重试任务失败') }
   finally { retryingTaskId.value = null }
 }
+async function retryWorkspaceTask(task: any) {
+  try {
+    retryingWorkspaceTaskId.value = task.id
+    await api.post(`/tasks/${task.id}/retry`, {}, { headers: headers.value })
+    await refreshWorkspaceTasks()
+    showToast('失败任务已重新入队')
+  } catch (e: any) { showToast(e.response?.data?.detail || '重试任务失败') }
+  finally { retryingWorkspaceTaskId.value = null }
+}
 function chooseMaterialUploadFiles(event: Event) {
   const input = event.target as HTMLInputElement
   const files = Array.from(input.files || [])
@@ -1087,8 +1109,8 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
       </section>
       <section v-else-if="page==='drafts'" class="page">
         <div class="section-heading draft-heading"><div><span>本地草稿可批量导出 TikTok 表格，或手动发布至妙手后认领到 TikTok 采集箱。</span><div class="material-filter-row"><label class="draft-template-filter">产品模板<select v-model="draftTemplateFilterId" @change="changeDraftTemplateFilter"><option :value="null">全部模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><label v-if="user?.role==='company_admin'" class="draft-template-filter">创作人<select v-model="draftCreatorFilterId" @change="changeDraftCreatorFilter"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label></div></div><div class="draft-heading-actions"><button class="primary" @click="page='materials'">新建商品草稿</button></div></div>
-        <section v-if="selectedDraftIds.length" class="draft-export-bar"><strong>已选择 {{selectedDraftIds.length}} / {{MAX_TIKTOK_EXPORT_DRAFTS}} 条商品草稿</strong><button v-if="selectedDraftIds.length===1" class="secondary" @click="openDraftImageWorkspace(selectedDrafts[0])">制作商品图片</button><button class="primary" @click="openTiktokExportDialog">导出 TikTok 表格</button><button class="ghost" @click="selectedDraftIds=[]">取消选择</button></section>
-        <div class="draft-table task-table"><div class="thead draft-thead"><label class="material-checkbox" aria-label="选择当前页商品草稿"><input type="checkbox" :checked="allPagedDraftsSelected" @change="togglePagedDrafts"/></label><span>商品</span><span>模板</span><span>商品标题</span><span>SKU 数量</span><span>来源任务</span><span>创建时间</span><span>创作人</span><span>更新时间</span><span>最新修改用户</span><span>导出次数</span><span>状态</span><span>操作</span></div><div v-for="draft in pagedDrafts" :key="draft.id" class="trow draft-trow" :class="{selected:selectedDraftIds.includes(draft.id)}"><label class="material-checkbox" :aria-label="`选择商品草稿 ${draft.id}`"><input type="checkbox" :checked="selectedDraftIds.includes(draft.id)" :disabled="selectedDraftIds.length >= MAX_TIKTOK_EXPORT_DRAFTS && !selectedDraftIds.includes(draft.id)" @change="toggleDraftSelection(draft.id)"/></label><button v-if="draft.image_urls?.[0]" class="draft-thumbnail" title="查看大图" @click="openImagePreview(draft.image_urls[0], draft.title)"><img :src="imageUrl(draft.image_urls[0])" :alt="draft.title"/></button><span v-else></span><span>{{draftTemplateName(draft)}}</span><b class="draft-product-title">{{draft.title}}</b><span>{{draft.sku_items?.length || 1}}</span><span>{{draft.source_task_id ? `#${draft.source_task_id}` : '素材库'}}</span><span>{{new Date(draft.created_at).toLocaleString()}}</span><span>{{draft.created_by_name || '历史记录缺失'}}</span><span>{{new Date(draft.updated_at || draft.created_at).toLocaleString()}}</span><span>{{draft.updated_by_name || '历史记录缺失'}}</span><span>{{draft.export_count || 0}}</span><span class="chip" :class="draft.tiktok_collect_box_id ? 'blue' : 'orange'">{{draft.tiktok_collect_box_id ? '已认领到 TikTok' : draft.miaoshou_collect_box_id ? '待认领到 TikTok' : '待发布'}}</span><span><button @click="openDraftEditDialog(draft)">编辑</button> <button v-if="!draft.tiktok_collect_box_id" class="primary compact-action" :disabled="publishingDraftId===draft.id" @click="publishDraftToMiaoshou(draft)">{{publishingDraftId===draft.id ? '处理中…' : '发布至妙手'}}</button><small v-else>TikTok #{{draft.tiktok_collect_box_id}}</small></span></div><div v-if="!filteredDrafts.length" class="empty">{{drafts.length ? '没有符合筛选条件的商品草稿。' : '暂无商品草稿，请先在任务中心领取素材，或上传本地素材。'}}</div><footer v-else class="draft-pagination"><span>共 {{filteredDrafts.length}} 条</span><label>每页 <select v-model.number="draftPageSize" @change="changeDraftPageSize"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option><option :value="500">500</option><option :value="1000">1000</option></select> 条</label><button :disabled="visibleDraftPage===1" @click="currentDraftPage=visibleDraftPage-1">上一页</button><span>第 {{visibleDraftPage}} / {{draftPageCount}} 页</span><button :disabled="visibleDraftPage===draftPageCount" @click="currentDraftPage=visibleDraftPage+1">下一页</button></footer></div>
+        <section v-if="selectedDraftIds.length" class="draft-export-bar"><strong>已选择 {{selectedDraftIds.length}} / {{MAX_TIKTOK_EXPORT_DRAFTS}} 条商品草稿</strong><button class="primary" @click="openTiktokExportDialog">导出 TikTok 表格</button><button class="ghost" @click="selectedDraftIds=[]">取消选择</button></section>
+        <div class="draft-table task-table"><div class="thead draft-thead"><label class="material-checkbox" aria-label="选择当前页商品草稿"><input type="checkbox" :checked="allPagedDraftsSelected" @change="togglePagedDrafts"/></label><span>商品</span><span>模板</span><span>商品标题</span><span>SKU 数量</span><span>来源任务</span><span>创建时间</span><span>创作人</span><span>轮播图</span><span>导出次数</span><span>状态</span><span>操作</span></div><div v-for="draft in pagedDrafts" :key="draft.id" class="trow draft-trow" :class="{selected:selectedDraftIds.includes(draft.id)}"><label class="material-checkbox" :aria-label="`选择商品草稿 ${draft.id}`"><input type="checkbox" :checked="selectedDraftIds.includes(draft.id)" :disabled="selectedDraftIds.length >= MAX_TIKTOK_EXPORT_DRAFTS && !selectedDraftIds.includes(draft.id)" @change="toggleDraftSelection(draft.id)"/></label><button v-if="draft.image_urls?.[0]" class="draft-thumbnail" title="查看大图" @click="openImagePreview(draft.image_urls[0], draft.title)"><img :src="imageUrl(draft.image_urls[0])" :alt="draft.title"/></button><span v-else></span><span>{{draftTemplateName(draft)}}</span><b class="draft-product-title">{{draft.title}}</b><span>{{draft.sku_items?.length || 1}}</span><span>{{draft.source_task_id ? `#${draft.source_task_id}` : '素材库'}}</span><span>{{new Date(draft.created_at).toLocaleString()}}</span><span>{{draft.created_by_name || '历史记录缺失'}}</span><span class="draft-carousel-flag" :class="draft.carousel_items?.length ? 'has' : 'none'">{{draft.carousel_items?.length ? '有' : '无'}}</span><span>{{draft.export_count || 0}}</span><span class="draft-status-cell"><span class="chip" :class="draft.tiktok_collect_box_id ? 'blue' : 'orange'">{{draft.tiktok_collect_box_id ? '已认领到 TikTok' : draft.miaoshou_collect_box_id ? '待认领到 TikTok' : '待发布'}}</span><small v-if="draft.tiktok_collect_box_id">TikTok #{{draft.tiktok_collect_box_id}}</small></span><span class="draft-trow-actions"><button @click="openDraftEditDialog(draft)">编辑</button><button @click="openDraftImageWorkspace(draft)">制作轮播图</button><button v-if="!draft.tiktok_collect_box_id" class="primary compact-action" :disabled="publishingDraftId===draft.id" @click="publishDraftToMiaoshou(draft)">{{publishingDraftId===draft.id ? '处理中…' : '发布至妙手'}}</button></span></div><div v-if="!filteredDrafts.length" class="empty">{{drafts.length ? '没有符合筛选条件的商品草稿。' : '暂无商品草稿，请先在任务中心领取素材，或上传本地素材。'}}</div><footer v-else class="draft-pagination"><span>共 {{filteredDrafts.length}} 条</span><label>每页 <select v-model.number="draftPageSize" @change="changeDraftPageSize"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option><option :value="500">500</option><option :value="1000">1000</option></select> 条</label><button :disabled="visibleDraftPage===1" @click="currentDraftPage=visibleDraftPage-1">上一页</button><span>第 {{visibleDraftPage}} / {{draftPageCount}} 页</span><button :disabled="visibleDraftPage===draftPageCount" @click="currentDraftPage=visibleDraftPage+1">下一页</button></footer></div>
       </section>
       <section v-else-if="page==='members' && user?.role==='company_admin'" class="page"><div class="section-heading"><div><span>管理本公司成员账号，并为包括公司管理员在内的每位员工配置独立模型平台密钥。</span></div><button class="primary" @click="openMemberDialog()">新增成员</button></div><section class="draft-table"><div class="thead" style="grid-template-columns:1fr .65fr .8fr .9fr .7fr .85fr 1.6fr"><span>成员</span><span>用户代码</span><span>账号类型</span><span>邮箱</span><span>状态</span><span>加入时间</span><span>操作</span></div><div v-for="member in members" :key="member.id" class="trow" style="grid-template-columns:1fr .65fr .8fr .9fr .7fr .85fr 1.6fr"><span><b>{{member.name}}</b></span><span>{{member.user_code || '—'}}</span><span>{{member.role === 'company_admin' ? '公司管理员' : '普通成员'}}</span><span>{{member.email}}</span><span class="chip" :class="member.is_active ? 'blue' : 'orange'">{{member.is_active ? '启用中' : '已停用'}}</span><span>{{new Date(member.created_at).toLocaleDateString()}}</span><span class="member-row-actions"><template v-if="member.role === 'member'"><button @click="openMemberDialog(member)">编辑</button><button :class="member.is_active ? 'negative' : 'positive'" @click="toggleMember(member)">{{member.is_active ? '停用' : '启用'}}</button></template><button v-for="provider in aiProviders" :key="provider.provider" class="credential-button" :class="member.ai_provider_credentials?.[provider.provider] ? 'configured' : 'missing'" @click="openMemberCredentialDialog(member, provider)">{{provider.display_name}} 密钥 · {{member.ai_provider_credentials?.[provider.provider] ? '已配置' : '待配置'}}</button></span></div><p v-if="!members.length" class="empty">暂无公司成员。</p></section></section>
       <section v-else-if="page==='shops' && user?.role==='company_admin'" class="page">
@@ -1151,77 +1173,69 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
       <header class="image-workspace-header">
         <div class="image-workspace-header-text">
           <small>商品草稿 #{{imageDraft?.id}}</small>
-          <h2>制作商品图片</h2>
+          <h2>制作轮播图</h2>
           <p>{{imageDraft?.title}}</p>
         </div>
-        <span class="chip" :class="imageDraft?.locked?'orange':'purple'">{{imageDraft?.locked?'图片已锁定':`${draftImagePreviewUrls.length} / 9 张`}}</span>
+        <span class="chip purple">{{draftImagePreviewUrls.length}} / 9 张</span>
       </header>
       <nav class="workspace-steps" aria-label="制作流程">
-        <span class="workspace-step" :class="{active: true, done: selectedImageSkus.length || imageDraft?.carousel_items?.length}">
-          <i>1</i><span>选择 SKU</span>
+        <span class="workspace-step" :class="{active: true, done: imageDraft?.carousel_items?.length}">
+          <i>1</i><span>生成轮播图</span>
         </span>
         <span class="workspace-step-divider"></span>
-        <span class="workspace-step" :class="{active: imageDraft?.carousel_items?.length, done: imageDraft?.carousel_items?.length}">
-          <i>2</i><span>生成轮播图</span>
-        </span>
-        <span class="workspace-step-divider"></span>
-        <span class="workspace-step" :class="{active: currentGeneratedMainImage}">
-          <i>3</i><span>制作首图</span>
+        <span class="workspace-step" :class="{active: imageDraft?.carousel_items?.length, done: currentGeneratedMainImage}">
+          <i>2</i><span>制作首图</span>
         </span>
         <span class="workspace-step-divider"></span>
         <span class="workspace-step" :class="{active: draftImagePreviewUrls.length}">
-          <i>4</i><span>预览确认</span>
+          <i>3</i><span>预览确认</span>
         </span>
       </nav>
       <div v-if="imageWorkspaceLoading" class="empty">正在加载图片…</div>
       <template v-else-if="imageDraft">
-        <section v-if="imageDraft.locked" class="image-lock-notice">
-          <strong>该草稿已经发布，图片不可直接修改。</strong>
-          <button class="primary" @click="duplicateDraftForImages(imageDraft)">复制为新版草稿</button>
+        <section v-if="imageDraft.published" class="image-lock-notice">
+          <strong>该草稿已经发布</strong>
         </section>
         <div class="image-workspace-grid">
           <main class="image-workspace-main">
-            <section class="workspace-card workspace-sku-card-section">
+            <section id="carousel-workspace-section" class="workspace-card">
               <div class="workspace-card-header">
                 <span class="workspace-step-badge">1</span>
                 <div>
-                  <h3>选择 SKU 图</h3>
-                  <p>勾选 SKU 后，系统会为每个 SKU 创建一条轮播图任务。</p>
-                </div>
-                <span class="workspace-card-action-hint">{{selectedImageSkus.length}} / 9 已选</span>
-              </div>
-              <div class="workspace-sku-scroll">
-                <label v-for="item in imageDraftSkus" :key="item.sku" class="workspace-sku-card" :class="{selected:selectedImageSkus.includes(item.sku)}">
-                  <span class="workspace-sku-check"><input type="checkbox" :disabled="imageDraft.locked || (!selectedImageSkus.includes(item.sku) && selectedImageSkus.length>=9)" :checked="selectedImageSkus.includes(item.sku)" @change="toggleImageSku(item.sku)"/></span>
-                  <span class="workspace-sku-image"><img :src="imageUrl(item.image_url)" :alt="item.sku"/></span>
-                  <span class="workspace-sku-info">
-                    <b>{{item.sku}}</b>
-                    <small class="workspace-sku-status" :class="imageDraft.carousel_items?.some((carousel:any)=>carousel.sku===item.sku) ? 'done' : 'pending'"><i></i>{{imageDraft.carousel_items?.some((carousel:any)=>carousel.sku===item.sku)?'当前轮播图':'可生成'}}</small>
-                  </span>
-                </label>
-                <p v-if="!imageDraftSkus.length" class="workspace-sku-empty">该草稿暂无 SKU 素材。</p>
-              </div>
-            </section>
-            <section id="carousel-workspace-section" class="workspace-card">
-              <div class="workspace-card-header">
-                <span class="workspace-step-badge">2</span>
-                <div>
-                  <h3>轮播图</h3>
-                  <p>拖动缩略图调整顺序；每个 SKU 最多采用一张。</p>
+                  <h3>生成轮播图</h3>
+                  <p>勾选 SKU 图并填写生成参数后开始创作</p>
                 </div>
                 <span class="workspace-card-action-hint">{{imageDraft.using_sku_fallback?'当前使用 SKU 图回退':`当前 ${imageDraft.carousel_items?.length || 0} 张`}}</span>
               </div>
-              <div class="carousel-strip">
-                <article v-for="(item,index) in imageDraft.carousel_items || []" :key="item.image_url" draggable="true" @dragstart="draggedCarouselSku=item.image_url" @dragover.prevent @drop="dropCarousel(item.image_url)">
-                  <span class="carousel-strip-index">{{index + 1}}</span>
-                  <img :src="imageUrl(item.image_url)" :alt="item.sku || 'AI 首图'"/>
-                  <b>{{item.sku || 'AI 首图'}}</b>
-                  <button :disabled="imageDraft.locked" @click="removeCarouselImage(item.image_url)">移除</button>
-                </article>
-                <div v-if="!imageDraft.carousel_items?.length" class="carousel-empty">
-                  <span class="carousel-empty-icon" aria-hidden="true">🖼</span>
-                  <strong>还没有轮播图</strong>
-                  <small>从上方勾选 SKU，然后填写下方生成参数并点击「开始创作轮播图」。</small>
+              <div class="workspace-subsection">
+                <div class="workspace-subsection-head">
+                  <b>选择 SKU 图</b>
+                  <span class="workspace-subsection-count">{{selectedImageSkus.length}} / 9 已选</span>
+                </div>
+                <div class="workspace-sku-scroll">
+                  <label v-for="item in imageDraftSkus" :key="item.sku" class="workspace-sku-card" :class="{selected:selectedImageSkus.includes(item.sku)}">
+                    <span class="workspace-sku-check"><input type="checkbox" :disabled="!selectedImageSkus.includes(item.sku) && selectedImageSkus.length>=9" :checked="selectedImageSkus.includes(item.sku)" @change="toggleImageSku(item.sku)"/></span>
+                    <span class="workspace-sku-image"><img :src="imageUrl(item.image_url)" :alt="item.sku"/></span>
+                    <span class="workspace-sku-info">
+                      <b>{{item.sku}}</b>
+                    <small v-if="!imageDraft.carousel_items?.some((carousel:any)=>carousel.sku===item.sku)" class="workspace-sku-status pending"><i></i>可生成</small>
+                    </span>
+                  </label>
+                  <p v-if="!imageDraftSkus.length" class="workspace-sku-empty">该草稿暂无 SKU 素材。</p>
+                </div>
+              </div>
+              <div class="workspace-params">
+                <div class="workspace-settings-grid">
+                  <label class="workspace-prompt-field">
+                    <span>创作要求</span>
+                    <textarea v-model="carouselParams.prompt" rows="2" maxlength="1000" placeholder="例如：保持服装款式、颜色和印花准确，生成自然真实、适合电商展示的商品场景图"></textarea>
+                  </label>
+                  <div class="workspace-settings-row">
+                    <label>AI 模型<select v-model="carouselParams.provider"><option v-for="provider in availableAiProviders" :key="provider.provider" :value="provider.provider">{{provider.display_name}} · {{provider.model}}</option></select></label>
+                    <label>比例<select v-model="carouselParams.ratio"><option>1:1</option><option>3:4</option></select></label>
+                    <label>清晰度<select v-model="carouselParams.quality"><option>1K</option><option>2K</option></select></label>
+                    <button class="primary workspace-create-button" :disabled="!!imageTaskCreatingType || !selectedImageSkus.length" @click="createDraftImageTasks('carousel')">{{imageTaskCreatingType==='carousel' ? '创建中…' : '开始创作轮播图'}}</button>
+                  </div>
                 </div>
               </div>
               <div v-if="workspaceCarouselTasks().length" class="workspace-task-panel">
@@ -1243,45 +1257,38 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
                     <span v-else class="workspace-task-dash">—</span>
                     <span class="workspace-task-message" :class="{error: task.status==='failed'}">{{task.failure_reason || '—'}}</span>
                     <span class="workspace-task-actions">
-                      <button class="primary" :disabled="imageDraft.locked || !task.result_urls?.length || isWorkspaceTaskSelected(task,task.result_urls[0])" @click="applyWorkspaceCarouselTask(task)">{{isWorkspaceTaskSelected(task,task.result_urls?.[0]) ? '已采用' : '采用'}}</button>
-                      <button class="secondary" @click="openTaskDetail(task)">详情</button>
+                      <button v-if="taskHasSuccessfulResult(task)" :class="isWorkspaceTaskSelected(task,task.result_urls[0]) ? 'secondary' : 'primary'" :title="isWorkspaceTaskSelected(task,task.result_urls[0]) ? '点击取消采用' : '点击采用'" @click="toggleWorkspaceCarouselTask(task)">{{isWorkspaceTaskSelected(task,task.result_urls[0]) ? '已采用' : '采用'}}</button>
+                      <button v-if="task.status==='failed'" class="secondary" :disabled="retryingWorkspaceTaskId===task.id" @click="retryWorkspaceTask(task)">{{retryingWorkspaceTaskId===task.id ? '重试中…' : '重试'}}</button>
                     </span>
                   </div>
                 </div>
               </div>
-              <div class="workspace-params">
-                <div class="workspace-params-head">
-                  <b>轮播图生成参数</b>
-                  <small>仅应用于轮播图任务</small>
+              <div class="workspace-subsection">
+                <div class="workspace-subsection-head">
+                  <b>生成的轮播图</b>
+                  <small>通过上方任务的采用按钮控制图片是否保留</small>
                 </div>
-                <div class="workspace-settings-grid">
-                  <label class="workspace-prompt-field">
-                    <span>创作要求</span>
-                    <textarea v-model="carouselParams.prompt" rows="2" maxlength="1000" placeholder="例如：保持服装款式、颜色和印花准确，生成自然真实、适合电商展示的商品场景图"></textarea>
-                  </label>
-                  <div class="workspace-settings-row">
-                    <label>AI 模型<select v-model="carouselParams.provider"><option v-for="provider in availableAiProviders" :key="provider.provider" :value="provider.provider">{{provider.display_name}} · {{provider.model}}</option></select></label>
-                    <label>比例<select v-model="carouselParams.ratio"><option>1:1</option><option>3:4</option></select></label>
-                    <label>清晰度<select v-model="carouselParams.quality"><option>1K</option><option>2K</option></select></label>
+                <div class="carousel-strip generated-carousel-strip">
+                  <article v-for="(item,index) in adoptedCarouselItems" :key="item.image_url">
+                    <span class="carousel-strip-index">{{index + 1}}</span>
+                    <img :src="imageUrl(item.image_url)" :alt="item.sku || 'AI 首图'"/>
+                    <b>{{item.sku || 'AI 首图'}}</b>
+                  </article>
+                  <div v-if="!adoptedCarouselItems.length" class="carousel-empty">
+                    <span class="carousel-empty-icon" aria-hidden="true">🖼</span>
+                    <strong>还没有轮播图</strong>
+                    <small>在上方勾选 SKU 图并填写生成参数，然后点击「开始创作轮播图」。</small>
                   </div>
                 </div>
-              </div>
-              <div class="workspace-card-footer">
-                <button class="primary" :disabled="imageDraft.locked || !!imageTaskCreatingType || !selectedImageSkus.length" @click="createDraftImageTasks('carousel')">{{imageTaskCreatingType==='carousel' ? '创建中…' : '开始创作轮播图'}}</button>
               </div>
             </section>
             <section id="main-image-workspace-section" class="workspace-card">
               <div class="workspace-card-header">
-                <span class="workspace-step-badge">3</span>
+                <span class="workspace-step-badge">2</span>
                 <div>
-                  <h3>首图（可选重新生成）</h3>
+                  <h3>制作首图</h3>
                   <p>首图就是最终轮播图第 1 张；不重新生成时使用当前轮播图第 1 张。</p>
                 </div>
-                <button v-if="currentGeneratedMainImage" class="ghost workspace-card-action" :disabled="imageDraft.locked" @click="removeMainImage">移除 AI 首图</button>
-              </div>
-              <div v-if="currentGeneratedMainImage" class="main-image-preview">
-                <img :src="imageUrl(currentGeneratedMainImage.image_url)" alt="AI 生成图片"/>
-                <span>已采用的 AI 首图任务图片</span>
               </div>
               <div class="reference-mode-tabs" role="tablist">
                 <button type="button" role="tab" :class="{active: mainReferenceMode==='random'}" :aria-selected="mainReferenceMode==='random'" @click="mainReferenceMode='random'">
@@ -1296,42 +1303,14 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
                 </button>
               </div>
               <div v-if="mainReferenceMode==='manual'" class="reference-picker">
-                <label v-for="item in imageDraft.carousel_items || []" :key="item.image_url" :class="{selected:selectedMainReferences.includes(item.image_url)}">
+                <label v-for="item in adoptedCarouselItems" :key="item.image_url" :class="{selected:selectedMainReferences.includes(item.image_url)}">
                   <input type="checkbox" :checked="selectedMainReferences.includes(item.image_url)" @change="toggleMainReference(item.image_url)"/>
                   <img :src="imageUrl(item.image_url)" :alt="item.sku || 'AI 首图'"/>
                   <span>{{item.sku || 'AI 首图'}}</span>
                 </label>
-                <p v-if="!(imageDraft.carousel_items?.length)" class="empty">请先生成并采用轮播图。</p>
-              </div>
-              <div v-if="workspaceMainTasks().length" class="workspace-task-panel">
-                <div class="workspace-task-panel-head">
-                  <b>相关首图任务</b>
-                  <button class="ghost workspace-task-refresh" :disabled="imageTasksRefreshing" @click="refreshWorkspaceTasks">{{imageTasksRefreshing ? '刷新中…' : '刷新'}}</button>
-                </div>
-                <div class="workspace-task-list">
-                  <div class="workspace-task-row workspace-task-row-head"><span>素材</span><span>状态</span><span>结果</span><span>处理信息</span><span>操作</span></div>
-                  <div v-for="task in workspaceMainTasks()" :key="task.id" class="workspace-task-row">
-                    <button v-if="task.parameters?.print_url" type="button" class="workspace-task-thumb" title="查看创作素材" @click.stop.prevent="openImagePreview(task.parameters.print_url, '创作素材')"><img :src="imageUrl(task.parameters.print_url)" alt="创作素材"/></button>
-                    <span v-else class="workspace-task-dash">—</span>
-                    <span class="workspace-task-status">
-                      <span class="chip" :class="taskStatusClass(task.status)">{{taskStatusLabel[task.status] || task.status || '—'}}</span>
-                      <small>#{{task.id}} · 已提交 {{task.submit_attempts || 0}} 次</small>
-                    </span>
-                    <button v-if="task.result_urls?.[0]" type="button" class="workspace-task-thumb" title="查看结果图" @click.stop.prevent="openImagePreview(task.result_urls[0], `任务 #${task.id} 结果图`)"><img :src="imageUrl(task.result_urls[0])" :alt="`任务 #${task.id} 结果图`"/></button>
-                    <span v-else class="workspace-task-dash">—</span>
-                    <span class="workspace-task-message" :class="{error: task.status==='failed'}">{{task.failure_reason || '—'}}</span>
-                    <span class="workspace-task-actions">
-                      <button class="primary" :disabled="imageDraft.locked || !task.result_urls?.length || isWorkspaceTaskSelected(task,task.result_urls[0])" @click="applyWorkspaceMainTask(task)">{{isWorkspaceTaskSelected(task,task.result_urls?.[0]) ? '已采用' : '采用'}}</button>
-                      <button class="secondary" @click="openTaskDetail(task)">详情</button>
-                    </span>
-                  </div>
-                </div>
+                <p v-if="!adoptedCarouselItems.length" class="empty">请先生成并采用轮播图。</p>
               </div>
               <div class="workspace-params">
-                <div class="workspace-params-head">
-                  <b>首图生成参数</b>
-                  <small>仅应用于首图任务</small>
-                </div>
                 <div class="workspace-settings-grid">
                   <label class="workspace-prompt-field">
                     <span>创作要求</span>
@@ -1341,16 +1320,43 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
                     <label>AI 模型<select v-model="mainParams.provider"><option v-for="provider in availableAiProviders" :key="provider.provider" :value="provider.provider">{{provider.display_name}} · {{provider.model}}</option></select></label>
                     <label>比例<select v-model="mainParams.ratio"><option>1:1</option><option>3:4</option></select></label>
                     <label>清晰度<select v-model="mainParams.quality"><option>1K</option><option>2K</option></select></label>
+                    <button class="primary workspace-create-button" :disabled="!!imageTaskCreatingType || !adoptedCarouselItems.length" @click="createDraftImageTasks('main_image')">{{imageTaskCreatingType==='main_image' ? '创建中…' : '开始创作首图'}}</button>
                   </div>
                 </div>
               </div>
-              <div class="workspace-card-footer">
-                <button class="primary" :disabled="imageDraft.locked || !!imageTaskCreatingType || !imageDraft.carousel_items?.length" @click="createDraftImageTasks('main_image')">{{imageTaskCreatingType==='main_image' ? '创建中…' : '开始创作首图'}}</button>
+              <div v-if="workspaceMainTasks().length" class="workspace-task-panel">
+                <div class="workspace-task-panel-head">
+                  <b>相关首图任务</b>
+                  <button class="ghost workspace-task-refresh" :disabled="imageTasksRefreshing" @click="refreshWorkspaceTasks">{{imageTasksRefreshing ? '刷新中…' : '刷新'}}</button>
+                </div>
+                <div class="workspace-task-list">
+                  <div class="workspace-task-row workspace-task-row-head carousel-task-row"><span>素材</span><span>提示词</span><span>状态</span><span>结果</span><span>处理信息</span><span>操作</span></div>
+                  <div v-for="task in workspaceMainTasks()" :key="task.id" class="workspace-task-row carousel-task-row">
+                    <button v-if="task.parameters?.print_url" type="button" class="workspace-task-thumb" title="查看创作素材" @click.stop.prevent="openImagePreview(task.parameters.print_url, '创作素材')"><img :src="imageUrl(task.parameters.print_url)" alt="创作素材"/></button>
+                    <span v-else class="workspace-task-dash">—</span>
+                    <span class="workspace-task-prompt" :title="task.parameters?.creative_requirement || ''">{{task.parameters?.creative_requirement || '—'}}</span>
+                    <span class="workspace-task-status">
+                      <span class="chip" :class="taskStatusClass(task.status)">{{taskStatusLabel[task.status] || task.status || '—'}}</span>
+                      <small>#{{task.id}} · 已提交 {{task.submit_attempts || 0}} 次</small>
+                    </span>
+                    <button v-if="task.result_urls?.[0]" type="button" class="workspace-task-thumb" title="查看结果图" @click.stop.prevent="openImagePreview(task.result_urls[0], `任务 #${task.id} 结果图`)"><img :src="imageUrl(task.result_urls[0])" :alt="`任务 #${task.id} 结果图`"/></button>
+                    <span v-else class="workspace-task-dash">—</span>
+                    <span class="workspace-task-message" :class="{error: task.status==='failed'}">{{task.failure_reason || '—'}}</span>
+                    <span class="workspace-task-actions">
+                      <button v-if="taskHasSuccessfulResult(task)" :class="isWorkspaceTaskSelected(task,task.result_urls[0]) ? 'secondary' : 'primary'" :title="isWorkspaceTaskSelected(task,task.result_urls[0]) ? '点击取消采用' : '点击采用'" @click="toggleWorkspaceMainTask(task)">{{isWorkspaceTaskSelected(task,task.result_urls[0]) ? '已采用' : '采用'}}</button>
+                      <button v-if="task.status==='failed'" class="secondary" :disabled="retryingWorkspaceTaskId===task.id" @click="retryWorkspaceTask(task)">{{retryingWorkspaceTaskId===task.id ? '重试中…' : '重试'}}</button>
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div v-if="currentGeneratedMainImage" class="main-image-preview adopted-main-image-preview">
+                <img :src="imageUrl(currentGeneratedMainImage.image_url)" alt="AI 生成图片"/>
+                <span>已采用图片</span>
               </div>
             </section>
             <section class="workspace-card final-image-preview-card">
               <div class="workspace-card-header">
-                <span class="workspace-step-badge">4</span>
+                <span class="workspace-step-badge">3</span>
                 <div>
                   <h3>最终商品图片预览</h3>
                   <p>拖动图片调整最终顺序；第 1 张就是首图，合计不超过 9 张。</p>
@@ -1370,11 +1376,11 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
                 </div>
               </div>
             </section>
-            <div class="modal-actions image-workspace-actions">
-              <small>采用、移除和拖动排序仅在当前弹窗暂存；确认后一次保存到草稿。</small>
-              <button class="primary" :disabled="imageDraft.locked || imageConfirmSaving || !!imageTaskCreatingType" @click="confirmDraftImages">{{imageConfirmSaving ? '保存中…' : '确认并保存到草稿'}}</button>
-            </div>
           </main>
+        </div>
+        <div class="modal-actions image-workspace-actions">
+          <small>采用、移除和拖动排序仅在当前弹窗暂存；确认后一次保存到草稿。</small>
+          <button class="primary" :disabled="imageConfirmSaving || !!imageTaskCreatingType" @click="confirmDraftImages">{{imageConfirmSaving ? '保存中…' : '保存到草稿'}}</button>
         </div>
       </template>
     </section>
@@ -1392,3 +1398,105 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
   <div v-if="toast" class="toast" role="alert" style="position:fixed;top:24px;left:50%;z-index:1000;transform:translateX(-50%);padding:12px 18px;border-radius:10px;background:#302954;color:#fff;box-shadow:0 10px 28px #30295440;font-size:14px">{{ toast }}</div>
   <div v-if="showMaterialUploadDialog" class="modal-backdrop" @click.self="showMaterialUploadDialog=false"><section class="modal-card material-template-dialog"><button class="modal-close" @click="showMaterialUploadDialog=false">×</button><h2>上传本地素材</h2><p>已选择 {{pendingMaterialUploadFiles.length}} 张图片，请先选择产品模板。</p><p v-if="materialUploading" style="margin:-10px 0 16px;color:#5545ca">正在上传 {{materialUploadedCount}} / {{materialUploadTotal}}…</p><label>产品模板<select v-model="materialUploadTemplateId" :disabled="materialUploading"><option :value="null" disabled>请选择产品模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><p v-if="materialUploadError" style="margin:14px 0 0;color:#d34b5f">{{materialUploadError}}</p><div class="modal-actions"><button class="ghost" :disabled="materialUploading" @click="showMaterialUploadDialog=false">取消</button><button class="primary" :disabled="materialUploading" @click="uploadMaterialAssets">{{materialUploading ? '上传中…' : '确认上传'}}</button></div></section></div>
 </template>
+
+<style scoped>
+/* SKU 选择卡使用固定分区，避免长图挤出卡片并遮住下方信息。 */
+.workspace-sku-scroll {
+  align-items: flex-start;
+  min-height: 184px;
+  padding: 2px 2px 8px;
+}
+
+.workspace-sku-card {
+  box-sizing: border-box;
+  flex: 0 0 100px;
+  width: 100px;
+  height: 174px;
+  grid-template-rows: 16px 110px 32px;
+  gap: 4px;
+  padding: 5px;
+  overflow: hidden;
+}
+
+.workspace-sku-card .workspace-sku-check {
+  width: 100%;
+  height: 16px;
+  justify-content: flex-start;
+}
+
+.workspace-sku-card .workspace-sku-image {
+  box-sizing: border-box;
+  width: 100%;
+  height: 110px;
+  min-height: 0;
+  overflow: hidden;
+  background: #fff;
+}
+
+.workspace-sku-card .workspace-sku-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.workspace-sku-card .workspace-sku-info {
+  box-sizing: border-box;
+  height: 32px;
+  min-height: 0;
+  align-content: start;
+  overflow: hidden;
+}
+
+.workspace-sku-card .workspace-sku-info b,
+.workspace-sku-card .workspace-sku-status {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generated-carousel-strip article {
+  cursor: default;
+}
+
+.workspace-params .workspace-settings-row {
+  grid-template-columns: minmax(180px, 320px) 104px 104px auto;
+  align-items: end;
+  justify-content: start;
+}
+
+.workspace-create-button {
+  align-self: end;
+  min-height: 36px;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.workspace-task-list {
+  max-height: 264px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.workspace-task-row-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.adopted-main-image-preview {
+  margin-top: 13px;
+  margin-bottom: 0;
+}
+
+@media (max-width: 700px) {
+  .workspace-params .workspace-settings-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .workspace-create-button {
+    width: 100%;
+  }
+}
+</style>

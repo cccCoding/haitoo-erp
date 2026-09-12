@@ -1750,11 +1750,6 @@ def get_accessible_draft(db: Session, user: User, draft_id: int) -> ProductDraft
     return draft
 
 
-def require_mutable_draft(draft: ProductDraft) -> None:
-    if draft.miaoshou_collect_box_id or draft.tiktok_collect_box_id:
-        raise HTTPException(409, "已发布草稿的图片已锁定，请复制为新版后制作")
-
-
 def image_task_provider(db: Session, user: User, provider_name: str | None) -> AIProviderSetting:
     provider = db.get(AIProviderSetting, provider_name) if provider_name else db.scalar(
         select(AIProviderSetting).where(AIProviderSetting.is_default.is_(True), AIProviderSetting.enabled.is_(True))
@@ -1846,7 +1841,7 @@ def get_draft_image_workspace(draft_id: int, user: User = Depends(current_user),
     return serialize_record(draft) | {
         "carousel_items": draft_base_carousel_items(draft),
         "using_sku_fallback": using_sku_fallback,
-        "locked": bool(draft.miaoshou_collect_box_id or draft.tiktok_collect_box_id),
+        "published": bool(draft.miaoshou_collect_box_id or draft.tiktok_collect_box_id),
         "published_image_urls": draft_confirmed_images(draft),
         "working_image_urls": draft_working_images(draft),
         "carousel_tasks": draft_image_task_views(db, user, draft.id, "carousel"),
@@ -1857,7 +1852,6 @@ def get_draft_image_workspace(draft_id: int, user: User = Depends(current_user),
 @app.post("/drafts/{draft_id}/image-tasks")
 def create_draft_image_tasks(draft_id: int, payload: DraftImageTaskCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     draft = get_accessible_draft(db, user, draft_id)
-    require_mutable_draft(draft)
     if not draft.template_id:
         raise HTTPException(400, "商品草稿缺少产品模板")
     provider = image_task_provider(db, user, payload.provider)
@@ -1929,7 +1923,6 @@ def create_draft_image_tasks(draft_id: int, payload: DraftImageTaskCreate, user:
 @app.post("/drafts/{draft_id}/image-tasks/{task_id}/apply")
 def apply_draft_image_result(draft_id: int, task_id: int, payload: DraftImageApply, user: User = Depends(current_user), db: Session = Depends(get_db)):
     draft = get_accessible_draft(db, user, draft_id)
-    require_mutable_draft(draft)
     task = db.get(PodTask, task_id)
     if not can_access_task(task, user) or (task.parameters or {}).get("draft_id") != draft.id:
         raise HTTPException(404, "图片任务不存在")
@@ -1938,7 +1931,6 @@ def apply_draft_image_result(draft_id: int, task_id: int, payload: DraftImageApp
     carousel_items = draft_base_carousel_items(draft)
     if task.task_type == "carousel":
         sku = str((task.parameters or {}).get("source_sku") or "")
-        carousel_items = [item for item in carousel_items if item.get("sku") != sku]
         if len(carousel_items) >= 9:
             raise HTTPException(400, "商品最终图片最多 9 张，请先移除一张轮播图")
         carousel_items.append({"sku": sku, "image_url": payload.result_url, "task_id": task.id})
@@ -1964,7 +1956,6 @@ def apply_draft_image_result(draft_id: int, task_id: int, payload: DraftImageApp
 @app.put("/drafts/{draft_id}/carousel-order")
 def reorder_draft_carousel(draft_id: int, payload: DraftCarouselOrderUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     draft = get_accessible_draft(db, user, draft_id)
-    require_mutable_draft(draft)
     existing = {str(item.get("sku")): dict(item) for item in draft_base_carousel_items(draft)}
     if len(payload.skus) != len(existing) or set(payload.skus) != set(existing):
         raise HTTPException(400, "轮播图排序必须包含当前全部 SKU")
@@ -1977,7 +1968,6 @@ def reorder_draft_carousel(draft_id: int, payload: DraftCarouselOrderUpdate, use
 @app.delete("/drafts/{draft_id}/carousel/{sku}")
 def remove_draft_carousel(draft_id: int, sku: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     draft = get_accessible_draft(db, user, draft_id)
-    require_mutable_draft(draft)
     items = draft_base_carousel_items(draft)
     draft.carousel_items = [item for item in items if item.get("sku") != sku]
     if len(items) == len(draft.carousel_items):
@@ -1990,7 +1980,6 @@ def remove_draft_carousel(draft_id: int, sku: str, user: User = Depends(current_
 @app.delete("/drafts/{draft_id}/main-image")
 def remove_draft_main_image(draft_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     draft = get_accessible_draft(db, user, draft_id)
-    require_mutable_draft(draft)
     draft.carousel_items = [
         item for item in draft_base_carousel_items(draft)
         if item.get("source_type") != "main_image"
@@ -2004,16 +1993,11 @@ def remove_draft_main_image(draft_id: int, user: User = Depends(current_user), d
 def confirm_draft_images(draft_id: int, payload: DraftImagesConfirm | None = None, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """确认有效轮播顺序；第 1 张即首图，没有自定义轮播时回退 SKU 图。"""
     draft = get_accessible_draft(db, user, draft_id)
-    require_mutable_draft(draft)
     selected_tasks: dict[int, str] = {}
     if payload is not None and payload.image_items is not None:
         urls = [item.result_url for item in payload.image_items]
         if len(urls) != len(set(urls)):
             raise HTTPException(400, "最终商品图片不能重复")
-        skus = [item.sku for item in payload.image_items if item.sku]
-        if len(skus) != len(set(skus)):
-            raise HTTPException(400, "每个 SKU 最多采用一张商品图片")
-
         existing_items = [dict(item) for item in draft_base_carousel_items(draft)]
         sku_items = draft_sku_carousel_items(draft)
         ordered_items: list[dict] = []
@@ -2085,20 +2069,6 @@ def confirm_draft_images(draft_id: int, payload: DraftImagesConfirm | None = Non
     draft.updated_by = user.id
     db.commit(); db.refresh(draft)
     return serialize_record(draft) | {"published_image_urls": images}
-
-
-@app.post("/drafts/{draft_id}/duplicate")
-def duplicate_draft(draft_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    source = get_accessible_draft(db, user, draft_id)
-    draft = ProductDraft(
-        company_id=source.company_id, shop_id=source.shop_id, template_id=source.template_id,
-        source_task_id=source.source_task_id, title=source.title, product_description=source.product_description,
-        size_chart_url=source.size_chart_url, status="pending_publish", image_urls=list(source.image_urls or []),
-        carousel_items=[dict(item) for item in (source.carousel_items or [])],
-        sku_items=list(source.sku_items or []), created_by=user.id, updated_by=user.id,
-    )
-    db.add(draft); db.commit(); db.refresh(draft)
-    return serialize_record(draft)
 
 
 @app.put("/drafts/{draft_id}")

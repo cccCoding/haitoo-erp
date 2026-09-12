@@ -677,6 +677,76 @@ class TaskJobTests(unittest.TestCase):
         self.assertEqual(workspace["working_image_urls"], expected)
         self.assertEqual([item["image_url"] for item in result["carousel_items"]], expected)
 
+    def test_multiple_images_from_the_same_sku_can_be_adopted_and_confirmed(self) -> None:
+        with self.session_factory() as db:
+            draft = ProductDraft(
+                company_id=1, template_id=1, title="T" * 25,
+                image_urls=[], carousel_items=[],
+                sku_items=[{"sku": "SKU1", "image_url": "https://img.example/sku.png"}],
+                created_by=1, updated_by=1,
+            )
+            db.add(draft); db.commit(); db.refresh(draft)
+            tasks = [PodTask(
+                company_id=1, template_id=1, created_by=1, task_type="carousel",
+                status=TaskStatus.AWAITING_SELECTION,
+                parameters={"draft_id": draft.id, "source_sku": "SKU1"},
+                result_urls=[f"https://img.example/carousel-{index}.png"], result_map=[],
+            ) for index in range(2)]
+            db.add_all(tasks); db.commit()
+            for task in tasks:
+                db.refresh(task)
+
+            first = main.apply_draft_image_result(
+                draft.id, tasks[0].id, DraftImageApply(result_url=tasks[0].result_urls[0]),
+                user=db.get(User, 1), db=db,
+            )
+            second = main.apply_draft_image_result(
+                draft.id, tasks[1].id, DraftImageApply(result_url=tasks[1].result_urls[0]),
+                user=db.get(User, 1), db=db,
+            )
+            result = main.confirm_draft_images(
+                draft.id,
+                DraftImagesConfirm(image_items=[
+                    DraftOrderedImageSelection(result_url=item["image_url"], sku=item.get("sku"), task_id=item.get("task_id"))
+                    for item in second["carousel_items"]
+                ]),
+                user=db.get(User, 1), db=db,
+            )
+
+        self.assertEqual(len(first["carousel_items"]), 2)
+        self.assertEqual(len(second["carousel_items"]), 3)
+        self.assertEqual([item.get("sku") for item in result["carousel_items"]], ["SKU1", "SKU1", "SKU1"])
+
+    def test_published_draft_images_remain_editable(self) -> None:
+        with self.session_factory() as db:
+            draft = ProductDraft(
+                company_id=1, template_id=1, title="T" * 25,
+                image_urls=["https://img.example/sku-1.png", "https://img.example/sku-2.png"],
+                carousel_items=[],
+                sku_items=[
+                    {"sku": "SKU1", "image_url": "https://img.example/sku-1.png"},
+                    {"sku": "SKU2", "image_url": "https://img.example/sku-2.png"},
+                ],
+                tiktok_collect_box_id="published-1",
+                created_by=1, updated_by=1,
+            )
+            db.add(draft); db.commit(); db.refresh(draft)
+            workspace = main.get_draft_image_workspace(draft.id, user=db.get(User, 1), db=db)
+            result = main.confirm_draft_images(
+                draft.id,
+                DraftImagesConfirm(image_items=[
+                    DraftOrderedImageSelection(result_url="https://img.example/sku-2.png", sku="SKU2"),
+                    DraftOrderedImageSelection(result_url="https://img.example/sku-1.png", sku="SKU1"),
+                ]),
+                user=db.get(User, 1), db=db,
+            )
+
+        self.assertTrue(workspace["published"])
+        self.assertEqual(result["image_urls"], [
+            "https://img.example/sku-2.png",
+            "https://img.example/sku-1.png",
+        ])
+
     def test_empty_custom_layout_restores_sku_images(self) -> None:
         with self.session_factory() as db:
             draft = ProductDraft(
