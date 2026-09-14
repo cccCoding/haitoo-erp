@@ -17,7 +17,7 @@ from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
 from app.models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential, UserTemplatePrompt, UserTemplateWhiteImage
-from app.schemas import AIProviderCredentialUpdate, ClaimMaterials, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
+from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
 
 
 class TaskJobTests(unittest.TestCase):
@@ -495,9 +495,9 @@ class TaskJobTests(unittest.TestCase):
 
             member_drafts = main.list_drafts(shop_id=None, creator_id=None, user=db.get(User, 1), db=db)
             admin_drafts = main.list_drafts(shop_id=None, creator_id=3, user=db.get(User, 2), db=db)
-            self.assertEqual([item["id"] for item in member_drafts], [own.id])
-            self.assertEqual([item["id"] for item in admin_drafts], [other.id])
-            self.assertEqual(admin_drafts[0]["created_by_name"], "Other")
+            self.assertEqual([item["id"] for item in member_drafts["items"]], [own.id])
+            self.assertEqual([item["id"] for item in admin_drafts["items"]], [other.id])
+            self.assertEqual(admin_drafts["items"][0]["created_by_name"], "Other")
             self.assertFalse(main.can_access_draft(other, db.get(User, 1)))
             self.assertTrue(main.can_access_draft(other, db.get(User, 2)))
 
@@ -506,6 +506,127 @@ class TaskJobTests(unittest.TestCase):
                     other.id, DraftUpdate(title="Changed product draft title", product_description=None),
                     user=db.get(User, 1), db=db,
                 )
+
+    def test_draft_work_status_is_scoped_to_its_image_type(self) -> None:
+        """轮播与首图任务必须分别决定各自阶段的列表状态。"""
+        with self.session_factory() as db:
+            active = ProductDraft(company_id=1, template_id=1, title="A" * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
+            untouched = ProductDraft(company_id=1, template_id=1, title="B" * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
+            carousel_failed = ProductDraft(company_id=1, template_id=1, title="C" * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
+            main_failed = ProductDraft(company_id=1, template_id=1, title="D" * 25, image_urls=[], sku_items=[], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            db.add_all([active, untouched, carousel_failed, main_failed]); db.commit()
+            db.refresh(active); db.refresh(untouched); db.refresh(carousel_failed); db.refresh(main_failed)
+            db.add_all([
+                PodTask(company_id=1, template_id=1, draft_id=active.id, created_by=1, task_type="carousel", status=TaskStatus.QUEUED, parameters={"draft_id": active.id}, result_urls=[], result_map=[]),
+                PodTask(company_id=1, template_id=1, draft_id=active.id, created_by=1, task_type="main_image", status=TaskStatus.AWAITING_SELECTION, parameters={"draft_id": active.id}, result_urls=["https://img.example/main.png"], result_map=[]),
+                PodTask(company_id=1, template_id=1, draft_id=carousel_failed.id, created_by=1, task_type="carousel", status=TaskStatus.FAILED, failure_reason="轮播图生成失败", parameters={"draft_id": carousel_failed.id}, result_urls=[], result_map=[]),
+                PodTask(company_id=1, template_id=1, draft_id=main_failed.id, created_by=1, task_type="main_image", status=TaskStatus.FAILED, failure_reason="首图生成失败", parameters={"draft_id": main_failed.id}, result_urls=[], result_map=[]),
+            ])
+            db.commit()
+
+            all_drafts = main.list_drafts(shop_id=None, creator_id=None, tab="carousel_pending", work_status="all", user=db.get(User, 1), db=db)
+            unstarted = main.list_drafts(shop_id=None, creator_id=None, tab="carousel_pending", work_status="not_started", user=db.get(User, 1), db=db)
+            carousel_failures = main.list_drafts(shop_id=None, creator_id=None, tab="carousel_pending", work_status="failed", user=db.get(User, 1), db=db)
+            main_failures = main.list_drafts(shop_id=None, creator_id=None, tab="main_image_pending", work_status="failed", user=db.get(User, 1), db=db)
+
+        active_view = next(item for item in all_drafts["items"] if item["id"] == active.id)
+        self.assertEqual(active_view["carousel_task_summary"]["work_status"], "in_progress")
+        self.assertEqual(active_view["main_image_task_summary"]["work_status"], "awaiting_review")
+        self.assertEqual(all_drafts["work_status_counts"]["in_progress"], 1)
+        self.assertEqual(all_drafts["work_status_counts"]["failed"], 1)
+        self.assertEqual([item["id"] for item in unstarted["items"]], [untouched.id])
+        self.assertEqual([item["id"] for item in carousel_failures["items"]], [carousel_failed.id])
+        self.assertEqual([item["id"] for item in main_failures["items"]], [main_failed.id])
+
+    def test_batch_skip_carousel_advances_all_or_none(self) -> None:
+        with self.session_factory() as db:
+            first = ProductDraft(company_id=1, template_id=1, title="A" * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
+            second = ProductDraft(company_id=1, template_id=1, title="B" * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
+            already_advanced = ProductDraft(company_id=1, template_id=1, title="C" * 25, image_urls=[], sku_items=[], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            untouched = ProductDraft(company_id=1, template_id=1, title="D" * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
+            db.add_all([first, second, already_advanced, untouched]); db.commit()
+            db.refresh(first); db.refresh(second); db.refresh(already_advanced); db.refresh(untouched)
+
+            result = main.batch_skip_draft_carousel(
+                BatchCarouselSkipInput(draft_ids=[first.id, second.id]), user=db.get(User, 1), db=db,
+            )
+            self.assertEqual(result, {"total": 2})
+            self.assertEqual(db.get(ProductDraft, first.id).workflow_stage, "main_image_pending")
+            self.assertEqual(db.get(ProductDraft, second.id).workflow_stage, "main_image_pending")
+
+            with self.assertRaisesRegex(HTTPException, "不在待制作轮播图阶段"):
+                main.batch_skip_draft_carousel(
+                    BatchCarouselSkipInput(draft_ids=[already_advanced.id, untouched.id]), user=db.get(User, 1), db=db,
+                )
+            self.assertEqual(db.get(ProductDraft, already_advanced.id).workflow_stage, "main_image_pending")
+            self.assertEqual(db.get(ProductDraft, untouched.id).workflow_stage, "carousel_pending")
+
+    def test_batch_skip_main_image_advances_all_or_none(self) -> None:
+        with self.session_factory() as db:
+            first = ProductDraft(company_id=1, template_id=1, title="A" * 25, image_urls=[], sku_items=[], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            second = ProductDraft(company_id=1, template_id=1, title="B" * 25, image_urls=[], sku_items=[], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            already_ready = ProductDraft(company_id=1, template_id=1, title="C" * 25, image_urls=[], sku_items=[], workflow_stage="ready_to_publish", created_by=1, updated_by=1)
+            untouched = ProductDraft(company_id=1, template_id=1, title="D" * 25, image_urls=[], sku_items=[], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            db.add_all([first, second, already_ready, untouched]); db.commit()
+            db.refresh(first); db.refresh(second); db.refresh(already_ready); db.refresh(untouched)
+
+            result = main.batch_skip_draft_main_image(
+                BatchMainImageSkipInput(draft_ids=[first.id, second.id]), user=db.get(User, 1), db=db,
+            )
+            self.assertEqual(result, {"total": 2})
+            self.assertEqual(db.get(ProductDraft, first.id).workflow_stage, "ready_to_publish")
+            self.assertEqual(db.get(ProductDraft, second.id).workflow_stage, "ready_to_publish")
+
+            with self.assertRaisesRegex(HTTPException, "不在待制作主图阶段"):
+                main.batch_skip_draft_main_image(
+                    BatchMainImageSkipInput(draft_ids=[already_ready.id, untouched.id]), user=db.get(User, 1), db=db,
+                )
+            self.assertEqual(db.get(ProductDraft, already_ready.id).workflow_stage, "ready_to_publish")
+            self.assertEqual(db.get(ProductDraft, untouched.id).workflow_stage, "main_image_pending")
+
+    def test_batch_create_main_image_tasks_supports_random_and_manual_references(self) -> None:
+        with self.session_factory() as db:
+            first = ProductDraft(company_id=1, template_id=1, title="A" * 25, image_urls=[], sku_items=[], carousel_items=[
+                {"sku": "SKU1", "image_url": "https://img.example/carousel-1.png", "source_type": "carousel"},
+                {"sku": "SKU2", "image_url": "https://img.example/carousel-2.png", "source_type": "carousel"},
+            ], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            second = ProductDraft(company_id=1, template_id=1, title="B" * 25, image_urls=[], sku_items=[], carousel_items=[
+                {"sku": "SKU3", "image_url": "https://img.example/carousel-3.png", "source_type": "carousel"},
+            ], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            manual = ProductDraft(company_id=1, template_id=1, title="C" * 25, image_urls=[], sku_items=[], carousel_items=[
+                {"sku": "SKU4", "image_url": "https://img.example/carousel-4.png", "source_type": "carousel"},
+                {"sku": "SKU5", "image_url": "https://img.example/carousel-5.png", "source_type": "carousel"},
+            ], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            ignored_failure = ProductDraft(company_id=1, template_id=1, title="D" * 25, image_urls=[], sku_items=[], carousel_items=[
+                {"sku": "SKU6", "image_url": "https://img.example/carousel-6.png", "source_type": "carousel"},
+            ], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            db.add_all([first, second, manual, ignored_failure]); db.commit()
+            db.refresh(first); db.refresh(second); db.refresh(manual); db.refresh(ignored_failure)
+            db.add(PodTask(company_id=1, template_id=1, draft_id=ignored_failure.id, created_by=1, task_type="main_image", status=TaskStatus.FAILED, failure_ignored=True, parameters={"draft_id": ignored_failure.id}, result_urls=[], result_map=[]))
+            db.commit()
+
+            random_result = main.create_batch_main_image_tasks(
+                BatchMainImageTaskCreate(drafts=[{"draft_id": first.id}, {"draft_id": second.id}], reference_mode="random", provider="grsai", creative_requirement="制作首图"),
+                user=db.get(User, 1), db=db,
+            )
+            manual_result = main.create_batch_main_image_tasks(
+                BatchMainImageTaskCreate(drafts=[{"draft_id": manual.id, "reference_urls": ["https://img.example/carousel-5.png"]}], reference_mode="manual", provider="grsai", creative_requirement="制作首图"),
+                user=db.get(User, 1), db=db,
+            )
+            retry_result = main.create_batch_main_image_tasks(
+                BatchMainImageTaskCreate(drafts=[{"draft_id": ignored_failure.id}], reference_mode="random", provider="grsai", creative_requirement="重新制作首图"),
+                user=db.get(User, 1), db=db,
+            )
+            tasks = db.scalars(select(PodTask).where(PodTask.task_type == "main_image").order_by(PodTask.id)).all()
+
+        self.assertEqual(random_result, {"draft_total": 2, "total": 2})
+        self.assertEqual(tasks[1].parameters["reference_mode"], "random")
+        self.assertEqual(set(tasks[1].parameters["reference_urls"]), {"https://img.example/carousel-1.png", "https://img.example/carousel-2.png"})
+        self.assertEqual(tasks[2].parameters["reference_urls"], ["https://img.example/carousel-3.png"])
+        self.assertEqual(manual_result, {"draft_total": 1, "total": 1})
+        self.assertEqual(tasks[3].parameters["reference_urls"], ["https://img.example/carousel-5.png"])
+        self.assertEqual(retry_result, {"draft_total": 1, "total": 1})
+        self.assertEqual(tasks[4].parameters["reference_urls"], ["https://img.example/carousel-6.png"])
 
     def test_manual_retry_resets_failed_task(self) -> None:
         task_id = self.add_task(status=TaskStatus.FAILED, provider_task_id="provider-1")
@@ -713,9 +834,62 @@ class TaskJobTests(unittest.TestCase):
                 user=db.get(User, 1), db=db,
             )
 
-        self.assertEqual(len(first["carousel_items"]), 2)
-        self.assertEqual(len(second["carousel_items"]), 3)
-        self.assertEqual([item.get("sku") for item in result["carousel_items"]], ["SKU1", "SKU1", "SKU1"])
+        self.assertEqual(len(first["carousel_items"]), 1)
+        self.assertEqual(len(second["carousel_items"]), 2)
+        self.assertEqual([item.get("sku") for item in result["carousel_items"]], ["SKU1", "SKU1"])
+
+    def test_adopting_carousel_replaces_its_sku_fallback_image(self) -> None:
+        with self.session_factory() as db:
+            draft = ProductDraft(
+                company_id=1, template_id=1, title="T" * 25,
+                image_urls=[], carousel_items=[],
+                sku_items=[
+                    {"sku": "SKU1", "image_url": "https://img.example/sku-1.png"},
+                    {"sku": "SKU2", "image_url": "https://img.example/sku-2.png"},
+                ],
+                created_by=1, updated_by=1,
+            )
+            db.add(draft); db.commit(); db.refresh(draft)
+            task = PodTask(
+                company_id=1, template_id=1, created_by=1, draft_id=draft.id,
+                task_type="carousel", status=TaskStatus.AWAITING_SELECTION,
+                parameters={"draft_id": draft.id, "source_sku": "SKU1"},
+                result_urls=["https://img.example/carousel-1.png"], result_map=[],
+            )
+            db.add(task); db.commit(); db.refresh(task)
+            result = main.apply_draft_image_result(
+                draft.id, task.id, DraftImageApply(result_url=task.result_urls[0]),
+                user=db.get(User, 1), db=db,
+            )
+
+        self.assertEqual(
+            [item["image_url"] for item in result["carousel_items"]],
+            ["https://img.example/carousel-1.png", "https://img.example/sku-2.png"],
+        )
+        self.assertFalse(any(item["image_url"] == "https://img.example/sku-1.png" for item in result["carousel_items"]))
+
+    def test_confirm_images_can_remove_an_individual_sku_fallback_image(self) -> None:
+        with self.session_factory() as db:
+            draft = ProductDraft(
+                company_id=1, template_id=1, title="T" * 25,
+                image_urls=[], carousel_items=[],
+                sku_items=[
+                    {"sku": "SKU1", "image_url": "https://img.example/sku-1.png"},
+                    {"sku": "SKU2", "image_url": "https://img.example/sku-2.png"},
+                ],
+                created_by=1, updated_by=1,
+            )
+            db.add(draft); db.commit(); db.refresh(draft)
+            result = main.confirm_draft_images(
+                draft.id,
+                DraftImagesConfirm(image_items=[
+                    DraftOrderedImageSelection(result_url="https://img.example/sku-2.png", sku="SKU2"),
+                ]),
+                user=db.get(User, 1), db=db,
+            )
+
+        self.assertEqual(result["image_urls"], ["https://img.example/sku-2.png"])
+        self.assertEqual([item["sku"] for item in result["carousel_items"]], ["SKU2"])
 
     def test_published_draft_images_remain_editable(self) -> None:
         with self.session_factory() as db:

@@ -42,10 +42,10 @@ class TiktokExportTests(unittest.TestCase):
     def payload(self) -> TiktokDraftExportInput:
         return TiktokDraftExportInput(draft_ids=[1, 2], category_catalog_id=1, category="Women's Islamic Clothing/Robes", default_price=10, default_quantity=999, cod="Y", attributes={"product_property/100198": "Floral"}, product_overrides=[{"draft_id": 1, "price": 12.5, "quantity": 88}])
 
-    def test_export_request_accepts_at_most_fifty_drafts(self) -> None:
+    def test_export_request_accepts_at_most_twenty_drafts(self) -> None:
         values = self.payload().model_dump()
-        values["draft_ids"] = list(range(1, 52))
-        with self.assertRaisesRegex(ValueError, "at most 50"):
+        values["draft_ids"] = list(range(1, 22))
+        with self.assertRaisesRegex(ValueError, "at most 20"):
             TiktokDraftExportInput(**values)
 
     def test_options_are_read_from_bundled_template(self) -> None:

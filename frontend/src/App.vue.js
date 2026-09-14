@@ -27,11 +27,17 @@ const MATERIAL_UPLOAD_CONCURRENCY = 8, MATERIAL_UPLOAD_MAX_FILES = 100, IMAGE_UP
 const templateSaving = ref(false);
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'], MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('');
-const publishingDraftId = ref(null);
+const publishingDraftId = ref(null), skippingCarouselDraftId = ref(null), skippingMainImageDraftId = ref(null);
 const selectedDraftIds = ref([]), showTiktokExportDialog = ref(false), tiktokExportOptions = ref(null), tiktokExportLoading = ref(false), tiktokExportError = ref('');
-const MAX_TIKTOK_EXPORT_DRAFTS = 50;
+const showBatchCarouselDialog = ref(false), showBatchMainImageDialog = ref(false), batchCarouselSaving = ref(false), batchMainImageSaving = ref(false), batchCarouselSkipping = ref(false), batchMainImageSkipping = ref(false), batchCarouselSelections = ref({}), batchMainImageSelections = ref({});
+const MAX_TIKTOK_EXPORT_DRAFTS = 20;
 const tiktokExportCatalogId = ref(null), tiktokExportCategory = ref(''), tiktokExportDefaultPrice = ref(null), tiktokExportDefaultQuantity = ref(999), tiktokExportCod = ref('Y'), tiktokExportAttributes = ref({}), tiktokExportOverrides = ref({});
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null);
+const activeDraftTab = ref('all'), draftTotal = ref(0), draftTabCounts = ref({ all: 0, carousel_pending: 0, main_image_pending: 0, ready_to_publish: 0, published: 0 });
+const activeDraftWorkStatus = ref('all'), draftWorkStatusCounts = ref({ all: 0, not_started: 0, in_progress: 0, awaiting_review: 0, failed: 0 });
+const draftWorkStatusTabs = [{ key: 'all', label: '全部' }, { key: 'not_started', label: '未制作' }, { key: 'in_progress', label: '制作中' }, { key: 'awaiting_review', label: '待审核' }, { key: 'failed', label: '制作失败' }];
+const draftTabs = [{ key: 'all', label: '全部' }, { key: 'carousel_pending', label: '待制作轮播图' }, { key: 'main_image_pending', label: '待制作主图' }, { key: 'ready_to_publish', label: '待发布' }, { key: 'published', label: '发布成功' }];
+const draftStatusLabels = { carousel_pending: '待制作轮播图', main_image_pending: '待制作主图', ready_to_publish: '待发布', published: '发布成功' };
 const taskTypeLabels = { sku_image: 'SKU图', carousel: '轮播图', main_image: '首图' };
 const initialTaskParams = new URLSearchParams(location.search);
 const initialTaskType = initialTaskParams.get('task_type');
@@ -52,10 +58,12 @@ const selectedTaskIds = ref([]), showBatchClaimDialog = ref(false), batchClaimIt
 const materialPageSize = ref(20), currentMaterialPage = ref(1), materialTotal = ref(0), materialCreatorFilterId = ref(null);
 const creatorFiltersInitialized = ref(false);
 const previewImageUrl = ref(''), previewImageAlt = ref('');
-const showDraftImageDialog = ref(false), imageDraft = ref(null), imageWorkspaceLoading = ref(false), imageTasksRefreshing = ref(false), imageTaskCreatingType = ref(''), imageConfirmSaving = ref(false);
+const showDraftImageDialog = ref(false), imageWorkspaceMode = ref('full'), imageDraft = ref(null), imageWorkspaceLoading = ref(false), imageTasksRefreshing = ref(false), imageTaskCreatingType = ref(''), imageConfirmSaving = ref(false);
 const selectedImageSkus = ref([]), selectedMainReferences = ref([]), mainReferenceMode = ref('random');
 // 轮播图与首图任务使用各自独立的一套生成参数，互不干扰。
 const carouselParams = ref({ prompt: '', provider: '', ratio: '1:1', quality: '1K' }), mainParams = ref({ prompt: '', provider: '', ratio: '1:1', quality: '1K' });
+const batchCarouselParams = ref({ prompt: '', provider: '', ratio: '1:1', quality: '1K' });
+const batchMainImageParams = ref({ prompt: '', provider: '', ratio: '1:1', quality: '1K' }), batchMainImageReferenceMode = ref('random');
 const stagedFinalImageItems = ref(null), draggedFinalImageUrl = ref('');
 const showMainApplyDialog = ref(false), pendingMainApply = ref(null), mainRemoveSku = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
@@ -106,18 +114,22 @@ const materialDraftSizes = computed(() => {
     return options.map((size) => String(size).trim()).filter(Boolean);
 });
 const materialDraftSkuCount = computed(() => selectedMaterialAssets.value.length);
-const filteredDrafts = computed(() => draftTemplateFilterId.value ? drafts.value.filter(draft => draft.template_id === draftTemplateFilterId.value) : drafts.value);
-const draftPageCount = computed(() => Math.max(1, Math.ceil(filteredDrafts.value.length / draftPageSize.value)));
+const filteredDrafts = computed(() => drafts.value);
+const draftPageCount = computed(() => Math.max(1, Math.ceil(draftTotal.value / draftPageSize.value)));
 const visibleDraftPage = computed(() => Math.min(currentDraftPage.value, draftPageCount.value));
-const pagedDrafts = computed(() => {
-    const start = (visibleDraftPage.value - 1) * draftPageSize.value;
-    return filteredDrafts.value.slice(start, start + draftPageSize.value);
-});
+const pagedDrafts = computed(() => drafts.value);
 const selectedDrafts = computed(() => drafts.value.filter(draft => selectedDraftIds.value.includes(draft.id)));
 const allPagedDraftsSelected = computed(() => Boolean(pagedDrafts.value.length) && pagedDrafts.value.every(draft => selectedDraftIds.value.includes(draft.id)));
+const batchCarouselEligible = computed(() => activeDraftTab.value === 'carousel_pending' && activeDraftWorkStatus.value === 'not_started' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.carousel_task_summary?.work_status === 'not_started'));
+const batchCarouselSkipEligible = computed(() => activeDraftTab.value === 'carousel_pending' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab === 'carousel_pending'));
+const batchMainImageSkipEligible = computed(() => activeDraftTab.value === 'main_image_pending' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab === 'main_image_pending'));
+const batchMainImageEligible = computed(() => activeDraftTab.value === 'main_image_pending' && activeDraftWorkStatus.value === 'not_started' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.main_image_task_summary?.work_status === 'not_started'));
 const selectedTiktokCategoryAttributes = computed(() => tiktokExportOptions.value?.attributes_by_category?.[tiktokExportCategory.value] || []);
 const managingTiktokCategoryAttributes = computed(() => managingTiktokCatalogOptions.value?.attributes_by_category?.[managingTiktokCategory.value] || []);
-function changeDraftPageSize() { currentDraftPage.value = 1; }
+async function changeDraftPageSize() { currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
+async function changeDraftTab(tab) { activeDraftTab.value = tab; activeDraftWorkStatus.value = 'all'; currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
+async function changeDraftWorkStatus(status) { activeDraftWorkStatus.value = status; currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
+async function changeDraftPage(next) { currentDraftPage.value = next; selectedDraftIds.value = []; await refreshDraftList(); }
 function toggleDraftSelection(draftId) {
     if (selectedDraftIds.value.includes(draftId)) {
         selectedDraftIds.value = selectedDraftIds.value.filter(id => id !== draftId);
@@ -143,12 +155,165 @@ function togglePagedDrafts() {
         showToast(`一次最多选择 ${MAX_TIKTOK_EXPORT_DRAFTS} 条商品草稿`);
     }
 }
-function changeDraftTemplateFilter() { currentDraftPage.value = 1; selectedDraftIds.value = []; }
+async function changeDraftTemplateFilter() { currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
 async function changeDraftCreatorFilter() { currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
 async function refreshDraftList() {
-    const { data } = await api.get('/drafts', { headers: headers.value, params: { creator_id: draftCreatorFilterId.value } });
-    drafts.value = data;
-    selectedDraftIds.value = selectedDraftIds.value.filter(id => data.some((draft) => draft.id === id));
+    const { data } = await api.get('/drafts', { headers: headers.value, params: { creator_id: draftCreatorFilterId.value, template_id: draftTemplateFilterId.value, tab: activeDraftTab.value, work_status: activeDraftWorkStatus.value, page: currentDraftPage.value, page_size: draftPageSize.value } });
+    drafts.value = data.items;
+    draftTotal.value = data.total;
+    draftTabCounts.value = data.tab_counts;
+    draftWorkStatusCounts.value = data.work_status_counts;
+    selectedDraftIds.value = selectedDraftIds.value.filter(id => data.items.some((draft) => draft.id === id));
+}
+function draftWorkSummary(draft) { return draft.display_tab === 'carousel_pending' ? draft.carousel_task_summary : draft.main_image_task_summary; }
+function openBatchCarouselDialog() {
+    if (!batchCarouselEligible.value) {
+        showToast('仅可选择尚未创建轮播图任务的待制作草稿');
+        return;
+    }
+    const defaultProvider = availableAiProviders.value.find(item => item.is_default)?.provider || availableAiProviders.value[0]?.provider || '';
+    batchCarouselParams.value = { prompt: carouselParams.value.prompt || '保持服装款式、颜色和印花准确，生成自然真实、适合电商展示的商品场景图', provider: defaultProvider, ratio: carouselParams.value.ratio, quality: carouselParams.value.quality };
+    batchCarouselSelections.value = Object.fromEntries(selectedDrafts.value.map(draft => [draft.id, (draft.sku_items || []).map((item) => item.sku).filter(Boolean)]));
+    showBatchCarouselDialog.value = true;
+}
+function toggleBatchCarouselSku(draftId, sku) {
+    const selected = batchCarouselSelections.value[draftId] || [];
+    batchCarouselSelections.value = { ...batchCarouselSelections.value, [draftId]: selected.includes(sku) ? selected.filter(item => item !== sku) : [...selected, sku] };
+}
+function batchMainImageReferenceItems(draft) {
+    const carouselItems = (draft.carousel_items || []).filter((item) => item?.image_url && item.source_type !== 'main_image');
+    return carouselItems.length ? carouselItems : (draft.sku_items || []).filter((item) => item?.image_url);
+}
+function openBatchMainImageDialog() {
+    if (!batchMainImageEligible.value) {
+        showToast('仅可选择尚未创建首图任务的待制作主图草稿');
+        return;
+    }
+    const defaultProvider = availableAiProviders.value.find(item => item.is_default)?.provider || availableAiProviders.value[0]?.provider || '';
+    batchMainImageParams.value = { prompt: mainParams.value.prompt || '以参考图为基础生成突出商品主体的电商首图，背景简洁、光线自然，保持款式与颜色准确', provider: defaultProvider, ratio: mainParams.value.ratio, quality: mainParams.value.quality };
+    batchMainImageReferenceMode.value = 'random';
+    batchMainImageSelections.value = Object.fromEntries(selectedDrafts.value.map(draft => [draft.id, batchMainImageReferenceItems(draft).slice(0, 3).map((item) => item.image_url)]));
+    showBatchMainImageDialog.value = true;
+}
+function toggleBatchMainImageReference(draftId, url) {
+    const selected = batchMainImageSelections.value[draftId] || [];
+    batchMainImageSelections.value = { ...batchMainImageSelections.value, [draftId]: selected.includes(url) ? selected.filter(item => item !== url) : [...selected, url].slice(0, 3) };
+}
+async function createBatchCarouselTasks() {
+    if (!batchCarouselParams.value.prompt.trim()) {
+        showToast('请填写轮播图的创作要求');
+        return;
+    }
+    const batchDrafts = selectedDrafts.value.map(draft => ({ draft_id: draft.id, source_skus: batchCarouselSelections.value[draft.id] || [] }));
+    if (batchDrafts.some(item => !item.source_skus.length)) {
+        showToast('每个草稿至少选择一张 SKU 图');
+        return;
+    }
+    try {
+        batchCarouselSaving.value = true;
+        const { data } = await api.post('/drafts/batch-carousel-tasks', { drafts: batchDrafts, provider: batchCarouselParams.value.provider, ratio: batchCarouselParams.value.ratio, quality: batchCarouselParams.value.quality, creative_requirement: batchCarouselParams.value.prompt.trim() }, { headers: headers.value });
+        showBatchCarouselDialog.value = false;
+        selectedDraftIds.value = [];
+        await refreshDraftList();
+        showToast(`已为 ${data.draft_total} 条草稿创建 ${data.total} 条轮播图任务`);
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '批量创建轮播图任务失败');
+    }
+    finally {
+        batchCarouselSaving.value = false;
+    }
+}
+async function createBatchMainImageTasks() {
+    if (!batchMainImageParams.value.prompt.trim()) {
+        showToast('请填写首图的创作要求');
+        return;
+    }
+    const batchDrafts = selectedDrafts.value.map(draft => ({ draft_id: draft.id, reference_urls: batchMainImageReferenceMode.value === 'manual' ? batchMainImageSelections.value[draft.id] || [] : [] }));
+    if (batchMainImageReferenceMode.value === 'manual' && batchDrafts.some(item => !item.reference_urls.length)) {
+        showToast('每个草稿至少选择一张轮播图');
+        return;
+    }
+    try {
+        batchMainImageSaving.value = true;
+        const { data } = await api.post('/drafts/batch-main-image-tasks', { drafts: batchDrafts, reference_mode: batchMainImageReferenceMode.value, provider: batchMainImageParams.value.provider, ratio: batchMainImageParams.value.ratio, quality: batchMainImageParams.value.quality, creative_requirement: batchMainImageParams.value.prompt.trim() }, { headers: headers.value });
+        showBatchMainImageDialog.value = false;
+        selectedDraftIds.value = [];
+        await refreshDraftList();
+        showToast(`已为 ${data.draft_total} 条草稿创建 ${data.total} 条首图任务`);
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '批量创建首图任务失败');
+    }
+    finally {
+        batchMainImageSaving.value = false;
+    }
+}
+async function skipDraftCarousel(draft) {
+    try {
+        skippingCarouselDraftId.value = draft.id;
+        await api.post(`/drafts/${draft.id}/skip-carousel`, {}, { headers: headers.value });
+        await refreshDraftList();
+        showToast('已跳过轮播图制作，请继续制作主图');
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '跳过轮播图失败');
+    }
+    finally {
+        skippingCarouselDraftId.value = null;
+    }
+}
+async function batchSkipDraftCarousel() {
+    if (!batchCarouselSkipEligible.value) {
+        showToast('仅可批量跳过待制作轮播图阶段的草稿');
+        return;
+    }
+    try {
+        batchCarouselSkipping.value = true;
+        const { data } = await api.post('/drafts/batch-skip-carousel', { draft_ids: selectedDraftIds.value }, { headers: headers.value });
+        selectedDraftIds.value = [];
+        await refreshDraftList();
+        showToast(`已跳过 ${data.total} 条草稿的轮播图制作`);
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '批量跳过轮播图制作失败');
+    }
+    finally {
+        batchCarouselSkipping.value = false;
+    }
+}
+async function skipDraftMainImage(draft) {
+    try {
+        skippingMainImageDraftId.value = draft.id;
+        await api.post(`/drafts/${draft.id}/skip-main-image`, {}, { headers: headers.value });
+        await refreshDraftList();
+        showToast('已跳过首图制作，草稿已进入待发布');
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '跳过首图制作失败');
+    }
+    finally {
+        skippingMainImageDraftId.value = null;
+    }
+}
+async function batchSkipDraftMainImage() {
+    if (!batchMainImageSkipEligible.value) {
+        showToast('仅可批量跳过待制作主图阶段的草稿');
+        return;
+    }
+    try {
+        batchMainImageSkipping.value = true;
+        const { data } = await api.post('/drafts/batch-skip-main-image', { draft_ids: selectedDraftIds.value }, { headers: headers.value });
+        selectedDraftIds.value = [];
+        await refreshDraftList();
+        showToast(`已跳过 ${data.total} 条草稿的首图制作`);
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '批量跳过首图制作失败');
+    }
+    finally {
+        batchMainImageSkipping.value = false;
+    }
 }
 const taskPageCount = computed(() => Math.max(1, Math.ceil(taskTotal.value / taskPageSize.value)));
 const visibleTaskPage = computed(() => Math.min(currentTaskPage.value, taskPageCount.value));
@@ -242,13 +407,16 @@ async function refresh() {
         draftCreatorFilterId.value = user.value.id;
         creatorFiltersInitialized.value = true;
     }
-    const [s, t, g, task, material, d, providers, catalogs] = await Promise.all([api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: taskQueryParams() }), api.get('/material-assets', { ...h, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value } }), api.get('/drafts', { ...h, params: { creator_id: draftCreatorFilterId.value } }), api.get('/ai-providers', h), api.get('/tiktok-category-catalogs', h)]);
+    const [s, t, g, task, material, d, providers, catalogs] = await Promise.all([api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: taskQueryParams() }), api.get('/material-assets', { ...h, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value } }), api.get('/drafts', { ...h, params: { creator_id: draftCreatorFilterId.value, template_id: draftTemplateFilterId.value, tab: activeDraftTab.value, work_status: activeDraftWorkStatus.value, page: currentDraftPage.value, page_size: draftPageSize.value } }), api.get('/ai-providers', h), api.get('/tiktok-category-catalogs', h)]);
     shops.value = s.data;
     templates.value = t.data;
     templateGroups.value = g.data;
     applyTaskPage(task.data);
     applyMaterialPage(material.data);
-    drafts.value = d.data;
+    drafts.value = d.data.items;
+    draftTotal.value = d.data.total;
+    draftTabCounts.value = d.data.tab_counts;
+    draftWorkStatusCounts.value = d.data.work_status_counts;
     aiProviders.value = providers.data;
     tiktokCatalogs.value = catalogs.data;
     // 后台停用当前所选模型后，刷新时立即切换到仍启用的默认模型，避免提交已停用的值。
@@ -784,7 +952,10 @@ const draftEditSkus = computed(() => {
 function openImagePreview(url, alt) { previewImageUrl.value = imageUrl(url); previewImageAlt.value = alt; }
 const imageDraftSkus = computed(() => {
     const seen = new Set();
-    return (imageDraft.value?.sku_items || []).filter((item) => { if (!item.sku || !item.image_url || seen.has(item.sku))
+    const adoptedSourceSkus = new Set((imageDraft.value?.carousel_items || [])
+        .filter((item) => item?.source_type === 'carousel' && item?.sku)
+        .map((item) => item.sku));
+    return (imageDraft.value?.sku_items || []).filter((item) => { if (!item.sku || !item.image_url || seen.has(item.sku) || adoptedSourceSkus.has(item.sku))
         return false; seen.add(item.sku); return true; });
 });
 function skuFallbackCarouselItems(draft) {
@@ -806,7 +977,7 @@ const draftFinalImageItems = computed(() => {
     return (imageDraft.value.carousel_items || []).filter((item) => item?.image_url && !seen.has(item.image_url) && seen.add(item.image_url));
 });
 const draftImagePreviewUrls = computed(() => draftFinalImageItems.value.map((item) => item.image_url));
-const adoptedCarouselItems = computed(() => (imageDraft.value?.carousel_items || []).filter((item) => item.source_type !== 'main_image'));
+const adoptedCarouselItems = computed(() => (imageDraft.value?.carousel_items || []).filter((item) => item?.source_type === 'carousel'));
 const currentGeneratedMainImage = computed(() => (imageDraft.value?.carousel_items || []).find((item) => item.source_type === 'main_image') || null);
 function resetFinalImageOrder() { stagedFinalImageItems.value = null; draggedFinalImageUrl.value = ''; }
 async function loadImageWorkspace(draftId, tasksOnly = false) {
@@ -830,7 +1001,8 @@ async function loadImageWorkspace(draftId, tasksOnly = false) {
             imageWorkspaceLoading.value = false;
     }
 }
-async function openDraftImageWorkspace(draft) {
+async function openImageWorkspace(draft, mode = 'full', focusMain = false) {
+    imageWorkspaceMode.value = mode;
     showDraftImageDialog.value = true;
     imageDraft.value = null;
     selectedImageSkus.value = [];
@@ -842,12 +1014,18 @@ async function openDraftImageWorkspace(draft) {
     mainParams.value = { prompt: '以参考图为基础生成突出商品主体的电商首图，背景简洁、光线自然，保持款式与颜色准确', provider: defaultImageProvider, ratio: '1:1', quality: '1K' };
     try {
         await loadImageWorkspace(draft.id);
+        if (focusMain) {
+            await nextTick();
+            document.getElementById('main-image-workspace-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
     }
     catch (e) {
         showDraftImageDialog.value = false;
         showToast(e.response?.data?.detail || '加载图片制作台失败');
     }
 }
+function openCarouselImageWorkspace(draft) { return openImageWorkspace(draft, 'carousel'); }
+function openFullImageWorkspace(draft, focusMain = false) { return openImageWorkspace(draft, 'full', focusMain); }
 function toggleImageSku(sku) {
     selectedImageSkus.value = selectedImageSkus.value.includes(sku) ? selectedImageSkus.value.filter(item => item !== sku) : [...selectedImageSkus.value, sku].slice(0, 9);
 }
@@ -912,13 +1090,20 @@ function stageCarouselTaskResult(task, url) {
         showToast('该任务缺少来源 SKU');
         return;
     }
+    const generated = { sku, image_url: url, task_id: task.id, source_type: 'carousel' };
     const existing = [...(imageDraft.value.carousel_items || [])];
-    if (existing.length >= 9) {
-        showToast('商品最终图片最多 9 张，请先移除一张轮播图');
-        return;
+    const fallbackIndex = existing.findIndex((item) => item.source_type === 'sku' && item.sku === sku);
+    if (fallbackIndex >= 0)
+        existing.splice(fallbackIndex, 1, generated);
+    else {
+        if (existing.length >= 9) {
+            showToast('商品最终图片最多 9 张，请先移除一张轮播图');
+            return;
+        }
+        existing.push(generated);
     }
     resetFinalImageOrder();
-    imageDraft.value.carousel_items = [...existing, { sku, image_url: url, task_id: task.id }];
+    imageDraft.value.carousel_items = existing;
     imageDraft.value.using_sku_fallback = false;
     selectedMainReferences.value = selectedMainReferences.value.filter(referenceUrl => (imageDraft.value.carousel_items || []).some((item) => item.image_url === referenceUrl));
     showToast('已暂存为轮播图，确认后保存到草稿');
@@ -948,7 +1133,7 @@ async function applyImageTaskResult(task, url, removeSku) {
     if (!showDraftImageDialog.value || imageDraft.value?.id !== Number(draftId)) {
         showTaskDetailDialog.value = false;
         page.value = 'drafts';
-        await openDraftImageWorkspace({ id: Number(draftId) });
+        await openImageWorkspace({ id: Number(draftId) }, task.task_type === 'carousel' ? 'carousel' : 'full', task.task_type === 'main_image');
         if (!imageDraft.value)
             return;
     }
@@ -975,7 +1160,12 @@ function toggleWorkspaceCarouselTask(task) {
         return;
     if (isWorkspaceTaskSelected(task, url)) {
         resetFinalImageOrder();
+        const sourceSku = String(task.parameters?.source_sku || '');
         const remaining = (imageDraft.value.carousel_items || []).filter((item) => !(item.task_id === task.id && item.image_url === url));
+        const sourceImage = imageDraft.value.sku_items?.find((item) => item.sku === sourceSku && item.image_url);
+        if (sourceImage && !remaining.some((item) => item.sku === sourceSku)) {
+            remaining.push({ sku: sourceSku, image_url: sourceImage.image_url, task_id: null, source_type: 'sku' });
+        }
         imageDraft.value.carousel_items = remaining.length ? remaining : skuFallbackCarouselItems(imageDraft.value);
         imageDraft.value.using_sku_fallback = !remaining.length;
         selectedMainReferences.value = selectedMainReferences.value.filter(referenceUrl => (imageDraft.value.carousel_items || []).some((item) => item.image_url === referenceUrl));
@@ -985,6 +1175,10 @@ function toggleWorkspaceCarouselTask(task) {
     stageCarouselTaskResult(task, url);
 }
 function workspaceMainTasks() { return (imageDraft.value?.main_image_tasks || []).filter((task) => task && task.id); }
+function workspaceFailedTasks() {
+    const tasks = imageWorkspaceMode.value === 'carousel' ? workspaceCarouselTasks() : workspaceCarouselTasks().concat(workspaceMainTasks());
+    return tasks.filter((task) => task.status === 'failed' && !task.failure_ignored);
+}
 function toggleWorkspaceMainTask(task) {
     if (!imageDraft.value)
         return;
@@ -1001,8 +1195,13 @@ function toggleWorkspaceMainTask(task) {
 function dropFinalImage(targetUrl) { if (!draggedFinalImageUrl.value || draggedFinalImageUrl.value === targetUrl)
     return; const items = [...draftFinalImageItems.value]; const from = items.findIndex((item) => item.image_url === draggedFinalImageUrl.value), to = items.findIndex((item) => item.image_url === targetUrl); if (from < 0 || to < 0)
     return; const [moved] = items.splice(from, 1); items.splice(to, 0, moved); stagedFinalImageItems.value = items; draggedFinalImageUrl.value = ''; }
+function removeFinalImage(imageUrl) { const items = draftFinalImageItems.value.filter((item) => item.image_url !== imageUrl); if (items.length === draftFinalImageItems.value.length)
+    return; if (!items.length) {
+    showToast('请至少保留一张 SKU 图或轮播图');
+    return;
+} stagedFinalImageItems.value = items; draggedFinalImageUrl.value = ''; selectedMainReferences.value = selectedMainReferences.value.filter(referenceUrl => referenceUrl !== imageUrl); showToast('已从最终商品图片中移除，确认后保存到草稿'); }
 async function openImageWorkspaceFromTask(task) { const draftId = task?.parameters?.draft_id; if (!draftId)
-    return; showTaskDetailDialog.value = false; page.value = 'drafts'; await openDraftImageWorkspace({ id: draftId }); if (task.task_type === 'carousel' && task.parameters?.source_sku)
+    return; showTaskDetailDialog.value = false; page.value = 'drafts'; await openImageWorkspace({ id: draftId }, task.task_type === 'carousel' ? 'carousel' : 'full', task.task_type === 'main_image'); if (task.task_type === 'carousel' && task.parameters?.source_sku)
     selectedImageSkus.value = [task.parameters.source_sku]; await nextTick(); document.getElementById(task.task_type === 'main_image' ? 'main-image-workspace-section' : 'carousel-workspace-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
 async function confirmDraftImages() { if (!imageDraft.value)
     return; if (!draftFinalImageItems.value.length) {
@@ -1412,6 +1611,19 @@ async function retryWorkspaceTask(task) {
     }
     finally {
         retryingWorkspaceTaskId.value = null;
+    }
+}
+async function ignoreWorkspaceTaskFailure(task) {
+    if (!imageDraft.value)
+        return;
+    try {
+        await api.post(`/drafts/${imageDraft.value.id}/image-tasks/${task.id}/ignore-failure`, {}, { headers: headers.value });
+        await refreshWorkspaceTasks();
+        await refreshDraftList();
+        showToast('已忽略失败任务，可继续当前制作阶段');
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '忽略失败任务失败');
     }
 }
 function chooseMaterialUploadFiles(event) {
@@ -3388,6 +3600,70 @@ if (__VLS_ctx.token) {
                 } },
             ...{ class: "primary" },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
+            ...{ class: "draft-tabs" },
+            'aria-label': "商品草稿流程",
+        });
+        for (const [item] of __VLS_getVForSourceType((__VLS_ctx.draftTabs))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        __VLS_ctx.changeDraftTab(item.key);
+                    } },
+                key: (item.key),
+                ...{ class: ({ active: __VLS_ctx.activeDraftTab === item.key }) },
+            });
+            (item.label);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            (__VLS_ctx.draftTabCounts[item.key] || 0);
+        }
+        if (__VLS_ctx.activeDraftTab === 'carousel_pending' || __VLS_ctx.activeDraftTab === 'main_image_pending') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
+                ...{ class: "draft-work-status-tabs" },
+                'aria-label': "制作状态",
+            });
+            for (const [item] of __VLS_getVForSourceType((__VLS_ctx.draftWorkStatusTabs))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!(__VLS_ctx.activeDraftTab === 'carousel_pending' || __VLS_ctx.activeDraftTab === 'main_image_pending'))
+                                return;
+                            __VLS_ctx.changeDraftWorkStatus(item.key);
+                        } },
+                    key: (item.key),
+                    ...{ class: ({ active: __VLS_ctx.activeDraftWorkStatus === item.key }) },
+                });
+                (item.label);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+                (__VLS_ctx.draftWorkStatusCounts[item.key] || 0);
+            }
+        }
         if (__VLS_ctx.selectedDraftIds.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
                 ...{ class: "draft-export-bar" },
@@ -3395,6 +3671,34 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (__VLS_ctx.selectedDraftIds.length);
             (__VLS_ctx.MAX_TIKTOK_EXPORT_DRAFTS);
+            if (__VLS_ctx.batchCarouselEligible) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.openBatchCarouselDialog) },
+                    ...{ class: "primary" },
+                });
+            }
+            if (__VLS_ctx.batchCarouselSkipEligible) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.batchSkipDraftCarousel) },
+                    ...{ class: "secondary" },
+                    disabled: (__VLS_ctx.batchCarouselSkipping),
+                });
+                (__VLS_ctx.batchCarouselSkipping ? '跳过中…' : '批量跳过轮播图制作');
+            }
+            if (__VLS_ctx.batchMainImageEligible) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.openBatchMainImageDialog) },
+                    ...{ class: "primary" },
+                });
+            }
+            if (__VLS_ctx.batchMainImageSkipEligible) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.batchSkipDraftMainImage) },
+                    ...{ class: "secondary" },
+                    disabled: (__VLS_ctx.batchMainImageSkipping),
+                });
+                (__VLS_ctx.batchMainImageSkipping ? '跳过中…' : '批量跳过首图制作');
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (__VLS_ctx.openTiktokExportDialog) },
                 ...{ class: "primary" },
@@ -3539,12 +3843,20 @@ if (__VLS_ctx.token) {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "chip" },
-                ...{ class: (draft.tiktok_collect_box_id ? 'blue' : 'orange') },
+                ...{ class: (draft.display_tab === 'published' ? 'blue' : 'purple') },
             });
-            (draft.tiktok_collect_box_id ? '已认领到 TikTok' : draft.miaoshou_collect_box_id ? '待认领到 TikTok' : '待发布');
-            if (draft.tiktok_collect_box_id) {
+            ({ carousel_pending: '待制作轮播图', main_image_pending: '待制作主图', ready_to_publish: '待发布', published: '发布成功' }[draft.display_tab]);
+            if (draft.display_tab === 'carousel_pending' || draft.display_tab === 'main_image_pending') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-                (draft.tiktok_collect_box_id);
+                ({ not_started: '未制作', in_progress: '制作中', awaiting_review: '待审核', failed: '制作失败' }[__VLS_ctx.draftWorkSummary(draft)?.work_status]);
+                if (__VLS_ctx.draftWorkSummary(draft)?.work_status === 'in_progress' && __VLS_ctx.draftWorkSummary(draft)?.awaiting_selection) {
+                }
+            }
+            if (__VLS_ctx.draftWorkSummary(draft)?.failed) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
+                    ...{ class: "error" },
+                });
+                (__VLS_ctx.draftWorkSummary(draft)?.failure_reasons?.[0] || '存在失败任务');
             }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "draft-trow-actions" },
@@ -3568,26 +3880,7 @@ if (__VLS_ctx.token) {
                         __VLS_ctx.openDraftEditDialog(draft);
                     } },
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!(__VLS_ctx.token))
-                            return;
-                        if (!!(__VLS_ctx.page === 'dashboard'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'templates'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'pod'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'tasks'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'materials'))
-                            return;
-                        if (!(__VLS_ctx.page === 'drafts'))
-                            return;
-                        __VLS_ctx.openDraftImageWorkspace(draft);
-                    } },
-            });
-            if (!draft.tiktok_collect_box_id) {
+            if (draft.display_tab === 'carousel_pending') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!(__VLS_ctx.token))
@@ -3604,7 +3897,134 @@ if (__VLS_ctx.token) {
                                 return;
                             if (!(__VLS_ctx.page === 'drafts'))
                                 return;
-                            if (!(!draft.tiktok_collect_box_id))
+                            if (!(draft.display_tab === 'carousel_pending'))
+                                return;
+                            __VLS_ctx.openCarouselImageWorkspace(draft);
+                        } },
+                    ...{ class: "primary compact-action" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!(draft.display_tab === 'carousel_pending'))
+                                return;
+                            __VLS_ctx.skipDraftCarousel(draft);
+                        } },
+                    ...{ class: "secondary compact-action" },
+                    disabled: (__VLS_ctx.skippingCarouselDraftId === draft.id),
+                });
+                (__VLS_ctx.skippingCarouselDraftId === draft.id ? '跳过中…' : '跳过轮播图制作');
+            }
+            else if (draft.display_tab === 'main_image_pending') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!!(draft.display_tab === 'carousel_pending'))
+                                return;
+                            if (!(draft.display_tab === 'main_image_pending'))
+                                return;
+                            __VLS_ctx.openFullImageWorkspace(draft, true);
+                        } },
+                    ...{ class: "primary compact-action" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!!(draft.display_tab === 'carousel_pending'))
+                                return;
+                            if (!(draft.display_tab === 'main_image_pending'))
+                                return;
+                            __VLS_ctx.skipDraftMainImage(draft);
+                        } },
+                    ...{ class: "secondary compact-action" },
+                    disabled: (__VLS_ctx.skippingMainImageDraftId === draft.id),
+                });
+                (__VLS_ctx.skippingMainImageDraftId === draft.id ? '跳过中…' : '跳过首图制作');
+            }
+            else if (draft.display_tab !== 'published') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!!(draft.display_tab === 'carousel_pending'))
+                                return;
+                            if (!!(draft.display_tab === 'main_image_pending'))
+                                return;
+                            if (!(draft.display_tab !== 'published'))
+                                return;
+                            __VLS_ctx.openFullImageWorkspace(draft);
+                        } },
+                });
+            }
+            if (draft.display_tab === 'ready_to_publish') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!(draft.display_tab === 'ready_to_publish'))
                                 return;
                             __VLS_ctx.publishDraftToMiaoshou(draft);
                         } },
@@ -3618,14 +4038,14 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "empty" },
             });
-            (__VLS_ctx.drafts.length ? '没有符合筛选条件的商品草稿。' : '暂无商品草稿，请先在任务中心领取素材，或上传本地素材。');
+            (__VLS_ctx.draftTotal ? '没有符合筛选条件的商品草稿。' : '暂无商品草稿，请先在任务中心领取素材，或上传本地素材。');
         }
         else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
                 ...{ class: "draft-pagination" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (__VLS_ctx.filteredDrafts.length);
+            (__VLS_ctx.draftTotal);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
                 ...{ onChange: (__VLS_ctx.changeDraftPageSize) },
@@ -3664,7 +4084,7 @@ if (__VLS_ctx.token) {
                             return;
                         if (!!(!__VLS_ctx.filteredDrafts.length))
                             return;
-                        __VLS_ctx.currentDraftPage = __VLS_ctx.visibleDraftPage - 1;
+                        __VLS_ctx.changeDraftPage(__VLS_ctx.visibleDraftPage - 1);
                     } },
                 disabled: (__VLS_ctx.visibleDraftPage === 1),
             });
@@ -3689,7 +4109,7 @@ if (__VLS_ctx.token) {
                             return;
                         if (!!(!__VLS_ctx.filteredDrafts.length))
                             return;
-                        __VLS_ctx.currentDraftPage = __VLS_ctx.visibleDraftPage + 1;
+                        __VLS_ctx.changeDraftPage(__VLS_ctx.visibleDraftPage + 1);
                     } },
                 disabled: (__VLS_ctx.visibleDraftPage === __VLS_ctx.draftPageCount),
             });
@@ -4916,6 +5336,172 @@ if (__VLS_ctx.showTeamResourcesDialog) {
         });
     }
 }
+if (__VLS_ctx.showBatchMainImageDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showBatchMainImageDialog))
+                    return;
+                !__VLS_ctx.batchMainImageSaving && (__VLS_ctx.showBatchMainImageDialog = false);
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card batch-carousel-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showBatchMainImageDialog))
+                    return;
+                __VLS_ctx.showBatchMainImageDialog = false;
+            } },
+        ...{ class: "modal-close" },
+        disabled: (__VLS_ctx.batchMainImageSaving),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.selectedDrafts.length);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "reference-mode-tabs" },
+        role: "tablist",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showBatchMainImageDialog))
+                    return;
+                __VLS_ctx.batchMainImageReferenceMode = 'random';
+            } },
+        type: "button",
+        role: "tab",
+        ...{ class: ({ active: __VLS_ctx.batchMainImageReferenceMode === 'random' }) },
+        'aria-selected': (__VLS_ctx.batchMainImageReferenceMode === 'random'),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({
+        ...{ class: "reference-mode-icon" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showBatchMainImageDialog))
+                    return;
+                __VLS_ctx.batchMainImageReferenceMode = 'manual';
+            } },
+        type: "button",
+        role: "tab",
+        ...{ class: ({ active: __VLS_ctx.batchMainImageReferenceMode === 'manual' }) },
+        'aria-selected': (__VLS_ctx.batchMainImageReferenceMode === 'manual'),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({
+        ...{ class: "reference-mode-icon" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "batch-carousel-list" },
+    });
+    for (const [draft] of __VLS_getVForSourceType((__VLS_ctx.selectedDrafts))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+            key: (draft.id),
+            ...{ class: "batch-carousel-draft" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        (draft.id);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            title: (draft.title),
+        });
+        (draft.title);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        (__VLS_ctx.batchMainImageReferenceMode === 'manual' ? `${(__VLS_ctx.batchMainImageSelections[draft.id] || []).length} / 3 已选` : `${Math.min(3, __VLS_ctx.batchMainImageReferenceItems(draft).length)} 张随机参考图`);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "batch-carousel-skus" },
+        });
+        for (const [item] of __VLS_getVForSourceType((__VLS_ctx.batchMainImageReferenceItems(draft)))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showBatchMainImageDialog))
+                            return;
+                        __VLS_ctx.toggleBatchMainImageReference(draft.id, item.image_url);
+                    } },
+                key: (item.image_url),
+                type: "button",
+                disabled: (__VLS_ctx.batchMainImageReferenceMode === 'random'),
+                ...{ class: ({ selected: (__VLS_ctx.batchMainImageSelections[draft.id] || []).includes(item.image_url) }) },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                src: (__VLS_ctx.imageUrl(item.image_url)),
+                alt: (item.sku || '轮播图'),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+            (item.sku || '轮播图');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "batch-carousel-hover" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                src: (__VLS_ctx.imageUrl(item.image_url)),
+                alt: (`${item.sku || '轮播图'} 放大图`),
+            });
+        }
+        if (!__VLS_ctx.batchMainImageReferenceItems(draft).length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "empty" },
+            });
+        }
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "batch-carousel-params" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea)({
+        value: (__VLS_ctx.batchMainImageParams.prompt),
+        rows: "2",
+        maxlength: "1000",
+        placeholder: "请输入首图创作要求",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.batchMainImageParams.provider),
+    });
+    for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.availableAiProviders))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (provider.provider),
+            value: (provider.provider),
+        });
+        (provider.display_name);
+        (provider.model);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.batchMainImageParams.ratio),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.batchMainImageParams.quality),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showBatchMainImageDialog))
+                    return;
+                __VLS_ctx.showBatchMainImageDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.batchMainImageSaving),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.createBatchMainImageTasks) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.batchMainImageSaving),
+    });
+    (__VLS_ctx.batchMainImageSaving ? '创建中…' : '开始创作主图');
+}
 if (__VLS_ctx.showMyAccountDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
@@ -5029,12 +5615,23 @@ if (__VLS_ctx.showMaterialDraftDialog) {
         });
         (__VLS_ctx.materialDraftTitleGenerating ? '生成中…' : 'AI 生成标题');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "material-draft-counter" },
+            ...{ class: ({ invalid: __VLS_ctx.materialDraftTitle.length > 0 && __VLS_ctx.materialDraftTitle.length < 25 }) },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (__VLS_ctx.materialDraftTitle.length);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
             value: (__VLS_ctx.materialDraftProductDescription),
             maxlength: "5000",
             placeholder: "默认使用产品模版描述，可按商品修改",
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "material-draft-counter" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (__VLS_ctx.materialDraftProductDescription.length);
     }
     if (__VLS_ctx.materialDraftTemplate) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
@@ -5088,6 +5685,131 @@ if (__VLS_ctx.showMaterialDraftDialog) {
         disabled: (__VLS_ctx.materialDraftSaving),
     });
     (__VLS_ctx.materialDraftSaving ? '创建中…' : '确认创建');
+}
+if (__VLS_ctx.showBatchCarouselDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showBatchCarouselDialog))
+                    return;
+                !__VLS_ctx.batchCarouselSaving && (__VLS_ctx.showBatchCarouselDialog = false);
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card batch-carousel-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showBatchCarouselDialog))
+                    return;
+                __VLS_ctx.showBatchCarouselDialog = false;
+            } },
+        ...{ class: "modal-close" },
+        disabled: (__VLS_ctx.batchCarouselSaving),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.selectedDrafts.length);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "batch-carousel-list" },
+    });
+    for (const [draft] of __VLS_getVForSourceType((__VLS_ctx.selectedDrafts))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+            key: (draft.id),
+            ...{ class: "batch-carousel-draft" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        (draft.id);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            title: (draft.title),
+        });
+        (draft.title);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        ((__VLS_ctx.batchCarouselSelections[draft.id] || []).length);
+        (draft.sku_items?.length || 0);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "batch-carousel-skus" },
+        });
+        for (const [item] of __VLS_getVForSourceType((draft.sku_items || []))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showBatchCarouselDialog))
+                            return;
+                        __VLS_ctx.toggleBatchCarouselSku(draft.id, item.sku);
+                    } },
+                key: (item.sku),
+                type: "button",
+                ...{ class: ({ selected: (__VLS_ctx.batchCarouselSelections[draft.id] || []).includes(item.sku) }) },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                src: (__VLS_ctx.imageUrl(item.image_url)),
+                alt: (item.sku),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+            (item.sku);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "batch-carousel-hover" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                src: (__VLS_ctx.imageUrl(item.image_url)),
+                alt: (`${item.sku} 放大图`),
+            });
+        }
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "batch-carousel-params" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea)({
+        value: (__VLS_ctx.batchCarouselParams.prompt),
+        rows: "2",
+        maxlength: "1000",
+        placeholder: "请输入轮播图创作要求",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.batchCarouselParams.provider),
+    });
+    for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.availableAiProviders))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (provider.provider),
+            value: (provider.provider),
+        });
+        (provider.display_name);
+        (provider.model);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.batchCarouselParams.ratio),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.batchCarouselParams.quality),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showBatchCarouselDialog))
+                    return;
+                __VLS_ctx.showBatchCarouselDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.batchCarouselSaving),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.createBatchCarouselTasks) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.batchCarouselSaving),
+    });
+    (__VLS_ctx.batchCarouselSaving ? '创建中…' : '开始创作轮播图');
 }
 if (__VLS_ctx.showTiktokExportDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -5536,6 +6258,7 @@ if (__VLS_ctx.showDraftImageDialog) {
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
         ...{ class: "modal-card image-workspace" },
+        ...{ class: ({ 'carousel-image-workspace': __VLS_ctx.imageWorkspaceMode === 'carousel' }) },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (...[$event]) => {
@@ -5554,40 +6277,43 @@ if (__VLS_ctx.showDraftImageDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
     (__VLS_ctx.imageDraft?.id);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    (__VLS_ctx.imageWorkspaceMode === 'carousel' ? '轮播图工作台' : '图片工作台');
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     (__VLS_ctx.imageDraft?.title);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
         ...{ class: "chip purple" },
     });
     (__VLS_ctx.draftImagePreviewUrls.length);
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
-        ...{ class: "workspace-steps" },
-        'aria-label': "制作流程",
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-        ...{ class: "workspace-step" },
-        ...{ class: ({ active: true, done: __VLS_ctx.imageDraft?.carousel_items?.length }) },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-        ...{ class: "workspace-step-divider" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-        ...{ class: "workspace-step" },
-        ...{ class: ({ active: __VLS_ctx.imageDraft?.carousel_items?.length, done: __VLS_ctx.currentGeneratedMainImage }) },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-        ...{ class: "workspace-step-divider" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-        ...{ class: "workspace-step" },
-        ...{ class: ({ active: __VLS_ctx.draftImagePreviewUrls.length }) },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    if (__VLS_ctx.imageWorkspaceMode === 'full') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
+            ...{ class: "workspace-steps" },
+            'aria-label': "制作流程",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "workspace-step" },
+            ...{ class: ({ active: true, done: __VLS_ctx.imageDraft?.carousel_items?.length }) },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "workspace-step-divider" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "workspace-step" },
+            ...{ class: ({ active: __VLS_ctx.imageDraft?.carousel_items?.length, done: __VLS_ctx.currentGeneratedMainImage }) },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "workspace-step-divider" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "workspace-step" },
+            ...{ class: ({ active: __VLS_ctx.draftImagePreviewUrls.length }) },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    }
     if (__VLS_ctx.imageWorkspaceLoading) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "empty" },
@@ -5927,408 +6653,501 @@ if (__VLS_ctx.showDraftImageDialog) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            id: "main-image-workspace-section",
-            ...{ class: "workspace-card" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-card-header" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-            ...{ class: "workspace-step-badge" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "reference-mode-tabs" },
-            role: "tablist",
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (...[$event]) => {
-                    if (!(__VLS_ctx.showDraftImageDialog))
-                        return;
-                    if (!!(__VLS_ctx.imageWorkspaceLoading))
-                        return;
-                    if (!(__VLS_ctx.imageDraft))
-                        return;
-                    __VLS_ctx.mainReferenceMode = 'random';
-                } },
-            type: "button",
-            role: "tab",
-            ...{ class: ({ active: __VLS_ctx.mainReferenceMode === 'random' }) },
-            'aria-selected': (__VLS_ctx.mainReferenceMode === 'random'),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({
-            ...{ class: "reference-mode-icon" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (...[$event]) => {
-                    if (!(__VLS_ctx.showDraftImageDialog))
-                        return;
-                    if (!!(__VLS_ctx.imageWorkspaceLoading))
-                        return;
-                    if (!(__VLS_ctx.imageDraft))
-                        return;
-                    __VLS_ctx.mainReferenceMode = 'manual';
-                } },
-            type: "button",
-            role: "tab",
-            ...{ class: ({ active: __VLS_ctx.mainReferenceMode === 'manual' }) },
-            'aria-selected': (__VLS_ctx.mainReferenceMode === 'manual'),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({
-            ...{ class: "reference-mode-icon" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        if (__VLS_ctx.mainReferenceMode === 'manual') {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "reference-picker" },
+        if (__VLS_ctx.imageWorkspaceMode === 'full') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+                id: "main-image-workspace-section",
+                ...{ class: "workspace-card" },
             });
-            for (const [item] of __VLS_getVForSourceType((__VLS_ctx.adoptedCarouselItems))) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
-                    key: (item.image_url),
-                    ...{ class: ({ selected: __VLS_ctx.selectedMainReferences.includes(item.image_url) }) },
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "workspace-card-header" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "workspace-step-badge" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "reference-mode-tabs" },
+                role: "tablist",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showDraftImageDialog))
+                            return;
+                        if (!!(__VLS_ctx.imageWorkspaceLoading))
+                            return;
+                        if (!(__VLS_ctx.imageDraft))
+                            return;
+                        if (!(__VLS_ctx.imageWorkspaceMode === 'full'))
+                            return;
+                        __VLS_ctx.mainReferenceMode = 'random';
+                    } },
+                type: "button",
+                role: "tab",
+                ...{ class: ({ active: __VLS_ctx.mainReferenceMode === 'random' }) },
+                'aria-selected': (__VLS_ctx.mainReferenceMode === 'random'),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({
+                ...{ class: "reference-mode-icon" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showDraftImageDialog))
+                            return;
+                        if (!!(__VLS_ctx.imageWorkspaceLoading))
+                            return;
+                        if (!(__VLS_ctx.imageDraft))
+                            return;
+                        if (!(__VLS_ctx.imageWorkspaceMode === 'full'))
+                            return;
+                        __VLS_ctx.mainReferenceMode = 'manual';
+                    } },
+                type: "button",
+                role: "tab",
+                ...{ class: ({ active: __VLS_ctx.mainReferenceMode === 'manual' }) },
+                'aria-selected': (__VLS_ctx.mainReferenceMode === 'manual'),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({
+                ...{ class: "reference-mode-icon" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            if (__VLS_ctx.mainReferenceMode === 'manual') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "reference-picker" },
                 });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-                    ...{ onChange: (...[$event]) => {
+                for (const [item] of __VLS_getVForSourceType((__VLS_ctx.adoptedCarouselItems))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+                        key: (item.image_url),
+                        ...{ class: ({ selected: __VLS_ctx.selectedMainReferences.includes(item.image_url) }) },
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                        ...{ onChange: (...[$event]) => {
+                                if (!(__VLS_ctx.showDraftImageDialog))
+                                    return;
+                                if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                    return;
+                                if (!(__VLS_ctx.imageDraft))
+                                    return;
+                                if (!(__VLS_ctx.imageWorkspaceMode === 'full'))
+                                    return;
+                                if (!(__VLS_ctx.mainReferenceMode === 'manual'))
+                                    return;
+                                __VLS_ctx.toggleMainReference(item.image_url);
+                            } },
+                        type: "checkbox",
+                        checked: (__VLS_ctx.selectedMainReferences.includes(item.image_url)),
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                        src: (__VLS_ctx.imageUrl(item.image_url)),
+                        alt: (item.sku || 'AI 首图'),
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                    (item.sku || 'AI 首图');
+                }
+                if (!__VLS_ctx.adoptedCarouselItems.length) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                        ...{ class: "empty" },
+                    });
+                }
+            }
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "workspace-params" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "workspace-settings-grid" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+                ...{ class: "workspace-prompt-field" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+                value: (__VLS_ctx.mainParams.prompt),
+                rows: "2",
+                maxlength: "1000",
+                placeholder: "例如：以参考图为基础生成突出商品主体的电商首图，背景简洁、光线自然",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "workspace-settings-row" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                value: (__VLS_ctx.mainParams.provider),
+            });
+            for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.availableAiProviders))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    key: (provider.provider),
+                    value: (provider.provider),
+                });
+                (provider.display_name);
+                (provider.model);
+            }
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                value: (__VLS_ctx.mainParams.ratio),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                value: (__VLS_ctx.mainParams.quality),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.showDraftImageDialog))
+                            return;
+                        if (!!(__VLS_ctx.imageWorkspaceLoading))
+                            return;
+                        if (!(__VLS_ctx.imageDraft))
+                            return;
+                        if (!(__VLS_ctx.imageWorkspaceMode === 'full'))
+                            return;
+                        __VLS_ctx.createDraftImageTasks('main_image');
+                    } },
+                ...{ class: "primary workspace-create-button" },
+                disabled: (!!__VLS_ctx.imageTaskCreatingType || !__VLS_ctx.adoptedCarouselItems.length),
+            });
+            (__VLS_ctx.imageTaskCreatingType === 'main_image' ? '创建中…' : '开始创作首图');
+            if (__VLS_ctx.workspaceMainTasks().length) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "workspace-task-panel" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "workspace-task-panel-head" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.refreshWorkspaceTasks) },
+                    ...{ class: "ghost workspace-task-refresh" },
+                    disabled: (__VLS_ctx.imageTasksRefreshing),
+                });
+                (__VLS_ctx.imageTasksRefreshing ? '刷新中…' : '刷新');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "workspace-task-list" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "workspace-task-row workspace-task-row-head carousel-task-row" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                for (const [task] of __VLS_getVForSourceType((__VLS_ctx.workspaceMainTasks()))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                        key: (task.id),
+                        ...{ class: "workspace-task-row carousel-task-row" },
+                    });
+                    if (task.parameters?.print_url) {
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                            ...{ onClick: (...[$event]) => {
+                                    if (!(__VLS_ctx.showDraftImageDialog))
+                                        return;
+                                    if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                        return;
+                                    if (!(__VLS_ctx.imageDraft))
+                                        return;
+                                    if (!(__VLS_ctx.imageWorkspaceMode === 'full'))
+                                        return;
+                                    if (!(__VLS_ctx.workspaceMainTasks().length))
+                                        return;
+                                    if (!(task.parameters?.print_url))
+                                        return;
+                                    __VLS_ctx.openImagePreview(task.parameters.print_url, '创作素材');
+                                } },
+                            type: "button",
+                            ...{ class: "workspace-task-thumb" },
+                            title: "查看创作素材",
+                        });
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                            src: (__VLS_ctx.imageUrl(task.parameters.print_url)),
+                            alt: "创作素材",
+                        });
+                    }
+                    else {
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                            ...{ class: "workspace-task-dash" },
+                        });
+                    }
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        ...{ class: "workspace-task-prompt" },
+                        title: (task.parameters?.creative_requirement || ''),
+                    });
+                    (task.parameters?.creative_requirement || '—');
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        ...{ class: "workspace-task-status" },
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        ...{ class: "chip" },
+                        ...{ class: (__VLS_ctx.taskStatusClass(task.status)) },
+                    });
+                    (__VLS_ctx.taskStatusLabel[task.status] || task.status || '—');
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+                    (task.id);
+                    (task.submit_attempts || 0);
+                    if (task.result_urls?.[0]) {
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                            ...{ onClick: (...[$event]) => {
+                                    if (!(__VLS_ctx.showDraftImageDialog))
+                                        return;
+                                    if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                        return;
+                                    if (!(__VLS_ctx.imageDraft))
+                                        return;
+                                    if (!(__VLS_ctx.imageWorkspaceMode === 'full'))
+                                        return;
+                                    if (!(__VLS_ctx.workspaceMainTasks().length))
+                                        return;
+                                    if (!(task.result_urls?.[0]))
+                                        return;
+                                    __VLS_ctx.openImagePreview(task.result_urls[0], `任务 #${task.id} 结果图`);
+                                } },
+                            type: "button",
+                            ...{ class: "workspace-task-thumb" },
+                            title: "查看结果图",
+                        });
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                            src: (__VLS_ctx.imageUrl(task.result_urls[0])),
+                            alt: (`任务 #${task.id} 结果图`),
+                        });
+                    }
+                    else {
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                            ...{ class: "workspace-task-dash" },
+                        });
+                    }
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        ...{ class: "workspace-task-message" },
+                        ...{ class: ({ error: task.status === 'failed' }) },
+                    });
+                    (task.failure_reason || '—');
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        ...{ class: "workspace-task-actions" },
+                    });
+                    if (__VLS_ctx.taskHasSuccessfulResult(task)) {
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                            ...{ onClick: (...[$event]) => {
+                                    if (!(__VLS_ctx.showDraftImageDialog))
+                                        return;
+                                    if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                        return;
+                                    if (!(__VLS_ctx.imageDraft))
+                                        return;
+                                    if (!(__VLS_ctx.imageWorkspaceMode === 'full'))
+                                        return;
+                                    if (!(__VLS_ctx.workspaceMainTasks().length))
+                                        return;
+                                    if (!(__VLS_ctx.taskHasSuccessfulResult(task)))
+                                        return;
+                                    __VLS_ctx.toggleWorkspaceMainTask(task);
+                                } },
+                            ...{ class: (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0]) ? 'secondary' : 'primary') },
+                            title: (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0]) ? '点击取消采用' : '点击采用'),
+                        });
+                        (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0]) ? '已采用' : '采用');
+                    }
+                    if (task.status === 'failed') {
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                            ...{ onClick: (...[$event]) => {
+                                    if (!(__VLS_ctx.showDraftImageDialog))
+                                        return;
+                                    if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                        return;
+                                    if (!(__VLS_ctx.imageDraft))
+                                        return;
+                                    if (!(__VLS_ctx.imageWorkspaceMode === 'full'))
+                                        return;
+                                    if (!(__VLS_ctx.workspaceMainTasks().length))
+                                        return;
+                                    if (!(task.status === 'failed'))
+                                        return;
+                                    __VLS_ctx.retryWorkspaceTask(task);
+                                } },
+                            ...{ class: "secondary" },
+                            disabled: (__VLS_ctx.retryingWorkspaceTaskId === task.id),
+                        });
+                        (__VLS_ctx.retryingWorkspaceTaskId === task.id ? '重试中…' : '重试');
+                    }
+                }
+            }
+            if (__VLS_ctx.currentGeneratedMainImage) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "main-image-preview adopted-main-image-preview" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                    src: (__VLS_ctx.imageUrl(__VLS_ctx.currentGeneratedMainImage.image_url)),
+                    alt: "AI 生成图片",
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            }
+        }
+        if (__VLS_ctx.workspaceFailedTasks().length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+                ...{ class: "workspace-card" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "workspace-card-header" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "workspace-step-badge" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "workspace-task-actions" },
+            });
+            for (const [task] of __VLS_getVForSourceType((__VLS_ctx.workspaceFailedTasks()))) {
+                (task.id);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
                             if (!(__VLS_ctx.showDraftImageDialog))
                                 return;
                             if (!!(__VLS_ctx.imageWorkspaceLoading))
                                 return;
                             if (!(__VLS_ctx.imageDraft))
                                 return;
-                            if (!(__VLS_ctx.mainReferenceMode === 'manual'))
+                            if (!(__VLS_ctx.workspaceFailedTasks().length))
                                 return;
-                            __VLS_ctx.toggleMainReference(item.image_url);
+                            __VLS_ctx.retryWorkspaceTask(task);
                         } },
-                    type: "checkbox",
-                    checked: (__VLS_ctx.selectedMainReferences.includes(item.image_url)),
+                    ...{ class: "secondary" },
+                    disabled: (__VLS_ctx.retryingWorkspaceTaskId === task.id),
+                });
+                (__VLS_ctx.retryingWorkspaceTaskId === task.id ? '重试中…' : `重试 #${task.id}`);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.showDraftImageDialog))
+                                return;
+                            if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                return;
+                            if (!(__VLS_ctx.imageDraft))
+                                return;
+                            if (!(__VLS_ctx.workspaceFailedTasks().length))
+                                return;
+                            __VLS_ctx.ignoreWorkspaceTaskFailure(task);
+                        } },
+                    ...{ class: "ghost" },
+                });
+            }
+        }
+        if (__VLS_ctx.imageWorkspaceMode === 'full') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+                ...{ class: "workspace-card final-image-preview-card" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "workspace-card-header" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "workspace-step-badge" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "preview-count" },
+            });
+            (__VLS_ctx.draftImagePreviewUrls.length);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "carousel-strip" },
+            });
+            for (const [item, index] of __VLS_getVForSourceType((__VLS_ctx.draftFinalImageItems))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+                    ...{ onDragstart: (...[$event]) => {
+                            if (!(__VLS_ctx.showDraftImageDialog))
+                                return;
+                            if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                return;
+                            if (!(__VLS_ctx.imageDraft))
+                                return;
+                            if (!(__VLS_ctx.imageWorkspaceMode === 'full'))
+                                return;
+                            __VLS_ctx.draggedFinalImageUrl = item.image_url;
+                        } },
+                    ...{ onDragend: (...[$event]) => {
+                            if (!(__VLS_ctx.showDraftImageDialog))
+                                return;
+                            if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                return;
+                            if (!(__VLS_ctx.imageDraft))
+                                return;
+                            if (!(__VLS_ctx.imageWorkspaceMode === 'full'))
+                                return;
+                            __VLS_ctx.draggedFinalImageUrl = '';
+                        } },
+                    ...{ onDragover: () => { } },
+                    ...{ onDrop: (...[$event]) => {
+                            if (!(__VLS_ctx.showDraftImageDialog))
+                                return;
+                            if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                return;
+                            if (!(__VLS_ctx.imageDraft))
+                                return;
+                            if (!(__VLS_ctx.imageWorkspaceMode === 'full'))
+                                return;
+                            __VLS_ctx.dropFinalImage(item.image_url);
+                        } },
+                    key: (item.image_url),
+                    draggable: "true",
+                    ...{ style: {} },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "carousel-strip-index" },
+                    ...{ class: ({ 'is-main': index === 0 }) },
+                });
+                (index === 0 ? '首' : index + 1);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.showDraftImageDialog))
+                                return;
+                            if (!!(__VLS_ctx.imageWorkspaceLoading))
+                                return;
+                            if (!(__VLS_ctx.imageDraft))
+                                return;
+                            if (!(__VLS_ctx.imageWorkspaceMode === 'full'))
+                                return;
+                            __VLS_ctx.removeFinalImage(item.image_url);
+                        } },
+                    type: "button",
+                    ...{ class: "carousel-strip-remove" },
+                    title: "从最终商品图片中移除",
                 });
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
                     src: (__VLS_ctx.imageUrl(item.image_url)),
-                    alt: (item.sku || 'AI 首图'),
+                    alt: (`商品图片 ${index + 1}`),
                 });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-                (item.sku || 'AI 首图');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+                (index === 0 ? '1 · 首图' : `${index + 1} · 轮播图`);
             }
-            if (!__VLS_ctx.adoptedCarouselItems.length) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
-                    ...{ class: "empty" },
-                });
-            }
-        }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-params" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-settings-grid" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
-            ...{ class: "workspace-prompt-field" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
-            value: (__VLS_ctx.mainParams.prompt),
-            rows: "2",
-            maxlength: "1000",
-            placeholder: "例如：以参考图为基础生成突出商品主体的电商首图，背景简洁、光线自然",
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-settings-row" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.mainParams.provider),
-        });
-        for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.availableAiProviders))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                key: (provider.provider),
-                value: (provider.provider),
-            });
-            (provider.display_name);
-            (provider.model);
-        }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.mainParams.ratio),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.mainParams.quality),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (...[$event]) => {
-                    if (!(__VLS_ctx.showDraftImageDialog))
-                        return;
-                    if (!!(__VLS_ctx.imageWorkspaceLoading))
-                        return;
-                    if (!(__VLS_ctx.imageDraft))
-                        return;
-                    __VLS_ctx.createDraftImageTasks('main_image');
-                } },
-            ...{ class: "primary workspace-create-button" },
-            disabled: (!!__VLS_ctx.imageTaskCreatingType || !__VLS_ctx.adoptedCarouselItems.length),
-        });
-        (__VLS_ctx.imageTaskCreatingType === 'main_image' ? '创建中…' : '开始创作首图');
-        if (__VLS_ctx.workspaceMainTasks().length) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "workspace-task-panel" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "workspace-task-panel-head" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (__VLS_ctx.refreshWorkspaceTasks) },
-                ...{ class: "ghost workspace-task-refresh" },
-                disabled: (__VLS_ctx.imageTasksRefreshing),
-            });
-            (__VLS_ctx.imageTasksRefreshing ? '刷新中…' : '刷新');
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "workspace-task-list" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "workspace-task-row workspace-task-row-head carousel-task-row" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            for (const [task] of __VLS_getVForSourceType((__VLS_ctx.workspaceMainTasks()))) {
+            if (!__VLS_ctx.draftImagePreviewUrls.length) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                    key: (task.id),
-                    ...{ class: "workspace-task-row carousel-task-row" },
-                });
-                if (task.parameters?.print_url) {
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                        ...{ onClick: (...[$event]) => {
-                                if (!(__VLS_ctx.showDraftImageDialog))
-                                    return;
-                                if (!!(__VLS_ctx.imageWorkspaceLoading))
-                                    return;
-                                if (!(__VLS_ctx.imageDraft))
-                                    return;
-                                if (!(__VLS_ctx.workspaceMainTasks().length))
-                                    return;
-                                if (!(task.parameters?.print_url))
-                                    return;
-                                __VLS_ctx.openImagePreview(task.parameters.print_url, '创作素材');
-                            } },
-                        type: "button",
-                        ...{ class: "workspace-task-thumb" },
-                        title: "查看创作素材",
-                    });
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                        src: (__VLS_ctx.imageUrl(task.parameters.print_url)),
-                        alt: "创作素材",
-                    });
-                }
-                else {
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                        ...{ class: "workspace-task-dash" },
-                    });
-                }
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                    ...{ class: "workspace-task-prompt" },
-                    title: (task.parameters?.creative_requirement || ''),
-                });
-                (task.parameters?.creative_requirement || '—');
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                    ...{ class: "workspace-task-status" },
+                    ...{ class: "carousel-empty" },
                 });
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                    ...{ class: "chip" },
-                    ...{ class: (__VLS_ctx.taskStatusClass(task.status)) },
+                    ...{ class: "carousel-empty-icon" },
+                    'aria-hidden': "true",
                 });
-                (__VLS_ctx.taskStatusLabel[task.status] || task.status || '—');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-                (task.id);
-                (task.submit_attempts || 0);
-                if (task.result_urls?.[0]) {
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                        ...{ onClick: (...[$event]) => {
-                                if (!(__VLS_ctx.showDraftImageDialog))
-                                    return;
-                                if (!!(__VLS_ctx.imageWorkspaceLoading))
-                                    return;
-                                if (!(__VLS_ctx.imageDraft))
-                                    return;
-                                if (!(__VLS_ctx.workspaceMainTasks().length))
-                                    return;
-                                if (!(task.result_urls?.[0]))
-                                    return;
-                                __VLS_ctx.openImagePreview(task.result_urls[0], `任务 #${task.id} 结果图`);
-                            } },
-                        type: "button",
-                        ...{ class: "workspace-task-thumb" },
-                        title: "查看结果图",
-                    });
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                        src: (__VLS_ctx.imageUrl(task.result_urls[0])),
-                        alt: (`任务 #${task.id} 结果图`),
-                    });
-                }
-                else {
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                        ...{ class: "workspace-task-dash" },
-                    });
-                }
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                    ...{ class: "workspace-task-message" },
-                    ...{ class: ({ error: task.status === 'failed' }) },
-                });
-                (task.failure_reason || '—');
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                    ...{ class: "workspace-task-actions" },
-                });
-                if (__VLS_ctx.taskHasSuccessfulResult(task)) {
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                        ...{ onClick: (...[$event]) => {
-                                if (!(__VLS_ctx.showDraftImageDialog))
-                                    return;
-                                if (!!(__VLS_ctx.imageWorkspaceLoading))
-                                    return;
-                                if (!(__VLS_ctx.imageDraft))
-                                    return;
-                                if (!(__VLS_ctx.workspaceMainTasks().length))
-                                    return;
-                                if (!(__VLS_ctx.taskHasSuccessfulResult(task)))
-                                    return;
-                                __VLS_ctx.toggleWorkspaceMainTask(task);
-                            } },
-                        ...{ class: (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0]) ? 'secondary' : 'primary') },
-                        title: (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0]) ? '点击取消采用' : '点击采用'),
-                    });
-                    (__VLS_ctx.isWorkspaceTaskSelected(task, task.result_urls[0]) ? '已采用' : '采用');
-                }
-                if (task.status === 'failed') {
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                        ...{ onClick: (...[$event]) => {
-                                if (!(__VLS_ctx.showDraftImageDialog))
-                                    return;
-                                if (!!(__VLS_ctx.imageWorkspaceLoading))
-                                    return;
-                                if (!(__VLS_ctx.imageDraft))
-                                    return;
-                                if (!(__VLS_ctx.workspaceMainTasks().length))
-                                    return;
-                                if (!(task.status === 'failed'))
-                                    return;
-                                __VLS_ctx.retryWorkspaceTask(task);
-                            } },
-                        ...{ class: "secondary" },
-                        disabled: (__VLS_ctx.retryingWorkspaceTaskId === task.id),
-                    });
-                    (__VLS_ctx.retryingWorkspaceTaskId === task.id ? '重试中…' : '重试');
-                }
             }
-        }
-        if (__VLS_ctx.currentGeneratedMainImage) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "main-image-preview adopted-main-image-preview" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                src: (__VLS_ctx.imageUrl(__VLS_ctx.currentGeneratedMainImage.image_url)),
-                alt: "AI 生成图片",
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "workspace-card final-image-preview-card" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "workspace-card-header" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-            ...{ class: "workspace-step-badge" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-            ...{ class: "preview-count" },
-        });
-        (__VLS_ctx.draftImagePreviewUrls.length);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "carousel-strip" },
-        });
-        for (const [item, index] of __VLS_getVForSourceType((__VLS_ctx.draftFinalImageItems))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-                ...{ onDragstart: (...[$event]) => {
-                        if (!(__VLS_ctx.showDraftImageDialog))
-                            return;
-                        if (!!(__VLS_ctx.imageWorkspaceLoading))
-                            return;
-                        if (!(__VLS_ctx.imageDraft))
-                            return;
-                        __VLS_ctx.draggedFinalImageUrl = item.image_url;
-                    } },
-                ...{ onDragend: (...[$event]) => {
-                        if (!(__VLS_ctx.showDraftImageDialog))
-                            return;
-                        if (!!(__VLS_ctx.imageWorkspaceLoading))
-                            return;
-                        if (!(__VLS_ctx.imageDraft))
-                            return;
-                        __VLS_ctx.draggedFinalImageUrl = '';
-                    } },
-                ...{ onDragover: () => { } },
-                ...{ onDrop: (...[$event]) => {
-                        if (!(__VLS_ctx.showDraftImageDialog))
-                            return;
-                        if (!!(__VLS_ctx.imageWorkspaceLoading))
-                            return;
-                        if (!(__VLS_ctx.imageDraft))
-                            return;
-                        __VLS_ctx.dropFinalImage(item.image_url);
-                    } },
-                key: (item.image_url),
-                draggable: "true",
-                ...{ style: {} },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "carousel-strip-index" },
-                ...{ class: ({ 'is-main': index === 0 }) },
-            });
-            (index === 0 ? '首' : index + 1);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                src: (__VLS_ctx.imageUrl(item.image_url)),
-                alt: (`商品图片 ${index + 1}`),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-            (index === 0 ? '1 · 首图' : `${index + 1} · 轮播图`);
-        }
-        if (!__VLS_ctx.draftImagePreviewUrls.length) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "carousel-empty" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "carousel-empty-icon" },
-                'aria-hidden': "true",
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "modal-actions image-workspace-actions" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        (__VLS_ctx.imageWorkspaceMode === 'carousel' ? '采用轮播图后点击确认，将保存轮播图并进入首图制作。' : '采用、移除和拖动排序仅在当前弹窗暂存；确认后一次保存到草稿。');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.confirmDraftImages) },
             ...{ class: "primary" },
             disabled: (__VLS_ctx.imageConfirmSaving || !!__VLS_ctx.imageTaskCreatingType),
         });
-        (__VLS_ctx.imageConfirmSaving ? '保存中…' : '保存到草稿');
+        (__VLS_ctx.imageConfirmSaving ? '保存中…' : __VLS_ctx.imageDraft?.workflow_stage === 'carousel_pending' ? '确认轮播图并进入主图制作' : __VLS_ctx.imageDraft?.workflow_stage === 'main_image_pending' ? '确认主图并进入待发布' : '保存到草稿');
     }
 }
 if (__VLS_ctx.showMainApplyDialog && __VLS_ctx.pendingMainApply) {
@@ -7254,7 +8073,13 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['draft-template-filter']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-heading-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-tabs']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-work-status-tabs']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-export-bar']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
@@ -7270,7 +8095,16 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['draft-carousel-flag']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-status-cell']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-trow-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['compact-action']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['compact-action']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['compact-action']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['compact-action']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['compact-action']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
@@ -7407,6 +8241,22 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-carousel-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['reference-mode-tabs']} */ ;
+/** @type {__VLS_StyleScopedClasses['reference-mode-icon']} */ ;
+/** @type {__VLS_StyleScopedClasses['reference-mode-icon']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-carousel-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-carousel-draft']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-carousel-skus']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-carousel-hover']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-carousel-params']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -7420,9 +8270,23 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['material-draft-details']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-title-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-counter']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-counter']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-sku-summary']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-sku-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-size-chart']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-carousel-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-carousel-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-carousel-draft']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-carousel-skus']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-carousel-hover']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-carousel-params']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -7587,12 +8451,19 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['main-image-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['adopted-main-image-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-card-header']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-step-badge']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-task-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['workspace-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['final-image-preview-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-card-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-step-badge']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-count']} */ ;
 /** @type {__VLS_StyleScopedClasses['carousel-strip']} */ ;
 /** @type {__VLS_StyleScopedClasses['carousel-strip-index']} */ ;
+/** @type {__VLS_StyleScopedClasses['carousel-strip-remove']} */ ;
 /** @type {__VLS_StyleScopedClasses['carousel-empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['carousel-empty-icon']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
@@ -7772,11 +8643,21 @@ const __VLS_self = (await import('vue')).defineComponent({
             draftEditSaving: draftEditSaving,
             draftEditError: draftEditError,
             publishingDraftId: publishingDraftId,
+            skippingCarouselDraftId: skippingCarouselDraftId,
+            skippingMainImageDraftId: skippingMainImageDraftId,
             selectedDraftIds: selectedDraftIds,
             showTiktokExportDialog: showTiktokExportDialog,
             tiktokExportOptions: tiktokExportOptions,
             tiktokExportLoading: tiktokExportLoading,
             tiktokExportError: tiktokExportError,
+            showBatchCarouselDialog: showBatchCarouselDialog,
+            showBatchMainImageDialog: showBatchMainImageDialog,
+            batchCarouselSaving: batchCarouselSaving,
+            batchMainImageSaving: batchMainImageSaving,
+            batchCarouselSkipping: batchCarouselSkipping,
+            batchMainImageSkipping: batchMainImageSkipping,
+            batchCarouselSelections: batchCarouselSelections,
+            batchMainImageSelections: batchMainImageSelections,
             MAX_TIKTOK_EXPORT_DRAFTS: MAX_TIKTOK_EXPORT_DRAFTS,
             tiktokExportCatalogId: tiktokExportCatalogId,
             tiktokExportCategory: tiktokExportCategory,
@@ -7786,9 +8667,15 @@ const __VLS_self = (await import('vue')).defineComponent({
             tiktokExportAttributes: tiktokExportAttributes,
             tiktokExportOverrides: tiktokExportOverrides,
             draftPageSize: draftPageSize,
-            currentDraftPage: currentDraftPage,
             draftTemplateFilterId: draftTemplateFilterId,
             draftCreatorFilterId: draftCreatorFilterId,
+            activeDraftTab: activeDraftTab,
+            draftTotal: draftTotal,
+            draftTabCounts: draftTabCounts,
+            activeDraftWorkStatus: activeDraftWorkStatus,
+            draftWorkStatusCounts: draftWorkStatusCounts,
+            draftWorkStatusTabs: draftWorkStatusTabs,
+            draftTabs: draftTabs,
             taskTypeLabels: taskTypeLabels,
             activeTaskType: activeTaskType,
             taskPageSize: taskPageSize,
@@ -7813,6 +8700,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             previewImageUrl: previewImageUrl,
             previewImageAlt: previewImageAlt,
             showDraftImageDialog: showDraftImageDialog,
+            imageWorkspaceMode: imageWorkspaceMode,
             imageDraft: imageDraft,
             imageWorkspaceLoading: imageWorkspaceLoading,
             imageTasksRefreshing: imageTasksRefreshing,
@@ -7823,6 +8711,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             mainReferenceMode: mainReferenceMode,
             carouselParams: carouselParams,
             mainParams: mainParams,
+            batchCarouselParams: batchCarouselParams,
+            batchMainImageParams: batchMainImageParams,
+            batchMainImageReferenceMode: batchMainImageReferenceMode,
             draggedFinalImageUrl: draggedFinalImageUrl,
             showMainApplyDialog: showMainApplyDialog,
             pendingMainApply: pendingMainApply,
@@ -7894,13 +8785,32 @@ const __VLS_self = (await import('vue')).defineComponent({
             pagedDrafts: pagedDrafts,
             selectedDrafts: selectedDrafts,
             allPagedDraftsSelected: allPagedDraftsSelected,
+            batchCarouselEligible: batchCarouselEligible,
+            batchCarouselSkipEligible: batchCarouselSkipEligible,
+            batchMainImageSkipEligible: batchMainImageSkipEligible,
+            batchMainImageEligible: batchMainImageEligible,
             selectedTiktokCategoryAttributes: selectedTiktokCategoryAttributes,
             managingTiktokCategoryAttributes: managingTiktokCategoryAttributes,
             changeDraftPageSize: changeDraftPageSize,
+            changeDraftTab: changeDraftTab,
+            changeDraftWorkStatus: changeDraftWorkStatus,
+            changeDraftPage: changeDraftPage,
             toggleDraftSelection: toggleDraftSelection,
             togglePagedDrafts: togglePagedDrafts,
             changeDraftTemplateFilter: changeDraftTemplateFilter,
             changeDraftCreatorFilter: changeDraftCreatorFilter,
+            draftWorkSummary: draftWorkSummary,
+            openBatchCarouselDialog: openBatchCarouselDialog,
+            toggleBatchCarouselSku: toggleBatchCarouselSku,
+            batchMainImageReferenceItems: batchMainImageReferenceItems,
+            openBatchMainImageDialog: openBatchMainImageDialog,
+            toggleBatchMainImageReference: toggleBatchMainImageReference,
+            createBatchCarouselTasks: createBatchCarouselTasks,
+            createBatchMainImageTasks: createBatchMainImageTasks,
+            skipDraftCarousel: skipDraftCarousel,
+            batchSkipDraftCarousel: batchSkipDraftCarousel,
+            skipDraftMainImage: skipDraftMainImage,
+            batchSkipDraftMainImage: batchSkipDraftMainImage,
             taskPageCount: taskPageCount,
             visibleTaskPage: visibleTaskPage,
             pagedTasks: pagedTasks,
@@ -7972,7 +8882,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             draftImagePreviewUrls: draftImagePreviewUrls,
             adoptedCarouselItems: adoptedCarouselItems,
             currentGeneratedMainImage: currentGeneratedMainImage,
-            openDraftImageWorkspace: openDraftImageWorkspace,
+            openCarouselImageWorkspace: openCarouselImageWorkspace,
+            openFullImageWorkspace: openFullImageWorkspace,
             toggleImageSku: toggleImageSku,
             toggleMainReference: toggleMainReference,
             createDraftImageTasks: createDraftImageTasks,
@@ -7984,8 +8895,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             refreshWorkspaceTasks: refreshWorkspaceTasks,
             toggleWorkspaceCarouselTask: toggleWorkspaceCarouselTask,
             workspaceMainTasks: workspaceMainTasks,
+            workspaceFailedTasks: workspaceFailedTasks,
             toggleWorkspaceMainTask: toggleWorkspaceMainTask,
             dropFinalImage: dropFinalImage,
+            removeFinalImage: removeFinalImage,
             openImageWorkspaceFromTask: openImageWorkspaceFromTask,
             confirmDraftImages: confirmDraftImages,
             saveDraftEdit: saveDraftEdit,
@@ -8012,6 +8925,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             confirmBatchClaim: confirmBatchClaim,
             retryTaskResult: retryTaskResult,
             retryWorkspaceTask: retryWorkspaceTask,
+            ignoreWorkspaceTaskFailure: ignoreWorkspaceTaskFailure,
             chooseMaterialUploadFiles: chooseMaterialUploadFiles,
             uploadMaterialAssets: uploadMaterialAssets,
             deleteSelectedMaterialAssets: deleteSelectedMaterialAssets,

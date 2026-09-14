@@ -159,6 +159,8 @@ class PodTask(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     template_id: Mapped[int] = mapped_column()
+    # 商品草稿图片任务的可索引归属；普通 SKU 图任务保持为空。
+    draft_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
     created_by: Mapped[int] = mapped_column()
     # 稳定的内部任务类型：sku_image、carousel、main_image。
     task_type: Mapped[str] = mapped_column(String(30), default="sku_image", index=True)
@@ -171,6 +173,8 @@ class PodTask(Base):
     # 外部异步 AI 任务的标识，例如 Grsai 返回的 id。
     provider_task_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
     failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 已明确忽略的失败不再阻塞商品草稿的制作流程。
+    failure_ignored: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     result_map: Mapped[list] = mapped_column(JSON, default=list)
     submit_attempts: Mapped[int] = mapped_column(Integer, default=0)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -205,6 +209,8 @@ class ProductDraft(Base):
     product_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     size_chart_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="pending_publish")
+    # 商品图片制作的当前工作阶段；失败状态由关联任务实时派生，不覆盖此值。
+    workflow_stage: Mapped[str] = mapped_column(String(30), default="carousel_pending", index=True)
     image_urls: Mapped[dict] = mapped_column(JSON, default=list)
     # 最终商品图片的完整有序列表；第 1 张是首图，为空时回退 SKU 图。
     carousel_items: Mapped[list] = mapped_column(JSON, default=list)

@@ -308,6 +308,41 @@ class DraftImageTaskCreate(BaseModel):
     creative_requirement: str = Field(min_length=1, max_length=1000)
 
 
+class BatchCarouselDraftSelection(BaseModel):
+    draft_id: int = Field(ge=1)
+    source_skus: list[str] = Field(min_length=1, max_length=9)
+
+
+class BatchCarouselTaskCreate(BaseModel):
+    drafts: list[BatchCarouselDraftSelection] = Field(min_length=1, max_length=20)
+    provider: str | None = Field(default=None, max_length=40)
+    ratio: Literal["1:1", "3:4"] = "1:1"
+    quality: Literal["1K", "2K"] = "1K"
+    creative_requirement: str = Field(min_length=1, max_length=1000)
+
+
+class BatchMainImageDraftSelection(BaseModel):
+    draft_id: int = Field(ge=1)
+    reference_urls: list[str] = Field(default_factory=list, max_length=3)
+
+
+class BatchMainImageTaskCreate(BaseModel):
+    drafts: list[BatchMainImageDraftSelection] = Field(min_length=1, max_length=20)
+    reference_mode: Literal["random", "manual"] = "random"
+    provider: str | None = Field(default=None, max_length=40)
+    ratio: Literal["1:1", "3:4"] = "1:1"
+    quality: Literal["1K", "2K"] = "1K"
+    creative_requirement: str = Field(min_length=1, max_length=1000)
+
+
+class BatchCarouselSkipInput(BaseModel):
+    draft_ids: list[int] = Field(min_length=1, max_length=20)
+
+
+class BatchMainImageSkipInput(BaseModel):
+    draft_ids: list[int] = Field(min_length=1, max_length=20)
+
+
 class DraftImageApply(BaseModel):
     result_url: str = Field(min_length=1, max_length=500)
     remove_carousel_sku: str | None = Field(default=None, max_length=24)
@@ -321,6 +356,7 @@ class DraftOrderedImageSelection(BaseModel):
 
 class DraftImagesConfirm(BaseModel):
     image_items: list[DraftOrderedImageSelection] | None = Field(default=None, max_length=9)
+    advance_workflow: bool = True
 
 
 class DraftCarouselOrderUpdate(BaseModel):
@@ -334,14 +370,14 @@ class TiktokDraftProductOverride(BaseModel):
 
 
 class TiktokDraftExportInput(BaseModel):
-    draft_ids: list[int] = Field(min_length=1, max_length=50)
+    draft_ids: list[int] = Field(min_length=1, max_length=20)
     category_catalog_id: int = Field(ge=1)
     category: str = Field(min_length=1, max_length=255)
     default_price: float = Field(ge=0.01, le=999999)
     default_quantity: int = Field(default=999, ge=0, le=999999)
     cod: Literal["Y", "N"] = "Y"
     attributes: dict[str, str | list[str]] = Field(default_factory=dict, max_length=14)
-    product_overrides: list[TiktokDraftProductOverride] = Field(default_factory=list, max_length=50)
+    product_overrides: list[TiktokDraftProductOverride] = Field(default_factory=list, max_length=20)
 
 
 class TiktokCategoryAttributeInputModeUpdate(BaseModel):
