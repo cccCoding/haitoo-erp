@@ -48,12 +48,14 @@ const initialTaskCreator = initialTaskParams.get('task_creator');
 const initialTaskStatus = initialTaskParams.get('task_status');
 const initialTaskFrom = initialTaskParams.get('task_from') || '';
 const initialTaskTo = initialTaskParams.get('task_to') || '';
+const initialTaskSkuQuery = initialTaskParams.get('task_skus') || '';
 const taskPageSize = ref([20, 50, 100].includes(initialTaskPageSize) ? initialTaskPageSize : 20), currentTaskPage = ref(initialTaskPage > 0 ? initialTaskPage : 1), taskTotal = ref(0), taskActiveCount = ref(0), taskStatusCounts = ref({}), taskCreatorFilterId = ref(initialTaskCreator && initialTaskCreator !== 'all' ? Number(initialTaskCreator) || null : null);
 const taskTypeTotals = ref({ sku_image: 0, carousel: 0, main_image: 0 });
 const taskTypeFilteredTotals = ref({ sku_image: null, carousel: null, main_image: null });
 const taskTabStates = ref({ sku_image: null, carousel: null, main_image: null });
 const taskStatusFilter = ref(initialTaskStatus !== null && ['queued', 'running', 'awaiting_selection', 'completed', 'failed', ''].includes(initialTaskStatus) ? initialTaskStatus : 'awaiting_selection'), taskCreatedFrom = ref(initialTaskFrom), taskCreatedTo = ref(initialTaskTo);
-const appliedTaskFilters = ref({ creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: initialTaskFrom ? new Date(initialTaskFrom).toISOString() : '', created_to: initialTaskTo ? new Date(initialTaskTo).toISOString() : '' });
+const taskSkuQuery = ref(initialTaskSkuQuery);
+const appliedTaskFilters = ref({ creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: initialTaskFrom ? new Date(initialTaskFrom).toISOString() : '', created_to: initialTaskTo ? new Date(initialTaskTo).toISOString() : '', sku_query: initialTaskSkuQuery });
 const selectedTaskIds = ref([]), showBatchClaimDialog = ref(false), batchClaimItems = ref([]), batchClaimLoading = ref(false), batchClaiming = ref(false), batchClaimCompleted = ref(0), batchClaimTotal = ref(0), batchClaimFailed = ref(0);
 const materialPageSize = ref(20), currentMaterialPage = ref(1), materialTotal = ref(0), materialCreatorFilterId = ref(null);
 const creatorFiltersInitialized = ref(false);
@@ -330,16 +332,16 @@ const groupedBatchClaimItems = computed(() => {
     });
     return [...groups.values()];
 });
-function syncTaskUrl() { const url = new URL(location.href); url.searchParams.set('task_type', activeTaskType.value); url.searchParams.set('task_page', String(currentTaskPage.value)); url.searchParams.set('task_page_size', String(taskPageSize.value)); url.searchParams.set('task_creator', taskCreatorFilterId.value ? String(taskCreatorFilterId.value) : 'all'); url.searchParams.set('task_status', taskStatusFilter.value); taskCreatedFrom.value ? url.searchParams.set('task_from', taskCreatedFrom.value) : url.searchParams.delete('task_from'); taskCreatedTo.value ? url.searchParams.set('task_to', taskCreatedTo.value) : url.searchParams.delete('task_to'); history.replaceState({}, '', url); }
-function clearTaskUrl() { const url = new URL(location.href); ['task_type', 'task_page', 'task_page_size', 'task_creator', 'task_status', 'task_from', 'task_to'].forEach(key => url.searchParams.delete(key)); history.replaceState({}, '', url); }
+function syncTaskUrl() { const url = new URL(location.href); url.searchParams.set('task_type', activeTaskType.value); url.searchParams.set('task_page', String(currentTaskPage.value)); url.searchParams.set('task_page_size', String(taskPageSize.value)); url.searchParams.set('task_creator', taskCreatorFilterId.value ? String(taskCreatorFilterId.value) : 'all'); url.searchParams.set('task_status', taskStatusFilter.value); taskCreatedFrom.value ? url.searchParams.set('task_from', taskCreatedFrom.value) : url.searchParams.delete('task_from'); taskCreatedTo.value ? url.searchParams.set('task_to', taskCreatedTo.value) : url.searchParams.delete('task_to'); activeTaskType.value === 'sku_image' && taskSkuQuery.value.trim() ? url.searchParams.set('task_skus', taskSkuQuery.value) : url.searchParams.delete('task_skus'); history.replaceState({}, '', url); }
+function clearTaskUrl() { const url = new URL(location.href); ['task_type', 'task_page', 'task_page_size', 'task_creator', 'task_status', 'task_from', 'task_to', 'task_skus'].forEach(key => url.searchParams.delete(key)); history.replaceState({}, '', url); }
 watch(page, value => value === 'tasks' ? syncTaskUrl() : clearTaskUrl());
 function applyTaskPage(data) { tasks.value = data.items || []; taskTotal.value = data.total || 0; taskTypeTotals.value = { ...taskTypeTotals.value, ...(data.task_type_counts || {}) }; taskTypeFilteredTotals.value = { ...taskTypeFilteredTotals.value, [activeTaskType.value]: data.total || 0 }; taskActiveCount.value = data.active_count || 0; taskStatusCounts.value = data.status_counts || {}; currentTaskPage.value = data.page || 1; if (page.value === 'tasks')
     syncTaskUrl(); }
 async function changeTaskPageSize() { currentTaskPage.value = 1; selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList(); }
 async function changeTaskPage(targetPage) { currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList(); }
-function taskQueryParams() { return { page: currentTaskPage.value, page_size: taskPageSize.value, task_type: activeTaskType.value, creator_id: appliedTaskFilters.value.creator_id ?? undefined, status: appliedTaskFilters.value.status || undefined, created_from: appliedTaskFilters.value.created_from || undefined, created_to: appliedTaskFilters.value.created_to || undefined }; }
+function taskQueryParams() { return { page: currentTaskPage.value, page_size: taskPageSize.value, task_type: activeTaskType.value, creator_id: appliedTaskFilters.value.creator_id ?? undefined, status: appliedTaskFilters.value.status || undefined, created_from: appliedTaskFilters.value.created_from || undefined, created_to: appliedTaskFilters.value.created_to || undefined, sku_query: activeTaskType.value === 'sku_image' ? appliedTaskFilters.value.sku_query.trim() || undefined : undefined }; }
 function snapshotTaskTab() {
-    taskTabStates.value[activeTaskType.value] = { page: currentTaskPage.value, pageSize: taskPageSize.value, creator: taskCreatorFilterId.value, status: taskStatusFilter.value, from: taskCreatedFrom.value, to: taskCreatedTo.value, applied: { ...appliedTaskFilters.value } };
+    taskTabStates.value[activeTaskType.value] = { page: currentTaskPage.value, pageSize: taskPageSize.value, creator: taskCreatorFilterId.value, status: taskStatusFilter.value, from: taskCreatedFrom.value, to: taskCreatedTo.value, skuQuery: taskSkuQuery.value, applied: { ...appliedTaskFilters.value } };
 }
 async function switchTaskType(rawType) {
     const type = rawType;
@@ -354,7 +356,8 @@ async function switchTaskType(rawType) {
     taskStatusFilter.value = state?.status ?? 'awaiting_selection';
     taskCreatedFrom.value = state?.from || '';
     taskCreatedTo.value = state?.to || '';
-    appliedTaskFilters.value = state?.applied || { creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: '', created_to: '' };
+    taskSkuQuery.value = state?.skuQuery || '';
+    appliedTaskFilters.value = state?.applied || { creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: '', created_to: '', sku_query: '' };
     selectedTaskIds.value = [];
     syncTaskUrl();
     await refreshTaskList();
@@ -366,7 +369,7 @@ async function searchTasks() {
         showToast('创建开始时间不能晚于结束时间');
         return;
     }
-    appliedTaskFilters.value = { creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: toUtcIso(taskCreatedFrom.value), created_to: toUtcIso(taskCreatedTo.value) };
+    appliedTaskFilters.value = { creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: toUtcIso(taskCreatedFrom.value), created_to: toUtcIso(taskCreatedTo.value), sku_query: activeTaskType.value === 'sku_image' ? taskSkuQuery.value : '' };
     currentTaskPage.value = 1;
     selectedTaskIds.value = [];
     syncTaskUrl();
@@ -2858,6 +2861,17 @@ if (__VLS_ctx.token) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "task-filter-row" },
         });
+        if (__VLS_ctx.activeTaskType === 'sku_image') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+                ...{ class: "task-sku-search" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+                value: (__VLS_ctx.taskSkuQuery),
+                rows: "3",
+                placeholder: "每行输入一个 SKU，例如：&#10;M05L-AA-ABC123&#10;M05L-AA-DEF456",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
             value: (__VLS_ctx.taskStatusFilter),
@@ -8010,6 +8024,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-center-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-filter-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-sku-search']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-search-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-batch-bar']} */ ;
@@ -8687,6 +8702,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             taskStatusFilter: taskStatusFilter,
             taskCreatedFrom: taskCreatedFrom,
             taskCreatedTo: taskCreatedTo,
+            taskSkuQuery: taskSkuQuery,
             selectedTaskIds: selectedTaskIds,
             showBatchClaimDialog: showBatchClaimDialog,
             batchClaimLoading: batchClaimLoading,

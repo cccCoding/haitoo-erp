@@ -1158,6 +1158,7 @@ def list_tasks(
     status: TaskStatus | None = None,
     created_from: datetime | None = None,
     created_to: datetime | None = None,
+    sku_query: str | None = Query(default=None, max_length=10000),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -1181,6 +1182,15 @@ def list_tasks(
         filters.append(PodTask.created_at >= normalized_created_from)
     if normalized_created_to is not None:
         filters.append(PodTask.created_at <= normalized_created_to)
+    if isinstance(sku_query, str) and sku_query:
+        # SKU 在领取生成素材时写入素材库；按行输入时匹配任一 SKU 所属的 SKU 图任务。
+        skus = list(dict.fromkeys(sku.strip() for sku in sku_query.splitlines() if sku.strip()))
+        if skus:
+            matching_task_ids = select(MaterialAsset.source_task_id).where(
+                MaterialAsset.sku.in_(skus),
+                MaterialAsset.source_task_id.is_not(None),
+            )
+            filters.append(PodTask.id.in_(matching_task_ids))
     task_type_counts_stmt = select(PodTask.task_type, func.count()).group_by(PodTask.task_type)
     if scope_filters:
         task_type_counts_stmt = task_type_counts_stmt.where(*scope_filters)

@@ -53,12 +53,14 @@ const initialTaskCreator = initialTaskParams.get('task_creator')
 const initialTaskStatus = initialTaskParams.get('task_status')
 const initialTaskFrom = initialTaskParams.get('task_from') || ''
 const initialTaskTo = initialTaskParams.get('task_to') || ''
+const initialTaskSkuQuery = initialTaskParams.get('task_skus') || ''
 const taskPageSize = ref([20,50,100].includes(initialTaskPageSize) ? initialTaskPageSize : 20), currentTaskPage = ref(initialTaskPage > 0 ? initialTaskPage : 1), taskTotal = ref(0), taskActiveCount = ref(0), taskStatusCounts = ref<Record<string, number>>({}), taskCreatorFilterId = ref<number | null>(initialTaskCreator && initialTaskCreator !== 'all' ? Number(initialTaskCreator) || null : null)
 const taskTypeTotals = ref<Record<string,number>>({sku_image:0,carousel:0,main_image:0})
 const taskTypeFilteredTotals = ref<Record<string,number | null>>({sku_image:null,carousel:null,main_image:null})
 const taskTabStates = ref<Record<TaskType,any>>({sku_image:null,carousel:null,main_image:null})
 const taskStatusFilter = ref(initialTaskStatus !== null && ['queued','running','awaiting_selection','completed','failed',''].includes(initialTaskStatus) ? initialTaskStatus : 'awaiting_selection'), taskCreatedFrom = ref(initialTaskFrom), taskCreatedTo = ref(initialTaskTo)
-const appliedTaskFilters = ref({ creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: initialTaskFrom ? new Date(initialTaskFrom).toISOString() : '', created_to: initialTaskTo ? new Date(initialTaskTo).toISOString() : '' })
+const taskSkuQuery = ref(initialTaskSkuQuery)
+const appliedTaskFilters = ref({ creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: initialTaskFrom ? new Date(initialTaskFrom).toISOString() : '', created_to: initialTaskTo ? new Date(initialTaskTo).toISOString() : '', sku_query: initialTaskSkuQuery })
 const selectedTaskIds = ref<number[]>([]), showBatchClaimDialog = ref(false), batchClaimItems = ref<{taskId:number; taskLabel:string; url:string}[]>([]), batchClaimLoading = ref(false), batchClaiming = ref(false), batchClaimCompleted = ref(0), batchClaimTotal = ref(0), batchClaimFailed = ref(0)
 const materialPageSize = ref(20), currentMaterialPage = ref(1), materialTotal = ref(0), materialCreatorFilterId = ref<number | null>(null)
 const creatorFiltersInitialized = ref(false)
@@ -278,15 +280,15 @@ const groupedBatchClaimItems = computed(() => {
   })
   return [...groups.values()]
 })
-function syncTaskUrl() { const url=new URL(location.href); url.searchParams.set('task_type',activeTaskType.value); url.searchParams.set('task_page',String(currentTaskPage.value)); url.searchParams.set('task_page_size',String(taskPageSize.value)); url.searchParams.set('task_creator',taskCreatorFilterId.value ? String(taskCreatorFilterId.value) : 'all'); url.searchParams.set('task_status',taskStatusFilter.value); taskCreatedFrom.value ? url.searchParams.set('task_from',taskCreatedFrom.value) : url.searchParams.delete('task_from'); taskCreatedTo.value ? url.searchParams.set('task_to',taskCreatedTo.value) : url.searchParams.delete('task_to'); history.replaceState({},'',url) }
-function clearTaskUrl() { const url=new URL(location.href); ['task_type','task_page','task_page_size','task_creator','task_status','task_from','task_to'].forEach(key=>url.searchParams.delete(key)); history.replaceState({},'',url) }
+function syncTaskUrl() { const url=new URL(location.href); url.searchParams.set('task_type',activeTaskType.value); url.searchParams.set('task_page',String(currentTaskPage.value)); url.searchParams.set('task_page_size',String(taskPageSize.value)); url.searchParams.set('task_creator',taskCreatorFilterId.value ? String(taskCreatorFilterId.value) : 'all'); url.searchParams.set('task_status',taskStatusFilter.value); taskCreatedFrom.value ? url.searchParams.set('task_from',taskCreatedFrom.value) : url.searchParams.delete('task_from'); taskCreatedTo.value ? url.searchParams.set('task_to',taskCreatedTo.value) : url.searchParams.delete('task_to'); activeTaskType.value==='sku_image' && taskSkuQuery.value.trim() ? url.searchParams.set('task_skus',taskSkuQuery.value) : url.searchParams.delete('task_skus'); history.replaceState({},'',url) }
+function clearTaskUrl() { const url=new URL(location.href); ['task_type','task_page','task_page_size','task_creator','task_status','task_from','task_to','task_skus'].forEach(key=>url.searchParams.delete(key)); history.replaceState({},'',url) }
 watch(page,value=>value==='tasks'?syncTaskUrl():clearTaskUrl())
 function applyTaskPage(data: any) { tasks.value = data.items || []; taskTotal.value = data.total || 0; taskTypeTotals.value={...taskTypeTotals.value,...(data.task_type_counts || {})}; taskTypeFilteredTotals.value={...taskTypeFilteredTotals.value,[activeTaskType.value]:data.total || 0}; taskActiveCount.value = data.active_count || 0; taskStatusCounts.value = data.status_counts || {}; currentTaskPage.value = data.page || 1; if(page.value==='tasks')syncTaskUrl() }
 async function changeTaskPageSize() { currentTaskPage.value = 1; selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList() }
 async function changeTaskPage(targetPage: number) { currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList() }
-function taskQueryParams() { return { page: currentTaskPage.value, page_size: taskPageSize.value, task_type: activeTaskType.value, creator_id: appliedTaskFilters.value.creator_id ?? undefined, status: appliedTaskFilters.value.status || undefined, created_from: appliedTaskFilters.value.created_from || undefined, created_to: appliedTaskFilters.value.created_to || undefined } }
+function taskQueryParams() { return { page: currentTaskPage.value, page_size: taskPageSize.value, task_type: activeTaskType.value, creator_id: appliedTaskFilters.value.creator_id ?? undefined, status: appliedTaskFilters.value.status || undefined, created_from: appliedTaskFilters.value.created_from || undefined, created_to: appliedTaskFilters.value.created_to || undefined, sku_query: activeTaskType.value==='sku_image' ? appliedTaskFilters.value.sku_query.trim() || undefined : undefined } }
 function snapshotTaskTab() {
-  taskTabStates.value[activeTaskType.value] = { page:currentTaskPage.value, pageSize:taskPageSize.value, creator:taskCreatorFilterId.value, status:taskStatusFilter.value, from:taskCreatedFrom.value, to:taskCreatedTo.value, applied:{...appliedTaskFilters.value} }
+  taskTabStates.value[activeTaskType.value] = { page:currentTaskPage.value, pageSize:taskPageSize.value, creator:taskCreatorFilterId.value, status:taskStatusFilter.value, from:taskCreatedFrom.value, to:taskCreatedTo.value, skuQuery:taskSkuQuery.value, applied:{...appliedTaskFilters.value} }
 }
 async function switchTaskType(rawType:string) {
   const type=rawType as TaskType
@@ -295,7 +297,8 @@ async function switchTaskType(rawType:string) {
   const state=taskTabStates.value[type]
   currentTaskPage.value=state?.page || 1; taskPageSize.value=state?.pageSize || 20
   taskCreatorFilterId.value=state?.creator ?? user.value?.id ?? null; taskStatusFilter.value=state?.status ?? 'awaiting_selection'; taskCreatedFrom.value=state?.from || ''; taskCreatedTo.value=state?.to || ''
-  appliedTaskFilters.value=state?.applied || {creator_id:taskCreatorFilterId.value,status:taskStatusFilter.value,created_from:'',created_to:''}
+  taskSkuQuery.value=state?.skuQuery || ''
+  appliedTaskFilters.value=state?.applied || {creator_id:taskCreatorFilterId.value,status:taskStatusFilter.value,created_from:'',created_to:'',sku_query:''}
   selectedTaskIds.value=[]
   syncTaskUrl()
   await refreshTaskList()
@@ -304,7 +307,7 @@ function taskTypeLabel(task:any) { return taskTypeLabels[(task?.task_type || 'sk
 function toUtcIso(value: string) { return value ? new Date(value).toISOString() : '' }
 async function searchTasks() {
   if (taskCreatedFrom.value && taskCreatedTo.value && new Date(taskCreatedFrom.value) > new Date(taskCreatedTo.value)) { showToast('创建开始时间不能晚于结束时间'); return }
-  appliedTaskFilters.value = { creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: toUtcIso(taskCreatedFrom.value), created_to: toUtcIso(taskCreatedTo.value) }
+  appliedTaskFilters.value = { creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: toUtcIso(taskCreatedFrom.value), created_to: toUtcIso(taskCreatedTo.value), sku_query: activeTaskType.value==='sku_image' ? taskSkuQuery.value : '' }
   currentTaskPage.value = 1
   selectedTaskIds.value = []
   syncTaskUrl()
@@ -1234,7 +1237,7 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
             <em v-if="taskTypeFilteredTotals[type]!==null" class="task-type-tabs-filter">筛选 {{taskTypeFilteredTotals[type]}}</em>
           </button>
         </nav>
-        <div class="section-heading task-center-heading"><div><span>筛选条件设置后需点击搜索；可多选任务并批量领取全部结果图。</span><div class="task-filter-row"><label>状态<select v-model="taskStatusFilter"><option value="">全部状态</option><option v-for="(label,status) in taskStatusLabel" :key="status" :value="status">{{label}}</option></select></label><label v-if="user?.role==='company_admin'">创作人<select v-model="taskCreatorFilterId"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label><label>创建开始时间<input v-model="taskCreatedFrom" type="datetime-local"/></label><label>创建结束时间<input v-model="taskCreatedTo" type="datetime-local"/></label><button class="primary task-search-button" :disabled="taskListRefreshing" @click="searchTasks">{{taskListRefreshing ? '搜索中…' : '搜索'}}</button></div></div></div>
+        <div class="section-heading task-center-heading"><div><span>筛选条件设置后需点击搜索；可多选任务并批量领取全部结果图。</span><div class="task-filter-row"><label v-if="activeTaskType==='sku_image'" class="task-sku-search">SKU 批量查询<textarea v-model="taskSkuQuery" rows="3" placeholder="每行输入一个SKU"></textarea></label><label>状态<select v-model="taskStatusFilter"><option value="">全部状态</option><option v-for="(label,status) in taskStatusLabel" :key="status" :value="status">{{label}}</option></select></label><label v-if="user?.role==='company_admin'">创作人<select v-model="taskCreatorFilterId"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label><label>创建开始时间<input v-model="taskCreatedFrom" type="datetime-local"/></label><label>创建结束时间<input v-model="taskCreatedTo" type="datetime-local"/></label><button class="primary task-search-button" :disabled="taskListRefreshing" @click="searchTasks">{{taskListRefreshing ? '搜索中…' : '搜索'}}</button></div></div></div>
         <div v-if="activeTaskType==='sku_image' && selectedTaskIds.length" class="task-batch-bar"><strong>已选择 {{selectedTaskIds.length}} 个任务</strong><button class="primary" :disabled="batchClaimLoading || batchClaiming" @click="openBatchClaimDialog">批量领取</button></div>
         <section class="draft-table task-table">
           <div class="thead task-list-grid"><label class="material-checkbox material-select-all"><input type="checkbox" :checked="allClaimableTasksSelected" :indeterminate="someClaimableTasksSelected" :disabled="!claimablePagedTasks.length" aria-label="全选本页可领取任务" @change="toggleAllClaimableTasks"/><span>选择</span></label><span>任务编号</span><span>任务类型</span><span>创作素材</span><span>产品模版</span><span>AI模型</span><span>创建时间</span><span>创建人</span><span>外部任务 ID</span><span>状态</span><span>结果</span><span>处理信息</span><span>操作</span></div>

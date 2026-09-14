@@ -345,6 +345,24 @@ class TaskJobTests(unittest.TestCase):
                     user=db.get(User, 1), db=db,
                 )
 
+    def test_sku_image_tasks_can_be_filtered_by_multiline_skus(self) -> None:
+        matching_task_id = self.add_task(status=TaskStatus.COMPLETED)
+        other_task_id = self.add_task(status=TaskStatus.COMPLETED)
+        with self.session_factory() as db:
+            db.add_all([
+                MaterialAsset(company_id=1, source_task_id=matching_task_id, template_id=1, url="https://img.example/matching.png", name="matching", sku="M05L-AA-ABC123", claimed_by=1),
+                MaterialAsset(company_id=1, source_task_id=other_task_id, template_id=1, url="https://img.example/other.png", name="other", sku="M05L-AA-DEF456", claimed_by=1),
+            ])
+            db.commit()
+            result = main.list_tasks(
+                page=1, page_size=20, task_type="sku_image", creator_id=None, status=None,
+                sku_query=" M05L-AA-ABC123 \n\nMISSING-SKU\n",
+                user=db.get(User, 1), db=db,
+            )
+
+        self.assertEqual([item["id"] for item in result["items"]], [matching_task_id])
+        self.assertEqual(result["total"], 1)
+
     def test_members_only_see_their_materials_and_template_update_route_is_removed(self) -> None:
         with self.session_factory() as db:
             own = MaterialAsset(company_id=1, template_id=1, url="https://img.example/own.png", name="own", claimed_by=1)
