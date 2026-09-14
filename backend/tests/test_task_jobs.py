@@ -16,7 +16,7 @@ from app.ai_providers import GrsaiProvider, ProviderError, ProviderTaskTerminalE
 from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
-from app.models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential, UserTemplatePrompt, UserTemplateWhiteImage
+from app.models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserTemplatePrompt, UserTemplateWhiteImage
 from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
 
 
@@ -418,6 +418,20 @@ class TaskJobTests(unittest.TestCase):
         for invalid_name in ("中文", "M-05", "ABCDEF"):
             with self.assertRaises(Exception):
                 TemplateCreate(name=invalid_name, group_id=1)
+
+    def test_only_empty_company_template_groups_can_be_deleted(self) -> None:
+        with self.session_factory() as db:
+            empty_group = TemplateGroup(company_id=1, name="Empty")
+            used_group = TemplateGroup(company_id=1, name="Used")
+            db.add_all([empty_group, used_group]); db.commit(); db.refresh(empty_group); db.refresh(used_group)
+            db.add(ProductTemplate(company_id=1, group_id=used_group.id, name="USED", cover_url="https://img.example/used.png"))
+            db.commit()
+
+            result = main.delete_template_group(empty_group.id, user=db.get(User, 2), db=db)
+            self.assertEqual(result, {"id": empty_group.id})
+            self.assertIsNone(db.get(TemplateGroup, empty_group.id))
+            with self.assertRaisesRegex(HTTPException, "包含模板"):
+                main.delete_template_group(used_group.id, user=db.get(User, 2), db=db)
 
     def test_material_sku_retries_database_collision(self) -> None:
         with self.session_factory() as db:

@@ -675,6 +675,18 @@ def create_template_group(payload: TemplateGroupCreate, user: User = Depends(req
     return group
 
 
+@app.delete("/template-groups/{group_id}")
+def delete_template_group(group_id: int, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
+    group = db.get(TemplateGroup, group_id)
+    if not group or group.company_id != user.company_id or group.is_platform:
+        raise HTTPException(404, "模板分类不存在或不可删除")
+    if db.scalar(select(ProductTemplate.id).where(ProductTemplate.group_id == group.id).limit(1)) is not None:
+        raise HTTPException(400, "该模板分类包含模板，无法删除")
+    db.delete(group)
+    db.commit()
+    return {"id": group_id}
+
+
 @app.get("/templates")
 def list_templates(group_id: int | None = None, q: str | None = None, user: User = Depends(current_user), db: Session = Depends(get_db)):
     filters = [ProductTemplate.is_platform.is_(True)]
