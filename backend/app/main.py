@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import engine, get_db
 from .models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
-from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftTitleGenerate, DraftUpdate, ImageUploadPresignInput, LoginInput, MaterialDownloadInput, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
+from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftTitleGenerate, DraftUpdate, ImageUploadPresignInput, LoginInput, MaterialDownloadInput, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
@@ -1719,6 +1719,7 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
         company_id=user.company_id,
         shop_id=None,
         template_id=template.id,
+        workflow_stage="pending",
         title=payload.title,
         product_description=payload.product_description.strip() if payload.product_description else None,
         size_chart_url=template.size_chart_url,
@@ -1811,7 +1812,7 @@ def draft_published_images(draft: ProductDraft) -> list[str]:
     return draft_working_images(draft)
 
 
-DRAFT_TABS = ("all", "carousel_pending", "main_image_pending", "ready_to_publish", "published")
+DRAFT_TABS = ("all", "pending", "carousel_pending", "main_image_pending", "ready_to_publish", "published")
 
 
 def draft_task_summary(tasks: list[PodTask], task_type: str | None = None) -> dict:
@@ -1845,7 +1846,7 @@ def draft_work_status(summary: dict) -> str:
 def draft_display_tab(draft: ProductDraft, summary: dict) -> str:
     if draft.workflow_stage == "published" or draft.tiktok_collect_box_id:
         return "published"
-    return draft.workflow_stage if draft.workflow_stage in DRAFT_TABS else "carousel_pending"
+    return draft.workflow_stage if draft.workflow_stage in DRAFT_TABS else "pending"
 
 
 def draft_view(draft: ProductDraft, user_names: dict[int, str], tasks: list[PodTask]) -> dict:
@@ -1915,11 +1916,16 @@ def draft_image_task_views_raw(db: Session, user: User, draft_id: int) -> list[P
 @app.post("/drafts/{draft_id}/image-tasks")
 def create_draft_image_tasks(draft_id: int, payload: DraftImageTaskCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     draft = get_accessible_draft(db, user, draft_id)
-    if draft.workflow_stage in {"ready_to_publish", "published"}:
-        raise HTTPException(400, "该草稿已完成图片制作，不能继续创建图片任务")
+    is_published = bool(draft.workflow_stage == "published" or draft.miaoshou_collect_box_id or draft.tiktok_collect_box_id)
+    if not is_published and draft.workflow_stage in {"pending", "ready_to_publish"}:
+        raise HTTPException(400, "该草稿当前阶段不能创建图片任务")
+    if not is_published and payload.task_type == "carousel" and draft.workflow_stage != "carousel_pending":
+        raise HTTPException(400, "该草稿当前不在轮播图制作阶段")
     # 兼容旧入口直接制作首图：视为显式跳过轮播阶段。
     if payload.task_type == "main_image" and draft.workflow_stage == "carousel_pending":
         draft.workflow_stage = "main_image_pending"
+    if not is_published and payload.task_type == "main_image" and draft.workflow_stage != "main_image_pending":
+        raise HTTPException(400, "该草稿当前不在主图制作阶段")
     if not draft.template_id:
         raise HTTPException(400, "商品草稿缺少产品模板")
     provider = image_task_provider(db, user, payload.provider)
@@ -2159,6 +2165,29 @@ def skip_draft_carousel(draft_id: int, user: User = Depends(current_user), db: S
     draft.updated_by = user.id
     db.commit(); db.refresh(draft)
     return serialize_record(draft)
+
+
+@app.post("/drafts/dispatch")
+def dispatch_drafts(payload: DraftDispatchInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """将待处理草稿批量分发到轮播图、主图或待发布阶段。"""
+    if len(set(payload.draft_ids)) != len(payload.draft_ids):
+        raise HTTPException(400, "同一草稿不能重复提交")
+    drafts_by_id = {
+        draft.id: draft
+        for draft in db.scalars(select(ProductDraft).where(ProductDraft.id.in_(payload.draft_ids))).all()
+    }
+    if len(drafts_by_id) != len(payload.draft_ids) or any(
+        not can_access_draft(drafts_by_id.get(draft_id), user) for draft_id in payload.draft_ids
+    ):
+        raise HTTPException(404, "包含不存在或无权操作的商品草稿")
+    drafts = [drafts_by_id[draft_id] for draft_id in payload.draft_ids]
+    if any(draft.workflow_stage != "pending" for draft in drafts):
+        raise HTTPException(400, "只能分发待处理状态的商品草稿")
+    for draft in drafts:
+        draft.workflow_stage = payload.target_stage
+        draft.updated_by = user.id
+    db.commit()
+    return {"total": len(drafts), "target_stage": payload.target_stage}
 
 
 @app.post("/drafts/batch-skip-carousel")
@@ -2605,6 +2634,11 @@ async def claim_draft_to_tiktok(draft_id: int, user: User = Depends(current_user
     if not can_access_draft(draft, user) or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
         raise HTTPException(404, "商品草稿不存在")
     if draft.tiktok_collect_box_id:
+        if draft.workflow_stage != "published" or draft.status != "claimed_to_tiktok":
+            draft.workflow_stage = "published"
+            draft.status = "claimed_to_tiktok"
+            draft.updated_by = user.id
+            db.commit()
         return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "tiktok_collect_box_detail_id": draft.tiktok_collect_box_id, "already_claimed": True}
     company = db.get(Company, draft.company_id)
     if not company or not company.miaoshou_app_id or not company.miaoshou_secret_encrypted:
@@ -2617,10 +2651,10 @@ async def claim_draft_to_tiktok(draft_id: int, user: User = Depends(current_user
     # 重试只会继续认领，不会在妙手重复创建商品。
     draft.status = "published_to_miaoshou"
     draft.updated_by = user.id
-    draft.workflow_stage = "published"
     db.commit()
     await claim_common_collect_box_to_tiktok(draft, company)
     draft.status = "claimed_to_tiktok"
+    draft.workflow_stage = "published"
     draft.updated_by = user.id
     db.commit()
     return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "tiktok_collect_box_detail_id": draft.tiktok_collect_box_id, "already_claimed": False}

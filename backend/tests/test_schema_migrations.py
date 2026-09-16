@@ -26,10 +26,12 @@ class SchemaMigrationTests(unittest.TestCase):
             command.upgrade(alembic_config(connection), "head")
             current, expected = schema_heads(connection)
 
-            self.assertEqual(current, {"20260914_05"})
+            self.assertEqual(current, {"20260916_06"})
         self.assertEqual(current, expected)
         self.assertIn("users", inspect(self.engine).get_table_names())
         self.assertIn("alembic_version", inspect(self.engine).get_table_names())
+        draft_columns = {column["name"]: column for column in inspect(self.engine).get_columns("product_drafts")}
+        self.assertIn("pending", str(draft_columns["workflow_stage"]["default"]))
         assert_schema_current(self.engine)
 
     def test_running_upgrade_again_is_a_no_op(self) -> None:
@@ -42,7 +44,7 @@ class SchemaMigrationTests(unittest.TestCase):
 
         self.assertEqual(first_tables, second_tables)
         with self.engine.connect() as connection:
-            self.assertEqual(schema_heads(connection)[0], {"20260914_05"})
+            self.assertEqual(schema_heads(connection)[0], {"20260916_06"})
 
     def test_existing_unversioned_database_requires_explicit_adoption(self) -> None:
         Base.metadata.create_all(self.engine)
@@ -53,7 +55,7 @@ class SchemaMigrationTests(unittest.TestCase):
             upgrade_database(connection, adopt_legacy=True)
             current, expected = schema_heads(connection)
 
-        self.assertEqual(current, {"20260914_05"})
+        self.assertEqual(current, {"20260916_06"})
         self.assertEqual(current, expected)
 
     def test_main_image_column_is_migrated_into_ordered_images_then_removed(self) -> None:

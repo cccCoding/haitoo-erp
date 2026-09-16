@@ -17,7 +17,7 @@ from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
 from app.models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserTemplatePrompt, UserTemplateWhiteImage
-from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
+from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
 
 
 class TaskJobTests(unittest.TestCase):
@@ -474,6 +474,7 @@ class TaskJobTests(unittest.TestCase):
             draft = main.create_draft_from_material_assets(payload, user=db.get(User, 1), db=db)
             self.assertEqual(draft["sku_items"], [{"image_url": current.url, "size": None, "sku": current.sku}])
             self.assertEqual(draft["status"], "pending_publish")
+            self.assertEqual(draft["workflow_stage"], "pending")
             self.assertIsNone(draft["miaoshou_collect_box_id"])
             self.assertIsNone(draft["tiktok_collect_box_id"])
             with self.assertRaisesRegex(Exception, "无 SKU"):
@@ -481,6 +482,37 @@ class TaskJobTests(unittest.TestCase):
                     MaterialDraftCreate(template_id=1, material_asset_ids=[legacy.id], title="L" * 25),
                     user=db.get(User, 1), db=db,
                 )
+
+    def test_pending_drafts_can_be_dispatched_to_each_workflow_stage(self) -> None:
+        with self.session_factory() as db:
+            drafts = [
+                ProductDraft(company_id=1, template_id=1, title=letter * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
+                for letter in ("A", "B", "C", "D")
+            ]
+            db.add_all(drafts); db.commit()
+            for draft in drafts:
+                db.refresh(draft)
+
+            targets = ("carousel_pending", "main_image_pending", "ready_to_publish")
+            for draft, target in zip(drafts, targets):
+                result = main.dispatch_drafts(
+                    DraftDispatchInput(draft_ids=[draft.id], target_stage=target),
+                    user=db.get(User, 1), db=db,
+                )
+                self.assertEqual(result, {"total": 1, "target_stage": target})
+                self.assertEqual(db.get(ProductDraft, draft.id).workflow_stage, target)
+
+            with self.assertRaisesRegex(HTTPException, "只能分发待处理"):
+                main.dispatch_drafts(
+                    DraftDispatchInput(draft_ids=[drafts[0].id, drafts[3].id], target_stage="carousel_pending"),
+                    user=db.get(User, 1), db=db,
+                )
+            self.assertEqual(db.get(ProductDraft, drafts[3].id).workflow_stage, "pending")
+
+            pending_page = main.list_drafts(
+                shop_id=None, creator_id=None, tab="pending", user=db.get(User, 1), db=db,
+            )
+            self.assertEqual([item["id"] for item in pending_page["items"]], [drafts[3].id])
 
     def test_draft_title_requires_25_to_255_trimmed_characters(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least 25 characters"):
@@ -496,6 +528,7 @@ class TaskJobTests(unittest.TestCase):
                 company_id=1, template_id=1, title="T" * 25,
                 image_urls=["https://img.example/product.png"],
                 sku_items=[{"image_url": "https://img.example/product.png", "size": None, "sku": "M05LAA123456"}],
+                workflow_stage="ready_to_publish",
                 created_by=1, updated_by=1,
             )
             db.add(draft); db.commit(); db.refresh(draft)
@@ -509,11 +542,43 @@ class TaskJobTests(unittest.TestCase):
                     persisted = other_db.get(ProductDraft, current_draft.id)
                     self.assertEqual(persisted.miaoshou_collect_box_id, "123")
                     self.assertEqual(persisted.status, "published_to_miaoshou")
+                    self.assertEqual(persisted.workflow_stage, "ready_to_publish")
                 raise HTTPException(502, "认领失败")
 
             with patch.object(main, "create_common_collect_box_detail", side_effect=create_common), patch.object(main, "claim_common_collect_box_to_tiktok", side_effect=fail_claim):
                 with self.assertRaisesRegex(HTTPException, "认领失败"):
                     asyncio.run(main.claim_draft_to_tiktok(draft.id, user=db.get(User, 1), db=db))
+
+            db.refresh(draft)
+            self.assertEqual(draft.workflow_stage, "ready_to_publish")
+            self.assertIsNone(draft.tiktok_collect_box_id)
+
+    def test_tiktok_claim_marks_published_only_after_claim_succeeds(self) -> None:
+        with self.session_factory() as db:
+            draft = ProductDraft(
+                company_id=1, template_id=1, title="T" * 25,
+                image_urls=["https://img.example/product.png"],
+                sku_items=[{"image_url": "https://img.example/product.png", "size": None, "sku": "M05LAA123456"}],
+                workflow_stage="ready_to_publish", created_by=1, updated_by=1,
+            )
+            db.add(draft); db.commit(); db.refresh(draft)
+
+            async def create_common(current_draft, _company, _template):
+                current_draft.miaoshou_collect_box_id = "123"
+                return "123"
+
+            async def claim_tiktok(current_draft, _company):
+                self.assertEqual(current_draft.workflow_stage, "ready_to_publish")
+                current_draft.tiktok_collect_box_id = "456"
+                return "456"
+
+            with patch.object(main, "create_common_collect_box_detail", side_effect=create_common), patch.object(main, "claim_common_collect_box_to_tiktok", side_effect=claim_tiktok):
+                result = asyncio.run(main.claim_draft_to_tiktok(draft.id, user=db.get(User, 1), db=db))
+
+            db.refresh(draft)
+            self.assertEqual(result["tiktok_collect_box_detail_id"], "456")
+            self.assertEqual(draft.status, "claimed_to_tiktok")
+            self.assertEqual(draft.workflow_stage, "published")
 
     def test_task_draft_route_is_removed(self) -> None:
         route_paths = {route.path for route in main.app.routes}
@@ -542,9 +607,9 @@ class TaskJobTests(unittest.TestCase):
     def test_draft_work_status_is_scoped_to_its_image_type(self) -> None:
         """轮播与首图任务必须分别决定各自阶段的列表状态。"""
         with self.session_factory() as db:
-            active = ProductDraft(company_id=1, template_id=1, title="A" * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
-            untouched = ProductDraft(company_id=1, template_id=1, title="B" * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
-            carousel_failed = ProductDraft(company_id=1, template_id=1, title="C" * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
+            active = ProductDraft(company_id=1, template_id=1, title="A" * 25, image_urls=[], sku_items=[], workflow_stage="carousel_pending", created_by=1, updated_by=1)
+            untouched = ProductDraft(company_id=1, template_id=1, title="B" * 25, image_urls=[], sku_items=[], workflow_stage="carousel_pending", created_by=1, updated_by=1)
+            carousel_failed = ProductDraft(company_id=1, template_id=1, title="C" * 25, image_urls=[], sku_items=[], workflow_stage="carousel_pending", created_by=1, updated_by=1)
             main_failed = ProductDraft(company_id=1, template_id=1, title="D" * 25, image_urls=[], sku_items=[], workflow_stage="main_image_pending", created_by=1, updated_by=1)
             db.add_all([active, untouched, carousel_failed, main_failed]); db.commit()
             db.refresh(active); db.refresh(untouched); db.refresh(carousel_failed); db.refresh(main_failed)
@@ -572,10 +637,10 @@ class TaskJobTests(unittest.TestCase):
 
     def test_batch_skip_carousel_advances_all_or_none(self) -> None:
         with self.session_factory() as db:
-            first = ProductDraft(company_id=1, template_id=1, title="A" * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
-            second = ProductDraft(company_id=1, template_id=1, title="B" * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
+            first = ProductDraft(company_id=1, template_id=1, title="A" * 25, image_urls=[], sku_items=[], workflow_stage="carousel_pending", created_by=1, updated_by=1)
+            second = ProductDraft(company_id=1, template_id=1, title="B" * 25, image_urls=[], sku_items=[], workflow_stage="carousel_pending", created_by=1, updated_by=1)
             already_advanced = ProductDraft(company_id=1, template_id=1, title="C" * 25, image_urls=[], sku_items=[], workflow_stage="main_image_pending", created_by=1, updated_by=1)
-            untouched = ProductDraft(company_id=1, template_id=1, title="D" * 25, image_urls=[], sku_items=[], created_by=1, updated_by=1)
+            untouched = ProductDraft(company_id=1, template_id=1, title="D" * 25, image_urls=[], sku_items=[], workflow_stage="carousel_pending", created_by=1, updated_by=1)
             db.add_all([first, second, already_advanced, untouched]); db.commit()
             db.refresh(first); db.refresh(second); db.refresh(already_advanced); db.refresh(untouched)
 
@@ -678,7 +743,7 @@ class TaskJobTests(unittest.TestCase):
             for index in range(6)
         ]
         with self.session_factory() as db:
-            draft = ProductDraft(company_id=1, template_id=1, title="T" * 25, image_urls=[item["image_url"] for item in sku_items], sku_items=sku_items, created_by=1, updated_by=1)
+            draft = ProductDraft(company_id=1, template_id=1, title="T" * 25, image_urls=[item["image_url"] for item in sku_items], sku_items=sku_items, workflow_stage="carousel_pending", created_by=1, updated_by=1)
             db.add(draft); db.commit(); db.refresh(draft)
             response = main.create_draft_image_tasks(
                 draft.id,
@@ -704,7 +769,7 @@ class TaskJobTests(unittest.TestCase):
 
     def test_first_image_can_reference_unconfirmed_carousel_task_result(self) -> None:
         with self.session_factory() as db:
-            draft = ProductDraft(company_id=1, template_id=1, title="T" * 25, image_urls=[], carousel_items=[], sku_items=[{"sku": "SKU1", "image_url": "https://img.example/sku.png"}], created_by=1, updated_by=1)
+            draft = ProductDraft(company_id=1, template_id=1, title="T" * 25, image_urls=[], carousel_items=[], sku_items=[{"sku": "SKU1", "image_url": "https://img.example/sku.png"}], workflow_stage="carousel_pending", created_by=1, updated_by=1)
             db.add(draft); db.commit(); db.refresh(draft)
             carousel_task = PodTask(
                 company_id=1, template_id=1, created_by=1, task_type="carousel",
@@ -726,6 +791,7 @@ class TaskJobTests(unittest.TestCase):
             draft = ProductDraft(
                 company_id=1, template_id=1, title="T" * 25, image_urls=[], carousel_items=[],
                 sku_items=[{"sku": "SKU1", "image_url": "https://img.example/sku.png"}],
+                workflow_stage="carousel_pending",
                 created_by=1, updated_by=1,
             )
             db.add(draft); db.commit(); db.refresh(draft)
@@ -938,6 +1004,11 @@ class TaskJobTests(unittest.TestCase):
             )
             db.add(draft); db.commit(); db.refresh(draft)
             workspace = main.get_draft_image_workspace(draft.id, user=db.get(User, 1), db=db)
+            generated = main.create_draft_image_tasks(
+                draft.id,
+                DraftImageTaskCreate(task_type="carousel", source_skus=["SKU1"], creative_requirement="重新制作已发布商品图片"),
+                user=db.get(User, 1), db=db,
+            )
             result = main.confirm_draft_images(
                 draft.id,
                 DraftImagesConfirm(image_items=[
@@ -948,6 +1019,7 @@ class TaskJobTests(unittest.TestCase):
             )
 
         self.assertTrue(workspace["published"])
+        self.assertEqual(generated["total"], 1)
         self.assertEqual(result["image_urls"], [
             "https://img.example/sku-2.png",
             "https://img.example/sku-1.png",

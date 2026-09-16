@@ -209,8 +209,8 @@ class ProductDraft(Base):
     product_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     size_chart_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="pending_publish")
-    # 商品图片制作的当前工作阶段；失败状态由关联任务实时派生，不覆盖此值。
-    workflow_stage: Mapped[str] = mapped_column(String(30), default="carousel_pending", index=True)
+    # 商品图片制作的当前工作阶段；新草稿先进入待处理池，由用户分发后再开始制作。
+    workflow_stage: Mapped[str] = mapped_column(String(30), default="pending", index=True)
     image_urls: Mapped[dict] = mapped_column(JSON, default=list)
     # 最终商品图片的完整有序列表；第 1 张是首图，为空时回退 SKU 图。
     carousel_items: Mapped[list] = mapped_column(JSON, default=list)

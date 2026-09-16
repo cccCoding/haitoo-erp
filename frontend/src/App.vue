@@ -29,19 +29,19 @@ const MATERIAL_UPLOAD_CONCURRENCY = 8, MATERIAL_UPLOAD_MAX_FILES = 100, IMAGE_UP
 const templateSaving = ref(false)
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'], MAX_IMAGE_BYTES = 5 * 1024 * 1024
 const showDraftEditDialog = ref(false), editingDraft = ref<any>(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('')
-const publishingDraftId = ref<number | null>(null), skippingCarouselDraftId = ref<number | null>(null), skippingMainImageDraftId = ref<number | null>(null)
+const publishingDraftId = ref<number | null>(null), skippingCarouselDraftId = ref<number | null>(null), skippingMainImageDraftId = ref<number | null>(null), dispatchingDraftStage = ref<''|'carousel_pending'|'main_image_pending'|'ready_to_publish'>('')
 const selectedDraftIds = ref<number[]>([]), showTiktokExportDialog = ref(false), tiktokExportOptions = ref<any>(null), tiktokExportLoading = ref(false), tiktokExportError = ref('')
 const showBatchCarouselDialog = ref(false), showBatchMainImageDialog = ref(false), batchCarouselSaving = ref(false), batchMainImageSaving = ref(false), batchCarouselSkipping = ref(false), batchMainImageSkipping = ref(false), batchCarouselSelections = ref<Record<number,string[]>>({}), batchMainImageSelections = ref<Record<number,string[]>>({})
 const MAX_TIKTOK_EXPORT_DRAFTS = 20
 const tiktokExportCatalogId = ref<number | null>(null), tiktokExportCategory = ref(''), tiktokExportDefaultPrice = ref<number | null>(null), tiktokExportDefaultQuantity = ref<number>(999), tiktokExportCod = ref<'Y' | 'N'>('Y'), tiktokExportAttributes = ref<Record<string, string>>({}), tiktokExportOverrides = ref<Record<number, {price:number | null; quantity:number | null}>>({})
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref<number | null>(null), draftCreatorFilterId = ref<number | null>(null)
-type DraftTab = 'all' | 'carousel_pending' | 'main_image_pending' | 'ready_to_publish' | 'published'
-const activeDraftTab = ref<DraftTab>('all'), draftTotal = ref(0), draftTabCounts = ref<Record<DraftTab, number>>({all:0,carousel_pending:0,main_image_pending:0,ready_to_publish:0,published:0})
+type DraftTab = 'all' | 'pending' | 'carousel_pending' | 'main_image_pending' | 'ready_to_publish' | 'published'
+const activeDraftTab = ref<DraftTab>('all'), draftTotal = ref(0), draftTabCounts = ref<Record<DraftTab, number>>({all:0,pending:0,carousel_pending:0,main_image_pending:0,ready_to_publish:0,published:0})
 type DraftWorkStatus = 'all' | 'not_started' | 'in_progress' | 'awaiting_review' | 'failed'
 const activeDraftWorkStatus = ref<DraftWorkStatus>('all'), draftWorkStatusCounts = ref<Record<DraftWorkStatus,number>>({all:0,not_started:0,in_progress:0,awaiting_review:0,failed:0})
 const draftWorkStatusTabs:{key:DraftWorkStatus;label:string}[]=[{key:'all',label:'全部'},{key:'not_started',label:'未制作'},{key:'in_progress',label:'制作中'},{key:'awaiting_review',label:'待审核'},{key:'failed',label:'制作失败'}]
-const draftTabs: {key:DraftTab;label:string}[] = [{key:'all',label:'全部'},{key:'carousel_pending',label:'待制作轮播图'},{key:'main_image_pending',label:'待制作主图'},{key:'ready_to_publish',label:'待发布'},{key:'published',label:'发布成功'}]
-const draftStatusLabels: Record<string,string> = {carousel_pending:'待制作轮播图',main_image_pending:'待制作主图',ready_to_publish:'待发布',published:'发布成功'}
+const draftTabs: {key:DraftTab;label:string}[] = [{key:'all',label:'全部'},{key:'pending',label:'待处理'},{key:'carousel_pending',label:'待制作轮播图'},{key:'main_image_pending',label:'待制作主图'},{key:'ready_to_publish',label:'待发布'},{key:'published',label:'发布成功'}]
+const draftStatusLabels: Record<string,string> = {pending:'待处理',carousel_pending:'待制作轮播图',main_image_pending:'待制作主图',ready_to_publish:'待发布',published:'发布成功'}
 type TaskType = 'sku_image' | 'carousel' | 'main_image'
 const taskTypeLabels: Record<TaskType,string> = { sku_image:'SKU图', carousel:'轮播图', main_image:'首图' }
 const initialTaskParams = new URLSearchParams(location.search)
@@ -130,6 +130,8 @@ const visibleDraftPage = computed(() => Math.min(currentDraftPage.value, draftPa
 const pagedDrafts = computed(() => drafts.value)
 const selectedDrafts = computed(() => drafts.value.filter(draft => selectedDraftIds.value.includes(draft.id)))
 const allPagedDraftsSelected = computed(() => Boolean(pagedDrafts.value.length) && pagedDrafts.value.every(draft => selectedDraftIds.value.includes(draft.id)))
+const batchDispatchEligible = computed(() => selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab === 'pending'))
+const tiktokExportEligible = computed(() => selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab !== 'pending'))
 const batchCarouselEligible = computed(() => activeDraftTab.value === 'carousel_pending' && activeDraftWorkStatus.value === 'not_started' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.carousel_task_summary?.work_status === 'not_started'))
 const batchCarouselSkipEligible = computed(() => activeDraftTab.value === 'carousel_pending' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab === 'carousel_pending'))
 const batchMainImageSkipEligible = computed(() => activeDraftTab.value === 'main_image_pending' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab === 'main_image_pending'))
@@ -176,6 +178,18 @@ async function refreshDraftList() {
   selectedDraftIds.value = selectedDraftIds.value.filter(id => data.items.some((draft:any) => draft.id === id))
 }
 function draftWorkSummary(draft:any) { return draft.display_tab==='carousel_pending' ? draft.carousel_task_summary : draft.main_image_task_summary }
+async function dispatchSelectedDrafts(targetStage:'carousel_pending'|'main_image_pending'|'ready_to_publish') {
+  if (!batchDispatchEligible.value) { showToast('仅可分发待处理状态的商品草稿'); return }
+  const targetLabel=draftStatusLabels[targetStage]
+  try {
+    dispatchingDraftStage.value=targetStage
+    const {data}=await api.post('/drafts/dispatch',{draft_ids:selectedDraftIds.value,target_stage:targetStage},{headers:headers.value})
+    selectedDraftIds.value=[]
+    await refreshDraftList()
+    showToast(`已将 ${data.total} 条草稿分发至${targetLabel}`)
+  } catch(e:any) { showToast(e.response?.data?.detail || '分发商品草稿失败') }
+  finally { dispatchingDraftStage.value='' }
+}
 function openBatchCarouselDialog() {
   if (!batchCarouselEligible.value) { showToast('仅可选择尚未创建轮播图任务的待制作草稿'); return }
   const defaultProvider = availableAiProviders.value.find(item=>item.is_default)?.provider || availableAiProviders.value[0]?.provider || ''
@@ -1261,7 +1275,7 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
         <div class="section-heading draft-heading"><div><span>本地草稿可批量导出 TikTok 表格，或手动发布至妙手后认领到 TikTok 采集箱。</span><div class="material-filter-row"><label class="draft-template-filter">产品模板<select v-model="draftTemplateFilterId" @change="changeDraftTemplateFilter"><option :value="null">全部模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><label v-if="user?.role==='company_admin'" class="draft-template-filter">创作人<select v-model="draftCreatorFilterId" @change="changeDraftCreatorFilter"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label></div></div><div class="draft-heading-actions"><button class="primary" @click="page='materials'">新建商品草稿</button></div></div>
         <nav class="draft-tabs" aria-label="商品草稿流程"><button v-for="item in draftTabs" :key="item.key" :class="{active:activeDraftTab===item.key}" @click="changeDraftTab(item.key)">{{item.label}} <b>({{draftTabCounts[item.key] || 0}})</b></button></nav>
         <nav v-if="activeDraftTab==='carousel_pending' || activeDraftTab==='main_image_pending'" class="draft-work-status-tabs" aria-label="制作状态"><button v-for="item in draftWorkStatusTabs" :key="item.key" :class="{active:activeDraftWorkStatus===item.key}" @click="changeDraftWorkStatus(item.key)">{{item.label}} <b>({{draftWorkStatusCounts[item.key] || 0}})</b></button></nav>
-        <section v-if="selectedDraftIds.length" class="draft-export-bar"><strong>已选择 {{selectedDraftIds.length}} / {{MAX_TIKTOK_EXPORT_DRAFTS}} 条商品草稿</strong><button v-if="batchCarouselEligible" class="primary" @click="openBatchCarouselDialog">批量制作轮播图</button><button v-if="batchCarouselSkipEligible" class="secondary" :disabled="batchCarouselSkipping" @click="batchSkipDraftCarousel">{{batchCarouselSkipping ? '跳过中…' : '批量跳过轮播图制作'}}</button><button v-if="batchMainImageEligible" class="primary" @click="openBatchMainImageDialog">批量制作主图</button><button v-if="batchMainImageSkipEligible" class="secondary" :disabled="batchMainImageSkipping" @click="batchSkipDraftMainImage">{{batchMainImageSkipping ? '跳过中…' : '批量跳过首图制作'}}</button><button class="primary" @click="openTiktokExportDialog">导出 TikTok 表格</button><button class="ghost" @click="selectedDraftIds=[]">取消选择</button></section>
+        <section v-if="selectedDraftIds.length" class="draft-export-bar"><strong>已选择 {{selectedDraftIds.length}} / {{MAX_TIKTOK_EXPORT_DRAFTS}} 条商品草稿</strong><template v-if="batchDispatchEligible"><button class="primary" :disabled="!!dispatchingDraftStage" @click="dispatchSelectedDrafts('carousel_pending')">{{dispatchingDraftStage==='carousel_pending' ? '分发中…' : '去做轮播图'}}</button><button class="secondary" :disabled="!!dispatchingDraftStage" @click="dispatchSelectedDrafts('main_image_pending')">{{dispatchingDraftStage==='main_image_pending' ? '分发中…' : '去做主图'}}</button><button class="secondary" :disabled="!!dispatchingDraftStage" @click="dispatchSelectedDrafts('ready_to_publish')">{{dispatchingDraftStage==='ready_to_publish' ? '分发中…' : '直接到待发布'}}</button></template><button v-if="batchCarouselEligible" class="primary" @click="openBatchCarouselDialog">批量制作轮播图</button><button v-if="batchCarouselSkipEligible" class="secondary" :disabled="batchCarouselSkipping" @click="batchSkipDraftCarousel">{{batchCarouselSkipping ? '跳过中…' : '批量跳过轮播图制作'}}</button><button v-if="batchMainImageEligible" class="primary" @click="openBatchMainImageDialog">批量制作主图</button><button v-if="batchMainImageSkipEligible" class="secondary" :disabled="batchMainImageSkipping" @click="batchSkipDraftMainImage">{{batchMainImageSkipping ? '跳过中…' : '批量跳过首图制作'}}</button><button v-if="tiktokExportEligible" class="primary" @click="openTiktokExportDialog">导出 TikTok 表格</button><button class="ghost" @click="selectedDraftIds=[]">取消选择</button></section>
         <div class="draft-table task-table">
           <div class="thead draft-thead">
             <label class="material-checkbox" aria-label="选择当前页商品草稿"><input type="checkbox" :checked="allPagedDraftsSelected" @change="togglePagedDrafts"/></label>
@@ -1274,7 +1288,7 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
             <span>{{draftTemplateName(draft)}}</span><b class="draft-product-title" :title="draft.title">{{draft.title}}</b><span>{{draft.sku_items?.length || 1}}</span><span>{{new Date(draft.created_at).toLocaleString()}}</span><span>{{draft.created_by_name || '历史记录缺失'}}</span>
             <span class="draft-carousel-flag" :class="draft.carousel_items?.length ? 'has' : 'none'">{{draft.carousel_items?.length ? '有' : '无'}}</span><span>{{draft.export_count || 0}}</span>
             <span class="draft-status-cell">
-              <span class="chip" :class="draft.display_tab==='published' ? 'blue' : 'purple'">{{({carousel_pending:'待制作轮播图',main_image_pending:'待制作主图',ready_to_publish:'待发布',published:'发布成功'} as any)[draft.display_tab]}}</span>
+              <span class="chip" :class="draft.display_tab==='published' ? 'blue' : 'purple'">{{draftStatusLabels[draft.display_tab] || draft.display_tab}}</span>
               <small v-if="draft.display_tab==='carousel_pending' || draft.display_tab==='main_image_pending'">{{({not_started:'未制作',in_progress:'制作中',awaiting_review:'待审核',failed:'制作失败'} as any)[draftWorkSummary(draft)?.work_status]}}<template v-if="draftWorkSummary(draft)?.work_status==='in_progress' && draftWorkSummary(draft)?.awaiting_selection">（含待审核结果）</template></small>
               <small v-if="draftWorkSummary(draft)?.failed" class="error">{{draftWorkSummary(draft)?.failure_reasons?.[0] || '存在失败任务'}}</small>
             </span>
@@ -1282,7 +1296,7 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
               <button @click="openDraftEditDialog(draft)">编辑</button>
               <template v-if="draft.display_tab==='carousel_pending'"><button class="primary compact-action" @click="openCarouselImageWorkspace(draft)">轮播图工作台</button><button class="secondary compact-action" :disabled="skippingCarouselDraftId===draft.id" @click="skipDraftCarousel(draft)">{{skippingCarouselDraftId===draft.id ? '跳过中…' : '跳过轮播图制作'}}</button></template>
               <template v-else-if="draft.display_tab==='main_image_pending'"><button class="primary compact-action" @click="openFullImageWorkspace(draft,true)">首图工作台</button><button class="secondary compact-action" :disabled="skippingMainImageDraftId===draft.id" @click="skipDraftMainImage(draft)">{{skippingMainImageDraftId===draft.id ? '跳过中…' : '跳过首图制作'}}</button></template>
-              <button v-else-if="draft.display_tab!=='published'" @click="openFullImageWorkspace(draft)">图片工作台</button>
+              <button v-else-if="draft.display_tab!=='pending'" @click="openFullImageWorkspace(draft)">图片工作台</button>
               <button v-if="draft.display_tab==='ready_to_publish'" class="primary compact-action" :disabled="publishingDraftId===draft.id" @click="publishDraftToMiaoshou(draft)">{{publishingDraftId===draft.id ? '处理中…' : '发布至妙手'}}</button>
             </span>
           </div>
@@ -1395,7 +1409,8 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
       <div v-if="imageWorkspaceLoading" class="empty">正在加载图片…</div>
       <template v-else-if="imageDraft">
         <section v-if="imageDraft.published" class="image-lock-notice">
-          <strong>该草稿已经发布</strong>
+          <strong>该草稿已经发布，仍可继续编辑图片</strong>
+          <span>保存只更新本地草稿，不会自动同步到妙手或 TikTok。</span>
         </section>
         <div class="image-workspace-grid">
           <main class="image-workspace-main">

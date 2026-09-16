@@ -27,17 +27,17 @@ const MATERIAL_UPLOAD_CONCURRENCY = 8, MATERIAL_UPLOAD_MAX_FILES = 100, IMAGE_UP
 const templateSaving = ref(false);
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'], MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('');
-const publishingDraftId = ref(null), skippingCarouselDraftId = ref(null), skippingMainImageDraftId = ref(null);
+const publishingDraftId = ref(null), skippingCarouselDraftId = ref(null), skippingMainImageDraftId = ref(null), dispatchingDraftStage = ref('');
 const selectedDraftIds = ref([]), showTiktokExportDialog = ref(false), tiktokExportOptions = ref(null), tiktokExportLoading = ref(false), tiktokExportError = ref('');
 const showBatchCarouselDialog = ref(false), showBatchMainImageDialog = ref(false), batchCarouselSaving = ref(false), batchMainImageSaving = ref(false), batchCarouselSkipping = ref(false), batchMainImageSkipping = ref(false), batchCarouselSelections = ref({}), batchMainImageSelections = ref({});
 const MAX_TIKTOK_EXPORT_DRAFTS = 20;
 const tiktokExportCatalogId = ref(null), tiktokExportCategory = ref(''), tiktokExportDefaultPrice = ref(null), tiktokExportDefaultQuantity = ref(999), tiktokExportCod = ref('Y'), tiktokExportAttributes = ref({}), tiktokExportOverrides = ref({});
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null);
-const activeDraftTab = ref('all'), draftTotal = ref(0), draftTabCounts = ref({ all: 0, carousel_pending: 0, main_image_pending: 0, ready_to_publish: 0, published: 0 });
+const activeDraftTab = ref('all'), draftTotal = ref(0), draftTabCounts = ref({ all: 0, pending: 0, carousel_pending: 0, main_image_pending: 0, ready_to_publish: 0, published: 0 });
 const activeDraftWorkStatus = ref('all'), draftWorkStatusCounts = ref({ all: 0, not_started: 0, in_progress: 0, awaiting_review: 0, failed: 0 });
 const draftWorkStatusTabs = [{ key: 'all', label: '全部' }, { key: 'not_started', label: '未制作' }, { key: 'in_progress', label: '制作中' }, { key: 'awaiting_review', label: '待审核' }, { key: 'failed', label: '制作失败' }];
-const draftTabs = [{ key: 'all', label: '全部' }, { key: 'carousel_pending', label: '待制作轮播图' }, { key: 'main_image_pending', label: '待制作主图' }, { key: 'ready_to_publish', label: '待发布' }, { key: 'published', label: '发布成功' }];
-const draftStatusLabels = { carousel_pending: '待制作轮播图', main_image_pending: '待制作主图', ready_to_publish: '待发布', published: '发布成功' };
+const draftTabs = [{ key: 'all', label: '全部' }, { key: 'pending', label: '待处理' }, { key: 'carousel_pending', label: '待制作轮播图' }, { key: 'main_image_pending', label: '待制作主图' }, { key: 'ready_to_publish', label: '待发布' }, { key: 'published', label: '发布成功' }];
+const draftStatusLabels = { pending: '待处理', carousel_pending: '待制作轮播图', main_image_pending: '待制作主图', ready_to_publish: '待发布', published: '发布成功' };
 const taskTypeLabels = { sku_image: 'SKU图', carousel: '轮播图', main_image: '首图' };
 const initialTaskParams = new URLSearchParams(location.search);
 const initialTaskType = initialTaskParams.get('task_type');
@@ -123,6 +123,8 @@ const visibleDraftPage = computed(() => Math.min(currentDraftPage.value, draftPa
 const pagedDrafts = computed(() => drafts.value);
 const selectedDrafts = computed(() => drafts.value.filter(draft => selectedDraftIds.value.includes(draft.id)));
 const allPagedDraftsSelected = computed(() => Boolean(pagedDrafts.value.length) && pagedDrafts.value.every(draft => selectedDraftIds.value.includes(draft.id)));
+const batchDispatchEligible = computed(() => selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab === 'pending'));
+const tiktokExportEligible = computed(() => selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab !== 'pending'));
 const batchCarouselEligible = computed(() => activeDraftTab.value === 'carousel_pending' && activeDraftWorkStatus.value === 'not_started' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.carousel_task_summary?.work_status === 'not_started'));
 const batchCarouselSkipEligible = computed(() => activeDraftTab.value === 'carousel_pending' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab === 'carousel_pending'));
 const batchMainImageSkipEligible = computed(() => activeDraftTab.value === 'main_image_pending' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab === 'main_image_pending'));
@@ -169,6 +171,26 @@ async function refreshDraftList() {
     selectedDraftIds.value = selectedDraftIds.value.filter(id => data.items.some((draft) => draft.id === id));
 }
 function draftWorkSummary(draft) { return draft.display_tab === 'carousel_pending' ? draft.carousel_task_summary : draft.main_image_task_summary; }
+async function dispatchSelectedDrafts(targetStage) {
+    if (!batchDispatchEligible.value) {
+        showToast('仅可分发待处理状态的商品草稿');
+        return;
+    }
+    const targetLabel = draftStatusLabels[targetStage];
+    try {
+        dispatchingDraftStage.value = targetStage;
+        const { data } = await api.post('/drafts/dispatch', { draft_ids: selectedDraftIds.value, target_stage: targetStage }, { headers: headers.value });
+        selectedDraftIds.value = [];
+        await refreshDraftList();
+        showToast(`已将 ${data.total} 条草稿分发至${targetLabel}`);
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '分发商品草稿失败');
+    }
+    finally {
+        dispatchingDraftStage.value = '';
+    }
+}
 function openBatchCarouselDialog() {
     if (!batchCarouselEligible.value) {
         showToast('仅可选择尚未创建轮播图任务的待制作草稿');
@@ -3718,6 +3740,86 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (__VLS_ctx.selectedDraftIds.length);
             (__VLS_ctx.MAX_TIKTOK_EXPORT_DRAFTS);
+            if (__VLS_ctx.batchDispatchEligible) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!(__VLS_ctx.selectedDraftIds.length))
+                                return;
+                            if (!(__VLS_ctx.batchDispatchEligible))
+                                return;
+                            __VLS_ctx.dispatchSelectedDrafts('carousel_pending');
+                        } },
+                    ...{ class: "primary" },
+                    disabled: (!!__VLS_ctx.dispatchingDraftStage),
+                });
+                (__VLS_ctx.dispatchingDraftStage === 'carousel_pending' ? '分发中…' : '去做轮播图');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!(__VLS_ctx.selectedDraftIds.length))
+                                return;
+                            if (!(__VLS_ctx.batchDispatchEligible))
+                                return;
+                            __VLS_ctx.dispatchSelectedDrafts('main_image_pending');
+                        } },
+                    ...{ class: "secondary" },
+                    disabled: (!!__VLS_ctx.dispatchingDraftStage),
+                });
+                (__VLS_ctx.dispatchingDraftStage === 'main_image_pending' ? '分发中…' : '去做主图');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!(__VLS_ctx.selectedDraftIds.length))
+                                return;
+                            if (!(__VLS_ctx.batchDispatchEligible))
+                                return;
+                            __VLS_ctx.dispatchSelectedDrafts('ready_to_publish');
+                        } },
+                    ...{ class: "secondary" },
+                    disabled: (!!__VLS_ctx.dispatchingDraftStage),
+                });
+                (__VLS_ctx.dispatchingDraftStage === 'ready_to_publish' ? '分发中…' : '直接到待发布');
+            }
             if (__VLS_ctx.batchCarouselEligible) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (__VLS_ctx.openBatchCarouselDialog) },
@@ -3746,10 +3848,12 @@ if (__VLS_ctx.token) {
                 });
                 (__VLS_ctx.batchMainImageSkipping ? '跳过中…' : '批量跳过首图制作');
             }
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (__VLS_ctx.openTiktokExportDialog) },
-                ...{ class: "primary" },
-            });
+            if (__VLS_ctx.tiktokExportEligible) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.openTiktokExportDialog) },
+                    ...{ class: "primary" },
+                });
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!(__VLS_ctx.token))
@@ -3892,7 +3996,7 @@ if (__VLS_ctx.token) {
                 ...{ class: "chip" },
                 ...{ class: (draft.display_tab === 'published' ? 'blue' : 'purple') },
             });
-            ({ carousel_pending: '待制作轮播图', main_image_pending: '待制作主图', ready_to_publish: '待发布', published: '发布成功' }[draft.display_tab]);
+            (__VLS_ctx.draftStatusLabels[draft.display_tab] || draft.display_tab);
             if (draft.display_tab === 'carousel_pending' || draft.display_tab === 'main_image_pending') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
                 ({ not_started: '未制作', in_progress: '制作中', awaiting_review: '待审核', failed: '制作失败' }[__VLS_ctx.draftWorkSummary(draft)?.work_status]);
@@ -4027,7 +4131,7 @@ if (__VLS_ctx.token) {
                 });
                 (__VLS_ctx.skippingMainImageDraftId === draft.id ? '跳过中…' : '跳过首图制作');
             }
-            else if (draft.display_tab !== 'published') {
+            else if (draft.display_tab !== 'pending') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!(__VLS_ctx.token))
@@ -4048,7 +4152,7 @@ if (__VLS_ctx.token) {
                                 return;
                             if (!!(draft.display_tab === 'main_image_pending'))
                                 return;
-                            if (!(draft.display_tab !== 'published'))
+                            if (!(draft.display_tab !== 'pending'))
                                 return;
                             __VLS_ctx.openFullImageWorkspace(draft);
                         } },
@@ -6372,6 +6476,7 @@ if (__VLS_ctx.showDraftImageDialog) {
                 ...{ class: "image-lock-notice" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "image-workspace-grid" },
@@ -8128,6 +8233,9 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['draft-export-bar']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -8695,6 +8803,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             publishingDraftId: publishingDraftId,
             skippingCarouselDraftId: skippingCarouselDraftId,
             skippingMainImageDraftId: skippingMainImageDraftId,
+            dispatchingDraftStage: dispatchingDraftStage,
             selectedDraftIds: selectedDraftIds,
             showTiktokExportDialog: showTiktokExportDialog,
             tiktokExportOptions: tiktokExportOptions,
@@ -8726,6 +8835,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             draftWorkStatusCounts: draftWorkStatusCounts,
             draftWorkStatusTabs: draftWorkStatusTabs,
             draftTabs: draftTabs,
+            draftStatusLabels: draftStatusLabels,
             taskTypeLabels: taskTypeLabels,
             activeTaskType: activeTaskType,
             taskPageSize: taskPageSize,
@@ -8837,6 +8947,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             pagedDrafts: pagedDrafts,
             selectedDrafts: selectedDrafts,
             allPagedDraftsSelected: allPagedDraftsSelected,
+            batchDispatchEligible: batchDispatchEligible,
+            tiktokExportEligible: tiktokExportEligible,
             batchCarouselEligible: batchCarouselEligible,
             batchCarouselSkipEligible: batchCarouselSkipEligible,
             batchMainImageSkipEligible: batchMainImageSkipEligible,
@@ -8852,6 +8964,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             changeDraftTemplateFilter: changeDraftTemplateFilter,
             changeDraftCreatorFilter: changeDraftCreatorFilter,
             draftWorkSummary: draftWorkSummary,
+            dispatchSelectedDrafts: dispatchSelectedDrafts,
             openBatchCarouselDialog: openBatchCarouselDialog,
             toggleBatchCarouselSku: toggleBatchCarouselSku,
             batchMainImageReferenceItems: batchMainImageReferenceItems,

@@ -297,6 +297,11 @@ class DraftUpdate(BaseModel):
         return value
 
 
+class DraftDispatchInput(BaseModel):
+    draft_ids: list[int] = Field(min_length=1, max_length=20)
+    target_stage: Literal["carousel_pending", "main_image_pending", "ready_to_publish"]
+
+
 class DraftImageTaskCreate(BaseModel):
     task_type: Literal["carousel", "main_image"]
     source_skus: list[str] = Field(default_factory=list, max_length=9)
