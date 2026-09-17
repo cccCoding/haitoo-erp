@@ -120,6 +120,7 @@ class TaskJobTests(unittest.TestCase):
 
         self.assertTrue(all(row["credential_configured"] for row in member_rows))
         self.assertTrue(all(not row["credential_configured"] for row in admin_rows))
+        self.assertTrue(all(row["credential_provider"] == "grsai" for row in member_rows))
         self.assertTrue(all("api_key" not in row and "secret_encrypted" not in row for row in member_rows))
 
     def test_task_creation_requires_its_creators_credential(self) -> None:

@@ -101,6 +101,21 @@ const filteredTemplates = computed(() => templates.value.filter(t => (!activeGro
 function templateGroupIsEmpty(groupId) { return !templates.value.some(template => template.group_id === groupId); }
 // 运营端接口只返回后台已启用的模型；这里再保留一次筛选，避免接口数据异常时将停用模型带入任务。
 const availableAiProviders = computed(() => aiProviders.value.filter(provider => provider.enabled !== false));
+// 密钥属于平台而不是具体模型。相同 credential_provider 的模型只显示一个入口。
+const memberCredentialProviders = computed(() => {
+    const seen = new Set();
+    return aiProviders.value.filter(provider => {
+        const credentialProvider = provider.credential_provider || provider.provider;
+        if (seen.has(credentialProvider))
+            return false;
+        seen.add(credentialProvider);
+        return true;
+    }).map(provider => ({
+        ...provider,
+        credential_provider: provider.credential_provider || provider.provider,
+        credential_display_name: provider.credential_provider === 'grsai' ? 'Grsai' : provider.display_name,
+    }));
+});
 const selectedCreativeProvider = computed(() => availableAiProviders.value.find(provider => provider.provider === creativeProvider.value));
 function providerUsesAutoQuality(provider) { return provider === 'grsai-gpt-image-2'; }
 function enforceProviderQuality(provider, params) { if (providerUsesAutoQuality(provider))
@@ -2032,7 +2047,8 @@ catch (e) {
     error.value = e.response?.data?.detail || '更新成员状态失败';
 } }
 function openMemberCredentialDialog(member, provider) { credentialMember.value = member; credentialProvider.value = provider; credentialApiKey.value = ''; showMemberCredentialDialog.value = true; }
-function memberCredentialPreview() { return credentialMember.value?.ai_provider_credential_previews?.[credentialProvider.value?.provider] || ''; }
+function memberCredentialKey() { return credentialProvider.value?.credential_provider || credentialProvider.value?.provider; }
+function memberCredentialPreview() { return credentialMember.value?.ai_provider_credential_previews?.[memberCredentialKey()] || ''; }
 async function saveMemberCredential() { if (!credentialMember.value || !credentialProvider.value || !credentialApiKey.value.trim()) {
     showToast('请输入平台密钥');
     return;
@@ -2041,7 +2057,7 @@ async function saveMemberCredential() { if (!credentialMember.value || !credenti
     await api.put(`/members/${credentialMember.value.id}/ai-provider-credentials/${credentialProvider.value.provider}`, { api_key: credentialApiKey.value.trim() }, { headers: headers.value });
     showMemberCredentialDialog.value = false;
     await refresh();
-    showToast(`${credentialProvider.value.display_name} 平台密钥已安全保存`);
+    showToast(`${credentialProvider.value.credential_display_name || credentialProvider.value.display_name} 平台密钥已安全保存`);
 }
 catch (e) {
     showToast(e.response?.data?.detail || '保存平台密钥失败');
@@ -2049,7 +2065,7 @@ catch (e) {
 finally {
     credentialSaving.value = false;
 } }
-async function clearMemberCredential() { if (!credentialMember.value || !credentialProvider.value || !confirm(`确定清除 ${credentialMember.value.name} 的 ${credentialProvider.value.display_name} 平台密钥吗？`))
+async function clearMemberCredential() { if (!credentialMember.value || !credentialProvider.value || !confirm(`确定清除 ${credentialMember.value.name} 的 ${credentialProvider.value.credential_display_name || credentialProvider.value.display_name} 平台密钥吗？`))
     return; try {
     credentialSaving.value = true;
     await api.delete(`/members/${credentialMember.value.id}/ai-provider-credentials/${credentialProvider.value.provider}`, { headers: headers.value });
@@ -4657,7 +4673,7 @@ if (__VLS_ctx.token) {
                 });
                 (member.is_active ? '停用' : '启用');
             }
-            for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.aiProviders))) {
+            for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.memberCredentialProviders))) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!(__VLS_ctx.token))
@@ -4678,12 +4694,12 @@ if (__VLS_ctx.token) {
                                 return;
                             __VLS_ctx.openMemberCredentialDialog(member, provider);
                         } },
-                    key: (provider.provider),
+                    key: (provider.credential_provider),
                     ...{ class: "credential-button" },
-                    ...{ class: (member.ai_provider_credentials?.[provider.provider] ? 'configured' : 'missing') },
+                    ...{ class: (member.ai_provider_credentials?.[provider.credential_provider] ? 'configured' : 'missing') },
                 });
-                (provider.display_name);
-                (member.ai_provider_credentials?.[provider.provider] ? '已配置' : '待配置');
+                (provider.credential_display_name);
+                (member.ai_provider_credentials?.[provider.credential_provider] ? '已配置' : '待配置');
             }
         }
         if (!__VLS_ctx.members.length) {
@@ -8134,7 +8150,7 @@ if (__VLS_ctx.showMemberCredentialDialog) {
         ...{ class: "modal-card" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-    (__VLS_ctx.credentialProvider?.display_name);
+    (__VLS_ctx.credentialProvider?.credential_display_name || __VLS_ctx.credentialProvider?.display_name);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     (__VLS_ctx.credentialMember?.name);
     if (__VLS_ctx.memberCredentialPreview()) {
@@ -8156,7 +8172,7 @@ if (__VLS_ctx.showMemberCredentialDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "modal-actions credential-modal-actions" },
     });
-    if (__VLS_ctx.credentialMember?.ai_provider_credentials?.[__VLS_ctx.credentialProvider?.provider]) {
+    if (__VLS_ctx.credentialMember?.ai_provider_credentials?.[__VLS_ctx.memberCredentialKey()]) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.clearMemberCredential) },
             ...{ class: "negative" },
@@ -9596,7 +9612,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             tasks: tasks,
             drafts: drafts,
             members: members,
-            aiProviders: aiProviders,
             loading: loading,
             error: error,
             toast: toast,
@@ -9825,6 +9840,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             filteredTemplates: filteredTemplates,
             templateGroupIsEmpty: templateGroupIsEmpty,
             availableAiProviders: availableAiProviders,
+            memberCredentialProviders: memberCredentialProviders,
             creativeCredentialError: creativeCredentialError,
             selectedWhiteImage: selectedWhiteImage,
             otherResourceOwners: otherResourceOwners,
@@ -10012,6 +10028,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             saveMember: saveMember,
             toggleMember: toggleMember,
             openMemberCredentialDialog: openMemberCredentialDialog,
+            memberCredentialKey: memberCredentialKey,
             memberCredentialPreview: memberCredentialPreview,
             saveMemberCredential: saveMemberCredential,
             clearMemberCredential: clearMemberCredential,

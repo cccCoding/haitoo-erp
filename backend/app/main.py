@@ -1784,6 +1784,8 @@ def list_available_ai_providers(user: User = Depends(current_user), db: Session 
     return [
         {
             "provider": setting.provider,
+            # 多个模型可复用同一平台凭据；成员管理据此只提供一次配置入口。
+            "credential_provider": setting.credential_provider,
             "display_name": setting.display_name,
             "model": setting.model,
             "is_default": setting.is_default,
