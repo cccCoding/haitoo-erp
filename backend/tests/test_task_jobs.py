@@ -17,7 +17,7 @@ from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
 from app.models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserTemplatePrompt, UserTemplateWhiteImage
-from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
+from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchImageReviewConfirm, BatchImageReviewTaskSelection, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
 
 
 class TaskJobTests(unittest.TestCase):
@@ -900,6 +900,46 @@ class TaskJobTests(unittest.TestCase):
                 user=db.get(User, 1), db=db,
             )
         self.assertEqual(result["workflow_stage"], "ready_to_publish")
+
+    def test_batch_review_carousel_accepts_all_results_and_advances(self) -> None:
+        with self.session_factory() as db:
+            draft = ProductDraft(company_id=1, template_id=1, title="T" * 25, image_urls=[], carousel_items=[], sku_items=[{"sku": "SKU1", "image_url": "https://img.example/sku.png"}], workflow_stage="carousel_pending", created_by=1, updated_by=1)
+            db.add(draft); db.commit(); db.refresh(draft)
+            task = PodTask(company_id=1, template_id=1, draft_id=draft.id, created_by=1, task_type="carousel", status=TaskStatus.AWAITING_SELECTION, parameters={"draft_id": draft.id, "source_sku": "SKU1"}, result_urls=["https://img.example/one.png", "https://img.example/two.png"], result_map=[])
+            db.add(task); db.commit(); db.refresh(task)
+            result = main.confirm_batch_image_review(BatchImageReviewConfirm(task_type="carousel", next_stage="ready_to_publish", selections=[BatchImageReviewTaskSelection(draft_id=draft.id, task_id=task.id, result_urls=task.result_urls)]), user=db.get(User, 1), db=db)
+            db.refresh(draft); db.refresh(task)
+        self.assertEqual(result["advanced_drafts"], 1)
+        self.assertEqual(draft.workflow_stage, "ready_to_publish")
+        self.assertEqual(draft.image_urls, ["https://img.example/one.png", "https://img.example/two.png"])
+        self.assertEqual(task.status, TaskStatus.COMPLETED)
+
+    def test_batch_review_main_image_partial_selection_advances(self) -> None:
+        with self.session_factory() as db:
+            draft = ProductDraft(company_id=1, template_id=1, title="T" * 25, image_urls=[], carousel_items=[], sku_items=[{"sku": "SKU1", "image_url": "https://img.example/sku.png"}], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            db.add(draft); db.commit(); db.refresh(draft)
+            selected = PodTask(company_id=1, template_id=1, draft_id=draft.id, created_by=1, task_type="main_image", status=TaskStatus.AWAITING_SELECTION, parameters={"draft_id": draft.id}, result_urls=["https://img.example/main.png"], result_map=[])
+            remaining = PodTask(company_id=1, template_id=1, draft_id=draft.id, created_by=1, task_type="main_image", status=TaskStatus.AWAITING_SELECTION, parameters={"draft_id": draft.id}, result_urls=["https://img.example/other.png"], result_map=[])
+            db.add_all([selected, remaining]); db.commit(); db.refresh(selected); db.refresh(remaining)
+            result = main.confirm_batch_image_review(BatchImageReviewConfirm(task_type="main_image", selections=[BatchImageReviewTaskSelection(draft_id=draft.id, task_id=selected.id, result_urls=[selected.result_urls[0]])]), user=db.get(User, 1), db=db)
+            db.refresh(draft); db.refresh(selected); db.refresh(remaining)
+        self.assertEqual(result["advanced_drafts"], 1)
+        self.assertEqual(draft.workflow_stage, "ready_to_publish")
+        self.assertEqual(selected.status, TaskStatus.COMPLETED)
+        self.assertEqual(remaining.status, TaskStatus.AWAITING_SELECTION)
+
+    def test_batch_review_can_confirm_previously_adopted_task(self) -> None:
+        with self.session_factory() as db:
+            draft = ProductDraft(company_id=1, template_id=1, title="T" * 25, image_urls=["https://img.example/carousel.png"], carousel_items=[{"sku": "SKU1", "image_url": "https://img.example/carousel.png", "task_id": 1, "source_type": "carousel"}], sku_items=[{"sku": "SKU1", "image_url": "https://img.example/sku.png"}], workflow_stage="carousel_pending", created_by=1, updated_by=1)
+            db.add(draft); db.commit(); db.refresh(draft)
+            task = PodTask(company_id=1, template_id=1, draft_id=draft.id, created_by=1, task_type="carousel", status=TaskStatus.COMPLETED, selected_result_url="https://img.example/carousel.png", parameters={"draft_id": draft.id, "source_sku": "SKU1"}, result_urls=["https://img.example/carousel.png"], result_map=[])
+            db.add(task); db.commit(); db.refresh(task)
+            draft.carousel_items[0]["task_id"] = task.id; db.commit()
+            result = main.confirm_batch_image_review(BatchImageReviewConfirm(task_type="carousel", next_stage="main_image_pending", selections=[BatchImageReviewTaskSelection(draft_id=draft.id, task_id=task.id, result_urls=[task.selected_result_url])]), user=db.get(User, 1), db=db)
+            db.refresh(draft)
+        self.assertEqual(result["advanced_drafts"], 1)
+        self.assertEqual(draft.workflow_stage, "main_image_pending")
+        self.assertEqual(draft.image_urls, ["https://img.example/carousel.png"])
 
     def test_confirm_images_preserves_dragged_final_order(self) -> None:
         with self.session_factory() as db:

@@ -378,6 +378,18 @@ class BatchMainImageSkipInput(BaseModel):
     draft_ids: list[int] = Field(min_length=1, max_length=20)
 
 
+class BatchImageReviewTaskSelection(BaseModel):
+    draft_id: int = Field(ge=1)
+    task_id: int = Field(ge=1)
+    result_urls: list[str] = Field(min_length=1, max_length=9)
+
+
+class BatchImageReviewConfirm(BaseModel):
+    task_type: Literal["carousel", "main_image"]
+    selections: list[BatchImageReviewTaskSelection] = Field(min_length=1, max_length=180)
+    next_stage: Literal["main_image_pending", "ready_to_publish"] | None = None
+
+
 class DraftImageApply(BaseModel):
     result_url: str = Field(min_length=1, max_length=500)
     remove_carousel_sku: str | None = Field(default=None, max_length=24)

@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import engine, get_db
 from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
-from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
+from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
@@ -2022,7 +2022,7 @@ def draft_view(draft: ProductDraft, user_names: dict[int, str], tasks: list[PodT
     }
 
 
-def draft_image_task_views(db: Session, user: User, draft_id: int, task_type: str, limit: int = 20) -> list[dict]:
+def draft_image_task_views(db: Session, user: User, draft_id: int, task_type: str, limit: int = 20, include_details: bool = False) -> list[dict]:
     """返回该草稿下指定类型的图片任务，字段与任务中心列表保持一致。
 
     parameters 是 JSON 列，不同数据库的 JSON 取值语法不一致，这里先按可见范围
@@ -2042,7 +2042,7 @@ def draft_image_task_views(db: Session, user: User, draft_id: int, task_type: st
     template_ids = {task.template_id for task in matched}
     template_names = {template.id: template.name for template in db.scalars(select(ProductTemplate).where(ProductTemplate.id.in_(template_ids))).all()} if template_ids else {}
     return [
-        serialize_task_view(task, creator_names.get(task.created_by, "历史记录缺失"), template_names.get(task.template_id, "历史模板已删除"), user, include_details=False)
+        serialize_task_view(task, creator_names.get(task.created_by, "历史记录缺失"), template_names.get(task.template_id, "历史模板已删除"), user, include_details=include_details)
         for task in matched
     ]
 
@@ -2060,6 +2060,21 @@ def get_draft_image_workspace(draft_id: int, user: User = Depends(current_user),
         "carousel_tasks": draft_image_task_views(db, user, draft.id, "carousel"),
         "main_image_tasks": draft_image_task_views(db, user, draft.id, "main_image"),
     }
+
+
+@app.get("/drafts/batch-image-review")
+def get_batch_image_review(draft_ids: list[int] = Query(min_length=1, max_length=20), task_type: str = Query(pattern="^(carousel|main_image)$"), user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """批量审核所需的候选图详情；列表页摘要不含全部候选图。"""
+    if len(set(draft_ids)) != len(draft_ids):
+        raise HTTPException(400, "同一草稿不能重复提交")
+    drafts = [get_accessible_draft(db, user, draft_id) for draft_id in draft_ids]
+    expected_stage = "carousel_pending" if task_type == "carousel" else "main_image_pending"
+    if any(draft.workflow_stage != expected_stage for draft in drafts):
+        raise HTTPException(400, "所选草稿不在对应的图片制作阶段")
+    return {"items": [serialize_record(draft) | {
+        "title": draft.title,
+        "tasks": draft_image_task_views(db, user, draft.id, task_type, include_details=True),
+    } for draft in drafts]}
 
 
 def draft_image_task_views_raw(db: Session, user: User, draft_id: int) -> list[PodTask]:
@@ -2315,6 +2330,66 @@ def ignore_draft_image_task_failure(draft_id: int, task_id: int, user: User = De
     task.failure_ignored = True
     db.commit()
     return {"task_id": task.id, "failure_ignored": True}
+
+
+@app.post("/drafts/batch-image-review/confirm")
+def confirm_batch_image_review(payload: BatchImageReviewConfirm, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """保存本次已审核图片；草稿至少审核一张即可推进对应阶段。"""
+    if payload.task_type == "carousel" and payload.next_stage not in {"main_image_pending", "ready_to_publish"}:
+        raise HTTPException(400, "确认轮播图时请选择下一步阶段")
+    if payload.task_type == "main_image" and payload.next_stage is not None:
+        raise HTTPException(400, "确认首图时不能指定下一步阶段")
+    task_ids = [item.task_id for item in payload.selections]
+    if len(set(task_ids)) != len(task_ids):
+        raise HTTPException(400, "同一图片任务不能重复提交")
+    tasks = {task.id: task for task in db.scalars(select(PodTask).where(PodTask.id.in_(task_ids))).all()}
+    if len(tasks) != len(task_ids):
+        raise HTTPException(404, "包含不存在的图片任务")
+    drafts_by_id: dict[int, ProductDraft] = {}
+    selections_by_draft: dict[int, list] = {}
+    for selection in payload.selections:
+        task = tasks[selection.task_id]
+        task_draft_id = task.draft_id or (task.parameters or {}).get("draft_id")
+        valid = (can_access_task(task, user) and task.task_type == payload.task_type and task_draft_id == selection.draft_id
+                 and task.status in {TaskStatus.AWAITING_SELECTION, TaskStatus.COMPLETED} and all(url in (task.result_urls or []) for url in selection.result_urls))
+        if not valid or (payload.task_type == "main_image" and len(selection.result_urls) != 1):
+            raise HTTPException(400, "包含不可审核的图片任务或候选图")
+        draft = drafts_by_id.setdefault(selection.draft_id, get_accessible_draft(db, user, selection.draft_id))
+        expected_stage = "carousel_pending" if payload.task_type == "carousel" else "main_image_pending"
+        if draft.workflow_stage != expected_stage:
+            raise HTTPException(400, "所选草稿不在对应的图片制作阶段")
+        selections_by_draft.setdefault(draft.id, []).append(selection)
+    advanced = 0
+    for draft_id, selections in selections_by_draft.items():
+        draft = drafts_by_id[draft_id]
+        items = [dict(item) for item in draft_base_carousel_items(draft)]
+        for selection in selections:
+            task = tasks[selection.task_id]
+            # 已采用的任务仅作为本次推进草稿阶段的依据，不能重复追加图片。
+            if task.status == TaskStatus.COMPLETED:
+                continue
+            if payload.task_type == "carousel":
+                sku = str((task.parameters or {}).get("source_sku") or "")
+                replacement = [{"sku": sku, "image_url": url, "task_id": task.id, "source_type": "carousel"} for url in selection.result_urls]
+                fallback_index = next((index for index, item in enumerate(items) if item.get("source_type") == "sku" and item.get("sku") == sku), None)
+                if fallback_index is not None:
+                    items[fallback_index:fallback_index + 1] = replacement
+                else:
+                    items.extend(replacement)
+            else:
+                items = [item for item in items if item.get("source_type") != "main_image"]
+                items.insert(0, {"sku": None, "image_url": selection.result_urls[0], "task_id": task.id, "source_type": "main_image"})
+            task.selected_result_url = selection.result_urls[0]
+            task.status = TaskStatus.COMPLETED
+        if len(items) > 9 or len({item.get("image_url") for item in items}) != len(items):
+            raise HTTPException(400, f"草稿 #{draft.id} 的最终商品图片最多 9 张且不能重复")
+        draft.carousel_items = items
+        draft.image_urls = [item["image_url"] for item in items]
+        draft.workflow_stage = payload.next_stage if payload.task_type == "carousel" else "ready_to_publish"
+        advanced += 1
+        draft.updated_by = user.id
+    db.commit()
+    return {"reviewed_tasks": len(payload.selections), "advanced_drafts": advanced}
 
 
 @app.post("/drafts/{draft_id}/skip-carousel")
