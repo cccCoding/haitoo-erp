@@ -65,6 +65,7 @@ const materialPageSize = ref(20), currentMaterialPage = ref(1), materialTotal = 
 const creatorFiltersInitialized = ref(false);
 const previewImageUrl = ref(''), previewImageAlt = ref('');
 const showDraftImageDialog = ref(false), imageWorkspaceMode = ref('full'), imageDraft = ref(null), imageWorkspaceLoading = ref(false), imageTasksRefreshing = ref(false), imageTaskCreatingType = ref(''), imageConfirmSaving = ref(false);
+const carouselConfirmNextStage = ref('main_image_pending');
 const selectedImageSkus = ref([]), selectedMainReferences = ref([]), mainReferenceMode = ref('random');
 // 轮播图与首图任务使用各自独立的一套生成参数，互不干扰。
 const carouselParams = ref({ prompt: '', provider: '', ratio: '1:1', quality: '1K' }), mainParams = ref({ prompt: '', provider: '', ratio: '1:1', quality: '1K' });
@@ -1069,6 +1070,7 @@ async function openImageWorkspace(draft, mode = 'full', focusMain = false) {
     selectedImageSkus.value = [];
     selectedMainReferences.value = [];
     mainReferenceMode.value = 'random';
+    carouselConfirmNextStage.value = 'main_image_pending';
     resetFinalImageOrder();
     const defaultImageProvider = availableAiProviders.value.find(item => item.is_default)?.provider || availableAiProviders.value[0]?.provider || '';
     carouselParams.value = { prompt: '保持服装款式、颜色和印花准确，生成自然真实、适合电商展示的商品场景图', provider: defaultImageProvider, ratio: '1:1', quality: '1K' };
@@ -1270,11 +1272,12 @@ async function confirmDraftImages() { if (!imageDraft.value)
     return;
 } try {
     imageConfirmSaving.value = true;
-    const payload = { image_items: draftFinalImageItems.value.map((item) => ({ result_url: item.image_url, sku: item.sku || null, task_id: item.task_id || null })) };
+    const isConfirmingCarousel = imageDraft.value.workflow_stage === 'carousel_pending';
+    const payload = { image_items: draftFinalImageItems.value.map((item) => ({ result_url: item.image_url, sku: item.sku || null, task_id: item.task_id || null })), ...(isConfirmingCarousel ? { next_stage: carouselConfirmNextStage.value } : {}) };
     imageDraft.value = (await api.post(`/drafts/${imageDraft.value.id}/images/confirm`, payload, { headers: headers.value })).data;
     await refreshDraftList();
     showDraftImageDialog.value = false;
-    showToast('商品图片已保存到草稿');
+    showToast(isConfirmingCarousel ? (carouselConfirmNextStage.value === 'ready_to_publish' ? '轮播图已确认，商品已进入待发布' : '轮播图已确认，请继续首图创作') : '商品图片已保存到草稿');
 }
 catch (e) {
     showToast(e.response?.data?.detail || '保存商品图片失败');
@@ -7600,14 +7603,34 @@ if (__VLS_ctx.showDraftImageDialog) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "modal-actions image-workspace-actions" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        (__VLS_ctx.imageWorkspaceMode === 'carousel' ? '采用轮播图后点击确认，将保存轮播图并进入首图制作。' : '采用、移除和拖动排序仅在当前弹窗暂存；确认后一次保存到草稿。');
+        if (__VLS_ctx.imageDraft?.workflow_stage === 'carousel_pending') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "carousel-confirm-next-step" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                type: "radio",
+                value: "main_image_pending",
+            });
+            (__VLS_ctx.carouselConfirmNextStage);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                type: "radio",
+                value: "ready_to_publish",
+            });
+            (__VLS_ctx.carouselConfirmNextStage);
+        }
+        else {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (__VLS_ctx.imageWorkspaceMode === 'carousel' ? '采用轮播图后点击确认，将保存轮播图。' : '采用、移除和拖动排序仅在当前弹窗暂存；确认后一次保存到草稿。');
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.confirmDraftImages) },
             ...{ class: "primary" },
             disabled: (__VLS_ctx.imageConfirmSaving || !!__VLS_ctx.imageTaskCreatingType),
         });
-        (__VLS_ctx.imageConfirmSaving ? '保存中…' : __VLS_ctx.imageDraft?.workflow_stage === 'carousel_pending' ? '确认轮播图并进入主图制作' : __VLS_ctx.imageDraft?.workflow_stage === 'main_image_pending' ? '确认主图并进入待发布' : '保存到草稿');
+        (__VLS_ctx.imageConfirmSaving ? '保存中…' : __VLS_ctx.imageDraft?.workflow_stage === 'carousel_pending' ? (__VLS_ctx.carouselConfirmNextStage === 'ready_to_publish' ? '确认轮播图并到待发布' : '确认轮播图并进入首图创作') : __VLS_ctx.imageDraft?.workflow_stage === 'main_image_pending' ? '确认主图并进入待发布' : '保存到草稿');
     }
 }
 if (__VLS_ctx.showMainApplyDialog && __VLS_ctx.pendingMainApply) {
@@ -9112,6 +9135,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['carousel-empty-icon']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['image-workspace-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['carousel-confirm-next-step']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
@@ -9384,6 +9408,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             imageTasksRefreshing: imageTasksRefreshing,
             imageTaskCreatingType: imageTaskCreatingType,
             imageConfirmSaving: imageConfirmSaving,
+            carouselConfirmNextStage: carouselConfirmNextStage,
             selectedImageSkus: selectedImageSkus,
             selectedMainReferences: selectedMainReferences,
             mainReferenceMode: mainReferenceMode,

@@ -71,6 +71,7 @@ const creatorFiltersInitialized = ref(false)
 const previewImageUrl = ref(''), previewImageAlt = ref('')
 type ImageWorkspaceMode = 'carousel' | 'full'
 const showDraftImageDialog = ref(false), imageWorkspaceMode = ref<ImageWorkspaceMode>('full'), imageDraft = ref<any>(null), imageWorkspaceLoading = ref(false), imageTasksRefreshing = ref(false), imageTaskCreatingType = ref<''|'carousel'|'main_image'>(''), imageConfirmSaving = ref(false)
+const carouselConfirmNextStage = ref<'main_image_pending'|'ready_to_publish'>('main_image_pending')
 const selectedImageSkus = ref<string[]>([]), selectedMainReferences = ref<string[]>([]), mainReferenceMode = ref<'random'|'manual'>('random')
 // 轮播图与首图任务使用各自独立的一套生成参数，互不干扰。
 const carouselParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:'1K'|'2K'}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'}), mainParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:'1K'|'2K'}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'})
@@ -687,7 +688,7 @@ async function loadImageWorkspace(draftId:number, tasksOnly=false) {
   }
 }
 async function openImageWorkspace(draft:any, mode:ImageWorkspaceMode='full', focusMain=false) {
-  imageWorkspaceMode.value=mode; showDraftImageDialog.value=true; imageDraft.value=null; selectedImageSkus.value=[]; selectedMainReferences.value=[]; mainReferenceMode.value='random';resetFinalImageOrder()
+  imageWorkspaceMode.value=mode; showDraftImageDialog.value=true; imageDraft.value=null; selectedImageSkus.value=[]; selectedMainReferences.value=[]; mainReferenceMode.value='random'; carouselConfirmNextStage.value='main_image_pending';resetFinalImageOrder()
   const defaultImageProvider=availableAiProviders.value.find(item=>item.is_default)?.provider || availableAiProviders.value[0]?.provider || ''
   carouselParams.value={prompt:'保持服装款式、颜色和印花准确，生成自然真实、适合电商展示的商品场景图',provider:defaultImageProvider,ratio:'1:1',quality:'1K'}
   mainParams.value={prompt:'以参考图为基础生成突出商品主体的电商首图，背景简洁、光线自然，保持款式与颜色准确',provider:defaultImageProvider,ratio:'1:1',quality:'1K'}
@@ -823,7 +824,7 @@ function toggleWorkspaceMainTask(task:any) {
 function dropFinalImage(targetUrl:string){if(!draggedFinalImageUrl.value || draggedFinalImageUrl.value===targetUrl)return;const items=[...draftFinalImageItems.value];const from=items.findIndex((item:any)=>item.image_url===draggedFinalImageUrl.value),to=items.findIndex((item:any)=>item.image_url===targetUrl);if(from<0 || to<0)return;const [moved]=items.splice(from,1);items.splice(to,0,moved);stagedFinalImageItems.value=items;draggedFinalImageUrl.value=''}
 function removeFinalImage(imageUrl:string){const items=draftFinalImageItems.value.filter((item:any)=>item.image_url!==imageUrl);if(items.length===draftFinalImageItems.value.length)return;if(!items.length){showToast('请至少保留一张 SKU 图或轮播图');return}stagedFinalImageItems.value=items;draggedFinalImageUrl.value='';selectedMainReferences.value=selectedMainReferences.value.filter(referenceUrl=>referenceUrl!==imageUrl);showToast('已从最终商品图片中移除，确认后保存到草稿')}
 async function openImageWorkspaceFromTask(task:any){const draftId=task?.parameters?.draft_id;if(!draftId)return;showTaskDetailDialog.value=false;page.value='drafts';await openImageWorkspace({id:draftId},task.task_type==='carousel'?'carousel':'full',task.task_type==='main_image');if(task.task_type==='carousel' && task.parameters?.source_sku)selectedImageSkus.value=[task.parameters.source_sku];await nextTick();document.getElementById(task.task_type==='main_image'?'main-image-workspace-section':'carousel-workspace-section')?.scrollIntoView({behavior:'smooth',block:'start'})}
-async function confirmDraftImages(){if(!imageDraft.value)return;if(!draftFinalImageItems.value.length){showToast('请至少保留一张 SKU 图或轮播图后再保存');return}try{imageConfirmSaving.value=true;const payload={image_items:draftFinalImageItems.value.map((item:any)=>({result_url:item.image_url,sku:item.sku || null,task_id:item.task_id || null}))};imageDraft.value=(await api.post(`/drafts/${imageDraft.value.id}/images/confirm`,payload,{headers:headers.value})).data;await refreshDraftList();showDraftImageDialog.value=false;showToast('商品图片已保存到草稿')}catch(e:any){showToast(e.response?.data?.detail || '保存商品图片失败')}finally{imageConfirmSaving.value=false}}
+async function confirmDraftImages(){if(!imageDraft.value)return;if(!draftFinalImageItems.value.length){showToast('请至少保留一张 SKU 图或轮播图后再保存');return}try{imageConfirmSaving.value=true;const isConfirmingCarousel=imageDraft.value.workflow_stage==='carousel_pending';const payload={image_items:draftFinalImageItems.value.map((item:any)=>({result_url:item.image_url,sku:item.sku || null,task_id:item.task_id || null})),...(isConfirmingCarousel?{next_stage:carouselConfirmNextStage.value}:{})};imageDraft.value=(await api.post(`/drafts/${imageDraft.value.id}/images/confirm`,payload,{headers:headers.value})).data;await refreshDraftList();showDraftImageDialog.value=false;showToast(isConfirmingCarousel?(carouselConfirmNextStage.value==='ready_to_publish'?'轮播图已确认，商品已进入待发布':'轮播图已确认，请继续首图创作'):'商品图片已保存到草稿')}catch(e:any){showToast(e.response?.data?.detail || '保存商品图片失败')}finally{imageConfirmSaving.value=false}}
 async function saveDraftEdit() {
   const title = draftEditTitle.value.trim()
   if (!editingDraft.value || title.length < 25 || title.length > 255) { draftEditError.value = '商品标题长度须为 25-255 个字符'; return }
@@ -1651,8 +1652,13 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
           </main>
         </div>
         <div class="modal-actions image-workspace-actions">
-          <small>{{imageWorkspaceMode==='carousel' ? '采用轮播图后点击确认，将保存轮播图并进入首图制作。' : '采用、移除和拖动排序仅在当前弹窗暂存；确认后一次保存到草稿。'}}</small>
-          <button class="primary" :disabled="imageConfirmSaving || !!imageTaskCreatingType" @click="confirmDraftImages">{{imageConfirmSaving ? '保存中…' : imageDraft?.workflow_stage==='carousel_pending' ? '确认轮播图并进入主图制作' : imageDraft?.workflow_stage==='main_image_pending' ? '确认主图并进入待发布' : '保存到草稿'}}</button>
+          <div v-if="imageDraft?.workflow_stage==='carousel_pending'" class="carousel-confirm-next-step">
+            <small>确认轮播图后</small>
+            <label><input v-model="carouselConfirmNextStage" type="radio" value="main_image_pending"/>进入首图创作</label>
+            <label><input v-model="carouselConfirmNextStage" type="radio" value="ready_to_publish"/>直接到待发布</label>
+          </div>
+          <small v-else>{{imageWorkspaceMode==='carousel' ? '采用轮播图后点击确认，将保存轮播图。' : '采用、移除和拖动排序仅在当前弹窗暂存；确认后一次保存到草稿。'}}</small>
+          <button class="primary" :disabled="imageConfirmSaving || !!imageTaskCreatingType" @click="confirmDraftImages">{{imageConfirmSaving ? '保存中…' : imageDraft?.workflow_stage==='carousel_pending' ? (carouselConfirmNextStage==='ready_to_publish' ? '确认轮播图并到待发布' : '确认轮播图并进入首图创作') : imageDraft?.workflow_stage==='main_image_pending' ? '确认主图并进入待发布' : '保存到草稿'}}</button>
         </div>
       </template>
     </section>

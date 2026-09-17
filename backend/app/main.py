@@ -2507,8 +2507,10 @@ def confirm_draft_images(draft_id: int, payload: DraftImagesConfirm | None = Non
     draft.image_urls = images
     if payload is None or payload.advance_workflow:
         if draft.workflow_stage == "carousel_pending":
-            draft.workflow_stage = "main_image_pending"
+            draft.workflow_stage = payload.next_stage if payload and payload.next_stage else "main_image_pending"
         elif draft.workflow_stage == "main_image_pending":
+            if payload and payload.next_stage:
+                raise HTTPException(400, "确认首图时不能指定下一步阶段")
             if not any(item.get("source_type") == "main_image" for item in ordered_items):
                 raise HTTPException(400, "请先采用一张主图后再进入待发布")
             draft.workflow_stage = "ready_to_publish"

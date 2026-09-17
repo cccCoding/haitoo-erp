@@ -392,6 +392,8 @@ class DraftOrderedImageSelection(BaseModel):
 class DraftImagesConfirm(BaseModel):
     image_items: list[DraftOrderedImageSelection] | None = Field(default=None, max_length=9)
     advance_workflow: bool = True
+    # 仅在确认轮播图时使用；未传时保持既有的“进入首图制作”行为。
+    next_stage: Literal["main_image_pending", "ready_to_publish"] | None = None
 
 
 class DraftCarouselOrderUpdate(BaseModel):

@@ -858,6 +858,25 @@ class TaskJobTests(unittest.TestCase):
         self.assertEqual(result["carousel_items"][1]["task_id"], carousel_task_id)
         self.assertEqual(result["carousel_items"][0]["source_type"], "main_image")
 
+    def test_confirm_carousel_can_go_directly_to_ready_to_publish(self) -> None:
+        with self.session_factory() as db:
+            draft = ProductDraft(
+                company_id=1, template_id=1, title="T" * 25,
+                image_urls=[], carousel_items=[],
+                sku_items=[{"sku": "SKU1", "image_url": "https://img.example/sku.png"}],
+                workflow_stage="carousel_pending", created_by=1, updated_by=1,
+            )
+            db.add(draft); db.commit(); db.refresh(draft)
+            result = main.confirm_draft_images(
+                draft.id,
+                DraftImagesConfirm(
+                    image_items=[DraftOrderedImageSelection(result_url="https://img.example/sku.png", sku="SKU1")],
+                    next_stage="ready_to_publish",
+                ),
+                user=db.get(User, 1), db=db,
+            )
+        self.assertEqual(result["workflow_stage"], "ready_to_publish")
+
     def test_confirm_images_preserves_dragged_final_order(self) -> None:
         with self.session_factory() as db:
             draft = ProductDraft(
