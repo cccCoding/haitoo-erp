@@ -295,6 +295,8 @@ class AIProviderSetting(Base):
     provider: Mapped[str] = mapped_column(String(40), primary_key=True)
     display_name: Mapped[str] = mapped_column(String(80))
     model: Mapped[str] = mapped_column(String(120))
+    # 模型配置可共享同一平台凭据，例如多个 Grsai 模型共用一份 API Key。
+    credential_provider: Mapped[str] = mapped_column(String(40), default="grsai")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     images_per_task: Mapped[int] = mapped_column(Integer, default=1)

@@ -140,7 +140,7 @@ docker compose exec api python -m app.admin_cli enable-super-admin \
 
 超级管理员登录后可在“AI 模型管理”中启用并切换印花贴合模型，并为每个平台模型设置“单个任务印花图数量”。批量快捷操作会按该数量创建多条独立任务；只有服务商保证输出顺序与输入一致时才能把数量设为大于 1，否则必须保持默认值 1。
 
-默认生产模型为 Grsai 的 `nano-banana-fast`。MySQL 中的任务记录就是队列状态源，`submit-worker` 按创建时间串行提交第三方 API，`result-worker` 独立串行查询异步结果。提交失败最多再重试 2 次，查询未完成或临时失败时留到下一轮。启动生产服务时需要同时运行 `api`、两个 Worker 和 MySQL；任务间隔可由超级管理员在线配置。每个新任务会记录实际使用的提供方、模型版本和创建人。模型平台密钥由公司管理员在“成员管理”中为每位员工单独配置，经加密保存后仅由后端按任务创建人读取，不再使用平台级共享模型密钥。
+默认生产模型为 Grsai 的 `nano-banana-fast`，可在后台启用并选择同平台的 `gpt-image-2`。两个模型共用同一份 Grsai API Key。MySQL 中的任务记录就是队列状态源，`submit-worker` 按创建时间串行提交第三方 API，`result-worker` 独立串行查询异步结果。提交失败最多再重试 2 次，查询未完成或临时失败时留到下一轮。启动生产服务时需要同时运行 `api`、两个 Worker 和 MySQL；任务间隔可由超级管理员在线配置。每个新任务会记录实际使用的提供方、模型版本和创建人。模型平台密钥由公司管理员在“成员管理”中为每位员工单独配置，经加密保存后仅由后端按任务创建人读取，不再使用平台级共享模型密钥。
 
 模型服务地址、标题生成服务及 R2 存储仍由部署环境配置：
 
@@ -154,7 +154,7 @@ export R2_SECRET_ACCESS_KEY='...'
 export R2_BUCKET='haitoro-images-prod'
 export R2_ENDPOINT='https://<account-id>.r2.cloudflarestorage.com'
 export R2_PUBLIC_BASE_URL='https://img.haitoro.com'
-# 是否复制 Seedream/千问的生成结果到 R2；默认 true，建议生产环境保持 true。
+# 是否复制模型生成结果到 R2；默认 true，建议生产环境保持 true。
 export AI_GENERATED_IMAGE_UPLOAD_TO_R2='true'
 ```
 
@@ -221,6 +221,6 @@ python -m app.db_migrate
 
 超级管理员后台“平台概览”会显示待处理、运行中、重试中、最终失败、最早排队时长、每模型积压、近一小时吞吐和近 15 分钟失败率。默认在待处理超过 200 个任务、最早排队超过 10 分钟或近 15 分钟失败率超过 10% 时标红。
 
-R2 不会自动删除对象。可在 Bucket 的 **Settings → Object Lifecycle Rules** 创建生命周期规则：使用前缀 `generated/` 可只清理 AI 生成图，例如设置“创建 90 天后删除”；模板、素材和尺码图使用其他前缀，不受该规则影响。`AI_GENERATED_IMAGE_UPLOAD_TO_R2=false` 时，Seedream/千问结果不再复制到 R2，而直接保存供应商 URL；这些 URL 可能过期，Gemini 因只返回内嵌图片仍必须上传 R2。
+R2 不会自动删除对象。可在 Bucket 的 **Settings → Object Lifecycle Rules** 创建生命周期规则：使用前缀 `generated/` 可只清理 AI 生成图，例如设置“创建 90 天后删除”；模板、素材和尺码图使用其他前缀，不受该规则影响。`AI_GENERATED_IMAGE_UPLOAD_TO_R2=false` 时，结果直接保存 Grsai 临时 URL，这些 URL 可能过期。
 
 > Docker Compose 中的密码仅用于本地开发。生产环境必须通过密钥管理服务配置数据库密码、JWT 密钥和妙手凭据加密密钥。

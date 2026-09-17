@@ -40,19 +40,18 @@ logger = logging.getLogger(__name__)
 
 def initialize_system_defaults(db: Session) -> None:
     """幂等补齐平台运行所需配置，不创建任何公司或用户。"""
-    if not db.get(AIProviderSetting, "seedream"):
-        db.add(AIProviderSetting(provider="seedream", display_name="Seedream", model="doubao-seedream-4-0-250828", enabled=True, is_default=False))
-    if not db.get(AIProviderSetting, "qwen"):
-        db.add(AIProviderSetting(provider="qwen", display_name="千问图像编辑", model="qwen-image-edit", enabled=True, is_default=False))
-    if not db.get(AIProviderSetting, "gemini"):
-        db.add(AIProviderSetting(provider="gemini", display_name="Gemini 图像生成", model="gemini-2.5-flash-image", enabled=True, is_default=False))
-    # 印花贴合生产默认使用 Nano Banana Fast；保留其他适配器供后台切换。
+    # 印花贴合默认使用 Nano Banana Fast；两个模型共享 Grsai 员工密钥。
     grsai_setting = db.get(AIProviderSetting, "grsai")
     if not grsai_setting:
         db.execute(update(AIProviderSetting).where(AIProviderSetting.is_default.is_(True)).values(is_default=False))
-        db.add(AIProviderSetting(provider="grsai", display_name="Grsai", model="nano-banana-fast", enabled=True, is_default=True))
+        db.add(AIProviderSetting(provider="grsai", display_name="Grsai · Nano Banana Fast", model="nano-banana-fast", credential_provider="grsai", enabled=True, is_default=True))
     elif grsai_setting.display_name == "Nano Banana Fast":
-        grsai_setting.display_name = "Grsai"
+        grsai_setting.display_name = "Grsai · Nano Banana Fast"
+    grsai_setting = db.get(AIProviderSetting, "grsai")
+    if grsai_setting:
+        grsai_setting.credential_provider = "grsai"
+    if not db.get(AIProviderSetting, "grsai-gpt-image-2"):
+        db.add(AIProviderSetting(provider="grsai-gpt-image-2", display_name="Grsai · GPT Image 2", model="gpt-image-2", credential_provider="grsai", enabled=True, is_default=False))
     if not db.get(TaskQueueSetting, 1):
         db.add(TaskQueueSetting(id=1, submit_interval_seconds=1, result_interval_seconds=5))
     # 类目库全部由公司管理员上传创建；清理早期版本自动生成的全局默认类目库。
@@ -630,13 +629,13 @@ def list_members(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Se
     return [
         UserOut.model_validate(member).model_dump() | {
             "ai_provider_credentials": {
-                provider.provider: (member.id, provider.provider) in configured
+                provider.provider: (member.id, provider.credential_provider) in configured
                 for provider in enabled_providers
             },
             "ai_provider_credential_previews": {
-                provider.provider: credential_previews.get((member.id, provider.provider))
+                provider.provider: credential_previews.get((member.id, provider.credential_provider))
                 for provider in enabled_providers
-                if (member.id, provider.provider) in configured
+                if (member.id, provider.credential_provider) in configured
             }
         }
         for member in members
@@ -704,9 +703,10 @@ def update_member_ai_provider_credential(
         raise HTTPException(400, "模型平台不存在或未启用")
     if not provider_supports_user_credentials(provider):
         raise HTTPException(400, "该模型平台不支持独立密钥")
+    credential_provider = setting.credential_provider
     credential = db.scalar(select(UserAIProviderCredential).where(
         UserAIProviderCredential.user_id == member.id,
-        UserAIProviderCredential.provider == provider,
+        UserAIProviderCredential.provider == credential_provider,
     ))
     if credential:
         credential.secret_encrypted = encrypt_secret(payload.api_key)
@@ -715,7 +715,7 @@ def update_member_ai_provider_credential(
         credential = UserAIProviderCredential(
             company_id=user.company_id,
             user_id=member.id,
-            provider=provider,
+            provider=credential_provider,
             secret_encrypted=encrypt_secret(payload.api_key),
         )
         db.add(credential)
@@ -731,9 +731,10 @@ def delete_member_ai_provider_credential(
     db: Session = Depends(get_db),
 ):
     member = get_company_credential_user(db, user, member_id)
+    setting = db.get(AIProviderSetting, provider)
     credential = db.scalar(select(UserAIProviderCredential).where(
         UserAIProviderCredential.user_id == member.id,
-        UserAIProviderCredential.provider == provider,
+        UserAIProviderCredential.provider == (setting.credential_provider if setting else provider),
     ))
     if credential:
         db.delete(credential)
@@ -1297,6 +1298,9 @@ def serialize_task_view(task: PodTask, creator_name: str, template_name: str, vi
         parameters["creative_requirement"] = None
         parameters["private_creative_configuration"] = True
     result = serialize_record(task) | {
+        # 配置键用于区分 Grsai 的模型，不应暴露为面向运营人员的平台名称。
+        "provider": "grsai" if task.provider in {"grsai", "grsai-gpt-image-2"} else task.provider,
+        "provider_key": task.provider,
         "parameters": parameters,
         "result_urls": result_urls if include_details else result_urls[:1],
         "result_count": len(result_urls),
@@ -1682,8 +1686,6 @@ def map_task_results(task: PodTask, urls: list[str]) -> list[dict]:
 async def persist_generated_images(urls: list[str], company_id: int, task_id: int) -> list[str]:
     """将模型供应商的临时 URL 复制到 R2，任务结果不依赖第三方 URL 的有效期。"""
     if not get_settings().ai_generated_image_upload_to_r2:
-        # Gemini 结果已在适配器中上传 R2（接口只返回 base64，无法保存为第三方 URL）。
-        # Seedream/千问则保留其供应商 URL，以节省 R2 存储和写入请求。
         return urls
     persisted: list[str] = []
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
@@ -1739,7 +1741,7 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
     credential = db.scalar(select(UserAIProviderCredential).where(
         UserAIProviderCredential.company_id == user.company_id,
         UserAIProviderCredential.user_id == user.id,
-        UserAIProviderCredential.provider == provider.provider,
+        UserAIProviderCredential.provider == provider.credential_provider,
     ))
     if not credential:
         raise HTTPException(400, f"尚未配置个人 {provider.display_name} 平台密钥，请联系公司管理员配置")
@@ -1749,6 +1751,7 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
         "white_image_id": white_image.id,
         "white_image_name": white_image.name,
         "white_image_url": white_image.image_url,
+        "quality": "auto" if provider.provider == "grsai-gpt-image-2" else payload.quality,
     }
     tasks = [
         PodTask(
@@ -1785,7 +1788,7 @@ def list_available_ai_providers(user: User = Depends(current_user), db: Session 
             "model": setting.model,
             "is_default": setting.is_default,
             "images_per_task": setting.images_per_task,
-            "credential_configured": setting.provider in configured_providers,
+            "credential_configured": setting.credential_provider in configured_providers,
         }
         for setting in db.scalars(select(AIProviderSetting).where(AIProviderSetting.enabled.is_(True)).order_by(AIProviderSetting.provider)).all()
     ]
@@ -1915,11 +1918,16 @@ def image_task_provider(db: Session, user: User, provider_name: str | None) -> A
     credential = db.scalar(select(UserAIProviderCredential).where(
         UserAIProviderCredential.company_id == user.company_id,
         UserAIProviderCredential.user_id == user.id,
-        UserAIProviderCredential.provider == provider.provider,
+        UserAIProviderCredential.provider == provider.credential_provider,
     ))
     if not credential:
         raise HTTPException(400, f"尚未配置个人 {provider.display_name} 平台密钥，请联系公司管理员配置")
     return provider
+
+
+def image_task_quality(provider: AIProviderSetting, requested_quality: str) -> str:
+    """按模型能力固化任务质量，避免旧客户端将 1K/2K 传给 gpt-image-2。"""
+    return "auto" if provider.provider == "grsai-gpt-image-2" else requested_quality
 
 
 def draft_sku_carousel_items(draft: ProductDraft) -> list[dict]:
@@ -2079,6 +2087,7 @@ def create_draft_image_tasks(draft_id: int, payload: DraftImageTaskCreate, user:
     if not draft.template_id:
         raise HTTPException(400, "商品草稿缺少产品模板")
     provider = image_task_provider(db, user, payload.provider)
+    quality = image_task_quality(provider, payload.quality)
     tasks: list[PodTask] = []
     if payload.task_type == "carousel":
         source_skus = list(dict.fromkeys(sku.strip() for sku in payload.source_skus if sku.strip()))
@@ -2099,7 +2108,7 @@ def create_draft_image_tasks(draft_id: int, payload: DraftImageTaskCreate, user:
                 parameters={
                     "task_type": "carousel", "draft_id": draft.id, "source_sku": sku,
                     "source_image_url": source_url, "reference_urls": [source_url],
-                    "ratio": payload.ratio, "quality": payload.quality,
+                    "ratio": payload.ratio, "quality": quality,
                     "creative_requirement": payload.creative_requirement,
                 }, result_urls=[], result_map=[],
             ))
@@ -2136,7 +2145,7 @@ def create_draft_image_tasks(draft_id: int, payload: DraftImageTaskCreate, user:
             task_type="main_image", status=TaskStatus.QUEUED, provider=provider.provider, provider_model=provider.model,
             parameters={
                 "task_type": "main_image", "draft_id": draft.id, "reference_mode": payload.reference_mode,
-                "reference_urls": references, "ratio": payload.ratio, "quality": payload.quality,
+                "reference_urls": references, "ratio": payload.ratio, "quality": quality,
                 "creative_requirement": payload.creative_requirement,
             }, result_urls=[], result_map=[],
         ))
@@ -2167,6 +2176,7 @@ def create_batch_carousel_tasks(payload: BatchCarouselTaskCreate, user: User = D
     if existing_task_drafts:
         raise HTTPException(400, "所选草稿中存在已创建轮播图任务的记录")
     provider = image_task_provider(db, user, payload.provider)
+    quality = image_task_quality(provider, payload.quality)
     tasks: list[PodTask] = []
     for selection in payload.drafts:
         draft = drafts[selection.draft_id]
@@ -2184,7 +2194,7 @@ def create_batch_carousel_tasks(payload: BatchCarouselTaskCreate, user: User = D
                 company_id=draft.company_id, template_id=draft.template_id, created_by=user.id, draft_id=draft.id,
                 task_type="carousel", status=TaskStatus.QUEUED, provider=provider.provider, provider_model=provider.model,
                 parameters={"task_type": "carousel", "draft_id": draft.id, "source_sku": sku, "source_image_url": source_url,
-                            "reference_urls": [source_url], "ratio": payload.ratio, "quality": payload.quality,
+                            "reference_urls": [source_url], "ratio": payload.ratio, "quality": quality,
                             "creative_requirement": payload.creative_requirement}, result_urls=[], result_map=[],
             ))
     db.add_all(tasks); db.commit()
@@ -2213,6 +2223,7 @@ def create_batch_main_image_tasks(payload: BatchMainImageTaskCreate, user: User 
     if existing_task_drafts:
         raise HTTPException(400, "所选草稿中存在已创建首图任务的记录")
     provider = image_task_provider(db, user, payload.provider)
+    quality = image_task_quality(provider, payload.quality)
     carousel_results_by_draft: dict[int, set[str]] = {draft_id: set() for draft_id in draft_ids}
     for task in db.scalars(select(PodTask).where(PodTask.draft_id.in_(draft_ids), PodTask.task_type == "carousel")).all():
         carousel_results_by_draft.setdefault(task.draft_id, set()).update(task.result_urls or [])
@@ -2243,7 +2254,7 @@ def create_batch_main_image_tasks(payload: BatchMainImageTaskCreate, user: User 
             company_id=draft.company_id, template_id=draft.template_id, created_by=user.id, draft_id=draft.id,
             task_type="main_image", status=TaskStatus.QUEUED, provider=provider.provider, provider_model=provider.model,
             parameters={"task_type": "main_image", "draft_id": draft.id, "reference_mode": payload.reference_mode,
-                        "reference_urls": references, "ratio": payload.ratio, "quality": payload.quality,
+                        "reference_urls": references, "ratio": payload.ratio, "quality": quality,
                         "creative_requirement": payload.creative_requirement}, result_urls=[], result_map=[],
         ))
     db.add_all(tasks); db.commit()

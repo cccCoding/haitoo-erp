@@ -74,9 +74,10 @@ const showDraftImageDialog = ref(false), imageWorkspaceMode = ref<ImageWorkspace
 const carouselConfirmNextStage = ref<'main_image_pending'|'ready_to_publish'>('main_image_pending')
 const selectedImageSkus = ref<string[]>([]), selectedMainReferences = ref<string[]>([]), mainReferenceMode = ref<'random'|'manual'>('random')
 // 轮播图与首图任务使用各自独立的一套生成参数，互不干扰。
-const carouselParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:'1K'|'2K'}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'}), mainParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:'1K'|'2K'}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'})
-const batchCarouselParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:'1K'|'2K'}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'})
-const batchMainImageParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:'1K'|'2K'}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'}), batchMainImageReferenceMode = ref<'random'|'manual'>('random')
+type ImageQuality = 'auto'|'1K'|'2K'
+const carouselParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:ImageQuality}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'}), mainParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:ImageQuality}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'})
+const batchCarouselParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:ImageQuality}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'})
+const batchMainImageParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:ImageQuality}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'}), batchMainImageReferenceMode = ref<'random'|'manual'>('random')
 const stagedFinalImageItems = ref<any[] | null>(null), draggedFinalImageUrl = ref('')
 const showMainApplyDialog = ref(false), pendingMainApply = ref<{task:any;url:string}|null>(null), mainRemoveSku = ref('')
 const showShopManagersDialog = ref(false), managingShop = ref<any>(null), selectedManagerIds = ref<number[]>([]), shopManagersSaving = ref(false)
@@ -86,7 +87,7 @@ const showClaimMaterialsDialog = ref(false), claimingTask = ref<any>(null), sele
 type CreativeAsset = { id: string; file: File; preview: string; uploadedUrl?: string }
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL']
 const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2 }
-const creativeAssets = ref<CreativeAsset[]>([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeSubmitError = ref(''), creativeRequirement = ref(''), creativePromptIndex = ref(''), creativeProvider = ref(''), creativeRatio = ref<'1:1' | '3:4'>('1:1'), creativeQuality = ref<'1K' | '2K'>('1K'), creativeUploading = ref(false), creativeUploadedCount = ref(0)
+const creativeAssets = ref<CreativeAsset[]>([]), showCreativeAssetsDialog = ref(false), creativeAssetError = ref(''), creativeSubmitError = ref(''), creativeRequirement = ref(''), creativePromptIndex = ref(''), creativeProvider = ref(''), creativeRatio = ref<'1:1' | '3:4'>('1:1'), creativeQuality = ref<ImageQuality>('1K'), creativeUploading = ref(false), creativeUploadedCount = ref(0)
 const personalWhiteImages = ref<any[]>([]), personalPrompts = ref<any[]>([]), selectedWhiteImageId = ref<number | null>(null), personalResourcesLoading = ref(false)
 const showPersonalResourcesDialog = ref(false), personalResourceTab = ref<'white-images' | 'prompts'>('white-images'), managedResourceUserId = ref<number | null>(null), managedWhiteImages = ref<any[]>([]), managedPrompts = ref<any[]>([]), personalResourceSaving = ref(false)
 const showTeamResourcesDialog = ref(false), teamResourceTab = ref<'white-images' | 'prompts'>('white-images'), teamResourceUserId = ref<number | null>(null), teamResourceTemplateId = ref<number | null>(null), teamWhiteImages = ref<any[]>([]), teamPrompts = ref<any[]>([]), teamResourcesLoading = ref(false), teamResourceQuery = ref('')
@@ -101,6 +102,8 @@ function templateGroupIsEmpty(groupId: number) { return !templates.value.some(te
 // 运营端接口只返回后台已启用的模型；这里再保留一次筛选，避免接口数据异常时将停用模型带入任务。
 const availableAiProviders = computed(() => aiProviders.value.filter(provider => provider.enabled !== false))
 const selectedCreativeProvider = computed(() => availableAiProviders.value.find(provider => provider.provider === creativeProvider.value))
+function providerUsesAutoQuality(provider: string) { return provider === 'grsai-gpt-image-2' }
+function enforceProviderQuality(provider: string, params: { quality: ImageQuality }) { if (providerUsesAutoQuality(provider)) params.quality = 'auto'; else if (params.quality === 'auto') params.quality = '1K' }
 const creativeCredentialError = computed(() => selectedCreativeProvider.value?.credential_configured === false
   ? `尚未配置个人 ${selectedCreativeProvider.value.display_name} 平台密钥，请联系公司管理员配置`
   : '')
@@ -230,7 +233,7 @@ async function createBatchCarouselTasks() {
   if (batchDrafts.some(item=>!item.source_skus.length)) { showToast('每个草稿至少选择一张 SKU 图'); return }
   try {
     batchCarouselSaving.value=true
-    const {data}=await api.post('/drafts/batch-carousel-tasks',{drafts:batchDrafts,provider:batchCarouselParams.value.provider,ratio:batchCarouselParams.value.ratio,quality:batchCarouselParams.value.quality,creative_requirement:batchCarouselParams.value.prompt.trim()},{headers:headers.value})
+    const {data}=await api.post('/drafts/batch-carousel-tasks',{drafts:batchDrafts,provider:batchCarouselParams.value.provider,ratio:batchCarouselParams.value.ratio,quality:providerUsesAutoQuality(batchCarouselParams.value.provider)?'auto':batchCarouselParams.value.quality,creative_requirement:batchCarouselParams.value.prompt.trim()},{headers:headers.value})
     showBatchCarouselDialog.value=false; selectedDraftIds.value=[]; await refreshDraftList()
     showToast(`已为 ${data.draft_total} 条草稿创建 ${data.total} 条轮播图任务`)
   } catch(e:any) { showToast(e.response?.data?.detail || '批量创建轮播图任务失败') }
@@ -242,7 +245,7 @@ async function createBatchMainImageTasks() {
   if (batchMainImageReferenceMode.value==='manual' && batchDrafts.some(item=>!item.reference_urls.length)) { showToast('每个草稿至少选择一张轮播图'); return }
   try {
     batchMainImageSaving.value=true
-    const {data}=await api.post('/drafts/batch-main-image-tasks',{drafts:batchDrafts,reference_mode:batchMainImageReferenceMode.value,provider:batchMainImageParams.value.provider,ratio:batchMainImageParams.value.ratio,quality:batchMainImageParams.value.quality,creative_requirement:batchMainImageParams.value.prompt.trim()},{headers:headers.value})
+    const {data}=await api.post('/drafts/batch-main-image-tasks',{drafts:batchDrafts,reference_mode:batchMainImageReferenceMode.value,provider:batchMainImageParams.value.provider,ratio:batchMainImageParams.value.ratio,quality:providerUsesAutoQuality(batchMainImageParams.value.provider)?'auto':batchMainImageParams.value.quality,creative_requirement:batchMainImageParams.value.prompt.trim()},{headers:headers.value})
     showBatchMainImageDialog.value=false; selectedDraftIds.value=[]; await refreshDraftList()
     showToast(`已为 ${data.draft_total} 条草稿创建 ${data.total} 条首图任务`)
   } catch(e:any) { showToast(e.response?.data?.detail || '批量创建首图任务失败') }
@@ -445,7 +448,7 @@ async function createTask() {
     creativeAssetError.value = ''
     creativeUploading.value = true
     const print_urls = await uploadCreativeAssets()
-    const {data} = await api.post('/tasks',{template_id:selectedTemplateId.value,white_image_id:selectedWhiteImageId.value,provider:creativeProvider.value,ratio:creativeRatio.value,quality:creativeQuality.value,print_url:print_urls[0],print_urls,creative_requirement:creativeRequirement.value.trim()},{headers:headers.value})
+    const {data} = await api.post('/tasks',{template_id:selectedTemplateId.value,white_image_id:selectedWhiteImageId.value,provider:creativeProvider.value,ratio:creativeRatio.value,quality:providerUsesAutoQuality(creativeProvider.value)?'auto':creativeQuality.value,print_url:print_urls[0],print_urls,creative_requirement:creativeRequirement.value.trim()},{headers:headers.value})
     activeTaskType.value='sku_image'; currentTaskPage.value = 1
     const taskUrl=new URL(location.href); taskUrl.searchParams.set('task_type','sku_image'); history.replaceState({},'',taskUrl)
     await refresh()
@@ -716,7 +719,7 @@ async function createDraftImageTasks(type:'carousel'|'main_image') {
   try {
     imageTaskCreatingType.value=type
     const mainReferenceUrls=mainReferenceMode.value==='manual' ? selectedMainReferences.value : adoptedCarouselItems.value.map((item:any)=>item.image_url)
-    const {data}=await api.post(`/drafts/${imageDraft.value.id}/image-tasks`,{task_type:type,source_skus:type==='carousel'?selectedImageSkus.value:[],reference_mode:mainReferenceMode.value,reference_urls:type==='main_image'?mainReferenceUrls:[],provider:params.provider,ratio:params.ratio,quality:params.quality,creative_requirement:params.prompt.trim()},{headers:headers.value})
+    const {data}=await api.post(`/drafts/${imageDraft.value.id}/image-tasks`,{task_type:type,source_skus:type==='carousel'?selectedImageSkus.value:[],reference_mode:mainReferenceMode.value,reference_urls:type==='main_image'?mainReferenceUrls:[],provider:params.provider,ratio:params.ratio,quality:providerUsesAutoQuality(params.provider)?'auto':params.quality,creative_requirement:params.prompt.trim()},{headers:headers.value})
     const taskKey=type==='carousel'?'carousel_tasks':'main_image_tasks'
     imageDraft.value[taskKey]=[...(data.items || []).reverse(),...(imageDraft.value[taskKey] || [])]
     if(type==='carousel'){ selectedImageSkus.value=[] }

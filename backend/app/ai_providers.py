@@ -1,19 +1,16 @@
 """印花贴合图像模型适配层。
 
 业务流程只调用 :func:`generate`，每个供应商的鉴权、请求格式和响应格式都由
-独立适配器处理。新增豆包、千问等模型时，实现 ``ImageGenerationProvider`` 并
-登记到 ``PROVIDERS``，无需修改任务或选图流程。
+Grsai 的模型差异集中在本模块，任务与选图流程只处理统一的异步任务协议。
 """
-import base64
-import binascii
 import logging
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 import httpx
 
 from .config import Settings, get_settings
-from .storage import StorageError, is_public_r2_url, upload_image_bytes_async
+from .storage import is_public_r2_url
 
 
 logger = logging.getLogger(__name__)
@@ -40,14 +37,6 @@ class GenerationRequest:
     idempotency_key: str
 
 
-class ImageGenerationProvider(Protocol):
-    """供应商适配器的稳定边界。返回值一律为系统可访问的图片 URL。"""
-
-    name: str
-
-    async def generate(self, request: GenerationRequest, api_key: str, settings: Settings, client: httpx.AsyncClient) -> list[str]: ...
-
-
 def build_prompt(parameters: dict, template_name: str) -> str:
     requirement = parameters.get("creative_requirement") or ""
     output_name = {
@@ -65,132 +54,29 @@ def _public_url(url: str) -> str:
     raise ProviderError("图片未上传至当前 Cloudflare R2 公网域名，无法提交给模型服务")
 
 
-def _urls_from_response(data: dict[str, Any]) -> list[str]:
-    candidates = data.get("data") or data.get("output", {}).get("choices") or []
-    urls: list[str] = []
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        url = item.get("url") or item.get("image_url")
-        if isinstance(url, str):
-            urls.append(url)
-        for content in item.get("message", {}).get("content", []):
-            if isinstance(content, dict) and isinstance(content.get("image"), str):
-                urls.append(content["image"])
-    if not urls:
-        raise ProviderError("模型响应中没有可用图片地址")
-    return urls
-
-
-async def _save_generated_image(data: bytes, mime_type: str, company_id: int, task_id: int) -> str:
-    try:
-        return await upload_image_bytes_async(data, mime_type, company_id, f"generated/task-{task_id}")
-    except StorageError as exc:
-        raise ProviderError(str(exc)) from exc
-
-
-class SeedreamProvider:
-    name = "seedream"
-
-    async def generate(self, request: GenerationRequest, api_key: str, settings: Settings, client: httpx.AsyncClient) -> list[str]:
-        images = [_public_url(request.template_url), *[_public_url(url) for url in request.print_urls]]
-        response = await client.post(
-            f"{settings.seedream_base_url.rstrip('/')}/images/generations",
-            headers={"Authorization": f"Bearer {api_key}", "Idempotency-Key": request.idempotency_key},
-            json={"model": request.model, "prompt": request.prompt, "image": images, "size": "2048x2048" if request.quality == "2K" else "1024x1024", "response_format": "url", "n": 2},
-        )
-        _raise_for_provider_error(self.name, response)
-        return _urls_from_response(response.json())
-
-
-class QwenProvider:
-    name = "qwen"
-
-    async def generate(self, request: GenerationRequest, api_key: str, settings: Settings, client: httpx.AsyncClient) -> list[str]:
-        images = [_public_url(request.template_url), *[_public_url(url) for url in request.print_urls]]
-        content = [{"image": image} for image in images] + [{"text": request.prompt}]
-        response = await client.post(
-            settings.qwen_base_url,
-            headers={"Authorization": f"Bearer {api_key}", "X-DashScope-Async": "enable", "Idempotency-Key": request.idempotency_key},
-            json={"model": request.model, "input": {"messages": [{"role": "user", "content": content}]}, "parameters": {"n": 2, "size": "2048*2048" if request.quality == "2K" else "1024*1024"}},
-        )
-        _raise_for_provider_error(self.name, response)
-        return _urls_from_response(response.json())
-
-
-class GeminiProvider:
-    """Gemini 2.5 Flash Image 适配器。
-
-    Gemini 的 generateContent 接口要求输入图片以 inlineData/fileData 提交，且将生成
-    图片作为 inlineData 返回；这里下载公开参考图、转为 base64，并将结果上传
-    Cloudflare R2，以保持业务层始终使用稳定公网 URL 的约定。
-    """
-
-    name = "gemini"
-
-    async def generate(self, request: GenerationRequest, api_key: str, settings: Settings, client: httpx.AsyncClient) -> list[str]:
-        source_urls = [_public_url(request.template_url), *[_public_url(url) for url in request.print_urls]]
-        image_parts = [await self._input_image_part(url, client) for url in source_urls]
-        response = await client.post(
-            f"{settings.gemini_base_url.rstrip('/')}/models/{request.model}:generateContent",
-            params={"key": api_key},
-            headers={"Idempotency-Key": request.idempotency_key},
-            json={
-                "contents": [{"role": "user", "parts": [{"text": request.prompt}, *image_parts]}],
-                "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-            },
-        )
-        _raise_for_provider_error(self.name, response)
-        return await self._generated_image_urls(response.json(), request.company_id, request.task_id)
-
-    async def _input_image_part(self, url: str, client: httpx.AsyncClient) -> dict[str, Any]:
-        response = await client.get(url)
-        _raise_for_provider_error(self.name, response)
-        mime_type = response.headers.get("content-type", "image/png").split(";", 1)[0].lower()
-        if mime_type not in {"image/jpeg", "image/png", "image/webp"}:
-            raise ProviderError(f"Gemini 不支持参考图格式：{mime_type}")
-        if len(response.content) > 20 * 1024 * 1024:
-            raise ProviderError("参考图超过 Gemini 允许的 20MB 上限")
-        return {"inlineData": {"mimeType": mime_type, "data": base64.b64encode(response.content).decode("ascii")}}
-
-    async def _generated_image_urls(self, data: dict[str, Any], company_id: int, task_id: int) -> list[str]:
-        urls: list[str] = []
-        for candidate in data.get("candidates", []):
-            for part in candidate.get("content", {}).get("parts", []):
-                inline_data = part.get("inlineData") or part.get("inline_data")
-                if not isinstance(inline_data, dict) or not isinstance(inline_data.get("data"), str):
-                    continue
-                try:
-                    urls.append(await _save_generated_image(base64.b64decode(inline_data["data"]), inline_data.get("mimeType", "image/png"), company_id, task_id))
-                except (ValueError, binascii.Error) as exc:
-                    raise ProviderError("Gemini 返回了无效的图片数据") from exc
-        if not urls:
-            raise ProviderError("Gemini 响应中没有可用图片")
-        return urls
-
-
 class GrsaiProvider:
     """Grsai Nano Banana 异步图像生成适配器。"""
 
     name = "grsai"
-    async def generate(self, request: GenerationRequest, api_key: str, settings: Settings, client: httpx.AsyncClient) -> list[str]:
-        raise ProviderError("grsai 必须通过异步提交和短轮询队列处理")
-
     async def submit(self, request: GenerationRequest, api_key: str, settings: Settings, client: httpx.AsyncClient) -> tuple[dict[str, Any], str, dict[str, str]]:
         images = [_public_url(request.template_url), *[_public_url(url) for url in request.print_urls]]
         base_url = settings.grsai_base_url.rstrip("/")
         headers = {"Authorization": f"Bearer {api_key}", "Idempotency-Key": request.idempotency_key}
+        payload: dict[str, Any] = {
+            "model": request.model,
+            "prompt": request.prompt,
+            "images": images,
+            "aspectRatio": request.ratio,
+            "replyType": "async",
+        }
+        if request.model == "gpt-image-2":
+            payload["quality"] = "auto"
+        else:
+            payload["imageSize"] = request.quality
         response = await client.post(
             f"{base_url}/v1/api/generate",
             headers=headers,
-            json={
-                "model": request.model,
-                "prompt": request.prompt,
-                "images": images,
-                "aspectRatio": request.ratio,
-                "imageSize": request.quality,
-                "replyType": "async",
-            },
+            json=payload,
         )
         _raise_for_provider_error(self.name, response)
         return self._response_data(response), base_url, headers
@@ -236,30 +122,18 @@ def _raise_for_provider_error(provider: str, response: httpx.Response) -> None:
         raise ProviderError(f"{provider} 调用失败：{response.status_code} {response.text[:300]}")
 
 
-PROVIDERS: dict[str, ImageGenerationProvider] = {
-    SeedreamProvider.name: SeedreamProvider(),
-    QwenProvider.name: QwenProvider(),
-    GeminiProvider.name: GeminiProvider(),
-    GrsaiProvider.name: GrsaiProvider(),
-}
+GRSAI_PROVIDER_KEYS = {"grsai", "grsai-gpt-image-2"}
+PROVIDERS: dict[str, GrsaiProvider] = {key: GrsaiProvider() for key in GRSAI_PROVIDER_KEYS}
 
 
 def provider_supports_user_credentials(provider: str) -> bool:
     return provider in PROVIDERS
 
 
-async def generate(provider: str, request: GenerationRequest, api_key: str) -> list[str]:
-    adapter = PROVIDERS.get(provider)
-    if not adapter:
-        raise ProviderError("不支持的模型提供方")
-    async with httpx.AsyncClient(timeout=120) as client:
-        return await adapter.generate(request, api_key, get_settings(), client)
-
-
 async def submit_async_generation(provider: str, request: GenerationRequest, api_key: str) -> tuple[dict[str, Any], str, dict[str, str]]:
     """提交支持外部异步任务的模型，并返回供应商响应和查询所需上下文。"""
     adapter = PROVIDERS.get(provider)
-    if not isinstance(adapter, GrsaiProvider):
+    if provider not in GRSAI_PROVIDER_KEYS or not isinstance(adapter, GrsaiProvider):
         raise ProviderError("当前模型不支持异步任务提交")
     async with httpx.AsyncClient(timeout=120) as client:
         return await adapter.submit(request, api_key, get_settings(), client)
@@ -267,7 +141,7 @@ async def submit_async_generation(provider: str, request: GenerationRequest, api
 
 async def poll_async_generation(provider: str, provider_task_id: str, api_key: str) -> list[str] | None:
     adapter = PROVIDERS.get(provider)
-    if not isinstance(adapter, GrsaiProvider):
+    if provider not in GRSAI_PROVIDER_KEYS or not isinstance(adapter, GrsaiProvider):
         raise ProviderError("当前模型不支持异步任务查询")
     async with httpx.AsyncClient(timeout=120) as client:
         return await adapter.poll_once(provider_task_id, api_key, get_settings(), client)

@@ -11,7 +11,6 @@ from .ai_providers import (
     ProviderError,
     ProviderTaskTerminalError,
     build_prompt,
-    generate,
     poll_async_generation,
     submit_async_generation,
 )
@@ -71,11 +70,14 @@ def _request_for(task: PodTask, template: ProductTemplate) -> GenerationRequest:
     )
 
 
-def _task_api_key(db, task: PodTask) -> str:
+def _task_api_key(db, task: PodTask, setting: AIProviderSetting | None = None) -> str:
+    setting = setting or db.get(AIProviderSetting, task.provider)
+    if not setting:
+        raise ProviderError("任务所选模型不存在")
     credential = db.scalar(select(UserAIProviderCredential).where(
         UserAIProviderCredential.company_id == task.company_id,
         UserAIProviderCredential.user_id == task.created_by,
-        UserAIProviderCredential.provider == task.provider,
+        UserAIProviderCredential.provider == setting.credential_provider,
     ))
     if not credential:
         raise ProviderError("任务创建人尚未配置该模型平台密钥")
@@ -112,39 +114,20 @@ async def submit_task_once(task_id: int) -> str:
         if not setting or not setting.enabled:
             raise ProviderError("任务所选模型已停用或不存在")
         request = _request_for(task, template)
-        api_key = _task_api_key(db, task)
-        if task.provider == "grsai":
-            initial_result, _, _ = await submit_async_generation(task.provider, request, api_key)
-            provider_task_id = initial_result.get("id")
-            if not isinstance(provider_task_id, str) or not provider_task_id:
-                raise ProviderError("grsai 异步任务未返回任务 ID")
-            task = db.get(PodTask, task_id)
-            if not task or task.status != TaskStatus.QUEUED:
-                return "skipped"
-            task.provider_task_id = provider_task_id
-            task.status = TaskStatus.RUNNING
-            task.submitted_at = datetime.utcnow()
-            task.failure_reason = None
-            db.commit()
-            logger.info(
-                "印花任务已提交第三方 | task_id=%s provider=%s provider_task_id=%s",
-                task_id, task.provider, provider_task_id,
-            )
-            return "done"
-
-        urls = await generate(task.provider or "", request, api_key)
-        urls = await persist_generated_images(urls, task.company_id, task.id)
+        api_key = _task_api_key(db, task, setting)
+        initial_result, _, _ = await submit_async_generation(task.provider or "", request, api_key)
+        provider_task_id = initial_result.get("id")
+        if not isinstance(provider_task_id, str) or not provider_task_id:
+            raise ProviderError("grsai 异步任务未返回任务 ID")
         task = db.get(PodTask, task_id)
         if not task or task.status != TaskStatus.QUEUED:
             return "skipped"
-        task.result_map = map_task_results(task, urls)
-        task.result_urls = urls
-        task.status = TaskStatus.AWAITING_SELECTION
+        task.provider_task_id = provider_task_id
+        task.status = TaskStatus.RUNNING
         task.submitted_at = datetime.utcnow()
-        task.completed_at = datetime.utcnow()
         task.failure_reason = None
         db.commit()
-        logger.info("印花任务同步生成完成 | task_id=%s image_count=%s", task_id, len(urls))
+        logger.info("印花任务已提交第三方 | task_id=%s provider=%s provider_task_id=%s", task_id, task.provider, provider_task_id)
         return "done"
     except Exception as exc:
         db.rollback()

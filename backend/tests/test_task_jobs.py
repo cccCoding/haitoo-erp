@@ -29,14 +29,13 @@ class TaskJobTests(unittest.TestCase):
             db.add_all([
                 Company(id=1, name="Test Company", miaoshou_app_id="app-id", miaoshou_secret_encrypted="encrypted-secret"),
                 TaskQueueSetting(id=1, submit_interval_seconds=1, result_interval_seconds=5),
-                AIProviderSetting(provider="grsai", display_name="Grsai", model="nano", enabled=True, is_default=True, images_per_task=2),
-                AIProviderSetting(provider="seedream", display_name="Seedream", model="seed", enabled=True, is_default=False, images_per_task=1),
+                AIProviderSetting(provider="grsai", display_name="Grsai · Nano Banana Fast", model="nano", credential_provider="grsai", enabled=True, is_default=True, images_per_task=2),
+                AIProviderSetting(provider="grsai-gpt-image-2", display_name="Grsai · GPT Image 2", model="gpt-image-2", credential_provider="grsai", enabled=True, is_default=False, images_per_task=1),
                 ProductTemplate(id=1, company_id=1, name="M05L", cover_url="https://img.example/template.png"),
                 User(id=1, company_id=1, email="operator@example.com", name="Operator", user_code="AA", password_hash="x", role=Role.MEMBER),
                 User(id=2, company_id=1, email="admin@example.com", name="Admin", user_code="AB", password_hash="x", role=Role.COMPANY_ADMIN),
                 User(id=3, company_id=1, email="other@example.com", name="Other", user_code="AC", password_hash="x", role=Role.MEMBER),
                 UserAIProviderCredential(company_id=1, user_id=1, provider="grsai", secret_encrypted=encrypt_secret("member-key")),
-                UserAIProviderCredential(company_id=1, user_id=1, provider="seedream", secret_encrypted=encrypt_secret("seedream-member-key")),
                 UserTemplateWhiteImage(id=1, company_id=1, user_id=1, template_id=1, name="Front", image_url="https://img.example/template-white/1.png"),
             ])
             db.commit()
@@ -131,7 +130,7 @@ class TaskJobTests(unittest.TestCase):
         with self.session_factory() as db, patch.object(main, "is_company_r2_url", return_value=True):
             credential = db.scalar(select(UserAIProviderCredential).where(UserAIProviderCredential.user_id == 1))
             db.delete(credential); db.commit()
-            with self.assertRaisesRegex(Exception, "个人 Grsai 平台密钥"):
+            with self.assertRaisesRegex(Exception, "个人 Grsai .*平台密钥"):
                 main.create_task(payload, user=db.get(User, 1), db=db)
 
     def test_task_snapshots_and_worker_uses_selected_white_image(self) -> None:
@@ -201,19 +200,44 @@ class TaskJobTests(unittest.TestCase):
         self.assertIsNone(hidden["parameters"]["creative_requirement"])
         self.assertEqual(visible["parameters"]["creative_requirement"], "private prompt")
 
-    def test_sync_provider_completes_in_submit_worker(self) -> None:
+    def test_gpt_image_2_uses_shared_grsai_credential_and_auto_quality(self) -> None:
+        payload = PodTaskCreate(
+            template_id=1, white_image_id=1, provider="grsai-gpt-image-2", quality="2K", creative_requirement="test",
+            print_urls=["https://img.example/creative/1.png"],
+        )
+        with self.session_factory() as db, patch.object(main, "is_company_r2_url", return_value=True):
+            response = main.create_task(payload, user=db.get(User, 1), db=db)
+            task = db.get(PodTask, response["items"][0]["id"])
+        self.assertEqual(task.provider, "grsai-gpt-image-2")
+        self.assertEqual(task.provider_model, "gpt-image-2")
+        self.assertEqual(task.parameters["quality"], "auto")
+
+    def test_gpt_image_2_task_view_shows_grsai_platform_name(self) -> None:
         task_id = self.add_task()
         with self.session_factory() as db:
             task = db.get(PodTask, task_id)
-            task.provider = "seedream"; task.provider_model = "seed"
+            task.provider = "grsai-gpt-image-2"; task.provider_model = "gpt-image-2"
             db.commit()
-        with patch.object(task_jobs, "get_db", self.fake_get_db), patch.object(task_jobs, "generate", new=AsyncMock(return_value=["https://img.example/result.png"])), patch.object(task_jobs, "persist_generated_images", new=AsyncMock(side_effect=lambda urls, *_: urls)):
-            asyncio.run(task_jobs.process_submission_task(task_id, sleep=AsyncMock()))
-        with self.session_factory() as db:
-            task = db.get(PodTask, task_id)
-            self.assertEqual(task.status, TaskStatus.AWAITING_SELECTION)
-            self.assertEqual(task.result_urls, ["https://img.example/result.png"])
-            self.assertEqual(task.result_map[0]["print_url"], "https://img.example/print.png")
+            view = main.serialize_task_view(task, "Operator", "M05L", db.get(User, 1), include_details=False)
+        self.assertEqual(view["provider"], "grsai")
+        self.assertEqual(view["provider_key"], "grsai-gpt-image-2")
+
+    def test_gpt_image_2_submit_payload_uses_async_auto_quality(self) -> None:
+        request = task_jobs.GenerationRequest(
+            model="gpt-image-2", prompt="test", template_url="https://img.example/template.png",
+            print_urls=["https://img.example/print.png"], ratio="3:4", quality="auto",
+            company_id=1, task_id=1, idempotency_key="task-1",
+        )
+        response = httpx.Response(200, request=httpx.Request("POST", "https://grsai.example/generate"), json={"id": "provider-1"})
+        client = AsyncMock(); client.post.return_value = response
+        with patch("app.ai_providers.is_public_r2_url", return_value=True):
+            asyncio.run(GrsaiProvider().submit(request, "test-key", Settings(grsai_base_url="https://grsai.example"), client))
+        payload = client.post.call_args.kwargs["json"]
+        self.assertEqual(payload, {
+            "model": "gpt-image-2", "prompt": "test",
+            "images": ["https://img.example/template.png", "https://img.example/print.png"],
+            "aspectRatio": "3:4", "quality": "auto", "replyType": "async",
+        })
 
     def test_three_submit_failures_are_terminal(self) -> None:
         task_id = self.add_task()

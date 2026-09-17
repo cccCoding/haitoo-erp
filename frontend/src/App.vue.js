@@ -67,7 +67,6 @@ const previewImageUrl = ref(''), previewImageAlt = ref('');
 const showDraftImageDialog = ref(false), imageWorkspaceMode = ref('full'), imageDraft = ref(null), imageWorkspaceLoading = ref(false), imageTasksRefreshing = ref(false), imageTaskCreatingType = ref(''), imageConfirmSaving = ref(false);
 const carouselConfirmNextStage = ref('main_image_pending');
 const selectedImageSkus = ref([]), selectedMainReferences = ref([]), mainReferenceMode = ref('random');
-// 轮播图与首图任务使用各自独立的一套生成参数，互不干扰。
 const carouselParams = ref({ prompt: '', provider: '', ratio: '1:1', quality: '1K' }), mainParams = ref({ prompt: '', provider: '', ratio: '1:1', quality: '1K' });
 const batchCarouselParams = ref({ prompt: '', provider: '', ratio: '1:1', quality: '1K' });
 const batchMainImageParams = ref({ prompt: '', provider: '', ratio: '1:1', quality: '1K' }), batchMainImageReferenceMode = ref('random');
@@ -94,6 +93,11 @@ function templateGroupIsEmpty(groupId) { return !templates.value.some(template =
 // 运营端接口只返回后台已启用的模型；这里再保留一次筛选，避免接口数据异常时将停用模型带入任务。
 const availableAiProviders = computed(() => aiProviders.value.filter(provider => provider.enabled !== false));
 const selectedCreativeProvider = computed(() => availableAiProviders.value.find(provider => provider.provider === creativeProvider.value));
+function providerUsesAutoQuality(provider) { return provider === 'grsai-gpt-image-2'; }
+function enforceProviderQuality(provider, params) { if (providerUsesAutoQuality(provider))
+    params.quality = 'auto';
+else if (params.quality === 'auto')
+    params.quality = '1K'; }
 const creativeCredentialError = computed(() => selectedCreativeProvider.value?.credential_configured === false
     ? `尚未配置个人 ${selectedCreativeProvider.value.display_name} 平台密钥，请联系公司管理员配置`
     : '');
@@ -243,7 +247,7 @@ async function createBatchCarouselTasks() {
     }
     try {
         batchCarouselSaving.value = true;
-        const { data } = await api.post('/drafts/batch-carousel-tasks', { drafts: batchDrafts, provider: batchCarouselParams.value.provider, ratio: batchCarouselParams.value.ratio, quality: batchCarouselParams.value.quality, creative_requirement: batchCarouselParams.value.prompt.trim() }, { headers: headers.value });
+        const { data } = await api.post('/drafts/batch-carousel-tasks', { drafts: batchDrafts, provider: batchCarouselParams.value.provider, ratio: batchCarouselParams.value.ratio, quality: providerUsesAutoQuality(batchCarouselParams.value.provider) ? 'auto' : batchCarouselParams.value.quality, creative_requirement: batchCarouselParams.value.prompt.trim() }, { headers: headers.value });
         showBatchCarouselDialog.value = false;
         selectedDraftIds.value = [];
         await refreshDraftList();
@@ -268,7 +272,7 @@ async function createBatchMainImageTasks() {
     }
     try {
         batchMainImageSaving.value = true;
-        const { data } = await api.post('/drafts/batch-main-image-tasks', { drafts: batchDrafts, reference_mode: batchMainImageReferenceMode.value, provider: batchMainImageParams.value.provider, ratio: batchMainImageParams.value.ratio, quality: batchMainImageParams.value.quality, creative_requirement: batchMainImageParams.value.prompt.trim() }, { headers: headers.value });
+        const { data } = await api.post('/drafts/batch-main-image-tasks', { drafts: batchDrafts, reference_mode: batchMainImageReferenceMode.value, provider: batchMainImageParams.value.provider, ratio: batchMainImageParams.value.ratio, quality: providerUsesAutoQuality(batchMainImageParams.value.provider) ? 'auto' : batchMainImageParams.value.quality, creative_requirement: batchMainImageParams.value.prompt.trim() }, { headers: headers.value });
         showBatchMainImageDialog.value = false;
         selectedDraftIds.value = [];
         await refreshDraftList();
@@ -586,7 +590,7 @@ async function createTask() {
         creativeAssetError.value = '';
         creativeUploading.value = true;
         const print_urls = await uploadCreativeAssets();
-        const { data } = await api.post('/tasks', { template_id: selectedTemplateId.value, white_image_id: selectedWhiteImageId.value, provider: creativeProvider.value, ratio: creativeRatio.value, quality: creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() }, { headers: headers.value });
+        const { data } = await api.post('/tasks', { template_id: selectedTemplateId.value, white_image_id: selectedWhiteImageId.value, provider: creativeProvider.value, ratio: creativeRatio.value, quality: providerUsesAutoQuality(creativeProvider.value) ? 'auto' : creativeQuality.value, print_url: print_urls[0], print_urls, creative_requirement: creativeRequirement.value.trim() }, { headers: headers.value });
         activeTaskType.value = 'sku_image';
         currentTaskPage.value = 1;
         const taskUrl = new URL(location.href);
@@ -1116,7 +1120,7 @@ async function createDraftImageTasks(type) {
     try {
         imageTaskCreatingType.value = type;
         const mainReferenceUrls = mainReferenceMode.value === 'manual' ? selectedMainReferences.value : adoptedCarouselItems.value.map((item) => item.image_url);
-        const { data } = await api.post(`/drafts/${imageDraft.value.id}/image-tasks`, { task_type: type, source_skus: type === 'carousel' ? selectedImageSkus.value : [], reference_mode: mainReferenceMode.value, reference_urls: type === 'main_image' ? mainReferenceUrls : [], provider: params.provider, ratio: params.ratio, quality: params.quality, creative_requirement: params.prompt.trim() }, { headers: headers.value });
+        const { data } = await api.post(`/drafts/${imageDraft.value.id}/image-tasks`, { task_type: type, source_skus: type === 'carousel' ? selectedImageSkus.value : [], reference_mode: mainReferenceMode.value, reference_urls: type === 'main_image' ? mainReferenceUrls : [], provider: params.provider, ratio: params.ratio, quality: providerUsesAutoQuality(params.provider) ? 'auto' : params.quality, creative_requirement: params.prompt.trim() }, { headers: headers.value });
         const taskKey = type === 'carousel' ? 'carousel_tasks' : 'main_image_tasks';
         imageDraft.value[taskKey] = [...(data.items || []).reverse(), ...(imageDraft.value[taskKey] || [])];
         if (type === 'carousel') {

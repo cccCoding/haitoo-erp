@@ -145,7 +145,7 @@ class PodTaskCreate(BaseModel):
     provider: str | None = Field(default=None, max_length=40)
     task_type: Literal["sku_image"] = "sku_image"
     ratio: Literal["1:1", "3:4"] = "1:1"
-    quality: Literal["1K", "2K"] = "1K"
+    quality: Literal["auto", "1K", "2K"] = "1K"
     print_url: str | None = None
     print_urls: list[str] = Field(default_factory=list, max_length=500)
     creative_requirement: str = Field(min_length=1, max_length=1000)
@@ -339,7 +339,7 @@ class DraftImageTaskCreate(BaseModel):
     reference_urls: list[str] = Field(default_factory=list, max_length=9)
     provider: str | None = Field(default=None, max_length=40)
     ratio: Literal["1:1", "3:4"] = "1:1"
-    quality: Literal["1K", "2K"] = "1K"
+    quality: Literal["auto", "1K", "2K"] = "1K"
     creative_requirement: str = Field(min_length=1, max_length=1000)
 
 
@@ -352,7 +352,7 @@ class BatchCarouselTaskCreate(BaseModel):
     drafts: list[BatchCarouselDraftSelection] = Field(min_length=1, max_length=20)
     provider: str | None = Field(default=None, max_length=40)
     ratio: Literal["1:1", "3:4"] = "1:1"
-    quality: Literal["1K", "2K"] = "1K"
+    quality: Literal["auto", "1K", "2K"] = "1K"
     creative_requirement: str = Field(min_length=1, max_length=1000)
 
 
@@ -366,7 +366,7 @@ class BatchMainImageTaskCreate(BaseModel):
     reference_mode: Literal["random", "manual"] = "random"
     provider: str | None = Field(default=None, max_length=40)
     ratio: Literal["1:1", "3:4"] = "1:1"
-    quality: Literal["1K", "2K"] = "1K"
+    quality: Literal["auto", "1K", "2K"] = "1K"
     creative_requirement: str = Field(min_length=1, max_length=1000)
 
 

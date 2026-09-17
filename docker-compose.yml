@@ -60,7 +60,7 @@ services:
       R2_BUCKET: ${R2_BUCKET:-haitoo-images-prod}
       R2_ENDPOINT: ${R2_ENDPOINT:-}
       R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
-      # false 时不复制 Seedream/千问生成结果到 R2；Gemini 的内嵌结果仍需上传 R2。
+      # false 时保留模型生成结果的临时 URL；生产环境建议保持 true。
       AI_GENERATED_IMAGE_UPLOAD_TO_R2: ${AI_GENERATED_IMAGE_UPLOAD_TO_R2:-true}
     ports:
       - "8001:8000"
