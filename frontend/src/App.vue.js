@@ -1,8 +1,16 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import axios from 'axios';
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' });
 const token = ref(localStorage.getItem('haitoro_token') || '');
-const page = ref(new URLSearchParams(location.search).has('task_type') ? 'tasks' : 'dashboard');
+const route = useRoute();
+const router = useRouter();
+const workspaceRouteNames = new Set(['dashboard', 'templates', 'pod', 'tasks', 'materials', 'drafts', 'members', 'shops', 'tiktok-catalogs']);
+const page = computed({
+    get: () => workspaceRouteNames.has(String(route.name)) ? String(route.name) : 'dashboard',
+    set: value => { if (workspaceRouteNames.has(value) && value !== route.name)
+        void router.push({ name: value }); },
+});
 const hubAgentPairingCode = ref(new URLSearchParams(location.search).get('hub_agent_pair') || '');
 const email = ref('');
 const password = ref('');
@@ -453,8 +461,10 @@ const groupedBatchClaimItems = computed(() => {
     });
     return [...groups.values()];
 });
-function syncTaskUrl() { const url = new URL(location.href); url.searchParams.set('task_type', activeTaskType.value); url.searchParams.set('task_page', String(currentTaskPage.value)); url.searchParams.set('task_page_size', String(taskPageSize.value)); url.searchParams.set('task_creator', taskCreatorFilterId.value ? String(taskCreatorFilterId.value) : 'all'); url.searchParams.set('task_status', taskStatusFilter.value); taskCreatedFrom.value ? url.searchParams.set('task_from', taskCreatedFrom.value) : url.searchParams.delete('task_from'); taskCreatedTo.value ? url.searchParams.set('task_to', taskCreatedTo.value) : url.searchParams.delete('task_to'); activeTaskType.value === 'sku_image' && taskSkuQuery.value.trim() ? url.searchParams.set('task_skus', taskSkuQuery.value) : url.searchParams.delete('task_skus'); history.replaceState({}, '', url); }
-function clearTaskUrl() { const url = new URL(location.href); ['task_type', 'task_page', 'task_page_size', 'task_creator', 'task_status', 'task_from', 'task_to', 'task_skus'].forEach(key => url.searchParams.delete(key)); history.replaceState({}, '', url); }
+function syncTaskUrl() { if (page.value !== 'tasks')
+    return; void router.replace({ name: 'tasks', query: { task_type: activeTaskType.value, task_page: String(currentTaskPage.value), task_page_size: String(taskPageSize.value), task_creator: taskCreatorFilterId.value ? String(taskCreatorFilterId.value) : 'all', task_status: taskStatusFilter.value, ...(taskCreatedFrom.value ? { task_from: taskCreatedFrom.value } : {}), ...(taskCreatedTo.value ? { task_to: taskCreatedTo.value } : {}), ...(activeTaskType.value === 'sku_image' && taskSkuQuery.value.trim() ? { task_skus: taskSkuQuery.value } : {}) } }); }
+function clearTaskUrl() { if (route.query.task_type)
+    void router.replace({ name: page.value }); }
 watch(page, value => value === 'tasks' ? syncTaskUrl() : clearTaskUrl());
 function applyTaskPage(data) { tasks.value = data.items || []; taskTotal.value = data.total || 0; taskTypeTotals.value = { ...taskTypeTotals.value, ...(data.task_type_counts || {}) }; taskTypeFilteredTotals.value = { ...taskTypeFilteredTotals.value, [activeTaskType.value]: data.total || 0 }; taskActiveCount.value = data.active_count || 0; taskStatusCounts.value = data.status_counts || {}; currentTaskPage.value = data.page || 1; if (page.value === 'tasks')
     syncTaskUrl(); }
@@ -523,6 +533,10 @@ async function refresh() {
     const me = await api.get('/me', h);
     user.value = me.data.user;
     company.value = me.data.company;
+    if (route.meta.requiresCompanyAdmin && user.value.role !== 'company_admin') {
+        await router.replace({ name: 'dashboard' });
+        showToast('当前账号没有访问该管理页面的权限');
+    }
     if (!creatorFiltersInitialized.value) {
         if (!initialTaskParams.has('task_creator'))
             taskCreatorFilterId.value = user.value.id;
