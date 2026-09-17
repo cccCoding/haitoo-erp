@@ -3,6 +3,7 @@ import axios from 'axios';
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' });
 const token = ref(localStorage.getItem('haitoro_token') || '');
 const page = ref(new URLSearchParams(location.search).has('task_type') ? 'tasks' : 'dashboard');
+const hubAgentPairingCode = ref(new URLSearchParams(location.search).get('hub_agent_pair') || '');
 const email = ref('');
 const password = ref('');
 const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), materialAssets = ref([]), drafts = ref([]), members = ref([]), aiProviders = ref([]);
@@ -14,7 +15,10 @@ const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref
 const showMemberCredentialDialog = ref(false), credentialMember = ref(null), credentialProvider = ref(null), credentialApiKey = ref(''), credentialSaving = ref(false);
 const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), myAccountSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
+const activeShopType = ref('cross_border'), showLocalShopDialog = ref(false), localShopSaving = ref(false), localShopForm = ref({ name: '', region: 'MY', nickname: '' });
 const showMiaoshouDialog = ref(false), miaoshouForm = ref({ app_id: '', app_secret: '' }), miaoshouSaving = ref(false);
+const hubAgents = ref([]), showHubstudioDialog = ref(false), hubstudioSaving = ref(false), hubstudioForm = ref({ app_id: '', app_secret: '', group_code: '' });
+const showHubBindingDialog = ref(false), bindingShop = ref(null), hubBindingSaving = ref(false), hubBindingForm = ref({ container_code: '', agent_id: null });
 const tiktokCatalogs = ref([]), tiktokCatalogLoading = ref(false), tiktokCatalogError = ref('');
 const showTiktokCatalogDialog = ref(false), tiktokCatalogName = ref(''), tiktokCatalogFile = ref(null);
 const showTiktokCatalogDetailDialog = ref(false), managingTiktokCatalog = ref(null), managingTiktokCatalogOptions = ref(null), managingTiktokCategory = ref('');
@@ -31,7 +35,7 @@ const publishingDraftId = ref(null), skippingCarouselDraftId = ref(null), skippi
 const selectedDraftIds = ref([]), showTiktokExportDialog = ref(false), tiktokExportOptions = ref(null), tiktokExportLoading = ref(false), tiktokExportError = ref('');
 const showBatchCarouselDialog = ref(false), showBatchMainImageDialog = ref(false), batchCarouselSaving = ref(false), batchMainImageSaving = ref(false), batchCarouselSkipping = ref(false), batchMainImageSkipping = ref(false), batchCarouselSelections = ref({}), batchMainImageSelections = ref({});
 const MAX_TIKTOK_EXPORT_DRAFTS = 20;
-const tiktokExportCatalogId = ref(null), tiktokExportCategory = ref(''), tiktokExportDefaultPrice = ref(null), tiktokExportDefaultQuantity = ref(999), tiktokExportCod = ref('Y'), tiktokExportAttributes = ref({}), tiktokExportOverrides = ref({});
+const tiktokExportCatalogId = ref(null), tiktokExportCategory = ref(''), tiktokExportDefaultPrice = ref(null), tiktokExportDefaultQuantity = ref(999), tiktokExportCod = ref('Y'), tiktokExportAttributes = ref({}), tiktokExportOverrides = ref({}), tiktokTargetShopId = ref(null), tiktokSubmitting = ref(false);
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null);
 const activeDraftTab = ref('all'), draftTotal = ref(0), draftTabCounts = ref({ all: 0, pending: 0, carousel_pending: 0, main_image_pending: 0, ready_to_publish: 0, published: 0 });
 const activeDraftWorkStatus = ref('all'), draftWorkStatusCounts = ref({ all: 0, not_started: 0, in_progress: 0, awaiting_review: 0, failed: 0 });
@@ -124,6 +128,8 @@ const pagedDrafts = computed(() => drafts.value);
 const selectedDrafts = computed(() => drafts.value.filter(draft => selectedDraftIds.value.includes(draft.id)));
 const allPagedDraftsSelected = computed(() => Boolean(pagedDrafts.value.length) && pagedDrafts.value.every(draft => selectedDraftIds.value.includes(draft.id)));
 const batchDispatchEligible = computed(() => selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab === 'pending'));
+const crossBorderManagedShops = computed(() => managedShops.value.filter(shop => shop.shop_type !== 'local'));
+const localManagedShops = computed(() => managedShops.value.filter(shop => shop.shop_type === 'local'));
 const tiktokExportEligible = computed(() => selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab !== 'pending'));
 const batchCarouselEligible = computed(() => activeDraftTab.value === 'carousel_pending' && activeDraftWorkStatus.value === 'not_started' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.carousel_task_summary?.work_status === 'not_started'));
 const batchCarouselSkipEligible = computed(() => activeDraftTab.value === 'carousel_pending' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab === 'carousel_pending'));
@@ -450,18 +456,35 @@ async function refresh() {
         creativeProvider.value = availableAiProviders.value.find(item => item.is_default)?.provider || availableAiProviders.value[0]?.provider || '';
     }
     if (user.value.role === 'company_admin') {
-        const [companyMembers, companyShops] = await Promise.all([api.get('/members', h), api.get('/shops/manage', h)]);
+        const [companyMembers, companyShops, agents] = await Promise.all([api.get('/members', h), api.get('/shops/manage', h), api.get('/hub-agents', h)]);
         members.value = companyMembers.data;
         managedShops.value = companyShops.data;
+        hubAgents.value = agents.data;
     }
     else {
         members.value = [];
         managedShops.value = [];
+        hubAgents.value = [];
     }
     if (!selectedTemplateId.value && templates.value[0])
         selectedTemplateId.value = templates.value[0].id;
     if (selectedTemplateId.value)
         await loadMyTemplateResources(false);
+    if (hubAgentPairingCode.value) {
+        try {
+            const { data } = await api.post('/hub-agent/pairings/complete', { code: hubAgentPairingCode.value }, h);
+            if (data.status === 'completed') {
+                hubAgentPairingCode.value = '';
+                const url = new URL(location.href);
+                url.searchParams.delete('hub_agent_pair');
+                history.replaceState({}, '', url);
+                showToast(`本机执行器 ${data.agent_name || ''} 已授权`);
+            }
+        }
+        catch (e) {
+            showToast(e.response?.data?.detail || '本机执行器配对失败');
+        }
+    }
 }
 async function login() { try {
     loading.value = true;
@@ -1315,6 +1338,7 @@ async function openTiktokExportDialog() {
     tiktokExportAttributes.value = {};
     tiktokExportOptions.value = null;
     tiktokExportOverrides.value = Object.fromEntries(selectedDrafts.value.map(draft => [draft.id, { price: null, quantity: null }]));
+    tiktokTargetShopId.value = null;
     try {
         if (!tiktokExportCatalogId.value)
             throw new Error('请先由管理员新增 TK 类目库');
@@ -1446,6 +1470,41 @@ async function exportSelectedDrafts() {
     }
     finally {
         tiktokExportLoading.value = false;
+    }
+}
+async function submitSelectedDraftsToHubstudio() {
+    const defaultPrice = Number(tiktokExportDefaultPrice.value), defaultQuantity = Number(tiktokExportDefaultQuantity.value);
+    if (!tiktokTargetShopId.value) {
+        tiktokExportError.value = '请选择已绑定 HubStudio 的本土店';
+        return;
+    }
+    if (!tiktokExportCatalogId.value || !tiktokExportCategory.value || !Number.isFinite(defaultPrice) || defaultPrice < 0.01 || !Number.isInteger(defaultQuantity) || defaultQuantity < 0) {
+        tiktokExportError.value = '请先完整填写 TikTok 导出参数';
+        return;
+    }
+    const product_overrides = selectedDrafts.value.flatMap(draft => {
+        const value = tiktokExportOverrides.value[draft.id] || {};
+        const item = { draft_id: draft.id };
+        if (value.price !== null && value.price !== '')
+            item.price = Number(value.price);
+        if (value.quantity !== null && value.quantity !== '')
+            item.quantity = Number(value.quantity);
+        return Object.keys(item).length > 1 ? [item] : [];
+    });
+    try {
+        tiktokSubmitting.value = true;
+        tiktokExportError.value = '';
+        const { data } = await api.post('/drafts/submit-to-hubstudio', { shop_id: tiktokTargetShopId.value, draft_ids: selectedDraftIds.value, category_catalog_id: tiktokExportCatalogId.value, category: tiktokExportCategory.value, default_price: defaultPrice, default_quantity: defaultQuantity, cod: tiktokExportCod.value, attributes: Object.fromEntries(Object.entries(tiktokExportAttributes.value).filter(([, value]) => hasTiktokAttributeValue(value))), product_overrides }, { headers: headers.value });
+        showTiktokExportDialog.value = false;
+        selectedDraftIds.value = [];
+        await refreshDraftList();
+        showToast(`自动上品任务 #${data.id} 已进入队列`);
+    }
+    catch (e) {
+        tiktokExportError.value = e.response?.data?.detail || '创建 HubStudio 自动上品任务失败';
+    }
+    finally {
+        tiktokSubmitting.value = false;
     }
 }
 function openTiktokCatalogCreateDialog() {
@@ -1911,6 +1970,29 @@ finally {
     shopLoading.value = false;
 } }
 function openMiaoshouDialog() { miaoshouForm.value = { app_id: '', app_secret: '' }; shopError.value = ''; showMiaoshouDialog.value = true; }
+function openLocalShopDialog() { localShopForm.value = { name: '', region: 'MY', nickname: '' }; shopError.value = ''; showLocalShopDialog.value = true; }
+async function createLocalShop() {
+    const name = localShopForm.value.name.trim();
+    if (!name) {
+        shopError.value = '请填写本土店名称';
+        return;
+    }
+    try {
+        localShopSaving.value = true;
+        shopError.value = '';
+        await api.post('/shops/local', { name, region: localShopForm.value.region.trim() || 'MY', nickname: localShopForm.value.nickname.trim() || null }, { headers: headers.value });
+        showLocalShopDialog.value = false;
+        activeShopType.value = 'local';
+        await refresh();
+        showToast('本土店已创建，请继续绑定 HubStudio 环境');
+    }
+    catch (e) {
+        shopError.value = e.response?.data?.detail || '创建本土店失败';
+    }
+    finally {
+        localShopSaving.value = false;
+    }
+}
 async function saveMiaoshouAccount() {
     const appId = miaoshouForm.value.app_id.trim(), appSecret = miaoshouForm.value.app_secret.trim();
     if (!appId || !appSecret) {
@@ -1948,6 +2030,35 @@ catch (e) {
 }
 finally {
     shopManagersSaving.value = false;
+} }
+function openHubstudioDialog() { hubstudioForm.value = { app_id: '', app_secret: '', group_code: '' }; showHubstudioDialog.value = true; }
+async function saveHubstudioAccount() { try {
+    hubstudioSaving.value = true;
+    await api.put('/hubstudio/account', hubstudioForm.value, { headers: headers.value });
+    showHubstudioDialog.value = false;
+    await refresh();
+    showToast('HubStudio API 凭据已保存');
+}
+catch (e) {
+    shopError.value = e.response?.data?.detail || '保存 HubStudio 配置失败';
+}
+finally {
+    hubstudioSaving.value = false;
+} }
+function openHubBindingDialog(shop) { bindingShop.value = shop; hubBindingForm.value = { container_code: shop.hubstudio_container_code || '', agent_id: shop.hub_agent_id || null }; showHubBindingDialog.value = true; }
+async function saveHubBinding() { if (!bindingShop.value || !hubBindingForm.value.container_code.trim() || !hubBindingForm.value.agent_id)
+    return; try {
+    hubBindingSaving.value = true;
+    await api.put(`/shops/${bindingShop.value.id}/hubstudio-binding`, { hubstudio_container_code: hubBindingForm.value.container_code.trim(), hub_agent_id: hubBindingForm.value.agent_id }, { headers: headers.value });
+    showHubBindingDialog.value = false;
+    await refresh();
+    showToast('店铺 HubStudio 环境已绑定');
+}
+catch (e) {
+    shopError.value = e.response?.data?.detail || '保存 HubStudio 店铺绑定失败';
+}
+finally {
+    hubBindingSaving.value = false;
 } }
 let toastTimer;
 function showToast(message) { toast.value = message; if (toastTimer)
@@ -4430,104 +4541,278 @@ if (__VLS_ctx.token) {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-            ...{ class: "miaoshou-status" },
-            ...{ class: (__VLS_ctx.company?.miaoshou_configured ? 'configured' : 'missing') },
-        });
-        (__VLS_ctx.company?.miaoshou_configured ? '妙手 API Key 已配置' : '请先配置妙手 API Key');
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "shop-actions" },
+        (__VLS_ctx.activeShopType === 'cross_border' ? '跨境店由妙手同步，用于现有跨境业务。' : '本土店由管理员手工创建，仅本土店可绑定 HubStudio 并自动上品。');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
+            ...{ class: "draft-tabs" },
+            'aria-label': "店铺类型",
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (__VLS_ctx.openMiaoshouDialog) },
-            ...{ class: "secondary" },
-            disabled: (__VLS_ctx.miaoshouSaving || __VLS_ctx.shopLoading),
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.token))
+                        return;
+                    if (!!(__VLS_ctx.page === 'dashboard'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'templates'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'pod'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'tasks'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'materials'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'drafts'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                        return;
+                    if (!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
+                        return;
+                    __VLS_ctx.activeShopType = 'cross_border';
+                } },
+            ...{ class: ({ active: __VLS_ctx.activeShopType === 'cross_border' }) },
         });
-        (__VLS_ctx.company?.miaoshou_configured ? '更新 API Key' : '配置 API Key');
+        (__VLS_ctx.crossBorderManagedShops.length);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (__VLS_ctx.loadMiaoshouShops) },
-            ...{ class: "primary" },
-            disabled: (__VLS_ctx.shopLoading || __VLS_ctx.miaoshouSaving || !__VLS_ctx.company?.miaoshou_configured),
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.token))
+                        return;
+                    if (!!(__VLS_ctx.page === 'dashboard'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'templates'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'pod'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'tasks'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'materials'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'drafts'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                        return;
+                    if (!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
+                        return;
+                    __VLS_ctx.activeShopType = 'local';
+                } },
+            ...{ class: ({ active: __VLS_ctx.activeShopType === 'local' }) },
         });
-        (__VLS_ctx.shopLoading ? '同步中…' : '↻ 同步妙手店铺');
+        (__VLS_ctx.localManagedShops.length);
         if (__VLS_ctx.shopError) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "error" },
             });
             (__VLS_ctx.shopError);
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "draft-table" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "thead" },
-            ...{ style: {} },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.managedShops))) {
+        if (__VLS_ctx.activeShopType === 'cross_border') {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                key: (shop.id),
-                ...{ class: "trow" },
+                ...{ class: "shop-actions" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "miaoshou-status" },
+                ...{ class: (__VLS_ctx.company?.miaoshou_configured ? 'configured' : 'missing') },
+            });
+            (__VLS_ctx.company?.miaoshou_configured ? '妙手 API Key 已配置' : '请先配置妙手 API Key');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.openMiaoshouDialog) },
+                ...{ class: "secondary" },
+                disabled: (__VLS_ctx.miaoshouSaving || __VLS_ctx.shopLoading),
+            });
+            (__VLS_ctx.company?.miaoshou_configured ? '更新 API Key' : '配置 API Key');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.loadMiaoshouShops) },
+                ...{ class: "primary" },
+                disabled: (__VLS_ctx.shopLoading || __VLS_ctx.miaoshouSaving || !__VLS_ctx.company?.miaoshou_configured),
+            });
+            (__VLS_ctx.shopLoading ? '同步中…' : '↻ 同步妙手店铺');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+                ...{ class: "draft-table" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "thead" },
                 ...{ style: {} },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (shop.external_shop_id || shop.id);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-            (shop.name || '—');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (shop.nickname || '—');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (shop.platform || '—');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (shop.region || '—');
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "chip" },
-                ...{ class: (shop.auth_status ? 'blue' : 'orange') },
-            });
-            (shop.auth_status || '未知');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (shop.auth_expires_at || '—');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (shop.manager_users.length ? shop.manager_users.map((member) => member.name).join('、') : '暂未分配');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!(__VLS_ctx.token))
-                            return;
-                        if (!!(__VLS_ctx.page === 'dashboard'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'templates'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'pod'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'tasks'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'materials'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'drafts'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
-                            return;
-                        if (!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
-                            return;
-                        __VLS_ctx.openShopManagersDialog(shop);
-                    } },
-            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.crossBorderManagedShops))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    key: (shop.id),
+                    ...{ class: "trow" },
+                    ...{ style: {} },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (shop.external_shop_id || shop.id);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+                (shop.name || '—');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (shop.nickname || '—');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (shop.platform || '—');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (shop.region || '—');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "chip" },
+                    ...{ class: (shop.auth_status ? 'blue' : 'orange') },
+                });
+                (shop.auth_status || '未知');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (shop.auth_expires_at || '—');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (shop.manager_users.length ? shop.manager_users.map((member) => member.name).join('、') : '暂未分配');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            if (!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            if (!(__VLS_ctx.activeShopType === 'cross_border'))
+                                return;
+                            __VLS_ctx.openShopManagersDialog(shop);
+                        } },
+                });
+            }
+            if (!__VLS_ctx.crossBorderManagedShops.length && !__VLS_ctx.shopLoading) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                    ...{ class: "empty" },
+                });
+                (__VLS_ctx.company?.miaoshou_configured ? '暂无已同步店铺，点击“同步妙手店铺”开始获取。' : '配置妙手 API Key 后即可同步店铺。');
+            }
         }
-        if (!__VLS_ctx.managedShops.length && !__VLS_ctx.shopLoading) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
-                ...{ class: "empty" },
+        else {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "shop-actions" },
             });
-            (__VLS_ctx.company?.miaoshou_configured ? '暂无已同步店铺，点击“同步妙手店铺”开始获取。' : '配置妙手 API Key 后即可同步店铺。');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "miaoshou-status" },
+                ...{ class: (__VLS_ctx.company?.hubstudio_configured ? 'configured' : 'missing') },
+            });
+            (__VLS_ctx.company?.hubstudio_configured ? 'HubStudio API 已配置' : '请配置 HubStudio API');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.openHubstudioDialog) },
+                ...{ class: "secondary" },
+            });
+            (__VLS_ctx.company?.hubstudio_configured ? '更新' : '配置');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (__VLS_ctx.hubAgents.length);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.openLocalShopDialog) },
+                ...{ class: "primary" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+                ...{ class: "draft-table" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "thead" },
+                ...{ style: {} },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.localManagedShops))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    key: (shop.id),
+                    ...{ class: "trow" },
+                    ...{ style: {} },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (shop.id);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+                (shop.name);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (shop.nickname || '—');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (shop.region || '—');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "chip" },
+                    ...{ class: (shop.hubstudio_container_code ? 'blue' : 'orange') },
+                });
+                (shop.hubstudio_container_code ? `已绑定 · ${shop.hubstudio_container_code}` : '未绑定');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            if (!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            if (!!(__VLS_ctx.activeShopType === 'cross_border'))
+                                return;
+                            __VLS_ctx.openShopManagersDialog(shop);
+                        } },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            if (!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            if (!!(__VLS_ctx.activeShopType === 'cross_border'))
+                                return;
+                            __VLS_ctx.openHubBindingDialog(shop);
+                        } },
+                    ...{ class: "primary" },
+                });
+                (shop.hubstudio_container_code ? '更新 Hub 绑定' : '绑定 Hub');
+            }
+            if (!__VLS_ctx.localManagedShops.length) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                    ...{ class: "empty" },
+                });
+            }
         }
     }
     else if (__VLS_ctx.page === 'tiktok-catalogs' && __VLS_ctx.user?.role === 'company_admin') {
@@ -6034,6 +6319,23 @@ if (__VLS_ctx.showTiktokExportDialog) {
             (category.name);
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.tiktokTargetShopId),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: (null),
+        });
+        for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.shops.filter(shop => shop.shop_type === 'local' && shop.hubstudio_container_code && shop.hub_agent_id)))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (shop.id),
+                value: (shop.id),
+            });
+            (shop.name);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
+            ...{ class: "tiktok-supported-values" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
             ...{ class: "required" },
         });
@@ -6167,7 +6469,7 @@ if (__VLS_ctx.showTiktokExportDialog) {
                 __VLS_ctx.showTiktokExportDialog = false;
             } },
         ...{ class: "ghost" },
-        disabled: (__VLS_ctx.tiktokExportLoading),
+        disabled: (__VLS_ctx.tiktokExportLoading || __VLS_ctx.tiktokSubmitting),
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.exportSelectedDrafts) },
@@ -6175,6 +6477,12 @@ if (__VLS_ctx.showTiktokExportDialog) {
         disabled: (__VLS_ctx.tiktokExportLoading || !__VLS_ctx.tiktokExportOptions),
     });
     (__VLS_ctx.tiktokExportLoading ? '生成中…' : '生成并下载');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.submitSelectedDraftsToHubstudio) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.tiktokExportLoading || __VLS_ctx.tiktokSubmitting || !__VLS_ctx.tiktokExportOptions || !__VLS_ctx.tiktokTargetShopId),
+    });
+    (__VLS_ctx.tiktokSubmitting ? '创建任务中…' : '生成并自动上品');
 }
 if (__VLS_ctx.showDraftEditDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -7572,6 +7880,171 @@ if (__VLS_ctx.showMiaoshouDialog) {
     });
     (__VLS_ctx.miaoshouSaving ? '保存中…' : '保存并同步');
 }
+if (__VLS_ctx.showLocalShopDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showLocalShopDialog))
+                    return;
+                !__VLS_ctx.localShopSaving && (__VLS_ctx.showLocalShopDialog = false);
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+        ...{ class: "required" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "120",
+        placeholder: "例如：MY 本土店 A",
+    });
+    (__VLS_ctx.localShopForm.name);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "20",
+        placeholder: "例如：MY",
+    });
+    (__VLS_ctx.localShopForm.region);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "120",
+        placeholder: "可选",
+    });
+    (__VLS_ctx.localShopForm.nickname);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showLocalShopDialog))
+                    return;
+                __VLS_ctx.showLocalShopDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.localShopSaving),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.createLocalShop) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.localShopSaving || !__VLS_ctx.localShopForm.name.trim()),
+    });
+    (__VLS_ctx.localShopSaving ? '创建中…' : '创建并绑定 Hub');
+}
+if (__VLS_ctx.showHubstudioDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showHubstudioDialog))
+                    return;
+                __VLS_ctx.showHubstudioDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "255",
+    });
+    (__VLS_ctx.hubstudioForm.app_id);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "password",
+        maxlength: "2000",
+    });
+    (__VLS_ctx.hubstudioForm.app_secret);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "120",
+    });
+    (__VLS_ctx.hubstudioForm.group_code);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showHubstudioDialog))
+                    return;
+                __VLS_ctx.showHubstudioDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.hubstudioSaving),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveHubstudioAccount) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.hubstudioSaving || !__VLS_ctx.hubstudioForm.app_id || !__VLS_ctx.hubstudioForm.app_secret || !__VLS_ctx.hubstudioForm.group_code),
+    });
+    (__VLS_ctx.hubstudioSaving ? '保存中…' : '安全保存');
+}
+if (__VLS_ctx.showHubBindingDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showHubBindingDialog))
+                    return;
+                __VLS_ctx.showHubBindingDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.bindingShop?.name);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "120",
+        placeholder: "例如：1743038373",
+    });
+    (__VLS_ctx.hubBindingForm.container_code);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.hubBindingForm.agent_id),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (null),
+        disabled: true,
+    });
+    for (const [agent] of __VLS_getVForSourceType((__VLS_ctx.hubAgents.filter(agent => agent.is_active)))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (agent.id),
+            value: (agent.id),
+        });
+        (agent.name);
+        (agent.platform);
+        (agent.online ? '在线' : '离线');
+    }
+    if (!__VLS_ctx.hubAgents.length) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "error" },
+        });
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showHubBindingDialog))
+                    return;
+                __VLS_ctx.showHubBindingDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.hubBindingSaving),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveHubBinding) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.hubBindingSaving || !__VLS_ctx.hubBindingForm.container_code || !__VLS_ctx.hubBindingForm.agent_id),
+    });
+    (__VLS_ctx.hubBindingSaving ? '保存中…' : '保存绑定');
+}
 if (__VLS_ctx.showShopManagersDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
@@ -8279,15 +8752,26 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
-/** @type {__VLS_StyleScopedClasses['miaoshou-status']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-tabs']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['shop-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['miaoshou-status']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
-/** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['shop-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['miaoshou-status']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
@@ -8456,6 +8940,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['tiktok-export-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-supported-values']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
@@ -8473,6 +8958,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['material-draft-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
@@ -8663,6 +9149,23 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['manager-option']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
@@ -8716,6 +9219,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             password: password,
             user: user,
             company: company,
+            shops: shops,
             templates: templates,
             templateGroups: templateGroups,
             tasks: tasks,
@@ -8762,12 +9266,23 @@ const __VLS_self = (await import('vue')).defineComponent({
             myName: myName,
             myUserCode: myUserCode,
             myAccountSaving: myAccountSaving,
-            managedShops: managedShops,
             shopLoading: shopLoading,
             shopError: shopError,
+            activeShopType: activeShopType,
+            showLocalShopDialog: showLocalShopDialog,
+            localShopSaving: localShopSaving,
+            localShopForm: localShopForm,
             showMiaoshouDialog: showMiaoshouDialog,
             miaoshouForm: miaoshouForm,
             miaoshouSaving: miaoshouSaving,
+            hubAgents: hubAgents,
+            showHubstudioDialog: showHubstudioDialog,
+            hubstudioSaving: hubstudioSaving,
+            hubstudioForm: hubstudioForm,
+            showHubBindingDialog: showHubBindingDialog,
+            bindingShop: bindingShop,
+            hubBindingSaving: hubBindingSaving,
+            hubBindingForm: hubBindingForm,
             tiktokCatalogs: tiktokCatalogs,
             tiktokCatalogLoading: tiktokCatalogLoading,
             tiktokCatalogError: tiktokCatalogError,
@@ -8825,6 +9340,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             tiktokExportCod: tiktokExportCod,
             tiktokExportAttributes: tiktokExportAttributes,
             tiktokExportOverrides: tiktokExportOverrides,
+            tiktokTargetShopId: tiktokTargetShopId,
+            tiktokSubmitting: tiktokSubmitting,
             draftPageSize: draftPageSize,
             draftTemplateFilterId: draftTemplateFilterId,
             draftCreatorFilterId: draftCreatorFilterId,
@@ -8948,6 +9465,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             selectedDrafts: selectedDrafts,
             allPagedDraftsSelected: allPagedDraftsSelected,
             batchDispatchEligible: batchDispatchEligible,
+            crossBorderManagedShops: crossBorderManagedShops,
+            localManagedShops: localManagedShops,
             tiktokExportEligible: tiktokExportEligible,
             batchCarouselEligible: batchCarouselEligible,
             batchCarouselSkipEligible: batchCarouselSkipEligible,
@@ -9075,6 +9594,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             tiktokAttributeMode: tiktokAttributeMode,
             tiktokAttributePlaceholder: tiktokAttributePlaceholder,
             exportSelectedDrafts: exportSelectedDrafts,
+            submitSelectedDraftsToHubstudio: submitSelectedDraftsToHubstudio,
             openTiktokCatalogCreateDialog: openTiktokCatalogCreateDialog,
             onTiktokCatalogFileChange: onTiktokCatalogFileChange,
             createTiktokCatalog: createTiktokCatalog,
@@ -9107,9 +9627,15 @@ const __VLS_self = (await import('vue')).defineComponent({
             clearMemberCredential: clearMemberCredential,
             loadMiaoshouShops: loadMiaoshouShops,
             openMiaoshouDialog: openMiaoshouDialog,
+            openLocalShopDialog: openLocalShopDialog,
+            createLocalShop: createLocalShop,
             saveMiaoshouAccount: saveMiaoshouAccount,
             openShopManagersDialog: openShopManagersDialog,
             saveShopManagers: saveShopManagers,
+            openHubstudioDialog: openHubstudioDialog,
+            saveHubstudioAccount: saveHubstudioAccount,
+            openHubBindingDialog: openHubBindingDialog,
+            saveHubBinding: saveHubBinding,
             logout: logout,
         };
     },

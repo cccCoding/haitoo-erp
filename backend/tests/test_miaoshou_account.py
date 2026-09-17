@@ -46,7 +46,7 @@ class MiaoshouAccountTests(unittest.TestCase):
         self.assertEqual(response, {"company_id": 1, "configured": True})
         self.assertEqual(
             me_response["company"],
-            {"id": 1, "name": "Test Company", "miaoshou_configured": True},
+            {"id": 1, "name": "Test Company", "miaoshou_configured": True, "hubstudio_configured": False},
         )
         self.assertNotIn("miaoshou_app_id", me_response["company"])
 

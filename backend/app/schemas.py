@@ -36,6 +36,9 @@ class ShopOut(BaseModel):
     platform: str | None
     auth_status: str
     auth_expires_at: str | None
+    shop_type: str
+    hubstudio_container_code: str | None = None
+    hub_agent_id: int | None = None
 
     class Config:
         from_attributes = True
@@ -44,6 +47,33 @@ class ShopOut(BaseModel):
 class ShopManagerUpdate(BaseModel):
     """店铺普通成员管理员列表；提交的列表会完整覆盖原有分配。"""
     member_ids: list[int] = Field(default_factory=list, max_length=100)
+
+
+class LocalShopCreate(BaseModel):
+    """本土店不从妙手同步，专用于 HubStudio 指纹环境上品。"""
+    name: str = Field(min_length=1, max_length=120)
+    region: str = Field(default="MY", min_length=1, max_length=20)
+    nickname: str | None = Field(default=None, max_length=120)
+
+
+class HubstudioAccountUpdate(BaseModel):
+    app_id: str = Field(min_length=1, max_length=255)
+    app_secret: str = Field(min_length=1, max_length=2000)
+    group_code: str = Field(min_length=1, max_length=120)
+
+
+class HubAgentRegisterInput(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    platform: Literal["macos", "windows"]
+
+
+class HubAgentPairingCompleteInput(BaseModel):
+    code: str = Field(min_length=32, max_length=128)
+
+
+class HubShopBindingUpdate(BaseModel):
+    hubstudio_container_code: str = Field(min_length=1, max_length=120)
+    hub_agent_id: int = Field(ge=1)
 
 
 class TemplateAiPrompt(BaseModel):
@@ -383,6 +413,16 @@ class TiktokDraftExportInput(BaseModel):
     cod: Literal["Y", "N"] = "Y"
     attributes: dict[str, str | list[str]] = Field(default_factory=dict, max_length=14)
     product_overrides: list[TiktokDraftProductOverride] = Field(default_factory=list, max_length=20)
+
+
+class HubUploadTaskCreate(TiktokDraftExportInput):
+    shop_id: int = Field(ge=1)
+
+
+class HubUploadTaskReport(BaseModel):
+    status: Literal["running", "awaiting_attention", "completed", "failed"]
+    stage: str = Field(min_length=1, max_length=80)
+    message: str | None = Field(default=None, max_length=500)
 
 
 class TiktokCategoryAttributeInputModeUpdate(BaseModel):

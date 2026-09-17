@@ -27,6 +27,9 @@ class Company(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     miaoshou_app_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     miaoshou_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hubstudio_app_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    hubstudio_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hubstudio_group_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -56,6 +59,65 @@ class Shop(Base):
     platform: Mapped[str | None] = mapped_column(String(40), nullable=True)
     auth_status: Mapped[str] = mapped_column(String(30), default="not_connected")
     auth_expires_at: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # 跨境店由妙手同步；本土店由管理员创建，并单独绑定 HubStudio。
+    shop_type: Mapped[str] = mapped_column(String(20), default="cross_border", index=True)
+    hubstudio_container_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    hub_agent_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
+
+
+class HubAgent(Base):
+    """安装在员工电脑上的 HubStudio 本地执行器。"""
+    __tablename__ = "hub_agents"
+    __table_args__ = (UniqueConstraint("company_id", "name", name="uq_hub_agents_company_name"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    user_id: Mapped[int] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    platform: Mapped[str] = mapped_column(String(20))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class HubAgentPairing(Base):
+    """一次性终端配对码；原始终端令牌仅在本地 Agent 首次领取时返回。"""
+    __tablename__ = "hub_agent_pairings"
+    code_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    platform: Mapped[str] = mapped_column(String(20))
+    agent_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
+    token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class HubUploadTask(Base):
+    """不可变的 TikTok 表格上品任务，由本地 Hub Agent 串行执行。"""
+    __tablename__ = "hub_upload_tasks"
+    __table_args__ = (
+        Index("ix_hub_upload_tasks_agent_status", "agent_id", "status", "created_at"),
+        Index("ix_hub_upload_tasks_shop_status", "shop_id", "status"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    shop_id: Mapped[int] = mapped_column(index=True)
+    agent_id: Mapped[int] = mapped_column(index=True)
+    created_by: Mapped[int] = mapped_column(index=True)
+    draft_ids: Mapped[list] = mapped_column(JSON, default=list)
+    export_filename: Mapped[str] = mapped_column(String(255))
+    export_blob: Mapped[bytes] = mapped_column(LargeBinary().with_variant(MEDIUMBLOB(), "mysql").with_variant(MEDIUMBLOB(), "mariadb"))
+    parameters: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    stage: Mapped[str] = mapped_column(String(80), default="queued")
+    failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    logs: Mapped[list] = mapped_column(JSON, default=list)
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class UserShop(Base):

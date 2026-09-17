@@ -23,6 +23,26 @@ docker compose run --rm migrate
 docker compose run --rm api alembic current
 ```
 
+### 代码更新后的数据库迁移
+
+当 API 日志提示“数据库版本不匹配”（例如当前 `20260916_06`、要求 `20260917_07`）时，表示代码已更新而 MySQL 还没执行对应迁移。按以下顺序处理：
+
+```bash
+# 1. 在项目根目录执行版本化迁移（会升级 MySQL 表结构）
+docker compose run --rm migrate
+
+# 2. 确认当前数据库已到代码要求的 head 版本
+docker compose run --rm api alembic current
+
+# 3. 重启 API 与两个后台 Worker，使它们加载新代码与新表结构
+docker compose restart api submit-worker result-worker
+
+# 4. 查看 API 启动结果；应出现“应用初始化完成”
+docker compose logs --tail=50 api
+```
+
+如果 compose 服务尚未启动，可改用 `docker compose up -d --build`；它会先执行 `migrate`。正常版本升级只运行 `docker compose run --rm migrate`，**不要**附加 `--adopt-legacy`。
+
 从旧版启动期自动建表流程升级时，迁移服务会拒绝直接接管没有 `alembic_version` 的既有数据库。确认数据库备份可恢复后，显式执行一次：
 
 ```bash
@@ -38,6 +58,22 @@ docker compose run --rm api alembic revision --autogenerate -m "变更说明"
 ```
 
 API 文档：`http://localhost:8001/docs`。
+
+## HubStudio 本土店自动上品
+
+店铺管理分为两个独立 Tab：
+
+- **跨境店**：只由妙手 API 同步，用于原有跨境业务，不显示也不能绑定 HubStudio。
+- **本土店**：由公司管理员手工新增；只有本土店可以绑定 HubStudio `containerCode` 与本地执行器，并在导出 TikTok 表格时作为“自动上品”目标店铺。
+
+升级到该功能前，必须执行迁移至 `20260917_09`：
+
+```bash
+docker compose run --rm migrate
+docker compose restart api submit-worker result-worker
+```
+
+管理员操作顺序：在“店铺管理 → 本土店”配置公司 HubStudio API、新增本土店、绑定对应 HubStudio 环境与已在线的本地执行器；随后在商品草稿的“导出 TikTok 批量上传表格”中选择该本土店并点击“生成并自动上品”。本地执行器会领取任务、启动该环境、下载不可变 XLSX 快照并提交。
 
 系统启动时不会创建公司、演示账号或默认超级管理员。首次部署后，通过容器内的一次性命令创建平台超级管理员；密码将在终端中安全输入两次，不会进入命令历史或环境变量：
 
