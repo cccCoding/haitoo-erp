@@ -46,7 +46,7 @@ const showBatchCarouselDialog = ref(false), showBatchMainImageDialog = ref(false
 const showBatchImageReviewDialog = ref(false), batchImageReviewLoading = ref(false), batchImageReviewSaving = ref(false), batchImageReviewType = ref('carousel'), batchImageReviewDrafts = ref([]), batchImageReviewSelections = ref({}), batchCarouselReviewNextStage = ref('main_image_pending');
 const MAX_TIKTOK_EXPORT_DRAFTS = 20;
 const tiktokExportCatalogId = ref(null), tiktokExportCategory = ref(''), tiktokExportDefaultPrice = ref(null), tiktokExportDefaultQuantity = ref(999), tiktokExportCod = ref('Y'), tiktokExportAttributes = ref({}), tiktokExportOverrides = ref({}), tiktokTargetShopId = ref(null), tiktokSubmitting = ref(false);
-const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null);
+const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null), draftListRefreshing = ref(false);
 const activeDraftTab = ref('all'), draftTotal = ref(0), draftTabCounts = ref({ all: 0, pending: 0, carousel_pending: 0, main_image_pending: 0, ready_to_publish: 0, published: 0 });
 const activeDraftWorkStatus = ref('all'), draftWorkStatusCounts = ref({ all: 0, not_started: 0, in_progress: 0, awaiting_review: 0, failed: 0 });
 const draftWorkStatusTabs = [{ key: 'all', label: '全部' }, { key: 'not_started', label: '未制作' }, { key: 'in_progress', label: '制作中' }, { key: 'awaiting_review', label: '待审核' }, { key: 'failed', label: '制作失败' }];
@@ -71,7 +71,7 @@ const taskStatusFilter = ref(initialTaskStatus !== null && ['queued', 'running',
 const taskSkuQuery = ref(initialTaskSkuQuery);
 const appliedTaskFilters = ref({ creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: initialTaskFrom ? new Date(initialTaskFrom).toISOString() : '', created_to: initialTaskTo ? new Date(initialTaskTo).toISOString() : '', sku_query: initialTaskSkuQuery });
 const selectedTaskIds = ref([]), showBatchClaimDialog = ref(false), batchClaimItems = ref([]), batchClaimLoading = ref(false), batchClaiming = ref(false), batchClaimCompleted = ref(0), batchClaimTotal = ref(0), batchClaimFailed = ref(0);
-const materialPageSize = ref(20), currentMaterialPage = ref(1), materialTotal = ref(0), materialCreatorFilterId = ref(null);
+const materialPageSize = ref(20), currentMaterialPage = ref(1), materialTotal = ref(0), materialCreatorFilterId = ref(null), materialListRefreshing = ref(false);
 const creatorFiltersInitialized = ref(false);
 const previewImageUrl = ref(''), previewImageAlt = ref('');
 const showDraftImageDialog = ref(false), imageWorkspaceMode = ref('full'), imageDraft = ref(null), imageWorkspaceLoading = ref(false), imageTasksRefreshing = ref(false), imageTaskCreatingType = ref(''), imageConfirmSaving = ref(false);
@@ -173,10 +173,14 @@ const batchMainImageEligible = computed(() => activeDraftTab.value === 'main_ima
 const batchMainImageReviewEligible = computed(() => activeDraftTab.value === 'main_image_pending' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.main_image_task_summary?.work_status === 'awaiting_review'));
 const selectedTiktokCategoryAttributes = computed(() => tiktokExportOptions.value?.attributes_by_category?.[tiktokExportCategory.value] || []);
 const managingTiktokCategoryAttributes = computed(() => managingTiktokCatalogOptions.value?.attributes_by_category?.[managingTiktokCategory.value] || []);
-async function changeDraftPageSize() { currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
-async function changeDraftTab(tab) { activeDraftTab.value = tab; activeDraftWorkStatus.value = 'all'; currentDraftPage.value = 1; selectedDraftIds.value = []; drafts.value = []; await refreshDraftList(); }
-async function changeDraftWorkStatus(status) { activeDraftWorkStatus.value = status; currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
-async function changeDraftPage(next) { currentDraftPage.value = next; selectedDraftIds.value = []; await refreshDraftList(); }
+async function changeDraftPageSize() { if (draftListRefreshing.value)
+    return; currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
+async function changeDraftTab(tab) { if (draftListRefreshing.value)
+    return; activeDraftTab.value = tab; activeDraftWorkStatus.value = 'all'; currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
+async function changeDraftWorkStatus(status) { if (draftListRefreshing.value)
+    return; activeDraftWorkStatus.value = status; currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
+async function changeDraftPage(next) { if (draftListRefreshing.value)
+    return; currentDraftPage.value = next; selectedDraftIds.value = []; await refreshDraftList(); }
 function toggleDraftSelection(draftId) {
     if (selectedDraftIds.value.includes(draftId)) {
         selectedDraftIds.value = selectedDraftIds.value.filter(id => id !== draftId);
@@ -202,15 +206,26 @@ function togglePagedDrafts() {
         showToast(`一次最多选择 ${MAX_TIKTOK_EXPORT_DRAFTS} 条商品草稿`);
     }
 }
-async function changeDraftTemplateFilter() { currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
-async function changeDraftCreatorFilter() { currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
+async function changeDraftTemplateFilter() { if (draftListRefreshing.value)
+    return; currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
+async function changeDraftCreatorFilter() { if (draftListRefreshing.value)
+    return; currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
 async function refreshDraftList() {
-    const { data } = await api.get('/drafts', { headers: headers.value, params: { creator_id: draftCreatorFilterId.value, template_id: draftTemplateFilterId.value, tab: activeDraftTab.value, work_status: activeDraftWorkStatus.value, page: currentDraftPage.value, page_size: draftPageSize.value } });
-    drafts.value = data.items;
-    draftTotal.value = data.total;
-    draftTabCounts.value = data.tab_counts;
-    draftWorkStatusCounts.value = data.work_status_counts;
-    selectedDraftIds.value = selectedDraftIds.value.filter(id => data.items.some((draft) => draft.id === id));
+    try {
+        draftListRefreshing.value = true;
+        const { data } = await api.get('/drafts', { headers: headers.value, params: { creator_id: draftCreatorFilterId.value, template_id: draftTemplateFilterId.value, tab: activeDraftTab.value, work_status: activeDraftWorkStatus.value, page: currentDraftPage.value, page_size: draftPageSize.value } });
+        drafts.value = data.items;
+        draftTotal.value = data.total;
+        draftTabCounts.value = data.tab_counts;
+        draftWorkStatusCounts.value = data.work_status_counts;
+        selectedDraftIds.value = selectedDraftIds.value.filter(id => data.items.some((draft) => draft.id === id));
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '刷新商品草稿失败');
+    }
+    finally {
+        draftListRefreshing.value = false;
+    }
 }
 function draftWorkSummary(draft) { return draft.display_tab === 'carousel_pending' ? draft.carousel_task_summary : draft.main_image_task_summary; }
 async function dispatchSelectedDrafts(targetStage) {
@@ -488,8 +503,10 @@ function clearTaskUrl() { if (route.query.task_type)
 watch(page, value => value === 'tasks' ? syncTaskUrl() : clearTaskUrl());
 function applyTaskPage(data) { tasks.value = data.items || []; taskTotal.value = data.total || 0; taskTypeTotals.value = { ...taskTypeTotals.value, ...(data.task_type_counts || {}) }; taskTypeFilteredTotals.value = { ...taskTypeFilteredTotals.value, [activeTaskType.value]: data.total || 0 }; taskActiveCount.value = data.active_count || 0; taskStatusCounts.value = data.status_counts || {}; currentTaskPage.value = data.page || 1; if (page.value === 'tasks')
     syncTaskUrl(); }
-async function changeTaskPageSize() { currentTaskPage.value = 1; selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList(); }
-async function changeTaskPage(targetPage) { currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList(); }
+async function changeTaskPageSize() { if (taskListRefreshing.value)
+    return; currentTaskPage.value = 1; selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList(); }
+async function changeTaskPage(targetPage) { if (taskListRefreshing.value)
+    return; currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList(); }
 function taskQueryParams() { return { page: currentTaskPage.value, page_size: taskPageSize.value, task_type: activeTaskType.value, creator_id: appliedTaskFilters.value.creator_id ?? undefined, status: appliedTaskFilters.value.status || undefined, created_from: appliedTaskFilters.value.created_from || undefined, created_to: appliedTaskFilters.value.created_to || undefined, sku_query: activeTaskType.value === 'sku_image' ? appliedTaskFilters.value.sku_query.trim() || undefined : undefined }; }
 function snapshotTaskTab() {
     taskTabStates.value[activeTaskType.value] = { page: currentTaskPage.value, pageSize: taskPageSize.value, creator: taskCreatorFilterId.value, status: taskStatusFilter.value, from: taskCreatedFrom.value, to: taskCreatedTo.value, skuQuery: taskSkuQuery.value, applied: { ...appliedTaskFilters.value } };
@@ -529,13 +546,25 @@ async function searchTasks() {
 const materialPageCount = computed(() => Math.max(1, Math.ceil(materialTotal.value / materialPageSize.value)));
 const visibleMaterialPage = computed(() => Math.min(currentMaterialPage.value, materialPageCount.value));
 function applyMaterialPage(data) { materialAssets.value = data.items || []; materialTotal.value = data.total || 0; currentMaterialPage.value = data.page || 1; }
-async function changeMaterialPageSize() { currentMaterialPage.value = 1; await refreshMaterialList(); }
-async function changeMaterialPage(targetPage) { currentMaterialPage.value = Math.min(Math.max(1, targetPage), materialPageCount.value); await refreshMaterialList(); }
-async function changeMaterialFilter() { currentMaterialPage.value = 1; await refreshMaterialList(); }
+async function changeMaterialPageSize() { if (materialListRefreshing.value)
+    return; currentMaterialPage.value = 1; await refreshMaterialList(); }
+async function changeMaterialPage(targetPage) { if (materialListRefreshing.value)
+    return; currentMaterialPage.value = Math.min(Math.max(1, targetPage), materialPageCount.value); await refreshMaterialList(); }
+async function changeMaterialFilter() { if (materialListRefreshing.value)
+    return; currentMaterialPage.value = 1; await refreshMaterialList(); }
 async function refreshMaterialList() {
-    selectedMaterialAssetIds.value = [];
-    const { data } = await api.get('/material-assets', { headers: headers.value, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value } });
-    applyMaterialPage(data);
+    try {
+        materialListRefreshing.value = true;
+        selectedMaterialAssetIds.value = [];
+        const { data } = await api.get('/material-assets', { headers: headers.value, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value } });
+        applyMaterialPage(data);
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '刷新素材列表失败');
+    }
+    finally {
+        materialListRefreshing.value = false;
+    }
 }
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
 const nativeToLocaleString = Date.prototype.toLocaleString;
@@ -3167,6 +3196,7 @@ if (__VLS_ctx.token) {
                     } },
                 key: (type),
                 ...{ class: ({ active: __VLS_ctx.activeTaskType === type }) },
+                disabled: (__VLS_ctx.taskListRefreshing),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({
                 ...{ class: "task-type-tabs-icon" },
@@ -3265,7 +3295,8 @@ if (__VLS_ctx.token) {
             });
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "draft-table task-table" },
+            ...{ class: "draft-table task-table refreshable-list" },
+            'aria-busy': (__VLS_ctx.taskListRefreshing),
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "thead task-list-grid" },
@@ -3529,7 +3560,7 @@ if (__VLS_ctx.token) {
                 });
             }
         }
-        if (!__VLS_ctx.tasks.length) {
+        if (!__VLS_ctx.tasks.length && !__VLS_ctx.taskListRefreshing) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "empty" },
             });
@@ -3544,6 +3575,7 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
                 ...{ onChange: (__VLS_ctx.changeTaskPageSize) },
                 value: (__VLS_ctx.taskPageSize),
+                disabled: (__VLS_ctx.taskListRefreshing),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
                 value: (20),
@@ -3570,7 +3602,7 @@ if (__VLS_ctx.token) {
                             return;
                         __VLS_ctx.changeTaskPage(__VLS_ctx.visibleTaskPage - 1);
                     } },
-                disabled: (__VLS_ctx.visibleTaskPage === 1),
+                disabled: (__VLS_ctx.taskListRefreshing || __VLS_ctx.visibleTaskPage === 1),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (__VLS_ctx.visibleTaskPage);
@@ -3591,8 +3623,16 @@ if (__VLS_ctx.token) {
                             return;
                         __VLS_ctx.changeTaskPage(__VLS_ctx.visibleTaskPage + 1);
                     } },
-                disabled: (__VLS_ctx.visibleTaskPage === __VLS_ctx.taskPageCount),
+                disabled: (__VLS_ctx.taskListRefreshing || __VLS_ctx.visibleTaskPage === __VLS_ctx.taskPageCount),
             });
+        }
+        if (__VLS_ctx.taskListRefreshing) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "list-refresh-overlay" },
+                role: "status",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         }
     }
     else if (__VLS_ctx.page === 'materials') {
@@ -3705,7 +3745,8 @@ if (__VLS_ctx.token) {
             });
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "draft-table material-list" },
+            ...{ class: "draft-table material-list refreshable-list" },
+            'aria-busy': (__VLS_ctx.materialListRefreshing),
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "thead material-thead" },
@@ -3806,7 +3847,7 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (asset.created_by_name || '历史记录缺失');
         }
-        if (!__VLS_ctx.filteredMaterialAssets.length) {
+        if (!__VLS_ctx.filteredMaterialAssets.length && !__VLS_ctx.materialListRefreshing) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "empty" },
             });
@@ -3822,6 +3863,7 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
                 ...{ onChange: (__VLS_ctx.changeMaterialPageSize) },
                 value: (__VLS_ctx.materialPageSize),
+                disabled: (__VLS_ctx.materialListRefreshing),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
                 value: (20),
@@ -3850,7 +3892,7 @@ if (__VLS_ctx.token) {
                             return;
                         __VLS_ctx.changeMaterialPage(__VLS_ctx.visibleMaterialPage - 1);
                     } },
-                disabled: (__VLS_ctx.visibleMaterialPage === 1),
+                disabled: (__VLS_ctx.materialListRefreshing || __VLS_ctx.visibleMaterialPage === 1),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (__VLS_ctx.visibleMaterialPage);
@@ -3873,8 +3915,16 @@ if (__VLS_ctx.token) {
                             return;
                         __VLS_ctx.changeMaterialPage(__VLS_ctx.visibleMaterialPage + 1);
                     } },
-                disabled: (__VLS_ctx.visibleMaterialPage === __VLS_ctx.materialPageCount),
+                disabled: (__VLS_ctx.materialListRefreshing || __VLS_ctx.visibleMaterialPage === __VLS_ctx.materialPageCount),
             });
+        }
+        if (__VLS_ctx.materialListRefreshing) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "list-refresh-overlay" },
+                role: "status",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         }
     }
     else if (__VLS_ctx.page === 'drafts') {
@@ -4215,7 +4265,8 @@ if (__VLS_ctx.token) {
             });
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "draft-table task-table" },
+            ...{ class: "draft-table task-table refreshable-list" },
+            'aria-busy': (__VLS_ctx.draftListRefreshing),
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "thead draft-thead" },
@@ -4522,13 +4573,13 @@ if (__VLS_ctx.token) {
                 (__VLS_ctx.publishingDraftId === draft.id ? '处理中…' : '发布至妙手');
             }
         }
-        if (!__VLS_ctx.filteredDrafts.length) {
+        if (!__VLS_ctx.filteredDrafts.length && !__VLS_ctx.draftListRefreshing) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "empty" },
             });
             (__VLS_ctx.draftTotal ? '没有符合筛选条件的商品草稿。' : '暂无商品草稿，请先在任务中心领取素材，或上传本地素材。');
         }
-        else {
+        else if (!__VLS_ctx.draftListRefreshing || __VLS_ctx.draftTotal) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
                 ...{ class: "draft-pagination" },
             });
@@ -4538,6 +4589,7 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
                 ...{ onChange: (__VLS_ctx.changeDraftPageSize) },
                 value: (__VLS_ctx.draftPageSize),
+                disabled: (__VLS_ctx.draftListRefreshing),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
                 value: (20),
@@ -4570,11 +4622,13 @@ if (__VLS_ctx.token) {
                             return;
                         if (!(__VLS_ctx.page === 'drafts'))
                             return;
-                        if (!!(!__VLS_ctx.filteredDrafts.length))
+                        if (!!(!__VLS_ctx.filteredDrafts.length && !__VLS_ctx.draftListRefreshing))
+                            return;
+                        if (!(!__VLS_ctx.draftListRefreshing || __VLS_ctx.draftTotal))
                             return;
                         __VLS_ctx.changeDraftPage(__VLS_ctx.visibleDraftPage - 1);
                     } },
-                disabled: (__VLS_ctx.visibleDraftPage === 1),
+                disabled: (__VLS_ctx.draftListRefreshing || __VLS_ctx.visibleDraftPage === 1),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (__VLS_ctx.visibleDraftPage);
@@ -4595,12 +4649,22 @@ if (__VLS_ctx.token) {
                             return;
                         if (!(__VLS_ctx.page === 'drafts'))
                             return;
-                        if (!!(!__VLS_ctx.filteredDrafts.length))
+                        if (!!(!__VLS_ctx.filteredDrafts.length && !__VLS_ctx.draftListRefreshing))
+                            return;
+                        if (!(!__VLS_ctx.draftListRefreshing || __VLS_ctx.draftTotal))
                             return;
                         __VLS_ctx.changeDraftPage(__VLS_ctx.visibleDraftPage + 1);
                     } },
-                disabled: (__VLS_ctx.visibleDraftPage === __VLS_ctx.draftPageCount),
+                disabled: (__VLS_ctx.draftListRefreshing || __VLS_ctx.visibleDraftPage === __VLS_ctx.draftPageCount),
             });
+        }
+        if (__VLS_ctx.draftListRefreshing) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "list-refresh-overlay" },
+                role: "status",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         }
     }
     else if (__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin') {
@@ -9141,6 +9205,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['refreshable-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-list-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-checkbox']} */ ;
@@ -9162,6 +9227,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-filter-row']} */ ;
@@ -9178,6 +9244,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['refreshable-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-checkbox']} */ ;
@@ -9190,6 +9257,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['material-source-task']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-heading']} */ ;
@@ -9215,6 +9283,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['refreshable-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-checkbox']} */ ;
@@ -9240,6 +9309,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['compact-action']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -9884,6 +9954,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             draftPageSize: draftPageSize,
             draftTemplateFilterId: draftTemplateFilterId,
             draftCreatorFilterId: draftCreatorFilterId,
+            draftListRefreshing: draftListRefreshing,
             activeDraftTab: activeDraftTab,
             draftTotal: draftTotal,
             draftTabCounts: draftTabCounts,
@@ -9914,6 +9985,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             materialPageSize: materialPageSize,
             materialTotal: materialTotal,
             materialCreatorFilterId: materialCreatorFilterId,
+            materialListRefreshing: materialListRefreshing,
             previewImageUrl: previewImageUrl,
             previewImageAlt: previewImageAlt,
             showDraftImageDialog: showDraftImageDialog,
