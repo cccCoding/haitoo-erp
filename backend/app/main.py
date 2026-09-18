@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import engine, get_db
 from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
-from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
+from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
@@ -1177,6 +1177,25 @@ async def claim_common_collect_box_to_tiktok(draft: ProductDraft, company: Compa
         raise HTTPException(502, "妙手 TikTok 认领接口未返回采集箱商品编号")
     draft.tiktok_collect_box_id = str(tiktok_detail_id)
     return draft.tiktok_collect_box_id
+
+
+async def assign_tiktok_collect_box_to_shop(draft: ProductDraft, company: Company, shop: Shop) -> None:
+    """将已认领的 TikTok 采集箱商品分配给指定妙手店铺。"""
+    if not draft.tiktok_collect_box_id:
+        raise HTTPException(400, "请先认领到 TikTok 采集箱")
+    external_shop_id = (shop.external_shop_id or "").strip()
+    if not external_shop_id:
+        raise HTTPException(400, "所选店铺未同步妙手店铺编号，无法分配")
+    try:
+        shop_id = int(external_shop_id)
+        detail_id = int(draft.tiktok_collect_box_id)
+    except ValueError as exc:
+        raise HTTPException(400, "所选店铺或 TikTok 采集箱商品编号无效，无法分配") from exc
+    result = await miaoshou_post(company, "/open/v1/product/collect_box/tiktok/collect_box/claim_to_shop", {
+        "shopIds": [shop_id], "detailIds": [detail_id],
+    })
+    if result.get("code") != "success" and result.get("result") != "success":
+        raise HTTPException(400, result.get("message") or result.get("code") or "妙手分配店铺接口返回失败")
 
 
 @app.put("/templates/{template_id}")
@@ -2946,58 +2965,44 @@ def report_hub_upload_task(task_id: int, payload: HubUploadTaskReport, request: 
 
 
 @app.post("/drafts/{draft_id}/publish-to-miaoshou")
-async def publish_draft_to_miaoshou(draft_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """将商品草稿创建到妙手公共采集箱，避免重复创建。"""
-    draft = db.get(ProductDraft, draft_id)
-    if not can_access_draft(draft, user) or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
-        raise HTTPException(404, "商品草稿不存在")
-    if draft.miaoshou_collect_box_id:
-        return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "already_published": True}
-    company = db.get(Company, draft.company_id)
-    if not company or not company.miaoshou_app_id or not company.miaoshou_secret_encrypted:
-        raise HTTPException(400, "尚未配置妙手 API Key，请联系公司管理员在店铺管理中配置")
-    template = db.get(ProductTemplate, draft.template_id) if draft.template_id else None
-    if not template:
-        raise HTTPException(400, "该商品草稿缺少产品模板信息，无法生成公共采集箱商品")
-
-    await create_common_collect_box_detail(draft, company, template)
-    draft.status = "published_to_miaoshou"
-    draft.updated_by = user.id
-    db.commit()
-    return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "already_published": False}
+async def publish_draft_to_miaoshou(draft_id: int, payload: DraftMiaoshouPublishInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """兼容旧入口：发布统一走“认领 TikTok 后分配店铺”的完整流程。"""
+    return await claim_draft_to_tiktok(draft_id, payload, user, db)
 
 
 @app.post("/drafts/{draft_id}/claim-to-tiktok")
-async def claim_draft_to_tiktok(draft_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """商品先进入公共草稿箱，再认领到 TikTok 采集箱；任一步失败均可安全重试。"""
+async def claim_draft_to_tiktok(draft_id: int, payload: DraftMiaoshouPublishInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """选择店铺后创建公共草稿、认领 TikTok 采集箱并分配到该店铺。"""
     draft = db.get(ProductDraft, draft_id)
     if not can_access_draft(draft, user) or (draft.shop_id is not None and draft.shop_id not in allowed_shop_ids(db, user)):
         raise HTTPException(404, "商品草稿不存在")
-    if draft.tiktok_collect_box_id:
-        if draft.workflow_stage != "published" or draft.status != "claimed_to_tiktok":
-            draft.workflow_stage = "published"
-            draft.status = "claimed_to_tiktok"
-            draft.updated_by = user.id
-            db.commit()
-        return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "tiktok_collect_box_detail_id": draft.tiktok_collect_box_id, "already_claimed": True}
+    shop = ensure_shop(db, user, payload.shop_id)
+    if shop.company_id != draft.company_id:
+        raise HTTPException(400, "只能选择当前公司的店铺")
     company = db.get(Company, draft.company_id)
     if not company or not company.miaoshou_app_id or not company.miaoshou_secret_encrypted:
         raise HTTPException(400, "尚未配置妙手 API Key，请联系公司管理员在店铺管理中配置")
     template = db.get(ProductTemplate, draft.template_id) if draft.template_id else None
     if not template:
         raise HTTPException(400, "该商品草稿缺少产品模板信息，无法生成公共采集箱商品")
-    await create_common_collect_box_detail(draft, company, template)
-    # 公共草稿箱创建成功后立即持久化编号。后续 TikTok 认领失败时，
-    # 重试只会继续认领，不会在妙手重复创建商品。
-    draft.status = "published_to_miaoshou"
-    draft.updated_by = user.id
-    db.commit()
-    await claim_common_collect_box_to_tiktok(draft, company)
+    already_claimed = bool(draft.tiktok_collect_box_id)
+    if not already_claimed:
+        await create_common_collect_box_detail(draft, company, template)
+        # 公共草稿箱创建成功后立即持久化编号。后续 TikTok 认领失败时，
+        # 重试只会继续认领，不会在妙手重复创建商品。
+        draft.status = "published_to_miaoshou"
+        draft.updated_by = user.id
+        db.commit()
+        await claim_common_collect_box_to_tiktok(draft, company)
+    # 认领成功后才调用妙手分配店铺接口；失败时不会写入本地店铺关联，便于重试。
+    if draft.shop_id != shop.id:
+        await assign_tiktok_collect_box_to_shop(draft, company, shop)
+        draft.shop_id = shop.id
     draft.status = "claimed_to_tiktok"
     draft.workflow_stage = "published"
     draft.updated_by = user.id
     db.commit()
-    return {"draft_id": draft.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "tiktok_collect_box_detail_id": draft.tiktok_collect_box_id, "already_claimed": False}
+    return {"draft_id": draft.id, "shop_id": shop.id, "common_collect_box_detail_id": draft.miaoshou_collect_box_id, "tiktok_collect_box_detail_id": draft.tiktok_collect_box_id, "already_claimed": already_claimed}
 
 
 @app.get("/drafts")

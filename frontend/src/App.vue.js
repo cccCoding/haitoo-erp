@@ -41,6 +41,7 @@ const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'], MAX_IMAGE
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('');
 const publishingDraftId = ref(null), skippingCarouselDraftId = ref(null), skippingMainImageDraftId = ref(null), dispatchingDraftStage = ref('');
 const selectedDraftIds = ref([]), showTiktokExportDialog = ref(false), tiktokExportOptions = ref(null), tiktokExportLoading = ref(false), tiktokExportError = ref('');
+const showMiaoshouPublishDialog = ref(false), miaoshouPublishDraftIds = ref([]), miaoshouPublishShopId = ref(null), miaoshouPublishing = ref(false), miaoshouPublishCompleted = ref(0), miaoshouPublishFailed = ref(0);
 const showBatchCarouselDialog = ref(false), showBatchMainImageDialog = ref(false), batchCarouselSaving = ref(false), batchMainImageSaving = ref(false), batchCarouselSkipping = ref(false), batchMainImageSkipping = ref(false), batchCarouselSelections = ref({}), batchMainImageSelections = ref({});
 const showBatchImageReviewDialog = ref(false), batchImageReviewLoading = ref(false), batchImageReviewSaving = ref(false), batchImageReviewType = ref('carousel'), batchImageReviewDrafts = ref([]), batchImageReviewSelections = ref({}), batchCarouselReviewNextStage = ref('main_image_pending');
 const MAX_TIKTOK_EXPORT_DRAFTS = 20;
@@ -150,15 +151,19 @@ const materialDraftSizes = computed(() => {
     return options.map((size) => String(size).trim()).filter(Boolean);
 });
 const materialDraftSkuCount = computed(() => selectedMaterialAssets.value.length);
-const filteredDrafts = computed(() => drafts.value);
+// 服务端按 Tab 返回数据；这里再按 display_tab 兜底，避免接口请求失败或旧服务未更新时，
+// 已切换的 Tab 短暂显示上一页的混合数据。
+const filteredDrafts = computed(() => activeDraftTab.value === 'all' ? drafts.value : drafts.value.filter(draft => draft.display_tab === activeDraftTab.value));
 const draftPageCount = computed(() => Math.max(1, Math.ceil(draftTotal.value / draftPageSize.value)));
 const visibleDraftPage = computed(() => Math.min(currentDraftPage.value, draftPageCount.value));
-const pagedDrafts = computed(() => drafts.value);
-const selectedDrafts = computed(() => drafts.value.filter(draft => selectedDraftIds.value.includes(draft.id)));
+const pagedDrafts = computed(() => filteredDrafts.value);
+const selectedDrafts = computed(() => filteredDrafts.value.filter(draft => selectedDraftIds.value.includes(draft.id)));
 const allPagedDraftsSelected = computed(() => Boolean(pagedDrafts.value.length) && pagedDrafts.value.every(draft => selectedDraftIds.value.includes(draft.id)));
 const batchDispatchEligible = computed(() => selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab === 'pending'));
 const crossBorderManagedShops = computed(() => managedShops.value.filter(shop => shop.shop_type !== 'local'));
 const localManagedShops = computed(() => managedShops.value.filter(shop => shop.shop_type === 'local'));
+const miaoshouAssignableShops = computed(() => shops.value.filter(shop => shop.shop_type !== 'local' && shop.external_shop_id));
+const batchMiaoshouPublishEligible = computed(() => activeDraftTab.value === 'ready_to_publish' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab === 'ready_to_publish'));
 const tiktokExportEligible = computed(() => selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.display_tab !== 'pending'));
 const batchCarouselEligible = computed(() => activeDraftTab.value === 'carousel_pending' && activeDraftWorkStatus.value === 'not_started' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.carousel_task_summary?.work_status === 'not_started'));
 const batchCarouselReviewEligible = computed(() => activeDraftTab.value === 'carousel_pending' && selectedDrafts.value.length > 0 && selectedDrafts.value.every(draft => draft.carousel_task_summary?.work_status === 'awaiting_review'));
@@ -169,7 +174,7 @@ const batchMainImageReviewEligible = computed(() => activeDraftTab.value === 'ma
 const selectedTiktokCategoryAttributes = computed(() => tiktokExportOptions.value?.attributes_by_category?.[tiktokExportCategory.value] || []);
 const managingTiktokCategoryAttributes = computed(() => managingTiktokCatalogOptions.value?.attributes_by_category?.[managingTiktokCategory.value] || []);
 async function changeDraftPageSize() { currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
-async function changeDraftTab(tab) { activeDraftTab.value = tab; activeDraftWorkStatus.value = 'all'; currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
+async function changeDraftTab(tab) { activeDraftTab.value = tab; activeDraftWorkStatus.value = 'all'; currentDraftPage.value = 1; selectedDraftIds.value = []; drafts.value = []; await refreshDraftList(); }
 async function changeDraftWorkStatus(status) { activeDraftWorkStatus.value = status; currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
 async function changeDraftPage(next) { currentDraftPage.value = next; selectedDraftIds.value = []; await refreshDraftList(); }
 function toggleDraftSelection(draftId) {
@@ -1425,21 +1430,60 @@ async function saveDraftEdit() {
         draftEditSaving.value = false;
     }
 }
-async function publishDraftToMiaoshou(draft) {
-    if (draft.tiktok_collect_box_id)
+function openMiaoshouPublishDialog(draftsToPublish) {
+    if (!draftsToPublish.length)
         return;
-    try {
-        publishingDraftId.value = draft.id;
-        const { data } = await api.post(`/drafts/${draft.id}/claim-to-tiktok`, {}, { headers: headers.value });
-        await refresh();
-        showToast(data.already_claimed ? '该商品已认领到 TikTok 采集箱' : `已发布公共草稿箱并认领到 TikTok（编号：${data.tiktok_collect_box_detail_id}）`);
+    if (!miaoshouAssignableShops.value.length) {
+        showToast('没有可分配的妙手店铺，请联系管理员同步并分配店铺权限');
+        return;
     }
-    catch (e) {
-        const detail = e.response?.data?.detail || '发布至妙手或认领 TikTok 失败';
-        showToast(`${detail}；草稿已保留，可稍后重试`);
+    miaoshouPublishDraftIds.value = draftsToPublish.map(draft => draft.id);
+    miaoshouPublishShopId.value = null;
+    miaoshouPublishCompleted.value = 0;
+    miaoshouPublishFailed.value = 0;
+    showMiaoshouPublishDialog.value = true;
+}
+function publishDraftToMiaoshou(draft) { openMiaoshouPublishDialog([draft]); }
+function openBatchMiaoshouPublishDialog() {
+    if (!batchMiaoshouPublishEligible.value) {
+        showToast('仅可批量发布待发布状态的商品草稿');
+        return;
+    }
+    openMiaoshouPublishDialog(selectedDrafts.value);
+}
+async function confirmMiaoshouPublish() {
+    if (!miaoshouPublishShopId.value) {
+        showToast('请先选择要分配的店铺');
+        return;
+    }
+    try {
+        miaoshouPublishing.value = true;
+        miaoshouPublishCompleted.value = 0;
+        miaoshouPublishFailed.value = 0;
+        for (const draftId of miaoshouPublishDraftIds.value) {
+            publishingDraftId.value = draftId;
+            try {
+                await api.post(`/drafts/${draftId}/claim-to-tiktok`, { shop_id: miaoshouPublishShopId.value }, { headers: headers.value });
+            }
+            catch {
+                miaoshouPublishFailed.value++;
+            }
+            finally {
+                miaoshouPublishCompleted.value++;
+            }
+        }
+        await refresh();
+        if (!miaoshouPublishFailed.value) {
+            showMiaoshouPublishDialog.value = false;
+            selectedDraftIds.value = [];
+            showToast(`已发布并分配 ${miaoshouPublishCompleted.value} 条商品到所选店铺`);
+        }
+        else
+            showToast(`发布完成，${miaoshouPublishFailed.value} 条失败，可保留弹窗后重试`);
     }
     finally {
         publishingDraftId.value = null;
+        miaoshouPublishing.value = false;
     }
 }
 async function openTiktokExportDialog() {
@@ -4135,6 +4179,12 @@ if (__VLS_ctx.token) {
                     ...{ class: "primary" },
                 });
             }
+            if (__VLS_ctx.batchMiaoshouPublishEligible) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.openBatchMiaoshouPublishDialog) },
+                    ...{ class: "primary" },
+                });
+            }
             if (__VLS_ctx.tiktokExportEligible) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (__VLS_ctx.openTiktokExportDialog) },
@@ -5281,6 +5331,87 @@ if (__VLS_ctx.showBatchClaimDialog) {
         disabled: (__VLS_ctx.batchClaimLoading || __VLS_ctx.batchClaiming || !__VLS_ctx.groupedBatchClaimItems.length),
     });
     (__VLS_ctx.batchClaiming ? `领取中 ${__VLS_ctx.batchClaimCompleted}/${__VLS_ctx.batchClaimTotal}` : __VLS_ctx.batchClaimFailed ? '重试领取' : '确认批量领取');
+}
+if (__VLS_ctx.showMiaoshouPublishDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMiaoshouPublishDialog))
+                    return;
+                !__VLS_ctx.miaoshouPublishing && (__VLS_ctx.showMiaoshouPublishDialog = false);
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMiaoshouPublishDialog))
+                    return;
+                __VLS_ctx.showMiaoshouPublishDialog = false;
+            } },
+        ...{ class: "modal-close" },
+        disabled: (__VLS_ctx.miaoshouPublishing),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    (__VLS_ctx.miaoshouPublishDraftIds.length > 1 ? '批量发布至妙手' : '发布至妙手');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.miaoshouPublishDraftIds.length);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+        ...{ class: "required" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.miaoshouPublishShopId),
+        disabled: (__VLS_ctx.miaoshouPublishing),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (null),
+        disabled: true,
+    });
+    for (const [shop] of __VLS_getVForSourceType((__VLS_ctx.miaoshouAssignableShops))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (shop.id),
+            value: (shop.id),
+        });
+        (shop.name);
+        (shop.external_shop_id);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+    if (__VLS_ctx.miaoshouPublishing || __VLS_ctx.miaoshouPublishCompleted) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "batch-claim-progress" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (__VLS_ctx.miaoshouPublishCompleted);
+        (__VLS_ctx.miaoshouPublishDraftIds.length);
+        if (__VLS_ctx.miaoshouPublishFailed) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            (__VLS_ctx.miaoshouPublishFailed);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.progress, __VLS_intrinsicElements.progress)({
+            max: (__VLS_ctx.miaoshouPublishDraftIds.length || 1),
+            value: (__VLS_ctx.miaoshouPublishCompleted),
+        });
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMiaoshouPublishDialog))
+                    return;
+                __VLS_ctx.showMiaoshouPublishDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.miaoshouPublishing),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.confirmMiaoshouPublish) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.miaoshouPublishing || !__VLS_ctx.miaoshouPublishShopId),
+    });
+    (__VLS_ctx.miaoshouPublishing ? `发布中 ${__VLS_ctx.miaoshouPublishCompleted}/${__VLS_ctx.miaoshouPublishDraftIds.length}` : __VLS_ctx.miaoshouPublishFailed ? '重试发布' : '确认并发布');
 }
 if (__VLS_ctx.showTaskDetailDialog && __VLS_ctx.viewingTask?.task_type === 'sku_image') {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -9080,6 +9211,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-table']} */ ;
@@ -9176,6 +9308,14 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['batch-claim-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['batch-claim-images']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-claim-progress']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
 /** @type {__VLS_StyleScopedClasses['batch-claim-progress']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
@@ -9710,6 +9850,12 @@ const __VLS_self = (await import('vue')).defineComponent({
             tiktokExportOptions: tiktokExportOptions,
             tiktokExportLoading: tiktokExportLoading,
             tiktokExportError: tiktokExportError,
+            showMiaoshouPublishDialog: showMiaoshouPublishDialog,
+            miaoshouPublishDraftIds: miaoshouPublishDraftIds,
+            miaoshouPublishShopId: miaoshouPublishShopId,
+            miaoshouPublishing: miaoshouPublishing,
+            miaoshouPublishCompleted: miaoshouPublishCompleted,
+            miaoshouPublishFailed: miaoshouPublishFailed,
             showBatchCarouselDialog: showBatchCarouselDialog,
             showBatchMainImageDialog: showBatchMainImageDialog,
             batchCarouselSaving: batchCarouselSaving,
@@ -9862,6 +10008,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             batchDispatchEligible: batchDispatchEligible,
             crossBorderManagedShops: crossBorderManagedShops,
             localManagedShops: localManagedShops,
+            miaoshouAssignableShops: miaoshouAssignableShops,
+            batchMiaoshouPublishEligible: batchMiaoshouPublishEligible,
             tiktokExportEligible: tiktokExportEligible,
             batchCarouselEligible: batchCarouselEligible,
             batchCarouselReviewEligible: batchCarouselReviewEligible,
@@ -9994,6 +10142,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             confirmDraftImages: confirmDraftImages,
             saveDraftEdit: saveDraftEdit,
             publishDraftToMiaoshou: publishDraftToMiaoshou,
+            openBatchMiaoshouPublishDialog: openBatchMiaoshouPublishDialog,
+            confirmMiaoshouPublish: confirmMiaoshouPublish,
             openTiktokExportDialog: openTiktokExportDialog,
             changeTiktokExportCategory: changeTiktokExportCategory,
             changeTiktokExportCatalog: changeTiktokExportCatalog,

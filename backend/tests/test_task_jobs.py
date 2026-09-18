@@ -16,8 +16,8 @@ from app.ai_providers import GrsaiProvider, ProviderError, ProviderTaskTerminalE
 from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
-from app.models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserTemplatePrompt, UserTemplateWhiteImage
-from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchImageReviewConfirm, BatchImageReviewTaskSelection, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
+from app.models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
+from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchImageReviewConfirm, BatchImageReviewTaskSelection, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
 
 
 class TaskJobTests(unittest.TestCase):
@@ -35,6 +35,8 @@ class TaskJobTests(unittest.TestCase):
                 User(id=1, company_id=1, email="operator@example.com", name="Operator", user_code="AA", password_hash="x", role=Role.MEMBER),
                 User(id=2, company_id=1, email="admin@example.com", name="Admin", user_code="AB", password_hash="x", role=Role.COMPANY_ADMIN),
                 User(id=3, company_id=1, email="other@example.com", name="Other", user_code="AC", password_hash="x", role=Role.MEMBER),
+                Shop(id=1, company_id=1, name="TikTok Shop", external_shop_id="1001", shop_type="cross_border"),
+                UserShop(user_id=1, shop_id=1),
                 UserAIProviderCredential(company_id=1, user_id=1, provider="grsai", secret_encrypted=encrypt_secret("member-key")),
                 UserTemplateWhiteImage(id=1, company_id=1, user_id=1, template_id=1, name="Front", image_url="https://img.example/template-white/1.png"),
             ])
@@ -572,7 +574,7 @@ class TaskJobTests(unittest.TestCase):
 
             with patch.object(main, "create_common_collect_box_detail", side_effect=create_common), patch.object(main, "claim_common_collect_box_to_tiktok", side_effect=fail_claim):
                 with self.assertRaisesRegex(HTTPException, "认领失败"):
-                    asyncio.run(main.claim_draft_to_tiktok(draft.id, user=db.get(User, 1), db=db))
+                    asyncio.run(main.claim_draft_to_tiktok(draft.id, DraftMiaoshouPublishInput(shop_id=1), user=db.get(User, 1), db=db))
 
             db.refresh(draft)
             self.assertEqual(draft.workflow_stage, "ready_to_publish")
@@ -597,11 +599,14 @@ class TaskJobTests(unittest.TestCase):
                 current_draft.tiktok_collect_box_id = "456"
                 return "456"
 
-            with patch.object(main, "create_common_collect_box_detail", side_effect=create_common), patch.object(main, "claim_common_collect_box_to_tiktok", side_effect=claim_tiktok):
-                result = asyncio.run(main.claim_draft_to_tiktok(draft.id, user=db.get(User, 1), db=db))
+            with patch.object(main, "create_common_collect_box_detail", side_effect=create_common), patch.object(main, "claim_common_collect_box_to_tiktok", side_effect=claim_tiktok), patch.object(main, "assign_tiktok_collect_box_to_shop") as assign_shop:
+                result = asyncio.run(main.claim_draft_to_tiktok(draft.id, DraftMiaoshouPublishInput(shop_id=1), user=db.get(User, 1), db=db))
+                assign_shop.assert_awaited_once()
 
             db.refresh(draft)
             self.assertEqual(result["tiktok_collect_box_detail_id"], "456")
+            self.assertEqual(result["shop_id"], 1)
+            self.assertEqual(draft.shop_id, 1)
             self.assertEqual(draft.status, "claimed_to_tiktok")
             self.assertEqual(draft.workflow_stage, "published")
 

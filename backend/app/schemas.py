@@ -520,3 +520,8 @@ class MiaoshouShopQuery(BaseModel):
     site: str | None = Field(default=None, max_length=20)
     page_no: int = Field(default=1, ge=1, alias="pageNo")
     page_size: int = Field(default=100, ge=1, le=100, alias="pageSize")
+
+
+class DraftMiaoshouPublishInput(BaseModel):
+    """发布前必须明确选择一个有权限的妙手店铺。"""
+    shop_id: int = Field(ge=1)
