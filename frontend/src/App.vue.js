@@ -19,7 +19,7 @@ const loading = ref(false), error = ref('');
 const toast = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
 const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFormTab = ref('basic'), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateTitleTemplate = ref(''), newTemplateProductDescription = ref(''), newTemplateSizeChart = ref(null), newTemplateSizeChartPreview = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), newPackageWeight = ref(null), newPackageLength = ref(null), newPackageWidth = ref(null), newPackageHeight = ref(null), newSkuSizeOptions = ref([]), newTemplateAiPrompts = ref([]), editingTemplate = ref(null);
-const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', user_code: '', email: '', password: '', is_active: true }), memberSaving = ref(false), memberFormError = ref('');
+const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', user_code: '', email: '', password: '', is_active: true }), memberSaving = ref(false), memberFormError = ref(''), memberListRefreshing = ref(false);
 const showMemberCredentialDialog = ref(false), credentialMember = ref(null), credentialProvider = ref(null), credentialApiKey = ref(''), credentialSaving = ref(false);
 const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), myAccountSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
@@ -27,7 +27,7 @@ const activeShopType = ref('cross_border'), showLocalShopDialog = ref(false), lo
 const showMiaoshouDialog = ref(false), miaoshouForm = ref({ app_id: '', app_secret: '' }), miaoshouSaving = ref(false);
 const hubAgents = ref([]), showHubstudioDialog = ref(false), hubstudioSaving = ref(false), hubstudioForm = ref({ app_id: '', app_secret: '', group_code: '' });
 const showHubBindingDialog = ref(false), bindingShop = ref(null), hubBindingSaving = ref(false), hubBindingForm = ref({ container_code: '', agent_id: null });
-const tiktokCatalogs = ref([]), tiktokCatalogLoading = ref(false), tiktokCatalogError = ref('');
+const tiktokCatalogs = ref([]), tiktokCatalogLoading = ref(false), tiktokCatalogError = ref(''), tiktokCatalogListRefreshing = ref(false);
 const showTiktokCatalogDialog = ref(false), tiktokCatalogName = ref(''), tiktokCatalogFile = ref(null);
 const showTiktokCatalogDetailDialog = ref(false), managingTiktokCatalog = ref(null), managingTiktokCatalogOptions = ref(null), managingTiktokCategory = ref('');
 const materialUploading = ref(false), materialUploadError = ref('');
@@ -1770,6 +1770,21 @@ async function submitSelectedDraftsToHubstudio() {
         tiktokSubmitting.value = false;
     }
 }
+async function refreshTiktokCatalogList() {
+    if (tiktokCatalogListRefreshing.value)
+        return;
+    try {
+        tiktokCatalogListRefreshing.value = true;
+        tiktokCatalogError.value = '';
+        tiktokCatalogs.value = (await api.get('/tiktok-category-catalogs', { headers: headers.value })).data;
+    }
+    catch (e) {
+        tiktokCatalogError.value = e.response?.data?.detail || '刷新 TK 类目列表失败';
+    }
+    finally {
+        tiktokCatalogListRefreshing.value = false;
+    }
+}
 function openTiktokCatalogCreateDialog() {
     tiktokCatalogName.value = '';
     tiktokCatalogFile.value = null;
@@ -2104,6 +2119,20 @@ async function downloadSelectedMaterialAssets() {
     }
     finally {
         materialDownloading.value = false;
+    }
+}
+async function refreshMemberList() {
+    if (memberListRefreshing.value)
+        return;
+    try {
+        memberListRefreshing.value = true;
+        members.value = (await api.get('/members', { headers: headers.value })).data;
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '刷新成员列表失败');
+    }
+    finally {
+        memberListRefreshing.value = false;
     }
 }
 function openMemberDialog(member) { editingMember.value = member || null; memberForm.value = { name: member?.name || '', user_code: member?.user_code || '', email: member?.email || '', password: '', is_active: member?.is_active ?? true }; memberFormError.value = ''; showMemberDialog.value = true; }
@@ -4774,6 +4803,15 @@ if (__VLS_ctx.token) {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "section-heading-actions" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.refreshMemberList) },
+            ...{ class: "ghost" },
+            disabled: (__VLS_ctx.memberListRefreshing),
+        });
+        (__VLS_ctx.memberListRefreshing ? '刷新中…' : '↻ 刷新');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
                     if (!(__VLS_ctx.token))
@@ -4797,7 +4835,8 @@ if (__VLS_ctx.token) {
             ...{ class: "primary" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "draft-table" },
+            ...{ class: "draft-table refreshable-list" },
+            'aria-busy': (__VLS_ctx.memberListRefreshing),
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "thead" },
@@ -4914,10 +4953,18 @@ if (__VLS_ctx.token) {
                 (member.ai_provider_credentials?.[provider.credential_provider] ? '已配置' : '待配置');
             }
         }
-        if (!__VLS_ctx.members.length) {
+        if (!__VLS_ctx.members.length && !__VLS_ctx.memberListRefreshing) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "empty" },
             });
+        }
+        if (__VLS_ctx.memberListRefreshing) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "list-refresh-overlay" },
+                role: "status",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         }
     }
     else if (__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin') {
@@ -5212,6 +5259,15 @@ if (__VLS_ctx.token) {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "section-heading-actions" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.refreshTiktokCatalogList) },
+            ...{ class: "ghost" },
+            disabled: (__VLS_ctx.tiktokCatalogListRefreshing),
+        });
+        (__VLS_ctx.tiktokCatalogListRefreshing ? '刷新中…' : '↻ 刷新');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.openTiktokCatalogCreateDialog) },
             ...{ class: "primary" },
@@ -5223,7 +5279,8 @@ if (__VLS_ctx.token) {
             (__VLS_ctx.tiktokCatalogError);
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "draft-table" },
+            ...{ class: "draft-table refreshable-list" },
+            'aria-busy': (__VLS_ctx.tiktokCatalogListRefreshing),
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "thead tiktok-catalog-grid" },
@@ -5306,10 +5363,18 @@ if (__VLS_ctx.token) {
                 disabled: (__VLS_ctx.tiktokCatalogLoading),
             });
         }
-        if (!__VLS_ctx.tiktokCatalogs.length) {
+        if (!__VLS_ctx.tiktokCatalogs.length && !__VLS_ctx.tiktokCatalogListRefreshing) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "empty" },
             });
+        }
+        if (__VLS_ctx.tiktokCatalogListRefreshing) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "list-refresh-overlay" },
+                role: "status",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         }
     }
 }
@@ -9537,14 +9602,18 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-heading-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['refreshable-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['member-row-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['credential-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-tabs']} */ ;
@@ -9570,9 +9639,12 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-heading-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['refreshable-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
 /** @type {__VLS_StyleScopedClasses['tiktok-catalog-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
@@ -9580,6 +9652,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['tiktok-catalog-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['negative']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-dialog']} */ ;
@@ -10091,6 +10164,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             memberForm: memberForm,
             memberSaving: memberSaving,
             memberFormError: memberFormError,
+            memberListRefreshing: memberListRefreshing,
             showMemberCredentialDialog: showMemberCredentialDialog,
             credentialMember: credentialMember,
             credentialProvider: credentialProvider,
@@ -10120,6 +10194,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             tiktokCatalogs: tiktokCatalogs,
             tiktokCatalogLoading: tiktokCatalogLoading,
             tiktokCatalogError: tiktokCatalogError,
+            tiktokCatalogListRefreshing: tiktokCatalogListRefreshing,
             showTiktokCatalogDialog: showTiktokCatalogDialog,
             tiktokCatalogName: tiktokCatalogName,
             showTiktokCatalogDetailDialog: showTiktokCatalogDetailDialog,
@@ -10473,6 +10548,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             tiktokAttributePlaceholder: tiktokAttributePlaceholder,
             exportSelectedDrafts: exportSelectedDrafts,
             submitSelectedDraftsToHubstudio: submitSelectedDraftsToHubstudio,
+            refreshTiktokCatalogList: refreshTiktokCatalogList,
             openTiktokCatalogCreateDialog: openTiktokCatalogCreateDialog,
             onTiktokCatalogFileChange: onTiktokCatalogFileChange,
             createTiktokCatalog: createTiktokCatalog,
@@ -10494,6 +10570,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             uploadMaterialAssets: uploadMaterialAssets,
             deleteSelectedMaterialAssets: deleteSelectedMaterialAssets,
             downloadSelectedMaterialAssets: downloadSelectedMaterialAssets,
+            refreshMemberList: refreshMemberList,
             openMemberDialog: openMemberDialog,
             openMyAccountDialog: openMyAccountDialog,
             saveMyUserCode: saveMyUserCode,
