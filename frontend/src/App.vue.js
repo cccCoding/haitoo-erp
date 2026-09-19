@@ -33,6 +33,9 @@ const showTiktokCatalogDetailDialog = ref(false), managingTiktokCatalog = ref(nu
 const materialUploading = ref(false), materialUploadError = ref('');
 const materialDownloading = ref(false);
 const selectedMaterialAssetIds = ref([]), materialTemplateFilterId = ref(null), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false);
+const activeMaterialUsageTab = ref('unused');
+const materialUsageTabs = [{ key: 'unused', label: '未使用' }, { key: 'used', label: '已使用' }];
+const showMaterialBatchDraftDialog = ref(false), materialBatchGroupSize = ref(5), materialBatchMode = ref('sequential'), materialBatchGroups = ref([]), materialBatchSaving = ref(false);
 const pendingMaterialUploadFiles = ref([]), showMaterialUploadDialog = ref(false), materialUploadTemplateId = ref(null);
 const materialUploadedCount = ref(0), materialUploadTotal = ref(0), pendingMaterialUploadUrls = ref([]);
 const MATERIAL_UPLOAD_CONCURRENCY = 8, MATERIAL_UPLOAD_MAX_FILES = 100, IMAGE_UPLOAD_RETRY = 2;
@@ -151,6 +154,7 @@ const materialDraftSizes = computed(() => {
     return options.map((size) => String(size).trim()).filter(Boolean);
 });
 const materialDraftSkuCount = computed(() => selectedMaterialAssets.value.length);
+const canCreateMaterialBatch = computed(() => activeMaterialUsageTab.value === 'unused' && selectedMaterialAssets.value.length >= 5 && Boolean(selectedMaterialTemplateId.value));
 // 服务端按 Tab 返回数据；这里再按 display_tab 兜底，避免接口请求失败或旧服务未更新时，
 // 已切换的 Tab 短暂显示上一页的混合数据。
 const filteredDrafts = computed(() => activeDraftTab.value === 'all' ? drafts.value : drafts.value.filter(draft => draft.display_tab === activeDraftTab.value));
@@ -552,11 +556,13 @@ async function changeMaterialPage(targetPage) { if (materialListRefreshing.value
     return; currentMaterialPage.value = Math.min(Math.max(1, targetPage), materialPageCount.value); await refreshMaterialList(); }
 async function changeMaterialFilter() { if (materialListRefreshing.value)
     return; currentMaterialPage.value = 1; await refreshMaterialList(); }
+async function changeMaterialUsageTab(tab) { if (activeMaterialUsageTab.value === tab || materialListRefreshing.value)
+    return; activeMaterialUsageTab.value = tab; currentMaterialPage.value = 1; selectedMaterialAssetIds.value = []; await refreshMaterialList(); }
 async function refreshMaterialList() {
     try {
         materialListRefreshing.value = true;
         selectedMaterialAssetIds.value = [];
-        const { data } = await api.get('/material-assets', { headers: headers.value, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value } });
+        const { data } = await api.get('/material-assets', { headers: headers.value, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value, usage_status: activeMaterialUsageTab.value } });
         applyMaterialPage(data);
     }
     catch (e) {
@@ -594,7 +600,7 @@ async function refresh() {
         draftCreatorFilterId.value = user.value.id;
         creatorFiltersInitialized.value = true;
     }
-    const [s, t, g, task, material, d, providers, catalogs] = await Promise.all([api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: taskQueryParams() }), api.get('/material-assets', { ...h, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value } }), api.get('/drafts', { ...h, params: { creator_id: draftCreatorFilterId.value, template_id: draftTemplateFilterId.value, tab: activeDraftTab.value, work_status: activeDraftWorkStatus.value, page: currentDraftPage.value, page_size: draftPageSize.value } }), api.get('/ai-providers', h), api.get('/tiktok-category-catalogs', h)]);
+    const [s, t, g, task, material, d, providers, catalogs] = await Promise.all([api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: taskQueryParams() }), api.get('/material-assets', { ...h, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value, usage_status: activeMaterialUsageTab.value } }), api.get('/drafts', { ...h, params: { creator_id: draftCreatorFilterId.value, template_id: draftTemplateFilterId.value, tab: activeDraftTab.value, work_status: activeDraftWorkStatus.value, page: currentDraftPage.value, page_size: draftPageSize.value } }), api.get('/ai-providers', h), api.get('/tiktok-category-catalogs', h)]);
     shops.value = s.data;
     templates.value = t.data;
     templateGroups.value = g.data;
@@ -1146,6 +1152,67 @@ async function createDraftFromMaterialAssets() {
     }
     finally {
         materialDraftSaving.value = false;
+    }
+}
+function shuffleAssets(items) {
+    const shuffled = [...items];
+    for (let index = shuffled.length - 1; index > 0; index--) {
+        const target = Math.floor(Math.random() * (index + 1));
+        [shuffled[index], shuffled[target]] = [shuffled[target], shuffled[index]];
+    }
+    return shuffled;
+}
+function buildMaterialBatchGroups() {
+    const assets = materialBatchMode.value === 'random' ? shuffleAssets(selectedMaterialAssets.value) : [...selectedMaterialAssets.value];
+    const completeCount = Math.floor(assets.length / materialBatchGroupSize.value) * materialBatchGroupSize.value;
+    materialBatchGroups.value = Array.from({ length: completeCount / materialBatchGroupSize.value }, (_, index) => ({ assets: assets.slice(index * materialBatchGroupSize.value, (index + 1) * materialBatchGroupSize.value), title: '', generating: false }));
+}
+function openMaterialBatchDraftDialog() {
+    if (!canCreateMaterialBatch.value) {
+        showToast('请选择至少 5 张属于同一产品模板的未使用素材');
+        return;
+    }
+    buildMaterialBatchGroups();
+    showMaterialBatchDraftDialog.value = true;
+}
+function rebuildMaterialBatchGroups() { if (selectedMaterialAssets.value.length >= materialBatchGroupSize.value)
+    buildMaterialBatchGroups(); }
+async function generateMaterialBatchTitle(group) {
+    if (!selectedMaterialTemplateId.value || !group.assets[0])
+        return;
+    try {
+        group.generating = true;
+        const { data } = await api.post(`/templates/${selectedMaterialTemplateId.value}/generate-draft-title`, { image_url: group.assets[0].url }, { headers: headers.value });
+        group.title = data.title;
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || 'AI 生成标题失败，请稍后重试');
+    }
+    finally {
+        group.generating = false;
+    }
+}
+async function createMaterialBatchDrafts() {
+    if (!selectedMaterialTemplateId.value || !materialBatchGroups.value.length)
+        return;
+    if (materialBatchGroups.value.some(group => group.title.trim().length < 25 || group.title.trim().length > 255)) {
+        showToast('请为每个组合填写 25-255 个字符的商品标题');
+        return;
+    }
+    try {
+        materialBatchSaving.value = true;
+        const { data } = await api.post('/drafts/from-material-assets/batch', { template_id: selectedMaterialTemplateId.value, groups: materialBatchGroups.value.map(group => ({ material_asset_ids: group.assets.map(asset => asset.id), title: group.title.trim() })) }, { headers: headers.value });
+        selectedMaterialAssetIds.value = [];
+        showMaterialBatchDraftDialog.value = false;
+        await refresh();
+        page.value = 'drafts';
+        showToast(`已创建 ${data.total} 条商品草稿`);
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '批量创建商品草稿失败，请稍后重试');
+    }
+    finally {
+        materialBatchSaving.value = false;
     }
 }
 function openDraftEditDialog(draft) { editingDraft.value = draft; draftEditTitle.value = draft.title; draftEditProductDescription.value = draft.product_description || ''; draftEditError.value = ''; showDraftEditDialog.value = true; }
@@ -3645,6 +3712,31 @@ if (__VLS_ctx.token) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "material-usage-tabs" },
+        });
+        for (const [tab] of __VLS_getVForSourceType((__VLS_ctx.materialUsageTabs))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!(__VLS_ctx.page === 'materials'))
+                            return;
+                        __VLS_ctx.changeMaterialUsageTab(tab.key);
+                    } },
+                key: (tab.key),
+                ...{ class: ({ active: __VLS_ctx.activeMaterialUsageTab === tab.key }) },
+            });
+            (tab.label);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "material-filter-row" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
@@ -3711,6 +3803,12 @@ if (__VLS_ctx.token) {
                 ...{ onClick: (__VLS_ctx.openMaterialDraftDialog) },
                 ...{ class: "primary" },
             });
+            if (__VLS_ctx.activeMaterialUsageTab === 'unused') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.openMaterialBatchDraftDialog) },
+                    ...{ class: "primary" },
+                });
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (__VLS_ctx.downloadSelectedMaterialAssets) },
                 ...{ class: "secondary" },
@@ -6663,6 +6761,131 @@ if (__VLS_ctx.showMaterialDraftDialog) {
     });
     (__VLS_ctx.materialDraftSaving ? '创建中…' : '确认创建');
 }
+if (__VLS_ctx.showMaterialBatchDraftDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMaterialBatchDraftDialog))
+                    return;
+                !__VLS_ctx.materialBatchSaving && (__VLS_ctx.showMaterialBatchDraftDialog = false);
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card material-batch-draft-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMaterialBatchDraftDialog))
+                    return;
+                __VLS_ctx.showMaterialBatchDraftDialog = false;
+            } },
+        ...{ class: "modal-close" },
+        disabled: (__VLS_ctx.materialBatchSaving),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "material-batch-options" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (__VLS_ctx.rebuildMaterialBatchGroups) },
+        value: (__VLS_ctx.materialBatchGroupSize),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (5),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (6),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (7),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (8),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (__VLS_ctx.rebuildMaterialBatchGroups) },
+        value: (__VLS_ctx.materialBatchMode),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "sequential",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "random",
+    });
+    if (__VLS_ctx.selectedMaterialAssets.length % __VLS_ctx.materialBatchGroupSize) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "material-batch-remainder" },
+        });
+        (__VLS_ctx.selectedMaterialAssets.length % __VLS_ctx.materialBatchGroupSize);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "material-batch-groups" },
+    });
+    for (const [group, index] of __VLS_getVForSourceType((__VLS_ctx.materialBatchGroups))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+            key: (index),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+        (index + 1);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (group.assets.length);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "material-draft-preview-images" },
+        });
+        for (const [asset] of __VLS_getVForSourceType((group.assets))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                key: (asset.id),
+                src: (__VLS_ctx.imageUrl(asset.url)),
+                alt: (asset.sku),
+            });
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "material-draft-title-row" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            minlength: "25",
+            maxlength: "255",
+            placeholder: "请输入 25-255 个字符的商品标题",
+        });
+        (group.title);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.showMaterialBatchDraftDialog))
+                        return;
+                    __VLS_ctx.generateMaterialBatchTitle(group);
+                } },
+            ...{ class: "secondary" },
+            disabled: (group.generating),
+        });
+        (group.generating ? '生成中…' : 'AI 生成标题');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
+            ...{ class: ({ error: group.title.length > 0 && group.title.length < 25 }) },
+        });
+        (group.title.length);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showMaterialBatchDraftDialog))
+                    return;
+                __VLS_ctx.showMaterialBatchDraftDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.materialBatchSaving),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.createMaterialBatchDrafts) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.materialBatchSaving || !__VLS_ctx.materialBatchGroups.length),
+    });
+    (__VLS_ctx.materialBatchSaving ? '创建中…' : `确认创建 ${__VLS_ctx.materialBatchGroups.length} 条草稿`);
+}
 if (__VLS_ctx.showBatchCarouselDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
@@ -9230,6 +9453,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-usage-tabs']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-filter-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-template-filter']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-template-filter']} */ ;
@@ -9238,6 +9462,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-upload-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-bar']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['negative']} */ ;
@@ -9513,6 +9738,19 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['material-draft-sku-summary']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-sku-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-draft-size-chart']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-batch-draft-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-batch-options']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-batch-remainder']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-batch-groups']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-preview-images']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-title-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
@@ -9899,6 +10137,13 @@ const __VLS_self = (await import('vue')).defineComponent({
             materialDraftSizeChartPreview: materialDraftSizeChartPreview,
             materialDraftTitleGenerating: materialDraftTitleGenerating,
             materialDraftSaving: materialDraftSaving,
+            activeMaterialUsageTab: activeMaterialUsageTab,
+            materialUsageTabs: materialUsageTabs,
+            showMaterialBatchDraftDialog: showMaterialBatchDraftDialog,
+            materialBatchGroupSize: materialBatchGroupSize,
+            materialBatchMode: materialBatchMode,
+            materialBatchGroups: materialBatchGroups,
+            materialBatchSaving: materialBatchSaving,
             pendingMaterialUploadFiles: pendingMaterialUploadFiles,
             showMaterialUploadDialog: showMaterialUploadDialog,
             materialUploadTemplateId: materialUploadTemplateId,
@@ -10138,6 +10383,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             changeMaterialPageSize: changeMaterialPageSize,
             changeMaterialPage: changeMaterialPage,
             changeMaterialFilter: changeMaterialFilter,
+            changeMaterialUsageTab: changeMaterialUsageTab,
             login: login,
             onCreativeAssetChange: onCreativeAssetChange,
             removeCreativeAsset: removeCreativeAsset,
@@ -10184,6 +10430,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             generateMaterialDraftTitle: generateMaterialDraftTitle,
             openMaterialDraftDialog: openMaterialDraftDialog,
             createDraftFromMaterialAssets: createDraftFromMaterialAssets,
+            openMaterialBatchDraftDialog: openMaterialBatchDraftDialog,
+            rebuildMaterialBatchGroups: rebuildMaterialBatchGroups,
+            generateMaterialBatchTitle: generateMaterialBatchTitle,
+            createMaterialBatchDrafts: createMaterialBatchDrafts,
             openDraftEditDialog: openDraftEditDialog,
             draftSkuForImage: draftSkuForImage,
             draftEditSkus: draftEditSkus,

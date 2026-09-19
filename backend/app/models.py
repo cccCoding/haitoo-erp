@@ -255,6 +255,8 @@ class MaterialAsset(Base):
     url: Mapped[str] = mapped_column(String(500))
     name: Mapped[str] = mapped_column(String(180))
     sku: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    # 仅记录是否曾被成功用于创建草稿；已使用素材仍可用于单条草稿复用。
+    usage_status: Mapped[str] = mapped_column(String(12), default="unused", nullable=False, index=True)
     claimed_by: Mapped[int] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

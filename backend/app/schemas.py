@@ -310,6 +310,24 @@ class MaterialDraftCreate(BaseModel):
         return value
 
 
+class MaterialDraftBatchGroup(BaseModel):
+    material_asset_ids: list[int] = Field(min_length=5, max_length=8)
+    title: str = Field(min_length=25, max_length=255)
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        value = value.strip()
+        if not 25 <= len(value) <= 255:
+            raise ValueError("商品标题长度须为 25-255 个字符")
+        return value
+
+
+class MaterialDraftBatchCreate(BaseModel):
+    template_id: int
+    groups: list[MaterialDraftBatchGroup] = Field(min_length=1, max_length=20)
+
+
 class DraftTitleGenerate(BaseModel):
     image_url: str = Field(min_length=1, max_length=500)
 

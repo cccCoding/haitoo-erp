@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import engine, get_db
 from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
-from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
+from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
@@ -1432,9 +1432,12 @@ def list_material_assets(
     page_size: int = Query(default=20, ge=1, le=100),
     creator_id: int | None = Query(default=None, ge=1),
     template_id: int | None = None,
+    usage_status: str = "unused",
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
+    if usage_status not in {"unused", "used"}:
+        raise HTTPException(422, "不支持的素材状态")
     filters = []
     if user.role != Role.SUPER_ADMIN:
         filters.append(MaterialAsset.company_id == user.company_id)
@@ -1444,6 +1447,7 @@ def list_material_assets(
         filters.append(MaterialAsset.claimed_by == creator_id)
     if template_id is not None:
         filters.append(MaterialAsset.template_id == template_id)
+    filters.append(MaterialAsset.usage_status == usage_status)
     total_stmt = select(func.count()).select_from(MaterialAsset)
     if filters:
         total_stmt = total_stmt.where(*filters)
@@ -1902,8 +1906,54 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
         created_by=user.id,
         updated_by=user.id,
     )
-    db.add(draft); db.commit(); db.refresh(draft)
+    db.add(draft)
+    for asset in assets:
+        asset.usage_status = "used"
+    db.commit(); db.refresh(draft)
     return serialize_record(draft)
+
+
+@app.post("/drafts/from-material-assets/batch")
+def create_drafts_from_material_assets_batch(payload: MaterialDraftBatchCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """将未使用素材按已预览的分组原子创建多个商品草稿。"""
+    template = get_company_template(db, user, payload.template_id)
+    groups = [(list(dict.fromkeys(group.material_asset_ids)), group.title) for group in payload.groups]
+    if any(len(asset_ids) != len(group.material_asset_ids) for (asset_ids, _title), group in zip(groups, payload.groups)):
+        raise HTTPException(400, "同一分组不能重复选择素材")
+    all_ids = [asset_id for asset_ids, _title in groups for asset_id in asset_ids]
+    if len(set(all_ids)) != len(all_ids):
+        raise HTTPException(400, "同一素材不能用于多个组合")
+    stmt = select(MaterialAsset).where(
+        MaterialAsset.company_id == user.company_id,
+        MaterialAsset.id.in_(all_ids),
+        *([MaterialAsset.claimed_by == user.id] if user.role == Role.MEMBER else []),
+    ).with_for_update()
+    assets_by_id = {asset.id: asset for asset in db.scalars(stmt).all()}
+    if len(assets_by_id) != len(all_ids):
+        raise HTTPException(400, "包含不存在或无权使用的素材")
+    if any(asset.usage_status != "unused" for asset in assets_by_id.values()):
+        raise HTTPException(400, "组合创建只能使用未使用素材，请刷新列表后重试")
+    if any(not asset.sku for asset in assets_by_id.values()):
+        raise HTTPException(400, "包含无 SKU 的历史素材，请重新上传或领取后再创建商品草稿")
+    if any(asset.template_id != template.id for asset in assets_by_id.values()):
+        raise HTTPException(400, "组合创建时只能使用属于所选产品模板的未使用素材")
+    drafts = []
+    for asset_ids, title in groups:
+        assets = [assets_by_id[asset_id] for asset_id in asset_ids]
+        drafts.append(ProductDraft(
+            company_id=user.company_id, shop_id=None, template_id=template.id, workflow_stage="pending",
+            title=title, product_description=template.product_description, size_chart_url=template.size_chart_url,
+            image_urls=[asset.url for asset in assets],
+            sku_items=[{"image_url": asset.url, "size": None, "sku": asset.sku} for asset in assets],
+            created_by=user.id, updated_by=user.id,
+        ))
+    db.add_all(drafts)
+    for asset in assets_by_id.values():
+        asset.usage_status = "used"
+    db.commit()
+    for draft in drafts:
+        db.refresh(draft)
+    return {"total": len(drafts), "drafts": [serialize_record(draft) for draft in drafts]}
 
 
 @app.post("/templates/{template_id}/generate-draft-title")

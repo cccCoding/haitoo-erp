@@ -7,7 +7,7 @@ import zipfile
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -17,7 +17,7 @@ from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
 from app.models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
-from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchImageReviewConfirm, BatchImageReviewTaskSelection, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
+from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchImageReviewConfirm, BatchImageReviewTaskSelection, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
 
 
 class TaskJobTests(unittest.TestCase):
@@ -502,6 +502,7 @@ class TaskJobTests(unittest.TestCase):
             self.assertEqual(draft["sku_items"], [{"image_url": current.url, "size": None, "sku": current.sku}])
             self.assertEqual(draft["status"], "pending_publish")
             self.assertEqual(draft["workflow_stage"], "pending")
+            self.assertEqual(db.get(MaterialAsset, current.id).usage_status, "used")
             self.assertIsNone(draft["miaoshou_collect_box_id"])
             self.assertIsNone(draft["tiktok_collect_box_id"])
             with self.assertRaisesRegex(Exception, "无 SKU"):
@@ -509,6 +510,27 @@ class TaskJobTests(unittest.TestCase):
                     MaterialDraftCreate(template_id=1, material_asset_ids=[legacy.id], title="L" * 25),
                     user=db.get(User, 1), db=db,
                 )
+
+    def test_material_usage_filter_and_batch_draft_creation_are_atomic(self) -> None:
+        with self.session_factory() as db:
+            assets = [MaterialAsset(company_id=1, template_id=1, url=f"https://img.example/{index}.png", name=str(index), sku=f"M05LAA{index:06d}", claimed_by=1) for index in range(10)]
+            db.add_all(assets); db.commit()
+            for asset in assets: db.refresh(asset)
+            payload = MaterialDraftBatchCreate(template_id=1, groups=[
+                {"material_asset_ids": [asset.id for asset in assets[:5]], "title": "A" * 25},
+                {"material_asset_ids": [asset.id for asset in assets[5:10]], "title": "B" * 25},
+            ])
+            result = main.create_drafts_from_material_assets_batch(payload, user=db.get(User, 1), db=db)
+            self.assertEqual(result["total"], 2)
+            self.assertEqual([item["sku"] for item in result["drafts"][0]["sku_items"]], [asset.sku for asset in assets[:5]])
+            self.assertTrue(all(db.get(MaterialAsset, asset.id).usage_status == "used" for asset in assets))
+            self.assertEqual(main.list_material_assets(page=1, page_size=20, creator_id=None, template_id=1, usage_status="unused", user=db.get(User, 1), db=db)["total"], 0)
+            self.assertEqual(main.list_material_assets(page=1, page_size=20, creator_id=None, template_id=1, usage_status="used", user=db.get(User, 1), db=db)["total"], 10)
+
+            rejected = MaterialDraftBatchCreate(template_id=1, groups=[{"material_asset_ids": [asset.id for asset in assets[:5]], "title": "C" * 25}])
+            with self.assertRaisesRegex(HTTPException, "未使用素材"):
+                main.create_drafts_from_material_assets_batch(rejected, user=db.get(User, 1), db=db)
+            self.assertEqual(db.scalar(select(func.count()).select_from(ProductDraft)), 2)
 
     def test_pending_drafts_can_be_dispatched_to_each_workflow_stage(self) -> None:
         with self.session_factory() as db:
