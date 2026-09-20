@@ -16,7 +16,7 @@ from app.ai_providers import GrsaiProvider, ProviderError, ProviderTaskTerminalE
 from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
-from app.models import AIProviderSetting, Company, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
+from app.models import AIProviderSetting, Company, MaterialAsset, MiaoshouCollectBoxItem, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
 from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchImageReviewConfirm, BatchImageReviewTaskSelection, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
 
 
@@ -1153,6 +1153,37 @@ class TaskJobTests(unittest.TestCase):
             )
         self.assertEqual(result["image_urls"], ["https://img.example/sku.png"])
         self.assertEqual(result["carousel_items"], [])
+
+    def test_miaoshou_collect_box_sync_excludes_local_drafts_without_title_matching(self) -> None:
+        remote_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+        response = {"code": "success", "data": {"total": 2, "detailList": [
+            {"commonCollectBoxDetailId": 901, "title": "不同标题的自建商品", "itemNum": "SELF-1", "status": "noClaimed", "gmtCreate": remote_time, "gmtModified": remote_time},
+            {"commonCollectBoxDetailId": 902, "title": "外部采集商品", "itemNum": "EXT-1", "status": "claimed", "gmtCreate": remote_time, "gmtModified": remote_time},
+        ]}}
+        with self.session_factory() as db:
+            db.add(ProductDraft(company_id=1, template_id=1, title="本地标题" * 10, image_urls=[], sku_items=[], miaoshou_collect_box_id="901", created_by=1, updated_by=1))
+            db.add(MiaoshouCollectBoxItem(company_id=1, common_collect_box_detail_id="901", title="历史缓存的自建商品"))
+            db.commit()
+            with patch.object(main, "miaoshou_post", new=AsyncMock(return_value=response)):
+                result = asyncio.run(main.sync_miaoshou_collect_box(db.get(Company, 1), db))
+            items = db.scalars(select(MiaoshouCollectBoxItem).order_by(MiaoshouCollectBoxItem.common_collect_box_detail_id)).all()
+            page = main.list_miaoshou_collect_box(user=db.get(User, 1), db=db)
+        self.assertTrue(result["first_sync"])
+        self.assertEqual([item.common_collect_box_detail_id for item in items], ["902"])
+        self.assertEqual([item["common_collect_box_detail_id"] for item in page["items"]], ["902"])
+
+    def test_miaoshou_collect_box_prune_physically_deletes_records_older_than_seven_days(self) -> None:
+        now = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add_all([
+                MiaoshouCollectBoxItem(company_id=1, common_collect_box_detail_id="old", title="过期商品", remote_created_at=now - timedelta(days=8)),
+                MiaoshouCollectBoxItem(company_id=1, common_collect_box_detail_id="current", title="当前商品", remote_created_at=now - timedelta(days=6)),
+            ])
+            db.commit()
+            deleted_count = main.prune_miaoshou_collect_box(db.get(Company, 1), db, now=now)
+            remaining = db.scalars(select(MiaoshouCollectBoxItem).order_by(MiaoshouCollectBoxItem.common_collect_box_detail_id)).all()
+        self.assertEqual(deleted_count, 1)
+        self.assertEqual([item.common_collect_box_detail_id for item in remaining], ["current"])
 
     def test_legacy_batch_migration_clears_tasks_and_preserves_assets(self) -> None:
         task_id = self.add_task()

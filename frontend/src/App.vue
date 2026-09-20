@@ -7,7 +7,7 @@ const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://loca
 const token = ref(localStorage.getItem('haitoro_token') || '')
 const route = useRoute()
 const router = useRouter()
-const workspaceRouteNames = new Set(['dashboard', 'templates', 'pod', 'tasks', 'materials', 'drafts', 'members', 'shops', 'tiktok-catalogs'])
+const workspaceRouteNames = new Set(['dashboard', 'templates', 'pod', 'tasks', 'materials', 'drafts', 'miaoshou-collect-box', 'members', 'shops', 'tiktok-catalogs'])
 const page = computed<string>({
   get: () => workspaceRouteNames.has(String(route.name)) ? String(route.name) : 'dashboard',
   set: value => { if (workspaceRouteNames.has(value) && value !== route.name) void router.push({ name: value }) },
@@ -56,6 +56,9 @@ const tiktokExportCatalogId = ref<number | null>(null), tiktokExportCategory = r
 const TIKTOK_EXPORT_ATTRIBUTE_PRESETS_VERSION = 'v1'
 const shopeeExportCatalogId = ref<number | null>(null), shopeeExportCategoryId = ref(''), shopeeExportDefaultPrice = ref<number | null>(null), shopeeExportDefaultQuantity = ref<number>(999), shopeeExportDangerousGoods = ref<'Yes'|'No'>('No'), shopeeExportChannels = ref<string[]>([]), shopeeExportOverrides = ref<Record<number,{price:number|null;quantity:number|null}>>({})
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref<number | null>(null), draftCreatorFilterId = ref<number | null>(null), draftListRefreshing = ref(false)
+const collectBoxItems = ref<any[]>([]), collectBoxTotal = ref(0), collectBoxLoading = ref(false)
+const collectBoxConfigured = ref(false), collectBoxLastSyncedAt = ref<number | null>(null), collectBoxInitialSyncedAt = ref<number | null>(null)
+const collectBoxQuery = ref(''), collectBoxPage = ref(1), collectBoxPageSize = ref(20)
 type DraftTab = 'all' | 'pending' | 'carousel_pending' | 'main_image_pending' | 'ready_to_publish' | 'published'
 const activeDraftTab = ref<DraftTab>('all'), draftTotal = ref(0), draftTabCounts = ref<Record<DraftTab, number>>({all:0,pending:0,carousel_pending:0,main_image_pending:0,ready_to_publish:0,published:0})
 type DraftWorkStatus = 'all' | 'not_started' | 'in_progress' | 'awaiting_review' | 'failed'
@@ -110,7 +113,7 @@ const showPersonalResourcesDialog = ref(false), personalResourceTab = ref<'white
 const showTeamResourcesDialog = ref(false), teamResourceTab = ref<'white-images' | 'prompts'>('white-images'), teamResourceUserId = ref<number | null>(null), teamResourceTemplateId = ref<number | null>(null), teamWhiteImages = ref<any[]>([]), teamPrompts = ref<any[]>([]), teamResourcesLoading = ref(false), teamResourceQuery = ref('')
 const editingWhiteImage = ref<any>(null), whiteImageForm = ref({ template_id: null as number | null, name: '', file: null as File | null })
 const editingPersonalPrompt = ref<any>(null), personalPromptForm = ref({ template_id: null as number | null, name: '', content: '' })
-const nav = [{key:'dashboard', icon:'◈', label:'工作台'}, {key:'templates', icon:'▦', label:'产品模板'}, {key:'pod', icon:'✦', label:'AI创作'}, {key:'tasks', icon:'◌', label:'任务中心'}, {key:'materials', icon:'◈', label:'素材库'}, {key:'drafts', icon:'▤', label:'商品草稿'}, {key:'members', icon:'♙', label:'成员管理', adminOnly:true}, {key:'shops', icon:'▣', label:'店铺管理', adminOnly:true}, {key:'tiktok-catalogs', icon:'▧', label:'类目管理', adminOnly:true}]
+const nav = [{key:'dashboard', icon:'◈', label:'工作台'}, {key:'templates', icon:'▦', label:'产品模板'}, {key:'pod', icon:'✦', label:'AI创作'}, {key:'tasks', icon:'◌', label:'任务中心'}, {key:'materials', icon:'◈', label:'素材库'}, {key:'drafts', icon:'▤', label:'商品草稿'}, {key:'miaoshou-collect-box', icon:'▤', label:'妙手采集箱'}, {key:'members', icon:'♙', label:'成员管理', adminOnly:true}, {key:'shops', icon:'▣', label:'店铺管理', adminOnly:true}, {key:'tiktok-catalogs', icon:'▧', label:'类目管理', adminOnly:true}]
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }))
 const visibleNav = computed(() => nav.filter(item => !item.adminOnly || user.value?.role === 'company_admin'))
 const pageTitle = computed(() => nav.find(x => x.key === page.value)?.label || '')
@@ -410,7 +413,10 @@ const groupedBatchClaimItems = computed(() => {
 })
 function syncTaskUrl() { if (page.value !== 'tasks') return; void router.replace({ name: 'tasks', query: { task_type:activeTaskType.value, task_page:String(currentTaskPage.value), task_page_size:String(taskPageSize.value), task_creator:taskCreatorFilterId.value ? String(taskCreatorFilterId.value) : 'all', task_status:taskStatusFilter.value, ...(taskCreatedFrom.value ? {task_from:taskCreatedFrom.value} : {}), ...(taskCreatedTo.value ? {task_to:taskCreatedTo.value} : {}), ...(activeTaskType.value==='sku_image' && taskSkuQuery.value.trim() ? {task_skus:taskSkuQuery.value} : {}) } }) }
 function clearTaskUrl() { if (route.query.task_type) void router.replace({ name: page.value }) }
-watch(page,value=>value==='tasks'?syncTaskUrl():clearTaskUrl())
+watch(page,value=>{
+  value==='tasks'?syncTaskUrl():clearTaskUrl()
+  if (value === 'miaoshou-collect-box') void loadCollectBox()
+})
 function applyTaskPage(data: any) { tasks.value = data.items || []; taskTotal.value = data.total || 0; taskTypeTotals.value={...taskTypeTotals.value,...(data.task_type_counts || {})}; taskTypeFilteredTotals.value={...taskTypeFilteredTotals.value,[activeTaskType.value]:data.total || 0}; taskActiveCount.value = data.active_count || 0; taskStatusCounts.value = data.status_counts || {}; currentTaskPage.value = data.page || 1; if(page.value==='tasks')syncTaskUrl() }
 async function changeTaskPageSize() { if (taskListRefreshing.value) return; currentTaskPage.value = 1; selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList() }
 async function changeTaskPage(targetPage: number) { if (taskListRefreshing.value) return; currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList() }
@@ -457,6 +463,21 @@ async function refreshMaterialList() {
   } catch (e:any) { showToast(e.response?.data?.detail || '刷新素材列表失败') }
   finally { materialListRefreshing.value = false }
 }
+const collectBoxPageCount = computed(() => Math.max(1, Math.ceil(collectBoxTotal.value / collectBoxPageSize.value)))
+async function loadCollectBox() {
+  try {
+    collectBoxLoading.value = true
+    const {data} = await api.get('/miaoshou/collect-box', {headers:headers.value, params:{
+      query:collectBoxQuery.value.trim(),
+      page:collectBoxPage.value, page_size:collectBoxPageSize.value,
+    }})
+    collectBoxItems.value=data.items || []; collectBoxTotal.value=data.total || 0; collectBoxConfigured.value=!!data.configured
+    collectBoxLastSyncedAt.value=data.last_synced_at || null; collectBoxInitialSyncedAt.value=data.initial_synced_at || null
+  } catch(e:any) { showToast(e.response?.data?.detail || '加载妙手采集箱失败') }
+  finally { collectBoxLoading.value = false }
+}
+function changeCollectBoxFilters() { collectBoxPage.value=1; void loadCollectBox() }
+function changeCollectBoxPage(page:number) { if (page < 1 || page > collectBoxPageCount.value || collectBoxLoading.value) return; collectBoxPage.value=page; void loadCollectBox() }
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
 const nativeToLocaleString = Date.prototype.toLocaleString
 const nativeToLocaleDateString = Date.prototype.toLocaleDateString
@@ -1711,6 +1732,12 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
           <footer v-else-if="!draftListRefreshing || draftTotal" class="draft-pagination"><span>共 {{draftTotal}} 条</span><label>每页 <select v-model.number="draftPageSize" :disabled="draftListRefreshing" @change="changeDraftPageSize"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option><option :value="500">500</option><option :value="1000">1000</option></select> 条</label><button :disabled="draftListRefreshing || visibleDraftPage===1" @click="changeDraftPage(visibleDraftPage-1)">上一页</button><span>第 {{visibleDraftPage}} / {{draftPageCount}} 页</span><button :disabled="draftListRefreshing || visibleDraftPage===draftPageCount" @click="changeDraftPage(visibleDraftPage+1)">下一页</button></footer>
           <div v-if="draftListRefreshing" class="list-refresh-overlay" role="status"><i></i><span>正在刷新列表…</span></div>
         </div>
+      </section>
+      <section v-else-if="page==='miaoshou-collect-box'" class="page">
+        <div class="section-heading draft-heading"><div><span>数据来自妙手公共采集箱，仅展示近 7 天的外部采集商品；系统每 5 分钟自动同步、每天自动清理过期数据。</span><small v-if="collectBoxLastSyncedAt" class="collect-box-sync-time">最近成功同步：{{new Date(collectBoxLastSyncedAt).toLocaleString()}}</small></div></div>
+        <p v-if="!collectBoxConfigured" class="error">请先由公司管理员在“店铺管理”配置妙手 API Key。</p>
+        <div class="collect-box-filters"><input v-model="collectBoxQuery" placeholder="搜索商品标题" @keyup.enter="changeCollectBoxFilters"/><button class="secondary" :disabled="collectBoxLoading" @click="changeCollectBoxFilters">搜索</button></div>
+        <section class="draft-table collect-box-table" :aria-busy="collectBoxLoading"><div class="thead collect-box-grid"><span>缩略图</span><span>商品</span><span>妙手状态</span><span>创建时间</span><span>更新时间</span></div><div v-for="item in collectBoxItems" :key="item.id" class="trow collect-box-grid"><button v-if="item.thumbnail" class="collect-box-thumbnail" @click="openImagePreview(item.thumbnail,item.title)"><img :src="imageUrl(item.thumbnail)" :alt="item.title"/></button><span v-else>—</span><span class="collect-box-title"><b :title="item.title">{{item.title}}</b><small v-if="item.reason" class="error">{{item.reason}}</small></span><span>{{item.status || '—'}}</span><span>{{item.remote_created_at ? new Date(item.remote_created_at).toLocaleString() : '—'}}</span><span>{{item.remote_updated_at ? new Date(item.remote_updated_at).toLocaleString() : '—'}}</span></div><p v-if="!collectBoxItems.length && !collectBoxLoading" class="empty">{{collectBoxInitialSyncedAt ? '没有符合筛选条件的采集箱商品。' : '尚未同步采集箱，系统将在配置妙手 API Key 后自动同步近 7 天数据。'}}</p><footer v-if="collectBoxTotal" class="draft-pagination"><span>共 {{collectBoxTotal}} 条</span><label>每页 <select v-model.number="collectBoxPageSize" :disabled="collectBoxLoading" @change="changeCollectBoxFilters"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 条</label><button :disabled="collectBoxLoading || collectBoxPage===1" @click="changeCollectBoxPage(collectBoxPage-1)">上一页</button><span>第 {{collectBoxPage}} / {{collectBoxPageCount}} 页</span><button :disabled="collectBoxLoading || collectBoxPage===collectBoxPageCount" @click="changeCollectBoxPage(collectBoxPage+1)">下一页</button></footer><div v-if="collectBoxLoading" class="list-refresh-overlay" role="status"><i></i><span>正在加载采集箱…</span></div></section>
       </section>
       <section v-else-if="page==='members' && user?.role==='company_admin'" class="page"><div class="section-heading"><div><span>管理本公司成员账号，并为包括公司管理员在内的每位员工配置独立模型平台密钥。</span></div><div class="section-heading-actions"><button class="ghost" :disabled="memberListRefreshing" @click="refreshMemberList">{{memberListRefreshing ? '刷新中…' : '↻ 刷新'}}</button><button class="primary" @click="openMemberDialog()">新增成员</button></div></div><section class="draft-table refreshable-list" :aria-busy="memberListRefreshing"><div class="thead" style="grid-template-columns:1fr .65fr .8fr .9fr .7fr .85fr 1.6fr"><span>成员</span><span>用户代码</span><span>账号类型</span><span>邮箱</span><span>状态</span><span>加入时间</span><span>操作</span></div><div v-for="member in members" :key="member.id" class="trow" style="grid-template-columns:1fr .65fr .8fr .9fr .7fr .85fr 1.6fr"><span><b>{{member.name}}</b></span><span>{{member.user_code || '—'}}</span><span>{{member.role === 'company_admin' ? '公司管理员' : '普通成员'}}</span><span>{{member.email}}</span><span class="chip" :class="member.is_active ? 'blue' : 'orange'">{{member.is_active ? '启用中' : '已停用'}}</span><span>{{new Date(member.created_at).toLocaleDateString()}}</span><span class="member-row-actions"><template v-if="member.role === 'member'"><button @click="openMemberDialog(member)">编辑</button><button :class="member.is_active ? 'negative' : 'positive'" @click="toggleMember(member)">{{member.is_active ? '停用' : '启用'}}</button></template><button v-for="provider in memberCredentialProviders" :key="provider.credential_provider" class="credential-button" :class="member.ai_provider_credentials?.[provider.credential_provider] ? 'configured' : 'missing'" @click="openMemberCredentialDialog(member, provider)">{{provider.credential_display_name}} 密钥 · {{member.ai_provider_credentials?.[provider.credential_provider] ? '已配置' : '待配置'}}</button></span></div><p v-if="!members.length && !memberListRefreshing" class="empty">暂无公司成员。</p><div v-if="memberListRefreshing" class="list-refresh-overlay" role="status"><i></i><span>正在刷新列表…</span></div></section></section>
       <section v-else-if="page==='shops' && user?.role==='company_admin'" class="page">

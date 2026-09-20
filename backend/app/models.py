@@ -27,6 +27,9 @@ class Company(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     miaoshou_app_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     miaoshou_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    miaoshou_collect_box_initial_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    miaoshou_collect_box_last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    miaoshou_collect_box_last_pruned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     hubstudio_app_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     hubstudio_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     hubstudio_group_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -290,6 +293,24 @@ class ProductDraft(Base):
     # 审计字段用于在待发布列表中显示草稿的创建与最后修改信息。
     created_by: Mapped[int | None] = mapped_column(nullable=True)
     updated_by: Mapped[int | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MiaoshouCollectBoxItem(Base):
+    """妙手公共采集箱的公司级只读缓存。"""
+    __tablename__ = "miaoshou_collect_box_items"
+    __table_args__ = (UniqueConstraint("company_id", "common_collect_box_detail_id", name="uq_miaoshou_collect_box_company_detail"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    common_collect_box_detail_id: Mapped[str] = mapped_column(String(120), index=True)
+    title: Mapped[str] = mapped_column(String(500))
+    thumbnail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    remote_created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    remote_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

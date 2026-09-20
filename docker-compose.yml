@@ -133,6 +133,22 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  # 公司级妙手公共采集箱同步；每 5 分钟运行一次，仅缓存外部采集商品。
+  miaoshou-collect-box-worker:
+    build: ./backend
+    command: python -m app.task_worker miaoshou-collect-box
+    environment:
+      DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
+      SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
+    volumes:
+      - ./backend:/app
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
   web:
     build: ./frontend
     ports:

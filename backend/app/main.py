@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import hashlib
 import hmac
 from io import BytesIO
@@ -22,8 +23,8 @@ from sqlalchemy import delete, func, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import get_settings
-from .database import engine, get_db
-from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
+from .database import SessionLocal, engine, get_db
+from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
 from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
@@ -37,6 +38,13 @@ import httpx
 
 configure_logging()
 logger = logging.getLogger(__name__)
+
+
+# 妙手开放平台按 App Key 限制请求频率。进程内所有入口共用这一节流器，
+# 避免采集同步分页或连续发布操作在同一秒内重复请求同一账号。
+MIAOSHOU_REQUEST_INTERVAL_SECONDS = 1.0
+_miaoshou_request_locks: dict[str, asyncio.Lock] = {}
+_miaoshou_last_request_started_at: dict[str, float] = {}
 
 
 def initialize_system_defaults(db: Session) -> None:
@@ -805,6 +813,11 @@ def update_miaoshou_account(
     company = db.get(Company, user.company_id)
     if not company:
         raise HTTPException(404, "公司不存在")
+    # App ID 变化意味着切换了妙手账号；旧账号的缓存不能继续向本公司展示。
+    if company.miaoshou_app_id and company.miaoshou_app_id != payload.app_id:
+        db.execute(delete(MiaoshouCollectBoxItem).where(MiaoshouCollectBoxItem.company_id == company.id))
+        company.miaoshou_collect_box_initial_synced_at = None
+        company.miaoshou_collect_box_last_synced_at = None
     company.miaoshou_app_id = payload.app_id
     company.miaoshou_secret_encrypted = encrypt_secret(payload.app_secret)
     db.commit()
@@ -1131,21 +1144,192 @@ def build_common_collect_box_payload(draft: ProductDraft, template: ProductTempl
 
 async def miaoshou_post(company: Company, path: str, body: dict) -> dict:
     """调用妙手开放平台，并统一处理鉴权和传输错误。"""
-    timestamp, app_key = str(int(time.time())), company.miaoshou_app_id
-    app_secret = decrypt_secret(company.miaoshou_secret_encrypted)
-    body_json = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
-    signature = miaoshou_request_signature(app_secret, path, timestamp, app_key, body_json)
+    app_key = company.miaoshou_app_id
+    request_lock = _miaoshou_request_locks.setdefault(app_key, asyncio.Lock())
+    async with request_lock:
+        elapsed = time.monotonic() - _miaoshou_last_request_started_at.get(app_key, float("-inf"))
+        if elapsed < MIAOSHOU_REQUEST_INTERVAL_SECONDS:
+            await asyncio.sleep(MIAOSHOU_REQUEST_INTERVAL_SECONDS - elapsed)
+        _miaoshou_last_request_started_at[app_key] = time.monotonic()
+
+        timestamp = str(int(time.time()))
+        app_secret = decrypt_secret(company.miaoshou_secret_encrypted)
+        body_json = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+        signature = miaoshou_request_signature(app_secret, path, timestamp, app_key, body_json)
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(
+                    f"https://openapi-erp.91miaoshou.com{path}", content=body_json.encode(), headers={
+                        "Content-Type": "application/json", "x-app-key": app_key, "x-timestamp": timestamp, "x-sign": signature,
+                    },
+                )
+            if response.is_error:
+                logger.warning(
+                    "妙手接口 HTTP 响应失败 | company_id=%s path=%s status=%s response=%s",
+                    company.id, path, response.status_code, response.text,
+                )
+            response.raise_for_status()
+            return response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(502, f"妙手接口调用失败：{exc}") from exc
+
+
+def miaoshou_time(value) -> datetime | None:
+    """将妙手返回的时间转为数据库使用的 UTC 无时区 datetime。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value) / 1000 if value > 10_000_000_000 else float(value)
+        return datetime.fromtimestamp(seconds, timezone.utc).replace(tzinfo=None)
+    raw = str(value).strip()
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                f"https://openapi-erp.91miaoshou.com{path}", content=body_json.encode(), headers={
-                    "Content-Type": "application/json", "x-app-key": app_key, "x-timestamp": timestamp, "x-sign": signature,
-                },
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    # 妙手未附带时区的 gmt 字段按业务时区 UTC+8 处理。
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone(timedelta(hours=8)))
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def miaoshou_collect_box_item_values(item: dict, synced_at: datetime) -> dict:
+    return {
+        "title": str(item.get("title") or "未命名商品").strip()[:500],
+        "thumbnail": str(item.get("listThumbnail") or item.get("thumbnail") or "").strip()[:500] or None,
+        "status": str(item.get("status") or "").strip()[:64] or None,
+        "reason": str(item.get("reason") or "").strip() or None,
+        "remote_created_at": miaoshou_time(item.get("gmtCreate")),
+        "remote_updated_at": miaoshou_time(item.get("gmtModified")),
+        "last_synced_at": synced_at,
+    }
+
+
+async def sync_miaoshou_collect_box(company: Company, db: Session) -> dict:
+    """全量扫描妙手列表，将首次三天窗口或后续增量写入公司缓存。"""
+    if not company.miaoshou_app_id or not company.miaoshou_secret_encrypted:
+        raise HTTPException(400, "尚未配置妙手 API Key，请先在店铺管理中完成配置")
+    started_at = datetime.utcnow()
+    first_sync = company.miaoshou_collect_box_initial_synced_at is None
+    retention_start = started_at - timedelta(days=7)
+    changed_since = None if first_sync else company.miaoshou_collect_box_last_synced_at
+    local_collect_box_ids = set(db.scalars(select(ProductDraft.miaoshou_collect_box_id).where(
+        ProductDraft.company_id == company.id, ProductDraft.miaoshou_collect_box_id.is_not(None),
+    )).all())
+    # 公共采集箱也会出现本系统刚发布的商品；缓存仅保留外部采集的数据。
+    if local_collect_box_ids:
+        db.execute(delete(MiaoshouCollectBoxItem).where(
+            MiaoshouCollectBoxItem.company_id == company.id,
+            MiaoshouCollectBoxItem.common_collect_box_detail_id.in_(local_collect_box_ids),
+        ))
+    page_no, page_size, scanned, saved, remote_total = 1, 500, 0, 0, None
+    path = "/open/v1/product/common_collect_box/common_collect_box/get_common_collect_box_list"
+    while True:
+        result = await miaoshou_post(company, path, {"pageNo": page_no, "pageSize": page_size, "filter": {"tabPaneName": "all"}})
+        if result.get("code") != "success" and result.get("result") != "success":
+            logger.warning(
+                "妙手公共采集箱列表接口业务失败 | company_id=%s path=%s response=%s",
+                company.id, path, json.dumps(result, ensure_ascii=False, separators=(",", ":")),
             )
-        response.raise_for_status()
-        return response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        raise HTTPException(502, f"妙手接口调用失败：{exc}") from exc
+            raise HTTPException(400, result.get("message") or result.get("code") or "妙手公共采集箱接口返回失败")
+        data = result.get("data") or {}
+        rows = data.get("detailList") or []
+        if remote_total is None:
+            remote_total = int(data.get("total") or 0)
+        for item in rows:
+            detail_id = str(item.get("commonCollectBoxDetailId") or "").strip()
+            if not detail_id or detail_id in local_collect_box_ids:
+                continue
+            scanned += 1
+            created_at = miaoshou_time(item.get("gmtCreate"))
+            changed_at = miaoshou_time(item.get("gmtModified")) or created_at
+            # 无论首次或后续同步，缓存都只保存近 7 天创建的外部采集商品。
+            if not created_at or created_at < retention_start:
+                continue
+            if changed_since is not None and (not changed_at or changed_at < changed_since):
+                continue
+            cached = db.scalar(select(MiaoshouCollectBoxItem).where(
+                MiaoshouCollectBoxItem.company_id == company.id,
+                MiaoshouCollectBoxItem.common_collect_box_detail_id == detail_id,
+            ))
+            if not cached:
+                cached = MiaoshouCollectBoxItem(company_id=company.id, common_collect_box_detail_id=detail_id)
+                db.add(cached)
+            for field, value in miaoshou_collect_box_item_values(item, started_at).items():
+                setattr(cached, field, value)
+            saved += 1
+        if not rows or len(rows) < page_size or (remote_total is not None and page_no * page_size >= remote_total):
+            break
+        page_no += 1
+    if first_sync:
+        company.miaoshou_collect_box_initial_synced_at = started_at
+    company.miaoshou_collect_box_last_synced_at = started_at
+    db.commit()
+    return {"scanned": scanned, "saved": saved, "remote_total": remote_total or scanned, "first_sync": first_sync, "last_synced_at": timestamp_ms(started_at)}
+
+
+def prune_miaoshou_collect_box(company: Company, db: Session, now: datetime | None = None) -> int:
+    """每天物理删除一次超过 7 天的缓存记录，控制采集箱表体积。"""
+    now = now or datetime.utcnow()
+    if company.miaoshou_collect_box_last_pruned_at and company.miaoshou_collect_box_last_pruned_at > now - timedelta(days=1):
+        return 0
+    deleted_count = db.execute(delete(MiaoshouCollectBoxItem).where(
+        MiaoshouCollectBoxItem.company_id == company.id,
+        MiaoshouCollectBoxItem.remote_created_at < now - timedelta(days=7),
+    )).rowcount or 0
+    company.miaoshou_collect_box_last_pruned_at = now
+    db.commit()
+    return deleted_count
+
+
+async def run_miaoshou_collect_box_sync_cycle() -> int:
+    """供独立 Worker 每五分钟执行一次；单个公司失败不影响其他公司。"""
+    synced_companies = 0
+    with SessionLocal() as db:
+        company_ids = db.scalars(select(Company.id).where(Company.is_active.is_(True))).all()
+        for company_id in company_ids:
+            company = db.get(Company, company_id)
+            if company and company.miaoshou_app_id and company.miaoshou_secret_encrypted:
+                try:
+                    await sync_miaoshou_collect_box(company, db)
+                    synced_companies += 1
+                except Exception as exc:
+                    db.rollback()
+                    logger.warning("妙手公共采集箱同步失败 | company_id=%s reason=%s", company_id, exc)
+            company = db.get(Company, company_id)
+            if company:
+                prune_miaoshou_collect_box(company, db)
+    return synced_companies
+
+
+@app.get("/miaoshou/collect-box")
+def list_miaoshou_collect_box(
+    query: str = "", status: str = "all", page: int = 1, page_size: int = 20,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    if page < 1 or not 1 <= page_size <= 1000:
+        raise HTTPException(400, "无效的采集箱筛选条件")
+    company = db.get(Company, user.company_id)
+    if not company:
+        raise HTTPException(404, "公司不存在")
+    stmt = select(MiaoshouCollectBoxItem).where(MiaoshouCollectBoxItem.company_id == company.id)
+    keyword = query.strip()
+    if keyword:
+        pattern = f"%{keyword}%"
+        stmt = stmt.where(MiaoshouCollectBoxItem.title.ilike(pattern))
+    if status != "all":
+        stmt = stmt.where(MiaoshouCollectBoxItem.status == status)
+    rows = db.scalars(stmt.order_by(MiaoshouCollectBoxItem.remote_updated_at.desc(), MiaoshouCollectBoxItem.id.desc())).all()
+    views = [serialize_record(row) for row in rows]
+    start = (page - 1) * page_size
+    return {
+        "items": views[start:start + page_size], "total": len(views),
+        "configured": bool(company.miaoshou_app_id and company.miaoshou_secret_encrypted),
+        "initial_synced_at": timestamp_ms(company.miaoshou_collect_box_initial_synced_at) if company.miaoshou_collect_box_initial_synced_at else None,
+        "last_synced_at": timestamp_ms(company.miaoshou_collect_box_last_synced_at) if company.miaoshou_collect_box_last_synced_at else None,
+    }
 
 
 async def create_common_collect_box_detail(draft: ProductDraft, company: Company, template: ProductTemplate) -> str:
