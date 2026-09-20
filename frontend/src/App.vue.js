@@ -51,6 +51,7 @@ const showBatchCarouselDialog = ref(false), showBatchMainImageDialog = ref(false
 const showBatchImageReviewDialog = ref(false), batchImageReviewLoading = ref(false), batchImageReviewSaving = ref(false), batchImageReviewType = ref('carousel'), batchImageReviewDrafts = ref([]), batchImageReviewSelections = ref({}), batchCarouselReviewNextStage = ref('main_image_pending');
 const MAX_TIKTOK_EXPORT_DRAFTS = 20;
 const tiktokExportCatalogId = ref(null), tiktokExportCategory = ref(''), tiktokExportDefaultPrice = ref(null), tiktokExportDefaultQuantity = ref(999), tiktokExportCod = ref('Y'), tiktokExportAttributes = ref({}), tiktokExportOverrides = ref({}), tiktokTargetShopId = ref(null), tiktokSubmitting = ref(false);
+const TIKTOK_EXPORT_ATTRIBUTE_PRESETS_VERSION = 'v1';
 const shopeeExportCatalogId = ref(null), shopeeExportCategoryId = ref(''), shopeeExportDefaultPrice = ref(null), shopeeExportDefaultQuantity = ref(999), shopeeExportDangerousGoods = ref('No'), shopeeExportChannels = ref([]), shopeeExportOverrides = ref({});
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null), draftListRefreshing = ref(false);
 const activeDraftTab = ref('all'), draftTotal = ref(0), draftTabCounts = ref({ all: 0, pending: 0, carousel_pending: 0, main_image_pending: 0, ready_to_publish: 0, published: 0 });
@@ -1788,7 +1789,71 @@ async function exportSelectedDraftsToShopee() {
         shopeeExportLoading.value = false;
     }
 }
-function changeTiktokExportCategory() { tiktokExportAttributes.value = {}; }
+function tiktokExportAttributePresetsStorageKey() {
+    return user.value?.id ? `haitoro_tiktok_export_attribute_presets_${TIKTOK_EXPORT_ATTRIBUTE_PRESETS_VERSION}:${user.value.id}` : '';
+}
+function isTiktokExportAttributePresetMap(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+function readTiktokExportAttributePresets() {
+    const storageKey = tiktokExportAttributePresetsStorageKey();
+    if (!storageKey)
+        return {};
+    try {
+        const parsed = JSON.parse(localStorage.getItem(storageKey) || '{}');
+        if (!isTiktokExportAttributePresetMap(parsed))
+            return {};
+        const presets = {};
+        for (const [catalogId, categories] of Object.entries(parsed)) {
+            if (!isTiktokExportAttributePresetMap(categories))
+                continue;
+            for (const [category, attributes] of Object.entries(categories)) {
+                if (!isTiktokExportAttributePresetMap(attributes))
+                    continue;
+                const validAttributes = Object.fromEntries(Object.entries(attributes).filter(([, value]) => typeof value === 'string'));
+                if (Object.keys(validAttributes).length)
+                    (presets[catalogId] || (presets[catalogId] = {}))[category] = validAttributes;
+            }
+        }
+        return presets;
+    }
+    catch {
+        return {};
+    }
+}
+function saveTiktokExportAttributePresets() {
+    const storageKey = tiktokExportAttributePresetsStorageKey();
+    if (!storageKey || !tiktokExportCatalogId.value || !tiktokExportCategory.value)
+        return;
+    const allowedFields = new Set(selectedTiktokCategoryAttributes.value.map((field) => field.field));
+    const attributes = Object.fromEntries(Object.entries(tiktokExportAttributes.value).filter(([field, value]) => allowedFields.has(field) && typeof value === 'string' && value.trim()));
+    const presets = readTiktokExportAttributePresets();
+    const catalogKey = String(tiktokExportCatalogId.value);
+    if (Object.keys(attributes).length) {
+        presets[catalogKey] || (presets[catalogKey] = {});
+        presets[catalogKey][tiktokExportCategory.value] = attributes;
+    }
+    else {
+        delete presets[catalogKey]?.[tiktokExportCategory.value];
+        if (presets[catalogKey] && !Object.keys(presets[catalogKey]).length)
+            delete presets[catalogKey];
+    }
+    try {
+        if (Object.keys(presets).length)
+            localStorage.setItem(storageKey, JSON.stringify(presets));
+        else
+            localStorage.removeItem(storageKey);
+    }
+    catch { /* 浏览器存储不可用时不影响导出。 */ }
+}
+function restoreTiktokExportAttributePresets() {
+    const catalogKey = tiktokExportCatalogId.value ? String(tiktokExportCatalogId.value) : '';
+    const remembered = catalogKey && tiktokExportCategory.value ? readTiktokExportAttributePresets()[catalogKey]?.[tiktokExportCategory.value] : {};
+    const allowedFields = new Set(selectedTiktokCategoryAttributes.value.map((field) => field.field));
+    tiktokExportAttributes.value = Object.fromEntries(Object.entries(remembered || {}).filter(([field, value]) => allowedFields.has(field) && typeof value === 'string' && value.trim()));
+}
+watch(tiktokExportAttributes, saveTiktokExportAttributePresets, { deep: true });
+function changeTiktokExportCategory() { restoreTiktokExportAttributePresets(); }
 async function changeTiktokExportCatalog() {
     tiktokExportCategory.value = '';
     tiktokExportAttributes.value = {};
@@ -1819,7 +1884,7 @@ function tiktokAttributePlaceholder(field) {
         return '请输入 http:// 或 https:// 开头的 URL';
     const mode = ['single', 'multiple'].includes(field.input_mode) ? 'select' : field.input_mode || (!field.options?.length ? 'text' : field.allow_custom ? 'select_or_text' : 'select');
     if (mode === 'select')
-        return '输入模板支持的属性值；多个值用英文逗号分隔';
+        return '输入模板支持的属性值；';
     if (mode === 'select_or_text')
         return '输入支持的属性值，或手动填写其他值';
     return '请输入属性值';
