@@ -49,7 +49,7 @@ const showShopeeExportDialog = ref(false), shopeeExportOptions = ref(null), shop
 const showMiaoshouPublishDialog = ref(false), miaoshouPublishDraftIds = ref([]), miaoshouPublishShopId = ref(null), miaoshouPublishing = ref(false), miaoshouPublishCompleted = ref(0), miaoshouPublishFailed = ref(0);
 const showBatchCarouselDialog = ref(false), showBatchMainImageDialog = ref(false), batchCarouselSaving = ref(false), batchMainImageSaving = ref(false), batchCarouselSkipping = ref(false), batchMainImageSkipping = ref(false), batchCarouselSelections = ref({}), batchMainImageSelections = ref({});
 const showBatchImageReviewDialog = ref(false), batchImageReviewLoading = ref(false), batchImageReviewSaving = ref(false), batchImageReviewType = ref('carousel'), batchImageReviewDrafts = ref([]), batchImageReviewSelections = ref({}), batchCarouselReviewNextStage = ref('main_image_pending');
-const MAX_TIKTOK_EXPORT_DRAFTS = 20;
+const MAX_DRAFT_BATCH_SIZE = 100;
 const tiktokExportCatalogId = ref(null), tiktokExportCategory = ref(''), tiktokExportDefaultPrice = ref(null), tiktokExportDefaultQuantity = ref(999), tiktokExportCod = ref('Y'), tiktokExportAttributes = ref({}), tiktokExportOverrides = ref({}), tiktokTargetShopId = ref(null), tiktokSubmitting = ref(false);
 const TIKTOK_EXPORT_ATTRIBUTE_PRESETS_VERSION = 'v1';
 const shopeeExportCatalogId = ref(null), shopeeExportCategoryId = ref(''), shopeeExportDefaultPrice = ref(null), shopeeExportDefaultQuantity = ref(999), shopeeExportDangerousGoods = ref('No'), shopeeExportChannels = ref([]), shopeeExportOverrides = ref({});
@@ -199,8 +199,8 @@ function toggleDraftSelection(draftId) {
         selectedDraftIds.value = selectedDraftIds.value.filter(id => id !== draftId);
         return;
     }
-    if (selectedDraftIds.value.length >= MAX_TIKTOK_EXPORT_DRAFTS) {
-        showToast(`一次最多选择 ${MAX_TIKTOK_EXPORT_DRAFTS} 条商品草稿`);
+    if (selectedDraftIds.value.length >= MAX_DRAFT_BATCH_SIZE) {
+        showToast(`一次最多选择 ${MAX_DRAFT_BATCH_SIZE} 条商品草稿`);
         return;
     }
     selectedDraftIds.value = [...selectedDraftIds.value, draftId];
@@ -211,12 +211,12 @@ function togglePagedDrafts() {
         selectedDraftIds.value = selectedDraftIds.value.filter(id => !pageIds.includes(id));
         return;
     }
-    const remaining = MAX_TIKTOK_EXPORT_DRAFTS - selectedDraftIds.value.length;
+    const remaining = MAX_DRAFT_BATCH_SIZE - selectedDraftIds.value.length;
     const candidates = pageIds.filter(id => !selectedDraftIds.value.includes(id));
     const additions = candidates.slice(0, remaining);
     selectedDraftIds.value = [...selectedDraftIds.value, ...additions];
     if (additions.length < candidates.length) {
-        showToast(`一次最多选择 ${MAX_TIKTOK_EXPORT_DRAFTS} 条商品草稿`);
+        showToast(`一次最多选择 ${MAX_DRAFT_BATCH_SIZE} 条商品草稿`);
     }
 }
 async function changeDraftTemplateFilter() { if (draftListRefreshing.value)
@@ -4442,7 +4442,7 @@ if (__VLS_ctx.token) {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (__VLS_ctx.selectedDraftIds.length);
-            (__VLS_ctx.MAX_TIKTOK_EXPORT_DRAFTS);
+            (__VLS_ctx.MAX_DRAFT_BATCH_SIZE);
             if (__VLS_ctx.batchDispatchEligible) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
@@ -4701,7 +4701,7 @@ if (__VLS_ctx.token) {
                     } },
                 type: "checkbox",
                 checked: (__VLS_ctx.selectedDraftIds.includes(draft.id)),
-                disabled: (__VLS_ctx.selectedDraftIds.length >= __VLS_ctx.MAX_TIKTOK_EXPORT_DRAFTS && !__VLS_ctx.selectedDraftIds.includes(draft.id)),
+                disabled: (__VLS_ctx.selectedDraftIds.length >= __VLS_ctx.MAX_DRAFT_BATCH_SIZE && !__VLS_ctx.selectedDraftIds.includes(draft.id)),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (draft.id);
@@ -10828,7 +10828,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             batchImageReviewDrafts: batchImageReviewDrafts,
             batchImageReviewSelections: batchImageReviewSelections,
             batchCarouselReviewNextStage: batchCarouselReviewNextStage,
-            MAX_TIKTOK_EXPORT_DRAFTS: MAX_TIKTOK_EXPORT_DRAFTS,
+            MAX_DRAFT_BATCH_SIZE: MAX_DRAFT_BATCH_SIZE,
             tiktokExportCatalogId: tiktokExportCatalogId,
             tiktokExportCategory: tiktokExportCategory,
             tiktokExportDefaultPrice: tiktokExportDefaultPrice,

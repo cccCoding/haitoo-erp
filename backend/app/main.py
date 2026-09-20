@@ -2135,7 +2135,7 @@ def get_draft_image_workspace(draft_id: int, user: User = Depends(current_user),
 
 
 @app.get("/drafts/batch-image-review")
-def get_batch_image_review(draft_ids: list[int] = Query(min_length=1, max_length=20), task_type: str = Query(pattern="^(carousel|main_image)$"), user: User = Depends(current_user), db: Session = Depends(get_db)):
+def get_batch_image_review(draft_ids: list[int] = Query(min_length=1, max_length=100), task_type: str = Query(pattern="^(carousel|main_image)$"), user: User = Depends(current_user), db: Session = Depends(get_db)):
     """批量审核所需的候选图详情；列表页摘要不含全部候选图。"""
     if len(set(draft_ids)) != len(draft_ids):
         raise HTTPException(400, "同一草稿不能重复提交")
@@ -2244,7 +2244,7 @@ def create_draft_image_tasks(draft_id: int, payload: DraftImageTaskCreate, user:
 
 @app.post("/drafts/batch-carousel-tasks")
 def create_batch_carousel_tasks(payload: BatchCarouselTaskCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """为最多 20 条尚未创建轮播任务的草稿批量创建任务。"""
+    """为最多 100 条尚未创建轮播任务的草稿批量创建任务。"""
     draft_ids = [item.draft_id for item in payload.drafts]
     if len(set(draft_ids)) != len(draft_ids):
         raise HTTPException(400, "同一草稿不能重复提交")
@@ -2290,7 +2290,7 @@ def create_batch_carousel_tasks(payload: BatchCarouselTaskCreate, user: User = D
 
 @app.post("/drafts/batch-main-image-tasks")
 def create_batch_main_image_tasks(payload: BatchMainImageTaskCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """为最多 20 条未创建首图任务的草稿批量创建首图任务。"""
+    """为最多 100 条未创建首图任务的草稿批量创建首图任务。"""
     draft_ids = [item.draft_id for item in payload.drafts]
     if len(set(draft_ids)) != len(draft_ids):
         raise HTTPException(400, "同一草稿不能重复提交")

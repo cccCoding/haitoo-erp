@@ -346,7 +346,7 @@ class DraftUpdate(BaseModel):
 
 
 class DraftDispatchInput(BaseModel):
-    draft_ids: list[int] = Field(min_length=1, max_length=20)
+    draft_ids: list[int] = Field(min_length=1, max_length=100)
     target_stage: Literal["carousel_pending", "main_image_pending", "ready_to_publish"]
 
 
@@ -367,7 +367,7 @@ class BatchCarouselDraftSelection(BaseModel):
 
 
 class BatchCarouselTaskCreate(BaseModel):
-    drafts: list[BatchCarouselDraftSelection] = Field(min_length=1, max_length=20)
+    drafts: list[BatchCarouselDraftSelection] = Field(min_length=1, max_length=100)
     provider: str | None = Field(default=None, max_length=40)
     ratio: Literal["1:1", "3:4"] = "1:1"
     quality: Literal["auto", "1K", "2K"] = "1K"
@@ -380,7 +380,7 @@ class BatchMainImageDraftSelection(BaseModel):
 
 
 class BatchMainImageTaskCreate(BaseModel):
-    drafts: list[BatchMainImageDraftSelection] = Field(min_length=1, max_length=20)
+    drafts: list[BatchMainImageDraftSelection] = Field(min_length=1, max_length=100)
     reference_mode: Literal["random", "manual"] = "random"
     provider: str | None = Field(default=None, max_length=40)
     ratio: Literal["1:1", "3:4"] = "1:1"
@@ -389,11 +389,11 @@ class BatchMainImageTaskCreate(BaseModel):
 
 
 class BatchCarouselSkipInput(BaseModel):
-    draft_ids: list[int] = Field(min_length=1, max_length=20)
+    draft_ids: list[int] = Field(min_length=1, max_length=100)
 
 
 class BatchMainImageSkipInput(BaseModel):
-    draft_ids: list[int] = Field(min_length=1, max_length=20)
+    draft_ids: list[int] = Field(min_length=1, max_length=100)
 
 
 class BatchImageReviewTaskSelection(BaseModel):
@@ -404,7 +404,7 @@ class BatchImageReviewTaskSelection(BaseModel):
 
 class BatchImageReviewConfirm(BaseModel):
     task_type: Literal["carousel", "main_image"]
-    selections: list[BatchImageReviewTaskSelection] = Field(min_length=1, max_length=180)
+    selections: list[BatchImageReviewTaskSelection] = Field(min_length=1, max_length=900)
     next_stage: Literal["main_image_pending", "ready_to_publish"] | None = None
 
 
@@ -443,25 +443,25 @@ class ShopeeDraftProductOverride(BaseModel):
 
 
 class TiktokDraftExportInput(BaseModel):
-    draft_ids: list[int] = Field(min_length=1, max_length=20)
+    draft_ids: list[int] = Field(min_length=1, max_length=100)
     category_catalog_id: int = Field(ge=1)
     category: str = Field(min_length=1, max_length=255)
     default_price: float = Field(ge=0.01, le=999999)
     default_quantity: int = Field(default=999, ge=0, le=999999)
     cod: Literal["Y", "N"] = "Y"
     attributes: dict[str, str | list[str]] = Field(default_factory=dict, max_length=14)
-    product_overrides: list[TiktokDraftProductOverride] = Field(default_factory=list, max_length=20)
+    product_overrides: list[TiktokDraftProductOverride] = Field(default_factory=list, max_length=100)
 
 
 class ShopeeDraftExportInput(BaseModel):
-    draft_ids: list[int] = Field(min_length=1, max_length=20)
+    draft_ids: list[int] = Field(min_length=1, max_length=100)
     category_catalog_id: int = Field(ge=1)
     category_id: str = Field(min_length=1, max_length=32)
     default_price: float = Field(ge=0.10, le=1_000_000_000)
     default_quantity: int = Field(default=999, ge=0, le=10_000_000)
     shipping_channels: list[str] = Field(min_length=1, max_length=20)
     dangerous_goods: Literal["Yes", "No"] = "No"
-    product_overrides: list[ShopeeDraftProductOverride] = Field(default_factory=list, max_length=20)
+    product_overrides: list[ShopeeDraftProductOverride] = Field(default_factory=list, max_length=100)
 
 
 class HubUploadTaskCreate(TiktokDraftExportInput):
