@@ -1155,7 +1155,7 @@ async function exportSelectedDraftsToShopee() {
     showShopeeExportDialog.value = false
     selectedDraftIds.value = []
     await refreshDraftList()
-    showToast('Shopee 批量上传表格已生成')
+    showToast('Shopee 批量上传表格已生成，商品草稿已标记为已发布')
   } catch (e:any) {
     if (e.response?.data instanceof Blob) {
       try { shopeeExportError.value = JSON.parse(await e.response.data.text()).detail || '导出失败' }
@@ -1285,7 +1285,7 @@ async function exportSelectedDrafts() {
     showTiktokExportDialog.value = false
     selectedDraftIds.value = []
     await refreshDraftList()
-    showToast('TikTok 批量上传表格已生成')
+    showToast('TikTok 批量上传表格已生成，商品草稿已标记为已发布')
   } catch (e:any) {
     if (e.response?.data instanceof Blob) {
       try { tiktokExportError.value = JSON.parse(await e.response.data.text()).detail || '导出失败' }

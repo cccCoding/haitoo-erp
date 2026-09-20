@@ -151,6 +151,8 @@ class ShopeeExportTests(unittest.TestCase):
                 default_quantity=99, shipping_channels=["channel_id.2000"], dangerous_goods="No",
             ), user=db.get(User, 1), db=db)
             self.assertEqual(db.get(ProductDraft, 1).export_count, 1)
+            self.assertEqual(db.get(ProductDraft, 1).status, "published")
+            self.assertEqual(db.get(ProductDraft, 1).workflow_stage, "published")
         exported = load_workbook(BytesIO(response.body), data_only=False)["Template"]
         self.assertEqual(exported["A7"].value, "100350")
 

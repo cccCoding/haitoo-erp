@@ -2936,7 +2936,12 @@ def export_drafts_to_tiktok(payload: TiktokDraftExportInput, user: User = Depend
     db.execute(
         update(ProductDraft)
         .where(ProductDraft.id.in_(payload.draft_ids))
-        .values(export_count=ProductDraft.export_count + 1)
+        .values(
+            export_count=ProductDraft.export_count + 1,
+            status="published",
+            workflow_stage="published",
+            updated_by=user.id,
+        )
     )
     db.commit()
     filename = f"TikTok批量上传_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
@@ -3045,7 +3050,12 @@ def export_drafts_to_shopee(payload: ShopeeDraftExportInput, user: User = Depend
     db.execute(
         update(ProductDraft)
         .where(ProductDraft.id.in_(payload.draft_ids))
-        .values(export_count=ProductDraft.export_count + 1)
+        .values(
+            export_count=ProductDraft.export_count + 1,
+            status="published",
+            workflow_stage="published",
+            updated_by=user.id,
+        )
     )
     db.commit()
     filename = f"Shopee批量上传_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"

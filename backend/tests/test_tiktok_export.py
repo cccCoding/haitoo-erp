@@ -101,6 +101,10 @@ class TiktokExportTests(unittest.TestCase):
             response = main.export_drafts_to_tiktok(self.payload(), user=db.get(User, 1), db=db)
             self.assertEqual(db.get(ProductDraft, 1).export_count, 1)
             self.assertEqual(db.get(ProductDraft, 2).export_count, 1)
+            self.assertEqual(db.get(ProductDraft, 1).status, "published")
+            self.assertEqual(db.get(ProductDraft, 2).status, "published")
+            self.assertEqual(db.get(ProductDraft, 1).workflow_stage, "published")
+            self.assertEqual(db.get(ProductDraft, 2).workflow_stage, "published")
         exported = load_workbook(BytesIO(response.body), data_only=False)
         self.assertEqual(exported.sheetnames, source.sheetnames)
         self.assertEqual([sheet.sheet_state for sheet in exported], [sheet.sheet_state for sheet in source])
@@ -180,6 +184,8 @@ class TiktokExportTests(unittest.TestCase):
             with patch("app.main.build_tiktok_workbook", side_effect=ValueError("生成失败")), self.assertRaisesRegex(HTTPException, "生成失败"):
                 main.export_drafts_to_tiktok(self.payload(), user=user, db=db)
             self.assertEqual(db.get(ProductDraft, 1).export_count, 0)
+            self.assertEqual(db.get(ProductDraft, 1).status, "pending_publish")
+            self.assertEqual(db.get(ProductDraft, 1).workflow_stage, "pending")
 
     def test_duplicate_product_names_are_rejected_without_incrementing_exports(self) -> None:
         with self.session_factory() as db:

@@ -1771,7 +1771,7 @@ async function exportSelectedDraftsToShopee() {
         showShopeeExportDialog.value = false;
         selectedDraftIds.value = [];
         await refreshDraftList();
-        showToast('Shopee 批量上传表格已生成');
+        showToast('Shopee 批量上传表格已生成，商品草稿已标记为已发布');
     }
     catch (e) {
         if (e.response?.data instanceof Blob) {
@@ -1958,7 +1958,7 @@ async function exportSelectedDrafts() {
         showTiktokExportDialog.value = false;
         selectedDraftIds.value = [];
         await refreshDraftList();
-        showToast('TikTok 批量上传表格已生成');
+        showToast('TikTok 批量上传表格已生成，商品草稿已标记为已发布');
     }
     catch (e) {
         if (e.response?.data instanceof Blob) {
