@@ -129,7 +129,7 @@ class UserShop(Base):
 
 
 class TiktokCategoryCatalog(Base):
-    """一套具名 TikTok 店铺类目及其原始批量上传模板。"""
+    """兼容历史表名的平台类目库，保存原始批量上传模板及解析结果。"""
     __tablename__ = "tiktok_category_catalogs"
     __table_args__ = (
         UniqueConstraint("company_id", "name", name="uq_tiktok_category_catalog_company_name"),
@@ -139,7 +139,7 @@ class TiktokCategoryCatalog(Base):
     company_id: Mapped[int] = mapped_column(nullable=False)
     name: Mapped[str] = mapped_column(String(120))
     source_filename: Mapped[str] = mapped_column(String(255))
-    # tiktok_local / tiktok_cross_border；用于选择对应 Excel 解析与导出适配器。
+    # tiktok_local / tiktok_cross_border / shopee_basic；用于选择平台解析与导出适配器。
     template_type: Mapped[str] = mapped_column(String(32), default="tiktok_local", nullable=False, index=True)
     template_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     template_blob: Mapped[bytes] = mapped_column(

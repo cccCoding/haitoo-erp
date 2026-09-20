@@ -436,6 +436,12 @@ class TiktokDraftProductOverride(BaseModel):
     quantity: int | None = Field(default=None, ge=0, le=999999)
 
 
+class ShopeeDraftProductOverride(BaseModel):
+    draft_id: int = Field(ge=1)
+    price: float | None = Field(default=None, ge=0.10, le=1_000_000_000)
+    quantity: int | None = Field(default=None, ge=0, le=10_000_000)
+
+
 class TiktokDraftExportInput(BaseModel):
     draft_ids: list[int] = Field(min_length=1, max_length=20)
     category_catalog_id: int = Field(ge=1)
@@ -445,6 +451,17 @@ class TiktokDraftExportInput(BaseModel):
     cod: Literal["Y", "N"] = "Y"
     attributes: dict[str, str | list[str]] = Field(default_factory=dict, max_length=14)
     product_overrides: list[TiktokDraftProductOverride] = Field(default_factory=list, max_length=20)
+
+
+class ShopeeDraftExportInput(BaseModel):
+    draft_ids: list[int] = Field(min_length=1, max_length=20)
+    category_catalog_id: int = Field(ge=1)
+    category_id: str = Field(min_length=1, max_length=32)
+    default_price: float = Field(ge=0.10, le=1_000_000_000)
+    default_quantity: int = Field(default=999, ge=0, le=10_000_000)
+    shipping_channels: list[str] = Field(min_length=1, max_length=20)
+    dangerous_goods: Literal["Yes", "No"] = "No"
+    product_overrides: list[ShopeeDraftProductOverride] = Field(default_factory=list, max_length=20)
 
 
 class HubUploadTaskCreate(TiktokDraftExportInput):

@@ -24,13 +24,14 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import engine, get_db
 from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
-from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
+from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
 from .storage import StorageError, create_image_upload_url, is_company_r2_url, is_public_r2_url, upload_image_bytes_async
 from .logging_config import configure_logging
 from .tiktok_export import build_workbook as build_tiktok_workbook, category_base_requirements, parse_listing_options, validate_attributes
+from .shopee_export import build_workbook as build_shopee_workbook, parse_listing_options as parse_shopee_listing_options
 import httpx
 
 
@@ -2712,6 +2713,7 @@ def serialize_tiktok_catalog(catalog: TiktokCategoryCatalog, *, include_options:
     return result
 
 
+@app.get("/category-catalogs")
 @app.get("/tiktok-category-catalogs")
 def list_tiktok_category_catalogs(user: User = Depends(current_user), db: Session = Depends(get_db)):
     catalogs = db.scalars(select(TiktokCategoryCatalog).where(
@@ -2720,35 +2722,40 @@ def list_tiktok_category_catalogs(user: User = Depends(current_user), db: Sessio
     return [serialize_tiktok_catalog(item) for item in catalogs]
 
 
+@app.post("/category-catalogs")
 @app.post("/tiktok-category-catalogs")
 async def create_tiktok_category_catalog(
     name: str = Form(..., min_length=1, max_length=120),
     file: UploadFile = File(...),
-    template_type: str = Form("tiktok_local", pattern="^(tiktok_local|tiktok_cross_border)$"),
+    template_type: str = Form("tiktok_local", pattern="^(tiktok_local|tiktok_cross_border|shopee_basic)$"),
     user: User = Depends(require_roles(Role.COMPANY_ADMIN)),
     db: Session = Depends(get_db),
 ):
     # 直接调用路由函数的旧测试/脚本不会经过 FastAPI 的 Form 注入。
-    if template_type not in {"tiktok_local", "tiktok_cross_border"}:
+    if template_type not in {"tiktok_local", "tiktok_cross_border", "shopee_basic"}:
         template_type = "tiktok_local"
     catalog_name = name.strip()
     if not catalog_name:
         raise HTTPException(400, "类目库名称不能为空")
     source_filename = Path(file.filename or "").name
     if not source_filename.lower().endswith(".xlsx"):
-        raise HTTPException(400, "请上传 .xlsx 格式的 TikTok 模板")
+        raise HTTPException(400, "请上传 .xlsx 格式的平台批量上传模板")
     template_bytes = await file.read(10 * 1024 * 1024 + 1)
     if not template_bytes or len(template_bytes) > 10 * 1024 * 1024:
-        raise HTTPException(400, "TikTok 模板大小须在 10MB 以内")
+        raise HTTPException(400, "模板大小须在 10MB 以内")
     try:
         with zipfile.ZipFile(BytesIO(template_bytes)) as archive:
             if sum(item.file_size for item in archive.infolist()) > 50 * 1024 * 1024:
                 raise ValueError("解压后内容过大")
-        options = parse_listing_options(template_bytes, template_type)
+        options = (
+            parse_shopee_listing_options(template_bytes, template_type)
+            if template_type == "shopee_basic"
+            else parse_listing_options(template_bytes, template_type)
+        )
     except (ValueError, zipfile.BadZipFile) as exc:
-        raise HTTPException(400, f"TikTok 模板解析失败：{exc}") from exc
+        raise HTTPException(400, f"模板解析失败：{exc}") from exc
     if not options.get("categories"):
-        raise HTTPException(400, "TikTok 模板中没有可用类目")
+        raise HTTPException(400, "模板中没有可用类目")
     catalog = TiktokCategoryCatalog(
         company_id=user.company_id, name=catalog_name, source_filename=source_filename, template_type=template_type,
         template_version=options.get("template_version"), template_blob=template_bytes,
@@ -2759,11 +2766,12 @@ async def create_tiktok_category_catalog(
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(400, "本公司已存在同名 TK 类目库") from exc
+        raise HTTPException(400, "本公司已存在同名类目库") from exc
     db.refresh(catalog)
     return serialize_tiktok_catalog(catalog, include_options=True)
 
 
+@app.patch("/category-catalogs/{catalog_id}")
 @app.patch("/tiktok-category-catalogs/{catalog_id}")
 def update_tiktok_category_catalog(
     catalog_id: int, payload: TiktokCategoryCatalogUpdate,
@@ -2771,7 +2779,7 @@ def update_tiktok_category_catalog(
 ):
     catalog = db.get(TiktokCategoryCatalog, catalog_id)
     if not catalog or catalog.company_id != user.company_id:
-        raise HTTPException(404, "TK 类目库不存在")
+        raise HTTPException(404, "类目库不存在")
     if payload.name is not None:
         catalog.name = payload.name
     options = json.loads(json.dumps(catalog.parsed_options or {}))
@@ -2790,22 +2798,24 @@ def update_tiktok_category_catalog(
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(400, "本公司已存在同名 TK 类目库") from exc
+        raise HTTPException(400, "本公司已存在同名类目库") from exc
     db.refresh(catalog)
     return serialize_tiktok_catalog(catalog, include_options=True)
 
 
+@app.delete("/category-catalogs/{catalog_id}", status_code=204)
 @app.delete("/tiktok-category-catalogs/{catalog_id}", status_code=204)
 def delete_tiktok_category_catalog(
     catalog_id: int, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
 ):
     catalog = db.get(TiktokCategoryCatalog, catalog_id)
     if not catalog or catalog.company_id != user.company_id:
-        raise HTTPException(404, "TK 类目库不存在")
+        raise HTTPException(404, "类目库不存在")
     db.delete(catalog)
     db.commit()
 
 
+@app.get("/category-export/options")
 @app.get("/tiktok-export/options")
 def get_tiktok_export_options(
     category_catalog_id: int = Query(ge=1),
@@ -2814,7 +2824,7 @@ def get_tiktok_export_options(
     """返回指定具名类目库中实际可用的类目、属性和输入范围。"""
     catalog = visible_tiktok_catalog(db, user, category_catalog_id)
     if not catalog:
-        raise HTTPException(404, "TK 类目库不存在")
+        raise HTTPException(404, "类目库不存在")
     return {**catalog.parsed_options, "category_catalog": serialize_tiktok_catalog(catalog)}
 
 
@@ -2864,6 +2874,8 @@ def export_drafts_to_tiktok(payload: TiktokDraftExportInput, user: User = Depend
     catalog = visible_tiktok_catalog(db, user, payload.category_catalog_id)
     if not catalog:
         raise HTTPException(404, "TK 类目库不存在或无权使用")
+    if catalog.template_type not in {"tiktok_local", "tiktok_cross_border"}:
+        raise HTTPException(400, "所选类目库不是 TikTok 模板")
     try:
         attributes = validate_attributes(payload.category, payload.attributes, catalog.parsed_options)
         base_requirements = category_base_requirements(payload.category, catalog.parsed_options)
@@ -2928,6 +2940,115 @@ def export_drafts_to_tiktok(payload: TiktokDraftExportInput, user: User = Depend
     )
     db.commit()
     filename = f"TikTok批量上传_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    return Response(
+        content=workbook_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
+@app.post("/drafts/export-shopee")
+def export_drafts_to_shopee(payload: ShopeeDraftExportInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """将同一产品模板下的商品草稿导出为 Shopee basic 批量上传表格。"""
+    if len(set(payload.draft_ids)) != len(payload.draft_ids):
+        raise HTTPException(400, "商品草稿不能重复选择")
+    if len({item.draft_id for item in payload.product_overrides}) != len(payload.product_overrides):
+        raise HTTPException(400, "同一商品草稿只能设置一组售价和库存覆盖值")
+
+    drafts = db.scalars(select(ProductDraft).where(ProductDraft.id.in_(payload.draft_ids))).all()
+    drafts_by_id = {draft.id: draft for draft in drafts}
+    if len(drafts_by_id) != len(payload.draft_ids) or any(not can_access_draft(drafts_by_id.get(draft_id), user) for draft_id in payload.draft_ids):
+        raise HTTPException(404, "包含不存在或无权导出的商品草稿")
+    drafts = [drafts_by_id[draft_id] for draft_id in payload.draft_ids]
+
+    title_groups: dict[str, list[ProductDraft]] = {}
+    for draft in drafts:
+        title = (draft.title or "").strip()
+        if not 20 <= len(title) <= 120:
+            raise HTTPException(400, f"商品草稿 #{draft.id} 的 Shopee 标题长度须为 20-120 个字符")
+        title_groups.setdefault(normalized_tiktok_product_name(title), []).append(draft)
+    duplicate_title_groups = [group for group in title_groups.values() if len(group) > 1]
+    if duplicate_title_groups:
+        details = "；".join(
+            f"“{group[0].title.strip()}”（草稿 #{'、#'.join(str(item.id) for item in group)}）"
+            for group in duplicate_title_groups
+        )
+        raise HTTPException(400, f"同批导出的商品名称必须不同：{details}")
+
+    template_ids = {draft.template_id for draft in drafts}
+    if None in template_ids or len(template_ids) != 1:
+        raise HTTPException(400, "一次只能导出属于同一产品模板的商品草稿")
+    template = db.get(ProductTemplate, next(iter(template_ids)))
+    if not template:
+        raise HTTPException(400, "商品草稿关联的产品模板不存在")
+    if template.package_weight is None or float(template.package_weight) <= 0:
+        raise HTTPException(400, "产品模板缺少有效包裹重量")
+
+    catalog = visible_tiktok_catalog(db, user, payload.category_catalog_id)
+    if not catalog:
+        raise HTTPException(404, "Shopee 类目库不存在或无权使用")
+    if catalog.template_type != "shopee_basic":
+        raise HTTPException(400, "所选类目库不是 Shopee basic 模板")
+
+    overrides = {item.draft_id: item for item in payload.product_overrides}
+    unknown_override_ids = sorted(set(overrides) - set(payload.draft_ids))
+    if unknown_override_ids:
+        raise HTTPException(400, "售价或库存覆盖项包含未选择的商品草稿")
+
+    products = []
+    for draft in drafts:
+        description = (draft.product_description or template.product_description or "").strip()
+        if not 20 <= len(description) <= 3000:
+            raise HTTPException(400, f"商品草稿 #{draft.id} 的 Shopee 商品描述长度须为 20-3000 个字符")
+        image_urls = draft_confirmed_images(draft)
+        if not image_urls:
+            raise HTTPException(400, f"商品草稿 #{draft.id} 没有商品图片")
+        if len(image_urls) > 9:
+            raise HTTPException(400, f"商品草稿 #{draft.id} 的商品图片超过 Shopee 9 张限制")
+        if any(not url.lower().startswith(("http://", "https://")) for url in image_urls):
+            raise HTTPException(400, f"商品草稿 #{draft.id} 包含非公网 HTTP(S) 图片地址")
+        base_sku_by_image = {}
+        for item in draft.sku_items or []:
+            image_url = str(item.get("image_url") or "").strip()
+            sku = str(item.get("sku") or "").strip()
+            if image_url and sku:
+                base_sku_by_image.setdefault(image_url, sku)
+        if not base_sku_by_image:
+            raise HTTPException(400, f"商品草稿 #{draft.id} 缺少基础 SKU")
+        size_chart_url = (draft.size_chart_url or template.size_chart_url or "").strip()
+        if size_chart_url and not size_chart_url.lower().startswith(("http://", "https://")):
+            raise HTTPException(400, f"商品草稿 #{draft.id} 的尺码图必须是公网 HTTP(S) 地址")
+        override = overrides.get(draft.id)
+        products.append({
+            "draft_id": draft.id,
+            "title": draft.title.strip(),
+            "description": description,
+            "image_urls": image_urls,
+            "sku_images": [{"image_url": url, "sku": sku} for url, sku in base_sku_by_image.items()],
+            "size_chart_url": size_chart_url or None,
+            "price": override.price if override and override.price is not None else payload.default_price,
+            "quantity": override.quantity if override and override.quantity is not None else payload.default_quantity,
+        })
+
+    try:
+        workbook_bytes = build_shopee_workbook(
+            template=template,
+            category_id=payload.category_id,
+            shipping_channels=payload.shipping_channels,
+            dangerous_goods=payload.dangerous_goods,
+            products=products,
+            template_bytes=catalog.template_blob,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    db.execute(
+        update(ProductDraft)
+        .where(ProductDraft.id.in_(payload.draft_ids))
+        .values(export_count=ProductDraft.export_count + 1)
+    )
+    db.commit()
+    filename = f"Shopee批量上传_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
     return Response(
         content=workbook_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

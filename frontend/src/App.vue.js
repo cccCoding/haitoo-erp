@@ -45,11 +45,13 @@ const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'], MAX_IMAGE
 const showDraftEditDialog = ref(false), editingDraft = ref(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('');
 const publishingDraftId = ref(null), skippingCarouselDraftId = ref(null), skippingMainImageDraftId = ref(null), dispatchingDraftStage = ref('');
 const selectedDraftIds = ref([]), showTiktokExportDialog = ref(false), tiktokExportOptions = ref(null), tiktokExportLoading = ref(false), tiktokExportError = ref('');
+const showShopeeExportDialog = ref(false), shopeeExportOptions = ref(null), shopeeExportLoading = ref(false), shopeeExportError = ref('');
 const showMiaoshouPublishDialog = ref(false), miaoshouPublishDraftIds = ref([]), miaoshouPublishShopId = ref(null), miaoshouPublishing = ref(false), miaoshouPublishCompleted = ref(0), miaoshouPublishFailed = ref(0);
 const showBatchCarouselDialog = ref(false), showBatchMainImageDialog = ref(false), batchCarouselSaving = ref(false), batchMainImageSaving = ref(false), batchCarouselSkipping = ref(false), batchMainImageSkipping = ref(false), batchCarouselSelections = ref({}), batchMainImageSelections = ref({});
 const showBatchImageReviewDialog = ref(false), batchImageReviewLoading = ref(false), batchImageReviewSaving = ref(false), batchImageReviewType = ref('carousel'), batchImageReviewDrafts = ref([]), batchImageReviewSelections = ref({}), batchCarouselReviewNextStage = ref('main_image_pending');
 const MAX_TIKTOK_EXPORT_DRAFTS = 20;
 const tiktokExportCatalogId = ref(null), tiktokExportCategory = ref(''), tiktokExportDefaultPrice = ref(null), tiktokExportDefaultQuantity = ref(999), tiktokExportCod = ref('Y'), tiktokExportAttributes = ref({}), tiktokExportOverrides = ref({}), tiktokTargetShopId = ref(null), tiktokSubmitting = ref(false);
+const shopeeExportCatalogId = ref(null), shopeeExportCategoryId = ref(''), shopeeExportDefaultPrice = ref(null), shopeeExportDefaultQuantity = ref(999), shopeeExportDangerousGoods = ref('No'), shopeeExportChannels = ref([]), shopeeExportOverrides = ref({});
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null), draftListRefreshing = ref(false);
 const activeDraftTab = ref('all'), draftTotal = ref(0), draftTabCounts = ref({ all: 0, pending: 0, carousel_pending: 0, main_image_pending: 0, ready_to_publish: 0, published: 0 });
 const activeDraftWorkStatus = ref('all'), draftWorkStatusCounts = ref({ all: 0, not_started: 0, in_progress: 0, awaiting_review: 0, failed: 0 });
@@ -179,8 +181,10 @@ const batchMainImageReviewEligible = computed(() => activeDraftTab.value === 'ma
 const selectedTiktokCategoryAttributes = computed(() => tiktokExportOptions.value?.attributes_by_category?.[tiktokExportCategory.value] || []);
 const managingTiktokCategoryAttributes = computed(() => managingTiktokCatalogOptions.value?.attributes_by_category?.[managingTiktokCategory.value] || []);
 const activeTiktokCatalogs = computed(() => tiktokCatalogs.value.filter(catalog => (catalog.template_type || 'tiktok_local') === tiktokCatalogTypeTab.value));
+const tiktokExportCatalogs = computed(() => tiktokCatalogs.value.filter(catalog => ['tiktok_local', 'tiktok_cross_border'].includes(catalog.template_type || 'tiktok_local')));
+const shopeeCatalogs = computed(() => tiktokCatalogs.value.filter(catalog => catalog.template_type === 'shopee_basic'));
 const tiktokExportIsLocal = computed(() => (tiktokExportOptions.value?.category_catalog?.template_type || tiktokCatalogs.value.find(catalog => catalog.id === tiktokExportCatalogId.value)?.template_type || 'tiktok_local') === 'tiktok_local');
-function tiktokCatalogTypeLabel(type) { return type === 'tiktok_cross_border' ? 'tk跨境店' : 'tk本土店'; }
+function tiktokCatalogTypeLabel(type) { return type === 'shopee_basic' ? 'Shopee' : type === 'tiktok_cross_border' ? 'tk跨境店' : 'tk本土店'; }
 async function changeDraftPageSize() { if (draftListRefreshing.value)
     return; currentDraftPage.value = 1; selectedDraftIds.value = []; await refreshDraftList(); }
 async function changeDraftTab(tab) { if (draftListRefreshing.value)
@@ -604,7 +608,7 @@ async function refresh() {
         draftCreatorFilterId.value = user.value.id;
         creatorFiltersInitialized.value = true;
     }
-    const [s, t, g, task, material, d, providers, catalogs] = await Promise.all([api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: taskQueryParams() }), api.get('/material-assets', { ...h, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value, usage_status: activeMaterialUsageTab.value } }), api.get('/drafts', { ...h, params: { creator_id: draftCreatorFilterId.value, template_id: draftTemplateFilterId.value, tab: activeDraftTab.value, work_status: activeDraftWorkStatus.value, page: currentDraftPage.value, page_size: draftPageSize.value } }), api.get('/ai-providers', h), api.get('/tiktok-category-catalogs', h)]);
+    const [s, t, g, task, material, d, providers, catalogs] = await Promise.all([api.get('/shops', h), api.get('/templates', h), api.get('/template-groups', h), api.get('/tasks', { ...h, params: taskQueryParams() }), api.get('/material-assets', { ...h, params: { page: currentMaterialPage.value, page_size: materialPageSize.value, creator_id: materialCreatorFilterId.value, template_id: materialTemplateFilterId.value, usage_status: activeMaterialUsageTab.value } }), api.get('/drafts', { ...h, params: { creator_id: draftCreatorFilterId.value, template_id: draftTemplateFilterId.value, tab: activeDraftTab.value, work_status: activeDraftWorkStatus.value, page: currentDraftPage.value, page_size: draftPageSize.value } }), api.get('/ai-providers', h), api.get('/category-catalogs', h)]);
     shops.value = s.data;
     templates.value = t.data;
     templateGroups.value = g.data;
@@ -1609,7 +1613,7 @@ async function openTiktokExportDialog() {
     showTiktokExportDialog.value = true;
     tiktokExportLoading.value = true;
     tiktokExportError.value = '';
-    tiktokExportCatalogId.value = tiktokCatalogs.value[0]?.id || null;
+    tiktokExportCatalogId.value = tiktokExportCatalogs.value[0]?.id || null;
     tiktokExportCategory.value = '';
     tiktokExportDefaultPrice.value = null;
     tiktokExportDefaultQuantity.value = 999;
@@ -1621,13 +1625,167 @@ async function openTiktokExportDialog() {
     try {
         if (!tiktokExportCatalogId.value)
             throw new Error('请先由管理员新增 TK 类目库');
-        tiktokExportOptions.value = (await api.get('/tiktok-export/options', { headers: headers.value, params: { category_catalog_id: tiktokExportCatalogId.value } })).data;
+        tiktokExportOptions.value = (await api.get('/category-export/options', { headers: headers.value, params: { category_catalog_id: tiktokExportCatalogId.value } })).data;
     }
     catch (e) {
         tiktokExportError.value = e.response?.data?.detail || e.message || '加载 TikTok 模板选项失败';
     }
     finally {
         tiktokExportLoading.value = false;
+    }
+}
+async function openShopeeExportDialog() {
+    if (!selectedDrafts.value.length)
+        return;
+    const templateIds = new Set(selectedDrafts.value.map(draft => draft.template_id));
+    if (templateIds.size !== 1 || templateIds.has(null)) {
+        showToast('一次只能导出属于同一产品模板的商品草稿');
+        return;
+    }
+    const titleGroups = new Map();
+    for (const draft of selectedDrafts.value) {
+        const titleKey = String(draft.title || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+        const group = titleGroups.get(titleKey) || [];
+        group.push(draft);
+        titleGroups.set(titleKey, group);
+    }
+    const duplicateTitles = [...titleGroups.values()].filter(group => group.length > 1);
+    if (duplicateTitles.length) {
+        showToast(`同批导出的商品名称必须不同：${duplicateTitles.map(group => `#${group.map(draft => draft.id).join('、#')}`).join('；')}`);
+        return;
+    }
+    showShopeeExportDialog.value = true;
+    shopeeExportLoading.value = true;
+    shopeeExportError.value = '';
+    shopeeExportCatalogId.value = shopeeCatalogs.value[0]?.id || null;
+    shopeeExportCategoryId.value = '';
+    shopeeExportDefaultPrice.value = null;
+    shopeeExportDefaultQuantity.value = 999;
+    shopeeExportDangerousGoods.value = 'No';
+    shopeeExportChannels.value = [];
+    shopeeExportOptions.value = null;
+    shopeeExportOverrides.value = Object.fromEntries(selectedDrafts.value.map(draft => [draft.id, { price: null, quantity: null }]));
+    try {
+        if (!shopeeExportCatalogId.value)
+            throw new Error('请先由管理员新增 Shopee 类目库');
+        shopeeExportOptions.value = (await api.get('/category-export/options', { headers: headers.value, params: { category_catalog_id: shopeeExportCatalogId.value } })).data;
+        shopeeExportChannels.value = shopeeExportOptions.value.shipping_channels?.[0]?.field ? [shopeeExportOptions.value.shipping_channels[0].field] : [];
+    }
+    catch (e) {
+        shopeeExportError.value = e.response?.data?.detail || e.message || '加载 Shopee 模板选项失败';
+    }
+    finally {
+        shopeeExportLoading.value = false;
+    }
+}
+async function changeShopeeExportCatalog() {
+    shopeeExportCategoryId.value = '';
+    shopeeExportChannels.value = [];
+    shopeeExportOptions.value = null;
+    if (!shopeeExportCatalogId.value)
+        return;
+    try {
+        shopeeExportLoading.value = true;
+        shopeeExportError.value = '';
+        shopeeExportOptions.value = (await api.get('/category-export/options', { headers: headers.value, params: { category_catalog_id: shopeeExportCatalogId.value } })).data;
+        shopeeExportChannels.value = shopeeExportOptions.value.shipping_channels?.[0]?.field ? [shopeeExportOptions.value.shipping_channels[0].field] : [];
+    }
+    catch (e) {
+        shopeeExportError.value = e.response?.data?.detail || '加载 Shopee 类目库失败';
+    }
+    finally {
+        shopeeExportLoading.value = false;
+    }
+}
+async function exportSelectedDraftsToShopee() {
+    const defaultPrice = Number(shopeeExportDefaultPrice.value);
+    const defaultQuantity = Number(shopeeExportDefaultQuantity.value);
+    if (!shopeeExportCatalogId.value) {
+        shopeeExportError.value = '请选择 Shopee 类目库';
+        return;
+    }
+    if (!shopeeExportCategoryId.value) {
+        shopeeExportError.value = '请选择 Shopee 商品类目';
+        return;
+    }
+    if (!Number.isFinite(defaultPrice) || defaultPrice < 0.10 || defaultPrice > 1000000000) {
+        shopeeExportError.value = '默认售价须为 0.10–1000000000';
+        return;
+    }
+    if (!Number.isInteger(defaultQuantity) || defaultQuantity < 0 || defaultQuantity > 10000000) {
+        shopeeExportError.value = '默认库存须为 0–10000000 的整数';
+        return;
+    }
+    if (!shopeeExportChannels.value.length) {
+        shopeeExportError.value = '请至少选择一个物流渠道';
+        return;
+    }
+    const productOverrides = [];
+    for (const draft of selectedDrafts.value) {
+        const value = shopeeExportOverrides.value[draft.id] || {};
+        const item = { draft_id: draft.id };
+        if (value.price !== null && value.price !== '') {
+            const price = Number(value.price);
+            if (!Number.isFinite(price) || price < 0.10 || price > 1000000000) {
+                shopeeExportError.value = `商品草稿 #${draft.id} 的售价覆盖值无效`;
+                return;
+            }
+            item.price = price;
+        }
+        if (value.quantity !== null && value.quantity !== '') {
+            const quantity = Number(value.quantity);
+            if (!Number.isInteger(quantity) || quantity < 0 || quantity > 10000000) {
+                shopeeExportError.value = `商品草稿 #${draft.id} 的库存覆盖值无效`;
+                return;
+            }
+            item.quantity = quantity;
+        }
+        if (Object.keys(item).length > 1)
+            productOverrides.push(item);
+    }
+    try {
+        shopeeExportLoading.value = true;
+        shopeeExportError.value = '';
+        const response = await api.post('/drafts/export-shopee', {
+            draft_ids: selectedDraftIds.value,
+            category_catalog_id: shopeeExportCatalogId.value,
+            category_id: shopeeExportCategoryId.value,
+            default_price: defaultPrice,
+            default_quantity: defaultQuantity,
+            dangerous_goods: shopeeExportDangerousGoods.value,
+            shipping_channels: shopeeExportChannels.value,
+            product_overrides: productOverrides,
+        }, { headers: headers.value, responseType: 'blob' });
+        const disposition = String(response.headers['content-disposition'] || '');
+        const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+        const filename = utf8Name ? decodeURIComponent(utf8Name) : 'Shopee批量上传.xlsx';
+        const url = URL.createObjectURL(response.data);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        showShopeeExportDialog.value = false;
+        selectedDraftIds.value = [];
+        await refreshDraftList();
+        showToast('Shopee 批量上传表格已生成');
+    }
+    catch (e) {
+        if (e.response?.data instanceof Blob) {
+            try {
+                shopeeExportError.value = JSON.parse(await e.response.data.text()).detail || '导出失败';
+            }
+            catch {
+                shopeeExportError.value = '导出 Shopee 表格失败';
+            }
+        }
+        else
+            shopeeExportError.value = e.response?.data?.detail || '导出 Shopee 表格失败';
+    }
+    finally {
+        shopeeExportLoading.value = false;
     }
 }
 function changeTiktokExportCategory() { tiktokExportAttributes.value = {}; }
@@ -1640,7 +1798,7 @@ async function changeTiktokExportCatalog() {
     try {
         tiktokExportLoading.value = true;
         tiktokExportError.value = '';
-        tiktokExportOptions.value = (await api.get('/tiktok-export/options', { headers: headers.value, params: { category_catalog_id: tiktokExportCatalogId.value } })).data;
+        tiktokExportOptions.value = (await api.get('/category-export/options', { headers: headers.value, params: { category_catalog_id: tiktokExportCatalogId.value } })).data;
         if (!tiktokExportIsLocal.value)
             tiktokTargetShopId.value = null;
     }
@@ -1798,10 +1956,10 @@ async function refreshTiktokCatalogList() {
     try {
         tiktokCatalogListRefreshing.value = true;
         tiktokCatalogError.value = '';
-        tiktokCatalogs.value = (await api.get('/tiktok-category-catalogs', { headers: headers.value })).data;
+        tiktokCatalogs.value = (await api.get('/category-catalogs', { headers: headers.value })).data;
     }
     catch (e) {
-        tiktokCatalogError.value = e.response?.data?.detail || '刷新 TK 类目列表失败';
+        tiktokCatalogError.value = e.response?.data?.detail || '刷新类目列表失败';
     }
     finally {
         tiktokCatalogListRefreshing.value = false;
@@ -1819,7 +1977,7 @@ function onTiktokCatalogFileChange(event) {
 async function createTiktokCatalog() {
     const name = tiktokCatalogName.value.trim();
     if (!name || !tiktokCatalogFile.value) {
-        tiktokCatalogError.value = '请填写类目库名称并选择 TikTok XLSX 模板';
+        tiktokCatalogError.value = '请填写类目库名称并选择平台 XLSX 模板';
         return;
     }
     const form = new FormData();
@@ -1829,9 +1987,9 @@ async function createTiktokCatalog() {
     try {
         tiktokCatalogLoading.value = true;
         tiktokCatalogError.value = '';
-        await api.post('/tiktok-category-catalogs', form, { headers: headers.value });
+        await api.post('/category-catalogs', form, { headers: headers.value });
         showTiktokCatalogDialog.value = false;
-        tiktokCatalogs.value = (await api.get('/tiktok-category-catalogs', { headers: headers.value })).data;
+        tiktokCatalogs.value = (await api.get('/category-catalogs', { headers: headers.value })).data;
         showToast('类目库已导入');
     }
     catch (e) {
@@ -1845,7 +2003,7 @@ async function openTiktokCatalogDetail(catalog) {
     try {
         tiktokCatalogLoading.value = true;
         tiktokCatalogError.value = '';
-        const { data } = await api.get('/tiktok-export/options', { headers: headers.value, params: { category_catalog_id: catalog.id } });
+        const { data } = await api.get('/category-export/options', { headers: headers.value, params: { category_catalog_id: catalog.id } });
         managingTiktokCatalog.value = catalog;
         managingTiktokCatalogOptions.value = data;
         managingTiktokCategory.value = data.categories?.[0]?.name || '';
@@ -1864,7 +2022,7 @@ async function setTiktokAttributeInputMode(field, inputMode) {
     try {
         tiktokCatalogLoading.value = true;
         tiktokCatalogError.value = '';
-        const { data } = await api.patch(`/tiktok-category-catalogs/${managingTiktokCatalog.value.id}`, {
+        const { data } = await api.patch(`/category-catalogs/${managingTiktokCatalog.value.id}`, {
             attribute_input_modes: [{ category: managingTiktokCategory.value, field: field.field, input_mode: inputMode }],
         }, { headers: headers.value });
         managingTiktokCatalogOptions.value = data.options || managingTiktokCatalogOptions.value;
@@ -1887,7 +2045,7 @@ async function deleteTiktokCatalog(catalog) {
     try {
         tiktokCatalogLoading.value = true;
         tiktokCatalogError.value = '';
-        await api.delete(`/tiktok-category-catalogs/${catalog.id}`, { headers: headers.value });
+        await api.delete(`/category-catalogs/${catalog.id}`, { headers: headers.value });
         tiktokCatalogs.value = tiktokCatalogs.value.filter(item => item.id !== catalog.id);
         showToast('类目库已删除');
     }
@@ -4392,6 +4550,12 @@ if (__VLS_ctx.token) {
                     ...{ class: "primary" },
                 });
             }
+            if (__VLS_ctx.tiktokExportEligible) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.openShopeeExportDialog) },
+                    ...{ class: "primary" },
+                });
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!(__VLS_ctx.token))
@@ -5351,6 +5515,32 @@ if (__VLS_ctx.token) {
                 } },
             ...{ class: ({ active: __VLS_ctx.tiktokCatalogTypeTab === 'tiktok_cross_border' }) },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.token))
+                        return;
+                    if (!!(__VLS_ctx.page === 'dashboard'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'templates'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'pod'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'tasks'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'materials'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'drafts'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
+                        return;
+                    if (!(__VLS_ctx.page === 'tiktok-catalogs' && __VLS_ctx.user?.role === 'company_admin'))
+                        return;
+                    __VLS_ctx.tiktokCatalogTypeTab = 'shopee_basic';
+                } },
+            ...{ class: ({ active: __VLS_ctx.tiktokCatalogTypeTab === 'shopee_basic' }) },
+        });
         if (__VLS_ctx.tiktokCatalogError) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "error" },
@@ -5392,31 +5582,35 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "tiktok-catalog-actions" },
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!(__VLS_ctx.token))
-                            return;
-                        if (!!(__VLS_ctx.page === 'dashboard'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'templates'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'pod'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'tasks'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'materials'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'drafts'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
-                            return;
-                        if (!(__VLS_ctx.page === 'tiktok-catalogs' && __VLS_ctx.user?.role === 'company_admin'))
-                            return;
-                        __VLS_ctx.openTiktokCatalogDetail(catalog);
-                    } },
-            });
+            if (catalog.template_type !== 'shopee_basic') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            if (!(__VLS_ctx.page === 'tiktok-catalogs' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            if (!(catalog.template_type !== 'shopee_basic'))
+                                return;
+                            __VLS_ctx.openTiktokCatalogDetail(catalog);
+                        } },
+                });
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!(__VLS_ctx.token))
@@ -7204,7 +7398,7 @@ if (__VLS_ctx.showTiktokExportDialog) {
             value: (null),
             disabled: true,
         });
-        for (const [catalog] of __VLS_getVForSourceType((__VLS_ctx.tiktokCatalogs))) {
+        for (const [catalog] of __VLS_getVForSourceType((__VLS_ctx.tiktokExportCatalogs))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
                 key: (catalog.id),
                 value: (catalog.id),
@@ -7402,6 +7596,196 @@ if (__VLS_ctx.showTiktokExportDialog) {
         });
         (__VLS_ctx.tiktokSubmitting ? '创建任务中…' : '生成并自动上品');
     }
+}
+if (__VLS_ctx.showShopeeExportDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showShopeeExportDialog))
+                    return;
+                !__VLS_ctx.shopeeExportLoading && (__VLS_ctx.showShopeeExportDialog = false);
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card tiktok-export-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showShopeeExportDialog))
+                    return;
+                __VLS_ctx.showShopeeExportDialog = false;
+            } },
+        ...{ class: "modal-close" },
+        disabled: (__VLS_ctx.shopeeExportLoading),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.selectedDrafts.length);
+    if (__VLS_ctx.shopeeExportLoading && !__VLS_ctx.shopeeExportOptions) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "empty" },
+        });
+    }
+    else {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "tiktok-export-grid" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+            ...{ class: "required" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (__VLS_ctx.changeShopeeExportCatalog) },
+            value: (__VLS_ctx.shopeeExportCatalogId),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: (null),
+            disabled: true,
+        });
+        for (const [catalog] of __VLS_getVForSourceType((__VLS_ctx.shopeeCatalogs))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (catalog.id),
+                value: (catalog.id),
+            });
+            (catalog.name);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+            ...{ class: "required" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.shopeeExportCategoryId),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "",
+            disabled: true,
+        });
+        for (const [category] of __VLS_getVForSourceType((__VLS_ctx.shopeeExportOptions?.categories || []))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (category.id),
+                value: (category.id),
+            });
+            (category.name);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+            ...{ class: "required" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            type: "number",
+            min: "0.10",
+            max: "1000000000",
+            step: "0.01",
+            placeholder: "请输入售价",
+        });
+        (__VLS_ctx.shopeeExportDefaultPrice);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+            ...{ class: "required" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            type: "number",
+            min: "0",
+            max: "10000000",
+            step: "1",
+        });
+        (__VLS_ctx.shopeeExportDefaultQuantity);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+            ...{ class: "required" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.shopeeExportDangerousGoods),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "No",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "Yes",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "tiktok-attribute-section" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+            ...{ class: "required" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "shopee-channel-options" },
+        });
+        for (const [channel] of __VLS_getVForSourceType((__VLS_ctx.shopeeExportOptions?.shipping_channels || []))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+                key: (channel.field),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                type: "checkbox",
+                value: (channel.field),
+            });
+            (__VLS_ctx.shopeeExportChannels);
+            (channel.name);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+            ...{ class: "tiktok-product-overrides" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "tiktok-override-head" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        for (const [draft] of __VLS_getVForSourceType((__VLS_ctx.selectedDrafts))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                key: (draft.id),
+                ...{ class: "tiktok-override-row" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            (draft.id);
+            (draft.title);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                type: "number",
+                min: "0.10",
+                max: "1000000000",
+                step: "0.01",
+                placeholder: "使用默认售价",
+            });
+            (__VLS_ctx.shopeeExportOverrides[draft.id].price);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                type: "number",
+                min: "0",
+                max: "10000000",
+                step: "1",
+                placeholder: "使用默认库存",
+            });
+            (__VLS_ctx.shopeeExportOverrides[draft.id].quantity);
+        }
+    }
+    if (__VLS_ctx.shopeeExportError) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "error material-draft-error" },
+        });
+        (__VLS_ctx.shopeeExportError);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showShopeeExportDialog))
+                    return;
+                __VLS_ctx.showShopeeExportDialog = false;
+            } },
+        ...{ class: "ghost" },
+        disabled: (__VLS_ctx.shopeeExportLoading),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.exportSelectedDraftsToShopee) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.shopeeExportLoading || !__VLS_ctx.shopeeExportOptions),
+    });
+    (__VLS_ctx.shopeeExportLoading ? '生成中…' : '生成并下载');
 }
 if (__VLS_ctx.showDraftEditDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -9660,6 +10044,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-table']} */ ;
@@ -9957,6 +10342,28 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-export-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-export-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-attribute-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['shopee-channel-options']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-product-overrides']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-override-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['tiktok-override-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['material-draft-error']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
@@ -10282,7 +10689,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             bindingShop: bindingShop,
             hubBindingSaving: hubBindingSaving,
             hubBindingForm: hubBindingForm,
-            tiktokCatalogs: tiktokCatalogs,
             tiktokCatalogLoading: tiktokCatalogLoading,
             tiktokCatalogError: tiktokCatalogError,
             tiktokCatalogListRefreshing: tiktokCatalogListRefreshing,
@@ -10332,6 +10738,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             tiktokExportOptions: tiktokExportOptions,
             tiktokExportLoading: tiktokExportLoading,
             tiktokExportError: tiktokExportError,
+            showShopeeExportDialog: showShopeeExportDialog,
+            shopeeExportOptions: shopeeExportOptions,
+            shopeeExportLoading: shopeeExportLoading,
+            shopeeExportError: shopeeExportError,
             showMiaoshouPublishDialog: showMiaoshouPublishDialog,
             miaoshouPublishDraftIds: miaoshouPublishDraftIds,
             miaoshouPublishShopId: miaoshouPublishShopId,
@@ -10363,6 +10773,13 @@ const __VLS_self = (await import('vue')).defineComponent({
             tiktokExportOverrides: tiktokExportOverrides,
             tiktokTargetShopId: tiktokTargetShopId,
             tiktokSubmitting: tiktokSubmitting,
+            shopeeExportCatalogId: shopeeExportCatalogId,
+            shopeeExportCategoryId: shopeeExportCategoryId,
+            shopeeExportDefaultPrice: shopeeExportDefaultPrice,
+            shopeeExportDefaultQuantity: shopeeExportDefaultQuantity,
+            shopeeExportDangerousGoods: shopeeExportDangerousGoods,
+            shopeeExportChannels: shopeeExportChannels,
+            shopeeExportOverrides: shopeeExportOverrides,
             draftPageSize: draftPageSize,
             draftTemplateFilterId: draftTemplateFilterId,
             draftCreatorFilterId: draftCreatorFilterId,
@@ -10504,6 +10921,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             selectedTiktokCategoryAttributes: selectedTiktokCategoryAttributes,
             managingTiktokCategoryAttributes: managingTiktokCategoryAttributes,
             activeTiktokCatalogs: activeTiktokCatalogs,
+            tiktokExportCatalogs: tiktokExportCatalogs,
+            shopeeCatalogs: shopeeCatalogs,
             tiktokExportIsLocal: tiktokExportIsLocal,
             tiktokCatalogTypeLabel: tiktokCatalogTypeLabel,
             changeDraftPageSize: changeDraftPageSize,
@@ -10637,6 +11056,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             openBatchMiaoshouPublishDialog: openBatchMiaoshouPublishDialog,
             confirmMiaoshouPublish: confirmMiaoshouPublish,
             openTiktokExportDialog: openTiktokExportDialog,
+            openShopeeExportDialog: openShopeeExportDialog,
+            changeShopeeExportCatalog: changeShopeeExportCatalog,
+            exportSelectedDraftsToShopee: exportSelectedDraftsToShopee,
             changeTiktokExportCategory: changeTiktokExportCategory,
             changeTiktokExportCatalog: changeTiktokExportCatalog,
             tiktokAttributeMode: tiktokAttributeMode,
