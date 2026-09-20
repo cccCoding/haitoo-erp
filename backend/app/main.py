@@ -2696,9 +2696,14 @@ def visible_tiktok_catalog(db: Session, user: User, catalog_id: int | None = Non
     ))
 
 
+def normalized_tiktok_product_name(value: str | None) -> str:
+    """用于同批导出重名校验：忽略首尾、多余空格和英文大小写。"""
+    return " ".join((value or "").split()).casefold()
+
+
 def serialize_tiktok_catalog(catalog: TiktokCategoryCatalog, *, include_options: bool = False) -> dict:
     result = {
-        "id": catalog.id, "name": catalog.name, "source_filename": catalog.source_filename,
+        "id": catalog.id, "name": catalog.name, "source_filename": catalog.source_filename, "template_type": catalog.template_type,
         "template_version": catalog.template_version, "category_count": len((catalog.parsed_options or {}).get("categories", [])),
         "created_at": timestamp_ms(catalog.created_at), "updated_at": timestamp_ms(catalog.updated_at),
     }
@@ -2719,9 +2724,13 @@ def list_tiktok_category_catalogs(user: User = Depends(current_user), db: Sessio
 async def create_tiktok_category_catalog(
     name: str = Form(..., min_length=1, max_length=120),
     file: UploadFile = File(...),
+    template_type: str = Form("tiktok_local", pattern="^(tiktok_local|tiktok_cross_border)$"),
     user: User = Depends(require_roles(Role.COMPANY_ADMIN)),
     db: Session = Depends(get_db),
 ):
+    # 直接调用路由函数的旧测试/脚本不会经过 FastAPI 的 Form 注入。
+    if template_type not in {"tiktok_local", "tiktok_cross_border"}:
+        template_type = "tiktok_local"
     catalog_name = name.strip()
     if not catalog_name:
         raise HTTPException(400, "类目库名称不能为空")
@@ -2735,13 +2744,13 @@ async def create_tiktok_category_catalog(
         with zipfile.ZipFile(BytesIO(template_bytes)) as archive:
             if sum(item.file_size for item in archive.infolist()) > 50 * 1024 * 1024:
                 raise ValueError("解压后内容过大")
-        options = parse_listing_options(template_bytes)
+        options = parse_listing_options(template_bytes, template_type)
     except (ValueError, zipfile.BadZipFile) as exc:
         raise HTTPException(400, f"TikTok 模板解析失败：{exc}") from exc
     if not options.get("categories"):
         raise HTTPException(400, "TikTok 模板中没有可用类目")
     catalog = TiktokCategoryCatalog(
-        company_id=user.company_id, name=catalog_name, source_filename=source_filename,
+        company_id=user.company_id, name=catalog_name, source_filename=source_filename, template_type=template_type,
         template_version=options.get("template_version"), template_blob=template_bytes,
         parsed_options=options, created_by=user.id,
     )
@@ -2823,6 +2832,20 @@ def export_drafts_to_tiktok(payload: TiktokDraftExportInput, user: User = Depend
         raise HTTPException(404, "包含不存在或无权导出的商品草稿")
     drafts = [drafts_by_id[draft_id] for draft_id in payload.draft_ids]
 
+    title_groups: dict[str, list[ProductDraft]] = {}
+    for draft in drafts:
+        title = (draft.title or "").strip()
+        if not 25 <= len(title) <= 255:
+            raise HTTPException(400, f"商品草稿 #{draft.id} 的标题长度须为 25-255 个字符")
+        title_groups.setdefault(normalized_tiktok_product_name(title), []).append(draft)
+    duplicate_title_groups = [group for group in title_groups.values() if len(group) > 1]
+    if duplicate_title_groups:
+        details = "；".join(
+            f"“{group[0].title.strip()}”（草稿 #{'、#'.join(str(item.id) for item in group)}）"
+            for group in duplicate_title_groups
+        )
+        raise HTTPException(400, f"同批导出的商品名称必须不同：{details}")
+
     template_ids = {draft.template_id for draft in drafts}
     if None in template_ids or len(template_ids) != 1:
         raise HTTPException(400, "一次只能导出属于同一产品模板的商品草稿")
@@ -2855,8 +2878,6 @@ def export_drafts_to_tiktok(payload: TiktokDraftExportInput, user: User = Depend
     products = []
     for draft in drafts:
         title = (draft.title or "").strip()
-        if not 25 <= len(title) <= 255:
-            raise HTTPException(400, f"商品草稿 #{draft.id} 的标题长度须为 25-255 个字符")
         description = (draft.product_description or template.product_description or "").strip()
         if not description:
             raise HTTPException(400, f"商品草稿 #{draft.id} 缺少产品描述")
@@ -2895,7 +2916,7 @@ def export_drafts_to_tiktok(payload: TiktokDraftExportInput, user: User = Depend
     try:
         workbook_bytes = build_tiktok_workbook(
             template=template, category=payload.category, cod=payload.cod,
-            attributes=attributes, products=products, template_bytes=catalog.template_blob,
+            attributes=attributes, products=products, template_bytes=catalog.template_blob, template_type=catalog.template_type,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -2933,6 +2954,9 @@ def create_hubstudio_upload_task(payload: HubUploadTaskCreate, user: User = Depe
     ).limit(1))
     if active:
         raise HTTPException(400, "该店铺已有进行中或待人工处理的自动上品任务")
+    catalog = visible_tiktok_catalog(db, user, payload.category_catalog_id)
+    if not catalog or catalog.template_type != "tiktok_local":
+        raise HTTPException(400, "自动上品仅支持 tk本土店类目库")
     # 复用既有模板校验与生成逻辑，响应体即任务唯一使用的 XLSX 快照。
     export_payload = TiktokDraftExportInput(**payload.model_dump(exclude={"shop_id"}))
     response = export_drafts_to_tiktok(export_payload, user=user, db=db)

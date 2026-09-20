@@ -13,7 +13,10 @@ from app import main
 from app.database import Base
 from app.models import ProductDraft, ProductTemplate, Role, TiktokCategoryCatalog, User
 from app.schemas import TiktokDraftExportInput
-from app.tiktok_export import TEMPLATE_PATH, listing_options, validate_attributes
+from app.tiktok_export import TEMPLATE_PATH, build_workbook, listing_options, parse_listing_options, validate_attributes
+
+
+CROSS_BORDER_TEMPLATE_PATH = TEMPLATE_PATH.parent / "tiktok_seller_cross_border_zh.xlsx"
 
 
 class TiktokExportTests(unittest.TestCase):
@@ -40,7 +43,7 @@ class TiktokExportTests(unittest.TestCase):
         self.engine.dispose()
 
     def payload(self) -> TiktokDraftExportInput:
-        return TiktokDraftExportInput(draft_ids=[1, 2], category_catalog_id=1, category="Women's Islamic Clothing/Robes", default_price=10, default_quantity=999, cod="Y", attributes={"product_property/100198": "Floral"}, product_overrides=[{"draft_id": 1, "price": 12.5, "quantity": 88}])
+        return TiktokDraftExportInput(draft_ids=[1, 2], category_catalog_id=1, category="女士上装/女士衬衫", default_price=10, default_quantity=999, cod="Y", attributes={"product_property/100198": "花朵"}, product_overrides=[{"draft_id": 1, "price": 12.5, "quantity": 88}])
 
     def test_export_request_accepts_at_most_twenty_drafts(self) -> None:
         values = self.payload().model_dump()
@@ -51,35 +54,45 @@ class TiktokExportTests(unittest.TestCase):
     def test_options_are_read_from_bundled_template(self) -> None:
         options = listing_options()
         self.assertEqual(options["template_version"], "V5.0.2")
-        self.assertEqual(len(options["categories"]), 47)
-        robe_fields = {item["field"]: item for item in options["attributes_by_category"]["Women's Islamic Clothing/Robes"]}
-        self.assertIn("product_property/100198", robe_fields)
-        self.assertTrue(robe_fields["product_property/100198"]["allow_custom"])
-        self.assertEqual(robe_fields["product_property/100198"]["input_mode"], "select_or_text")
-        season = next(item for item in robe_fields.values() if item["label"] == "Season")
+        self.assertEqual(len(options["categories"]), 41)
+        blouse_fields = {item["field"]: item for item in options["attributes_by_category"]["女士上装/女士衬衫"]}
+        self.assertIn("product_property/100198", blouse_fields)
+        self.assertTrue(blouse_fields["product_property/100198"]["allow_custom"])
+        self.assertEqual(blouse_fields["product_property/100198"]["input_mode"], "select_or_text")
+        season = next(item for item in blouse_fields.values() if item["label"] == "季节")
         self.assertEqual(season["input_mode"], "select")
-        self.assertEqual(options["base_requirements_by_category"]["Women's Islamic Clothing/Robes"]["size_chart"], "Mandatory")
+        self.assertEqual(options["base_requirements_by_category"]["女士上装/女士衬衫"]["size_chart"], "Mandatory")
+
+    def test_cross_border_template_uses_its_own_adapter(self) -> None:
+        options = parse_listing_options(CROSS_BORDER_TEMPLATE_PATH.read_bytes(), "tiktok_cross_border")
+        self.assertEqual(options["template_type"], "tiktok_cross_border")
+        self.assertEqual(options["template_version"], "V5.0.2")
+        self.assertFalse(options["capabilities"]["supports_cod"])
+        self.assertFalse(options["capabilities"]["supports_hubstudio_submit"])
+        self.assertEqual(len(options["categories"]), 41)
+        with self.assertRaisesRegex(ValueError, "不匹配"):
+            parse_listing_options(CROSS_BORDER_TEMPLATE_PATH.read_bytes(), "tiktok_local")
 
     def test_select_accepts_supported_values_and_custom_input_rejects_lists(self) -> None:
         options = listing_options()
-        robe_fields = options["attributes_by_category"]["Women's Islamic Clothing/Robes"]
-        season = next(item for item in robe_fields if item["label"] == "Season")
+        blouse_fields = options["attributes_by_category"]["女士上装/女士衬衫"]
+        season = next(item for item in blouse_fields if item["label"] == "季节")
         values = season["options"][:2]
         self.assertEqual(validate_attributes(
-            "Women's Islamic Clothing/Robes", {season["field"]: f"{values[0]}， {values[1]}"}, options,
+            "女士上装/女士衬衫", {season["field"]: f"{values[0]}， {values[1]}"}, options,
         )[season["field"]], ",".join(values))
-        pattern = next(item for item in robe_fields if item["label"] == "Pattern")
+        pattern = next(item for item in blouse_fields if item["label"] == "图案花纹")
         with self.assertRaisesRegex(ValueError, "不支持填写多个值"):
-            validate_attributes("Women's Islamic Clothing/Robes", {pattern["field"]: pattern["options"][:2]}, options)
+            validate_attributes("女士上装/女士衬衫", {pattern["field"]: pattern["options"][:2]}, options)
 
     def test_select_or_text_accepts_supported_or_custom_value(self) -> None:
         options = listing_options()
-        pattern = next(item for item in options["attributes_by_category"]["Women's Islamic Clothing/Robes"] if item["label"] == "Pattern")
+        pattern = next(item for item in options["attributes_by_category"]["女士上装/女士衬衫"] if item["label"] == "图案花纹")
         self.assertEqual(validate_attributes(
-            "Women's Islamic Clothing/Robes", {pattern["field"]: pattern["options"][0]}, options,
+            "女士上装/女士衬衫", {pattern["field"]: pattern["options"][0]}, options,
         )[pattern["field"]], pattern["options"][0])
         self.assertEqual(validate_attributes(
-            "Women's Islamic Clothing/Robes", {pattern["field"]: "My custom pattern"}, options,
+            "女士上装/女士衬衫", {pattern["field"]: "My custom pattern"}, options,
         )[pattern["field"]], "My custom pattern")
 
     def test_export_preserves_template_maps_drafts_and_counts_exports(self) -> None:
@@ -104,12 +117,14 @@ class TiktokExportTests(unittest.TestCase):
         self.assertEqual(sheet["E7"].value, "https://img.example/one.jpg")
         self.assertEqual(sheet["F7"].value, "https://img.example/two.jpg")
         self.assertEqual(sheet["P9"].value, "https://img.example/two.jpg")
+        self.assertEqual(sheet["N7"].value, "Color")
+        self.assertEqual(sheet["Q7"].value, "Size")
         self.assertEqual(sheet["D7"].value, "Draft description")
         self.assertEqual(sheet["D11"].value, "Template description")
         self.assertEqual([sheet.cell(row, 24).value for row in range(7, 13)], [12.5, 12.5, 12.5, 12.5, 10, 10])
         self.assertEqual([sheet.cell(row, 25).value for row in range(7, 13)], [88, 88, 88, 88, 999, 999])
         self.assertTrue(all(sheet.cell(row, 28).value == "Y" for row in range(7, 13)))
-        self.assertTrue(all(sheet.cell(row, 29).value == "Floral" for row in range(7, 13)))
+        self.assertTrue(all(sheet.cell(row, 30).value == "花朵" for row in range(7, 13)))
         self.assertIsNone(sheet["A13"].value)
 
     def test_repeated_successful_export_increments_once_per_draft(self) -> None:
@@ -137,6 +152,25 @@ class TiktokExportTests(unittest.TestCase):
         self.assertEqual(sheet["P7"].value, "https://img.example/one.jpg")
         self.assertEqual(sheet["P9"].value, "https://img.example/two.jpg")
 
+    def test_cross_border_workbook_leaves_auction_fields_empty(self) -> None:
+        with self.session_factory() as db:
+            draft = db.get(ProductDraft, 1)
+            template = db.get(ProductTemplate, 1)
+            workbook_bytes = build_workbook(
+                template=template, category="女士上装/女士衬衫", cod="Y", attributes={},
+                products=[{
+                    "title": draft.title, "description": draft.product_description,
+                    "image_urls": draft.image_urls, "sku_images": [{"image_url": "https://img.example/one.jpg", "sku": "Y1AA000001"}],
+                    "size_chart_url": draft.size_chart_url, "price": 10, "quantity": 2,
+                }], template_bytes=CROSS_BORDER_TEMPLATE_PATH.read_bytes(), template_type="tiktok_cross_border",
+            )
+        sheet = load_workbook(BytesIO(workbook_bytes), data_only=False)["Template"]
+        self.assertEqual(sheet["N7"].value, "Color")
+        self.assertEqual(sheet["Q7"].value, "Size")
+        self.assertEqual(sheet["W7"].value, 10)
+        self.assertIsNone(sheet["AA7"].value)
+        self.assertIsNone(sheet["AB7"].value)
+
     def test_validation_and_generation_failures_do_not_increment(self) -> None:
         with self.session_factory() as db:
             user = db.get(User, 1)
@@ -146,6 +180,16 @@ class TiktokExportTests(unittest.TestCase):
             with patch("app.main.build_tiktok_workbook", side_effect=ValueError("生成失败")), self.assertRaisesRegex(HTTPException, "生成失败"):
                 main.export_drafts_to_tiktok(self.payload(), user=user, db=db)
             self.assertEqual(db.get(ProductDraft, 1).export_count, 0)
+
+    def test_duplicate_product_names_are_rejected_without_incrementing_exports(self) -> None:
+        with self.session_factory() as db:
+            draft = db.get(ProductDraft, 2)
+            draft.title = "  FIRST unique tiktok product title  "
+            db.commit()
+            with self.assertRaisesRegex(HTTPException, "商品名称必须不同"):
+                main.export_drafts_to_tiktok(self.payload(), user=db.get(User, 1), db=db)
+            self.assertEqual(db.get(ProductDraft, 1).export_count, 0)
+            self.assertEqual(db.get(ProductDraft, 2).export_count, 0)
 
     def test_member_cannot_export_another_users_draft(self) -> None:
         payload = self.payload().model_copy(update={"draft_ids": [4]})

@@ -139,6 +139,8 @@ class TiktokCategoryCatalog(Base):
     company_id: Mapped[int] = mapped_column(nullable=False)
     name: Mapped[str] = mapped_column(String(120))
     source_filename: Mapped[str] = mapped_column(String(255))
+    # tiktok_local / tiktok_cross_border；用于选择对应 Excel 解析与导出适配器。
+    template_type: Mapped[str] = mapped_column(String(32), default="tiktok_local", nullable=False, index=True)
     template_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     template_blob: Mapped[bytes] = mapped_column(
         LargeBinary().with_variant(MEDIUMBLOB(), "mysql").with_variant(MEDIUMBLOB(), "mariadb")

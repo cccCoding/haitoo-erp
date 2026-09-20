@@ -35,7 +35,7 @@ class HubstudioTaskTests(unittest.TestCase):
         with self.Session() as db:
             admin = db.get(User, 1)
             main.update_hubstudio_account(HubstudioAccountUpdate(app_id="id", app_secret="secret", group_code="group"), admin, db)
-            payload = HubUploadTaskCreate(shop_id=1, draft_ids=[1], category_catalog_id=1, category="Women's Islamic Clothing/Robes", default_price=10, default_quantity=3, attributes={"product_property/100198":"Floral"})
+            payload = HubUploadTaskCreate(shop_id=1, draft_ids=[1], category_catalog_id=1, category="女士上装/女士衬衫", default_price=10, default_quantity=3, attributes={"product_property/100198":"花朵"})
             result = main.create_hubstudio_upload_task(payload, admin, db)
             task = db.get(HubUploadTask, result["id"])
             self.assertEqual(task.status, "queued")

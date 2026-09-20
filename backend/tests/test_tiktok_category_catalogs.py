@@ -14,6 +14,9 @@ from app.schemas import TiktokCategoryCatalogUpdate
 from app.tiktok_export import TEMPLATE_PATH
 
 
+CROSS_BORDER_TEMPLATE_PATH = TEMPLATE_PATH.parent / "tiktok_seller_cross_border_zh.xlsx"
+
+
 class TiktokCategoryCatalogTests(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
@@ -38,28 +41,28 @@ class TiktokCategoryCatalogTests(unittest.TestCase):
             result = self.create_catalog(db)
             self.assertEqual(result["name"], "穆斯林服装")
             self.assertEqual(result["template_version"], "V5.0.2")
-            self.assertEqual(result["category_count"], 47)
+            self.assertEqual(result["category_count"], 41)
             options = result["options"]
-            robe_fields = options["attributes_by_category"]["Women's Islamic Clothing/Robes"]
-            self.assertEqual(next(item for item in robe_fields if item["label"] == "Season")["input_mode"], "select")
-            self.assertEqual(next(item for item in robe_fields if item["label"] == "Pattern")["input_mode"], "select_or_text")
-            self.assertEqual(next(item for item in robe_fields if item["label"] == "Malaysia Product Safety & Quality Certification")["input_mode"], "text")
+            blouse_fields = options["attributes_by_category"]["女士上装/女士衬衫"]
+            self.assertEqual(next(item for item in blouse_fields if item["label"] == "季节")["input_mode"], "select")
+            self.assertEqual(next(item for item in blouse_fields if item["label"] == "图案花纹")["input_mode"], "select_or_text")
+            self.assertEqual(next(item for item in blouse_fields if item["label"] == "马来西亚产品安全与质量认证")["input_mode"], "text")
             self.assertEqual(db.get(TiktokCategoryCatalog, result["id"]).template_blob, TEMPLATE_PATH.read_bytes())
 
     def test_admin_can_change_input_mode_and_other_company_cannot_read(self) -> None:
         with self.session_factory() as db:
             result = self.create_catalog(db)
             catalog_id = result["id"]
-            fields = result["options"]["attributes_by_category"]["Women's Islamic Clothing/Robes"]
-            pattern = next(item for item in fields if item["label"] == "Pattern")
+            fields = result["options"]["attributes_by_category"]["女士上装/女士衬衫"]
+            pattern = next(item for item in fields if item["label"] == "图案花纹")
             updated = main.update_tiktok_category_catalog(
                 catalog_id,
                 TiktokCategoryCatalogUpdate(attribute_input_modes=[{
-                    "category": "Women's Islamic Clothing/Robes", "field": pattern["field"], "input_mode": "select",
+                    "category": "女士上装/女士衬衫", "field": pattern["field"], "input_mode": "select",
                 }]),
                 user=db.get(User, 1), db=db,
             )
-            updated_pattern = next(item for item in updated["options"]["attributes_by_category"]["Women's Islamic Clothing/Robes"] if item["field"] == pattern["field"])
+            updated_pattern = next(item for item in updated["options"]["attributes_by_category"]["女士上装/女士衬衫"] if item["field"] == pattern["field"])
             self.assertEqual(updated_pattern["input_mode"], "select")
             with self.assertRaisesRegex(HTTPException, "不存在"):
                 main.get_tiktok_export_options(catalog_id, user=db.get(User, 2), db=db)
@@ -70,6 +73,13 @@ class TiktokCategoryCatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(HTTPException, "解析失败"):
                 asyncio.run(main.create_tiktok_category_catalog("错误模板", upload, user=db.get(User, 1), db=db))
             self.assertEqual(db.query(TiktokCategoryCatalog).count(), 0)
+
+    def test_cross_border_catalog_is_recognized_and_saved_with_type(self) -> None:
+        with self.session_factory() as db:
+            upload = UploadFile(filename="cross-border.xlsx", file=BytesIO(CROSS_BORDER_TEMPLATE_PATH.read_bytes()))
+            result = asyncio.run(main.create_tiktok_category_catalog("跨境女装", upload, "tiktok_cross_border", user=db.get(User, 1), db=db))
+            self.assertEqual(result["template_type"], "tiktok_cross_border")
+            self.assertEqual(result["options"]["capabilities"]["supports_cod"], False)
 
 
 if __name__ == "__main__":
