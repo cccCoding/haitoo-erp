@@ -19,6 +19,16 @@ from app.tiktok_export import TEMPLATE_PATH, build_workbook, listing_options, pa
 CROSS_BORDER_TEMPLATE_PATH = TEMPLATE_PATH.parent / "tiktok_seller_cross_border_zh.xlsx"
 
 
+def cross_border_template_without_auction_fields() -> bytes:
+    """模拟新版跨境模板：删除拍卖列后，类目属性从 AA 列开始。"""
+    workbook = load_workbook(CROSS_BORDER_TEMPLATE_PATH, data_only=False)
+    workbook["Template"].delete_cols(27, 2)
+    workbook["HiddenStyle"].delete_cols(27, 2)
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
 class TiktokExportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
@@ -72,6 +82,14 @@ class TiktokExportTests(unittest.TestCase):
         self.assertEqual(len(options["categories"]), 41)
         with self.assertRaisesRegex(ValueError, "不匹配"):
             parse_listing_options(CROSS_BORDER_TEMPLATE_PATH.read_bytes(), "tiktok_local")
+
+    def test_new_cross_border_template_without_auction_fields_is_supported(self) -> None:
+        options = parse_listing_options(cross_border_template_without_auction_fields(), "tiktok_cross_border")
+        self.assertEqual(options["template_type"], "tiktok_cross_border")
+        blouse_fields = {item["field"] for item in options["attributes_by_category"]["女士上装/女士衬衫"]}
+        self.assertIn("product_property/100157", blouse_fields)
+        self.assertIn("product_property/100198", blouse_fields)
+        self.assertNotIn("product_property/100157", options["base_requirements_by_category"]["女士上装/女士衬衫"])
 
     def test_select_accepts_supported_values_and_custom_input_rejects_lists(self) -> None:
         options = listing_options()

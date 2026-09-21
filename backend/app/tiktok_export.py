@@ -10,9 +10,7 @@ from openpyxl.utils import get_column_letter
 
 TEMPLATE_PATH = Path(__file__).parent / "resources" / "tiktok_seller_batch_upload_zh_v5_0_2.xlsx"
 DATA_START_ROW = 7
-ATTRIBUTE_START_COLUMN = 29  # AC
 BASE_FIELD_START_COLUMN = 3  # C
-BASE_FIELD_END_COLUMN = ATTRIBUTE_START_COLUMN - 1  # AB
 
 FIELD_CATEGORY = "category"
 FIELD_PRODUCT_NAME = "product_name"
@@ -88,10 +86,10 @@ def _field_columns(sheet) -> dict[str, int]:
 
 
 def _attribute_fields(sheet) -> list[tuple[int, str]]:
-    """TikTok 模板从 AC 列开始存放 product_property / qualification 字段。"""
+    """按机器字段名查找类目属性，兼容不同模板版本中的起始列。"""
     return [
         (column, field)
-        for column in range(ATTRIBUTE_START_COLUMN, sheet.max_column + 1)
+        for column in range(1, sheet.max_column + 1)
         if (field := _clean(sheet.cell(1, column).value)).startswith(("product_property/", "qualification/"))
     ]
 
@@ -106,7 +104,15 @@ def tiktok_template_adapter(template_fields: set[str], expected_type: str | None
     """根据机器字段识别本土/跨境模板，并拒绝与用户选择不一致的文件。"""
     if {FIELD_DELIVERY, FIELD_COD}.issubset(template_fields):
         adapter = TIKTOK_LOCAL_ADAPTER
-    elif {FIELD_SPECIAL_PRODUCT_LISTING_TYPE, FIELD_AUCTION_STARTING_PRICE}.issubset(template_fields):
+    elif (
+        {FIELD_SPECIAL_PRODUCT_LISTING_TYPE, FIELD_AUCTION_STARTING_PRICE}.issubset(template_fields)
+        or (
+            COMMON_REQUIRED_EXPORT_FIELDS.issubset(template_fields)
+            and FIELD_DELIVERY not in template_fields
+            and FIELD_COD not in template_fields
+        )
+    ):
+        # 新版跨境模板不再包含拍卖相关字段，属性列也可能从 AA 开始。
         adapter = TIKTOK_CROSS_BORDER_ADAPTER
     else:
         raise ValueError("无法识别 TikTok 模板类型：未找到本土店或跨境店的特征字段")
@@ -182,9 +188,10 @@ def parse_listing_options(template_bytes: bytes | None = None, template_type: st
             base_requirements_by_category[category_name] = {}
             continue
         base_requirements_by_category[category_name] = {
-            _clean(template_sheet.cell(1, column).value): _clean(style_sheet.cell(style_row, column).value)
-            for column in range(BASE_FIELD_START_COLUMN, BASE_FIELD_END_COLUMN + 1)
-            if _clean(style_sheet.cell(style_row, column).value)
+            field: _clean(style_sheet.cell(style_row, column).value)
+            for column in range(BASE_FIELD_START_COLUMN, template_sheet.max_column + 1)
+            if not (field := _clean(template_sheet.cell(1, column).value)).startswith(("product_property/", "qualification/"))
+            and _clean(style_sheet.cell(style_row, column).value)
             and _clean(style_sheet.cell(style_row, column).value) != "Forbid"
         }
         for attribute_index, (column, field) in enumerate(attribute_fields):
@@ -358,8 +365,9 @@ def build_workbook(*, template, category: str, cod: str, attributes: dict[str, s
                     values[FIELD_DELIVERY] = None
                     values[FIELD_COD] = cod
                 else:
-                    values[FIELD_SPECIAL_PRODUCT_LISTING_TYPE] = None
-                    values[FIELD_AUCTION_STARTING_PRICE] = None
+                    for field in (FIELD_SPECIAL_PRODUCT_LISTING_TYPE, FIELD_AUCTION_STARTING_PRICE):
+                        if field in field_columns:
+                            values[field] = None
                 for index, gallery_url in enumerate(gallery):
                     values[FIELD_MAIN_IMAGE if index == 0 else f"image_{index + 1}"] = gallery_url
                 for field, value in values.items():
