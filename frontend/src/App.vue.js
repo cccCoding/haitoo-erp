@@ -1,6 +1,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import axios from 'axios';
+import SearchableSelect from './SearchableSelect.vue';
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' });
 const token = ref(localStorage.getItem('haitoro_token') || '');
 const route = useRoute();
@@ -7771,25 +7772,39 @@ if (__VLS_ctx.showTiktokExportDialog) {
             (catalog.name);
             (__VLS_ctx.tiktokCatalogTypeLabel(catalog.template_type));
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "export-field" },
+        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
             ...{ class: "required" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            ...{ onChange: (__VLS_ctx.changeTiktokExportCategory) },
-            value: (__VLS_ctx.tiktokExportCategory),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-            value: "",
-            disabled: true,
-        });
-        for (const [category] of __VLS_getVForSourceType((__VLS_ctx.tiktokExportOptions?.categories || []))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                key: (category.name),
-                value: (category.name),
-            });
-            (category.name);
-        }
+        /** @type {[typeof SearchableSelect, ]} */ ;
+        // @ts-ignore
+        const __VLS_0 = __VLS_asFunctionalComponent(SearchableSelect, new SearchableSelect({
+            ...{ 'onChange': {} },
+            modelValue: (__VLS_ctx.tiktokExportCategory),
+            options: (__VLS_ctx.tiktokExportOptions?.categories || []),
+            valueKey: "name",
+            labelKey: "name",
+            placeholder: "请选择商品类目",
+            searchPlaceholder: "搜索类目名称，空格分隔多个关键词",
+        }));
+        const __VLS_1 = __VLS_0({
+            ...{ 'onChange': {} },
+            modelValue: (__VLS_ctx.tiktokExportCategory),
+            options: (__VLS_ctx.tiktokExportOptions?.categories || []),
+            valueKey: "name",
+            labelKey: "name",
+            placeholder: "请选择商品类目",
+            searchPlaceholder: "搜索类目名称，空格分隔多个关键词",
+        }, ...__VLS_functionalComponentArgsRest(__VLS_0));
+        let __VLS_3;
+        let __VLS_4;
+        let __VLS_5;
+        const __VLS_6 = {
+            onChange: (__VLS_ctx.changeTiktokExportCategory)
+        };
+        var __VLS_2;
         if (__VLS_ctx.tiktokExportIsLocal) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
@@ -8014,24 +8029,30 @@ if (__VLS_ctx.showShopeeExportDialog) {
             });
             (catalog.name);
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "export-field" },
+        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
             ...{ class: "required" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.shopeeExportCategoryId),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-            value: "",
-            disabled: true,
-        });
-        for (const [category] of __VLS_getVForSourceType((__VLS_ctx.shopeeExportOptions?.categories || []))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                key: (category.id),
-                value: (category.id),
-            });
-            (category.name);
-        }
+        /** @type {[typeof SearchableSelect, ]} */ ;
+        // @ts-ignore
+        const __VLS_7 = __VLS_asFunctionalComponent(SearchableSelect, new SearchableSelect({
+            modelValue: (__VLS_ctx.shopeeExportCategoryId),
+            options: (__VLS_ctx.shopeeExportOptions?.categories || []),
+            valueKey: "id",
+            labelKey: "name",
+            placeholder: "请选择商品类目",
+            searchPlaceholder: "搜索类目名称，空格分隔多个关键词",
+        }));
+        const __VLS_8 = __VLS_7({
+            modelValue: (__VLS_ctx.shopeeExportCategoryId),
+            options: (__VLS_ctx.shopeeExportOptions?.categories || []),
+            valueKey: "id",
+            labelKey: "name",
+            placeholder: "请选择商品类目",
+            searchPlaceholder: "搜索类目名称，空格分隔多个关键词",
+        }, ...__VLS_functionalComponentArgsRest(__VLS_7));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
             ...{ class: "required" },
@@ -10708,6 +10729,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['tiktok-export-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['export-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
 /** @type {__VLS_StyleScopedClasses['tiktok-supported-values']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
@@ -10736,6 +10758,7 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['tiktok-export-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['export-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
@@ -11005,6 +11028,7 @@ var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
         return {
+            SearchableSelect: SearchableSelect,
             token: token,
             page: page,
             email: email,
