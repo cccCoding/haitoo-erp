@@ -17,7 +17,7 @@ from app.config import Settings
 from app.database import Base
 from app.credentials import encrypt_secret
 from app.models import AIProviderSetting, Company, MaterialAsset, MiaoshouCollectBoxItem, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
-from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchImageReviewConfirm, BatchImageReviewTaskSelection, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, PodTaskCreate, TemplateCreate, UserTemplatePromptCreate
+from app.schemas import AIProviderCredentialUpdate, BatchCarouselSkipInput, BatchImageReviewConfirm, BatchImageReviewTaskSelection, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftOrderedImageSelection, DraftUpdate, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, PodTaskCreate, TaskBatchRetry, TemplateCreate, UserTemplatePromptCreate
 
 
 class TaskJobTests(unittest.TestCase):
@@ -788,6 +788,52 @@ class TaskJobTests(unittest.TestCase):
         self.assertEqual(response["status"], "queued")
         self.assertEqual(task.submit_attempts, 0)
         self.assertIsNone(task.provider_task_id)
+
+    def test_batch_retry_resets_all_failed_tasks(self) -> None:
+        first_id = self.add_task(status=TaskStatus.FAILED, provider_task_id="provider-1")
+        second_id = self.add_task(status=TaskStatus.FAILED, provider_task_id="provider-2")
+        with self.session_factory() as db:
+            for task_id in (first_id, second_id):
+                task = db.get(PodTask, task_id)
+                task.submit_attempts = 3
+                task.failure_reason = "rejected"
+            db.commit()
+            response = main.batch_retry_tasks(
+                TaskBatchRetry(task_ids=[first_id, second_id, first_id]),
+                user=db.get(User, 1), db=db,
+            )
+            tasks = [db.get(PodTask, task_id) for task_id in (first_id, second_id)]
+        self.assertEqual(response, {"total": 2, "task_ids": [first_id, second_id]})
+        self.assertTrue(all(task.status == TaskStatus.QUEUED for task in tasks))
+        self.assertTrue(all(task.submit_attempts == 0 for task in tasks))
+        self.assertTrue(all(task.provider_task_id is None for task in tasks))
+        self.assertTrue(all(task.failure_reason is None for task in tasks))
+
+    def test_batch_retry_is_atomic_when_selection_contains_non_failed_task(self) -> None:
+        failed_id = self.add_task(status=TaskStatus.FAILED, provider_task_id="provider-1")
+        queued_id = self.add_task(status=TaskStatus.QUEUED)
+        with self.session_factory() as db:
+            with self.assertRaisesRegex(HTTPException, "只有失败任务可以重试"):
+                main.batch_retry_tasks(
+                    TaskBatchRetry(task_ids=[failed_id, queued_id]),
+                    user=db.get(User, 1), db=db,
+                )
+            failed = db.get(PodTask, failed_id)
+        self.assertEqual(failed.status, TaskStatus.FAILED)
+        self.assertEqual(failed.provider_task_id, "provider-1")
+
+    def test_batch_retry_rejects_inaccessible_tasks(self) -> None:
+        task_id = self.add_task(status=TaskStatus.FAILED, provider_task_id="provider-1")
+        with self.session_factory() as db:
+            with self.assertRaises(HTTPException) as raised:
+                main.batch_retry_tasks(
+                    TaskBatchRetry(task_ids=[task_id]),
+                    user=db.get(User, 3), db=db,
+                )
+            task = db.get(PodTask, task_id)
+        self.assertEqual(raised.exception.status_code, 404)
+        self.assertEqual(task.status, TaskStatus.FAILED)
+        self.assertEqual(task.provider_task_id, "provider-1")
 
     def test_carousel_generation_creates_one_task_per_sku(self) -> None:
         sku_items = [

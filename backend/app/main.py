@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import SessionLocal, engine, get_db
 from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
-from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
+from .schemas import AdminCompanyCreate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
@@ -2004,14 +2004,8 @@ def list_available_ai_providers(user: User = Depends(current_user), db: Session 
     ]
 
 
-@app.post("/tasks/{task_id}/retry")
-def retry_task(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """将一条失败任务完整重置为待提交状态。"""
-    task = db.get(PodTask, task_id)
-    if not can_access_task(task, user):
-        raise HTTPException(404, "任务不存在")
-    if task.status != TaskStatus.FAILED:
-        raise HTTPException(400, "只有失败任务可以重试")
+def reset_failed_task(task: PodTask) -> None:
+    """清除上一次执行结果，使失败任务可以按原参数重新提交。"""
     task.status = TaskStatus.QUEUED
     task.provider_task_id = None
     task.failure_reason = None
@@ -2022,6 +2016,33 @@ def retry_task(task_id: int, user: User = Depends(current_user), db: Session = D
     task.submit_attempts = 0
     task.submitted_at = None
     task.completed_at = None
+
+
+@app.post("/tasks/batch-retry")
+def batch_retry_tasks(payload: TaskBatchRetry, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """校验全部所选任务后，将失败任务批量重置为待提交状态。"""
+    task_ids = list(dict.fromkeys(payload.task_ids))
+    tasks = [db.get(PodTask, task_id) for task_id in task_ids]
+    if any(not can_access_task(task, user) for task in tasks):
+        raise HTTPException(404, "任务不存在")
+    non_failed_ids = [task.id for task in tasks if task.status != TaskStatus.FAILED]
+    if non_failed_ids:
+        raise HTTPException(400, f"只有失败任务可以重试：{', '.join(map(str, non_failed_ids))}")
+    for task in tasks:
+        reset_failed_task(task)
+    db.commit()
+    return {"total": len(tasks), "task_ids": task_ids}
+
+
+@app.post("/tasks/{task_id}/retry")
+def retry_task(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """将一条失败任务完整重置为待提交状态。"""
+    task = db.get(PodTask, task_id)
+    if not can_access_task(task, user):
+        raise HTTPException(404, "任务不存在")
+    if task.status != TaskStatus.FAILED:
+        raise HTTPException(400, "只有失败任务可以重试")
+    reset_failed_task(task)
     db.commit(); db.refresh(task)
     return serialize_record(task)
 

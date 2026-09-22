@@ -94,7 +94,7 @@ const stagedFinalImageItems = ref(null), draggedFinalImageUrl = ref('');
 const showMainApplyDialog = ref(false), pendingMainApply = ref(null), mainRemoveSku = ref('');
 const showShopManagersDialog = ref(false), managingShop = ref(null), selectedManagerIds = ref([]), shopManagersSaving = ref(false);
 const showTaskDetailDialog = ref(false), viewingTask = ref(null), taskDetailLoading = ref(false);
-const taskListRefreshing = ref(false), retryingTaskId = ref(null), retryingWorkspaceTaskId = ref(null);
+const taskListRefreshing = ref(false), retryingTaskId = ref(null), batchRetryingTasks = ref(false), retryingWorkspaceTaskId = ref(null);
 const showClaimMaterialsDialog = ref(false), claimingTask = ref(null), selectedClaimResultUrls = ref([]), claimingMaterials = ref(false);
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
 const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2 };
@@ -501,8 +501,12 @@ const taskPageCount = computed(() => Math.max(1, Math.ceil(taskTotal.value / tas
 const visibleTaskPage = computed(() => Math.min(currentTaskPage.value, taskPageCount.value));
 const pagedTasks = computed(() => tasks.value);
 const claimablePagedTasks = computed(() => pagedTasks.value.filter(task => ['awaiting_selection', 'completed'].includes(task.status) && (task.result_count || task.result_urls?.length)));
-const allClaimableTasksSelected = computed(() => Boolean(claimablePagedTasks.value.length) && claimablePagedTasks.value.every(task => selectedTaskIds.value.includes(task.id)));
-const someClaimableTasksSelected = computed(() => !allClaimableTasksSelected.value && claimablePagedTasks.value.some(task => selectedTaskIds.value.includes(task.id)));
+const retryablePagedTasks = computed(() => pagedTasks.value.filter(task => task.status === 'failed'));
+const selectablePagedTasks = computed(() => pagedTasks.value.filter(task => task.status === 'failed' || activeTaskType.value === 'sku_image' && claimablePagedTasks.value.some(item => item.id === task.id)));
+const selectedClaimableTaskIds = computed(() => claimablePagedTasks.value.filter(task => selectedTaskIds.value.includes(task.id)).map(task => task.id));
+const selectedRetryTaskIds = computed(() => retryablePagedTasks.value.filter(task => selectedTaskIds.value.includes(task.id)).map(task => task.id));
+const allSelectableTasksSelected = computed(() => Boolean(selectablePagedTasks.value.length) && selectablePagedTasks.value.every(task => selectedTaskIds.value.includes(task.id)));
+const someSelectableTasksSelected = computed(() => !allSelectableTasksSelected.value && selectablePagedTasks.value.some(task => selectedTaskIds.value.includes(task.id)));
 const groupedBatchClaimItems = computed(() => {
     const groups = new Map();
     batchClaimItems.value.forEach(item => {
@@ -521,8 +525,19 @@ watch(page, value => {
     if (value === 'miaoshou-collect-box')
         void loadCollectBox();
 });
-function applyTaskPage(data) { tasks.value = data.items || []; taskTotal.value = data.total || 0; taskTypeTotals.value = { ...taskTypeTotals.value, ...(data.task_type_counts || {}) }; taskTypeFilteredTotals.value = { ...taskTypeFilteredTotals.value, [activeTaskType.value]: data.total || 0 }; taskActiveCount.value = data.active_count || 0; taskStatusCounts.value = data.status_counts || {}; currentTaskPage.value = data.page || 1; if (page.value === 'tasks')
-    syncTaskUrl(); }
+function applyTaskPage(data) {
+    tasks.value = data.items || [];
+    taskTotal.value = data.total || 0;
+    taskTypeTotals.value = { ...taskTypeTotals.value, ...(data.task_type_counts || {}) };
+    taskTypeFilteredTotals.value = { ...taskTypeFilteredTotals.value, [activeTaskType.value]: data.total || 0 };
+    taskActiveCount.value = data.active_count || 0;
+    taskStatusCounts.value = data.status_counts || {};
+    currentTaskPage.value = data.page || 1;
+    const selectableIds = new Set(tasks.value.filter(task => taskCanBeSelected(task)).map(task => task.id));
+    selectedTaskIds.value = selectedTaskIds.value.filter(id => selectableIds.has(id));
+    if (page.value === 'tasks')
+        syncTaskUrl();
+}
 async function changeTaskPageSize() { if (taskListRefreshing.value)
     return; currentTaskPage.value = 1; selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList(); }
 async function changeTaskPage(targetPage) { if (taskListRefreshing.value)
@@ -2182,11 +2197,12 @@ async function claimMaterials() {
     }
 }
 function toggleTaskSelection(taskId) { selectedTaskIds.value = selectedTaskIds.value.includes(taskId) ? selectedTaskIds.value.filter(id => id !== taskId) : [...selectedTaskIds.value, taskId]; }
-function toggleAllClaimableTasks() { selectedTaskIds.value = allClaimableTasksSelected.value ? [] : claimablePagedTasks.value.map(task => task.id); }
+function taskCanBeSelected(task) { return task.status === 'failed' || activeTaskType.value === 'sku_image' && ['awaiting_selection', 'completed'].includes(task.status) && Boolean(task.result_count || task.result_urls?.length); }
+function toggleAllSelectableTasks() { selectedTaskIds.value = allSelectableTasksSelected.value ? [] : selectablePagedTasks.value.map(task => task.id); }
 function removeBatchClaimImage(taskId, url) { if (!batchClaiming.value)
     batchClaimItems.value = batchClaimItems.value.filter(item => item.taskId !== taskId || item.url !== url); }
 async function openBatchClaimDialog() {
-    if (!selectedTaskIds.value.length) {
+    if (!selectedClaimableTaskIds.value.length) {
         showToast('请至少选择一个可领取任务');
         return;
     }
@@ -2196,7 +2212,7 @@ async function openBatchClaimDialog() {
     batchClaimCompleted.value = 0;
     batchClaimFailed.value = 0;
     try {
-        const details = await Promise.all(selectedTaskIds.value.map(id => api.get(`/tasks/${id}`, { headers: headers.value }).then(response => response.data)));
+        const details = await Promise.all(selectedClaimableTaskIds.value.map(id => api.get(`/tasks/${id}`, { headers: headers.value }).then(response => response.data)));
         batchClaimItems.value = details.flatMap(task => (task.result_urls || []).map((url) => ({ taskId: task.id, taskLabel: `任务 #${task.id}`, url })));
         if (!batchClaimItems.value.length)
             showToast('所选任务没有可领取图片');
@@ -2233,7 +2249,8 @@ async function confirmBatchClaim() {
     batchClaiming.value = false;
     if (!batchClaimFailed.value)
         showBatchClaimDialog.value = false;
-    selectedTaskIds.value = [];
+    const claimedTaskIds = groups.map(group => group.taskId);
+    selectedTaskIds.value = selectedTaskIds.value.filter(id => !claimedTaskIds.includes(id));
     await refreshTaskList();
     showToast(batchClaimFailed.value ? `批量领取完成，${batchClaimFailed.value} 个任务失败，可保留弹窗后重试` : `批量领取成功，共处理 ${batchClaimTotal.value} 个任务`);
 }
@@ -2249,6 +2266,26 @@ async function retryTaskResult(task) {
     }
     finally {
         retryingTaskId.value = null;
+    }
+}
+async function retrySelectedTasks() {
+    const taskIds = selectedRetryTaskIds.value;
+    if (!taskIds.length) {
+        showToast('请至少选择一个失败任务');
+        return;
+    }
+    try {
+        batchRetryingTasks.value = true;
+        const { data } = await api.post('/tasks/batch-retry', { task_ids: taskIds }, { headers: headers.value });
+        selectedTaskIds.value = selectedTaskIds.value.filter(id => !taskIds.includes(id));
+        await refreshTaskList();
+        showToast(`已将 ${data.total} 个失败任务重新入队`);
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '批量重试任务失败');
+    }
+    finally {
+        batchRetryingTasks.value = false;
     }
 }
 async function retryWorkspaceTask(task) {
@@ -3656,17 +3693,31 @@ if (__VLS_ctx.token) {
             disabled: (__VLS_ctx.taskListRefreshing),
         });
         (__VLS_ctx.taskListRefreshing ? '搜索中…' : '搜索');
-        if (__VLS_ctx.activeTaskType === 'sku_image' && __VLS_ctx.selectedTaskIds.length) {
+        if (__VLS_ctx.selectedTaskIds.length) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "task-batch-bar" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (__VLS_ctx.selectedTaskIds.length);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (__VLS_ctx.openBatchClaimDialog) },
-                ...{ class: "primary" },
-                disabled: (__VLS_ctx.batchClaimLoading || __VLS_ctx.batchClaiming),
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "task-batch-actions" },
             });
+            if (__VLS_ctx.selectedRetryTaskIds.length) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.retrySelectedTasks) },
+                    ...{ class: "primary" },
+                    disabled: (__VLS_ctx.batchRetryingTasks || __VLS_ctx.taskListRefreshing),
+                });
+                (__VLS_ctx.batchRetryingTasks ? '批量重试中…' : `批量重试（${__VLS_ctx.selectedRetryTaskIds.length}）`);
+            }
+            if (__VLS_ctx.activeTaskType === 'sku_image' && __VLS_ctx.selectedClaimableTaskIds.length) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.openBatchClaimDialog) },
+                    ...{ class: "primary" },
+                    disabled: (__VLS_ctx.batchClaimLoading || __VLS_ctx.batchClaiming || __VLS_ctx.batchRetryingTasks),
+                });
+                (__VLS_ctx.selectedClaimableTaskIds.length);
+            }
         }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
             ...{ class: "draft-table task-table refreshable-list" },
@@ -3679,12 +3730,12 @@ if (__VLS_ctx.token) {
             ...{ class: "material-checkbox material-select-all" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-            ...{ onChange: (__VLS_ctx.toggleAllClaimableTasks) },
+            ...{ onChange: (__VLS_ctx.toggleAllSelectableTasks) },
             type: "checkbox",
-            checked: (__VLS_ctx.allClaimableTasksSelected),
-            indeterminate: (__VLS_ctx.someClaimableTasksSelected),
-            disabled: (!__VLS_ctx.claimablePagedTasks.length),
-            'aria-label': "全选本页可领取任务",
+            checked: (__VLS_ctx.allSelectableTasksSelected),
+            indeterminate: (__VLS_ctx.someSelectableTasksSelected),
+            disabled: (!__VLS_ctx.selectablePagedTasks.length),
+            'aria-label': "全选本页可批量操作任务",
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -3708,7 +3759,7 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
                 ...{ class: "material-checkbox" },
             });
-            if (__VLS_ctx.activeTaskType === 'sku_image') {
+            if (__VLS_ctx.taskCanBeSelected(task)) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
                     ...{ onChange: (...[$event]) => {
                             if (!(__VLS_ctx.token))
@@ -3721,13 +3772,12 @@ if (__VLS_ctx.token) {
                                 return;
                             if (!(__VLS_ctx.page === 'tasks'))
                                 return;
-                            if (!(__VLS_ctx.activeTaskType === 'sku_image'))
+                            if (!(__VLS_ctx.taskCanBeSelected(task)))
                                 return;
                             __VLS_ctx.toggleTaskSelection(task.id);
                         } },
                     type: "checkbox",
                     checked: (__VLS_ctx.selectedTaskIds.includes(task.id)),
-                    disabled: (!['awaiting_selection', 'completed'].includes(task.status) || !(task.result_count || task.result_urls?.length)),
                     'aria-label': (`选择任务 ${task.id}`),
                 });
             }
@@ -3909,7 +3959,7 @@ if (__VLS_ctx.token) {
                             __VLS_ctx.retryTaskResult(task);
                         } },
                     ...{ class: "secondary" },
-                    disabled: (__VLS_ctx.retryingTaskId === task.id),
+                    disabled: (__VLS_ctx.retryingTaskId === task.id || __VLS_ctx.batchRetryingTasks),
                 });
                 (__VLS_ctx.retryingTaskId === task.id ? '重试中…' : '重试任务');
             }
@@ -10279,6 +10329,8 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-search-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-batch-bar']} */ ;
+/** @type {__VLS_StyleScopedClasses['task-batch-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['task-table']} */ ;
@@ -11188,6 +11240,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             viewingTask: viewingTask,
             taskListRefreshing: taskListRefreshing,
             retryingTaskId: retryingTaskId,
+            batchRetryingTasks: batchRetryingTasks,
             retryingWorkspaceTaskId: retryingWorkspaceTaskId,
             showClaimMaterialsDialog: showClaimMaterialsDialog,
             claimingTask: claimingTask,
@@ -11301,9 +11354,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             taskPageCount: taskPageCount,
             visibleTaskPage: visibleTaskPage,
             pagedTasks: pagedTasks,
-            claimablePagedTasks: claimablePagedTasks,
-            allClaimableTasksSelected: allClaimableTasksSelected,
-            someClaimableTasksSelected: someClaimableTasksSelected,
+            selectablePagedTasks: selectablePagedTasks,
+            selectedClaimableTaskIds: selectedClaimableTaskIds,
+            selectedRetryTaskIds: selectedRetryTaskIds,
+            allSelectableTasksSelected: allSelectableTasksSelected,
+            someSelectableTasksSelected: someSelectableTasksSelected,
             groupedBatchClaimItems: groupedBatchClaimItems,
             changeTaskPageSize: changeTaskPageSize,
             changeTaskPage: changeTaskPage,
@@ -11422,11 +11477,13 @@ const __VLS_self = (await import('vue')).defineComponent({
             toggleClaimResult: toggleClaimResult,
             claimMaterials: claimMaterials,
             toggleTaskSelection: toggleTaskSelection,
-            toggleAllClaimableTasks: toggleAllClaimableTasks,
+            taskCanBeSelected: taskCanBeSelected,
+            toggleAllSelectableTasks: toggleAllSelectableTasks,
             removeBatchClaimImage: removeBatchClaimImage,
             openBatchClaimDialog: openBatchClaimDialog,
             confirmBatchClaim: confirmBatchClaim,
             retryTaskResult: retryTaskResult,
+            retrySelectedTasks: retrySelectedTasks,
             retryWorkspaceTask: retryWorkspaceTask,
             ignoreWorkspaceTaskFailure: ignoreWorkspaceTaskFailure,
             chooseMaterialUploadFiles: chooseMaterialUploadFiles,

@@ -294,6 +294,10 @@ class ClaimMaterials(BaseModel):
     result_urls: list[str] = Field(min_length=1, max_length=1000)
 
 
+class TaskBatchRetry(BaseModel):
+    task_ids: list[int] = Field(min_length=1, max_length=100)
+
+
 class MaterialDraftCreate(BaseModel):
     """尺码图不再随草稿提交，一律沿用所选产品模版的尺码图。"""
     template_id: int

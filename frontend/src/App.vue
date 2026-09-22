@@ -102,7 +102,7 @@ const stagedFinalImageItems = ref<any[] | null>(null), draggedFinalImageUrl = re
 const showMainApplyDialog = ref(false), pendingMainApply = ref<{task:any;url:string}|null>(null), mainRemoveSku = ref('')
 const showShopManagersDialog = ref(false), managingShop = ref<any>(null), selectedManagerIds = ref<number[]>([]), shopManagersSaving = ref(false)
 const showTaskDetailDialog = ref(false), viewingTask = ref<any>(null), taskDetailLoading = ref(false)
-const taskListRefreshing = ref(false), retryingTaskId = ref<number | null>(null), retryingWorkspaceTaskId = ref<number | null>(null)
+const taskListRefreshing = ref(false), retryingTaskId = ref<number | null>(null), batchRetryingTasks = ref(false), retryingWorkspaceTaskId = ref<number | null>(null)
 const showClaimMaterialsDialog = ref(false), claimingTask = ref<any>(null), selectedClaimResultUrls = ref<string[]>([]), claimingMaterials = ref(false)
 type CreativeAsset = { id: string; file: File; preview: string; uploadedUrl?: string }
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL']
@@ -401,8 +401,12 @@ const taskPageCount = computed(() => Math.max(1, Math.ceil(taskTotal.value / tas
 const visibleTaskPage = computed(() => Math.min(currentTaskPage.value, taskPageCount.value))
 const pagedTasks = computed(() => tasks.value)
 const claimablePagedTasks = computed(() => pagedTasks.value.filter(task => ['awaiting_selection', 'completed'].includes(task.status) && (task.result_count || task.result_urls?.length)))
-const allClaimableTasksSelected = computed(() => Boolean(claimablePagedTasks.value.length) && claimablePagedTasks.value.every(task => selectedTaskIds.value.includes(task.id)))
-const someClaimableTasksSelected = computed(() => !allClaimableTasksSelected.value && claimablePagedTasks.value.some(task => selectedTaskIds.value.includes(task.id)))
+const retryablePagedTasks = computed(() => pagedTasks.value.filter(task => task.status === 'failed'))
+const selectablePagedTasks = computed(() => pagedTasks.value.filter(task => task.status === 'failed' || activeTaskType.value === 'sku_image' && claimablePagedTasks.value.some(item => item.id === task.id)))
+const selectedClaimableTaskIds = computed(() => claimablePagedTasks.value.filter(task => selectedTaskIds.value.includes(task.id)).map(task => task.id))
+const selectedRetryTaskIds = computed(() => retryablePagedTasks.value.filter(task => selectedTaskIds.value.includes(task.id)).map(task => task.id))
+const allSelectableTasksSelected = computed(() => Boolean(selectablePagedTasks.value.length) && selectablePagedTasks.value.every(task => selectedTaskIds.value.includes(task.id)))
+const someSelectableTasksSelected = computed(() => !allSelectableTasksSelected.value && selectablePagedTasks.value.some(task => selectedTaskIds.value.includes(task.id)))
 const groupedBatchClaimItems = computed(() => {
   const groups = new Map<number, {taskId:number; taskLabel:string; urls:string[]}>()
   batchClaimItems.value.forEach(item => {
@@ -417,7 +421,18 @@ watch(page,value=>{
   value==='tasks'?syncTaskUrl():clearTaskUrl()
   if (value === 'miaoshou-collect-box') void loadCollectBox()
 })
-function applyTaskPage(data: any) { tasks.value = data.items || []; taskTotal.value = data.total || 0; taskTypeTotals.value={...taskTypeTotals.value,...(data.task_type_counts || {})}; taskTypeFilteredTotals.value={...taskTypeFilteredTotals.value,[activeTaskType.value]:data.total || 0}; taskActiveCount.value = data.active_count || 0; taskStatusCounts.value = data.status_counts || {}; currentTaskPage.value = data.page || 1; if(page.value==='tasks')syncTaskUrl() }
+function applyTaskPage(data: any) {
+  tasks.value = data.items || []
+  taskTotal.value = data.total || 0
+  taskTypeTotals.value = {...taskTypeTotals.value, ...(data.task_type_counts || {})}
+  taskTypeFilteredTotals.value = {...taskTypeFilteredTotals.value, [activeTaskType.value]:data.total || 0}
+  taskActiveCount.value = data.active_count || 0
+  taskStatusCounts.value = data.status_counts || {}
+  currentTaskPage.value = data.page || 1
+  const selectableIds = new Set(tasks.value.filter(task => taskCanBeSelected(task)).map(task => task.id))
+  selectedTaskIds.value = selectedTaskIds.value.filter(id => selectableIds.has(id))
+  if (page.value === 'tasks') syncTaskUrl()
+}
 async function changeTaskPageSize() { if (taskListRefreshing.value) return; currentTaskPage.value = 1; selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList() }
 async function changeTaskPage(targetPage: number) { if (taskListRefreshing.value) return; currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList() }
 function taskQueryParams() { return { page: currentTaskPage.value, page_size: taskPageSize.value, task_type: activeTaskType.value, creator_id: appliedTaskFilters.value.creator_id ?? undefined, status: appliedTaskFilters.value.status || undefined, created_from: appliedTaskFilters.value.created_from || undefined, created_to: appliedTaskFilters.value.created_to || undefined, sku_query: activeTaskType.value==='sku_image' ? appliedTaskFilters.value.sku_query.trim() || undefined : undefined } }
@@ -1420,13 +1435,14 @@ async function claimMaterials() {
   finally { claimingMaterials.value = false }
 }
 function toggleTaskSelection(taskId: number) { selectedTaskIds.value = selectedTaskIds.value.includes(taskId) ? selectedTaskIds.value.filter(id => id !== taskId) : [...selectedTaskIds.value, taskId] }
-function toggleAllClaimableTasks() { selectedTaskIds.value = allClaimableTasksSelected.value ? [] : claimablePagedTasks.value.map(task => task.id) }
+function taskCanBeSelected(task:any) { return task.status === 'failed' || activeTaskType.value === 'sku_image' && ['awaiting_selection','completed'].includes(task.status) && Boolean(task.result_count || task.result_urls?.length) }
+function toggleAllSelectableTasks() { selectedTaskIds.value = allSelectableTasksSelected.value ? [] : selectablePagedTasks.value.map(task => task.id) }
 function removeBatchClaimImage(taskId: number, url: string) { if (!batchClaiming.value) batchClaimItems.value = batchClaimItems.value.filter(item => item.taskId !== taskId || item.url !== url) }
 async function openBatchClaimDialog() {
-  if (!selectedTaskIds.value.length) { showToast('请至少选择一个可领取任务'); return }
+  if (!selectedClaimableTaskIds.value.length) { showToast('请至少选择一个可领取任务'); return }
   showBatchClaimDialog.value = true; batchClaimLoading.value = true; batchClaimItems.value = []; batchClaimCompleted.value = 0; batchClaimFailed.value = 0
   try {
-    const details = await Promise.all(selectedTaskIds.value.map(id => api.get(`/tasks/${id}`, { headers: headers.value }).then(response => response.data)))
+    const details = await Promise.all(selectedClaimableTaskIds.value.map(id => api.get(`/tasks/${id}`, { headers: headers.value }).then(response => response.data)))
     batchClaimItems.value = details.flatMap(task => (task.result_urls || []).map((url: string) => ({ taskId: task.id, taskLabel: `任务 #${task.id}`, url })))
     if (!batchClaimItems.value.length) showToast('所选任务没有可领取图片')
   } catch (e:any) { showBatchClaimDialog.value = false; showToast(e.response?.data?.detail || '加载批量领取内容失败') }
@@ -1443,7 +1459,8 @@ async function confirmBatchClaim() {
   }
   batchClaiming.value = false
   if (!batchClaimFailed.value) showBatchClaimDialog.value = false
-  selectedTaskIds.value = []
+  const claimedTaskIds = groups.map(group => group.taskId)
+  selectedTaskIds.value = selectedTaskIds.value.filter(id => !claimedTaskIds.includes(id))
   await refreshTaskList()
   showToast(batchClaimFailed.value ? `批量领取完成，${batchClaimFailed.value} 个任务失败，可保留弹窗后重试` : `批量领取成功，共处理 ${batchClaimTotal.value} 个任务`)
 }
@@ -1455,6 +1472,18 @@ async function retryTaskResult(task: any) {
     showToast('失败任务已重新入队')
   } catch (e: any) { showToast(e.response?.data?.detail || '重试任务失败') }
   finally { retryingTaskId.value = null }
+}
+async function retrySelectedTasks() {
+  const taskIds = selectedRetryTaskIds.value
+  if (!taskIds.length) { showToast('请至少选择一个失败任务'); return }
+  try {
+    batchRetryingTasks.value = true
+    const { data } = await api.post('/tasks/batch-retry', { task_ids: taskIds }, { headers: headers.value })
+    selectedTaskIds.value = selectedTaskIds.value.filter(id => !taskIds.includes(id))
+    await refreshTaskList()
+    showToast(`已将 ${data.total} 个失败任务重新入队`)
+  } catch (e:any) { showToast(e.response?.data?.detail || '批量重试任务失败') }
+  finally { batchRetryingTasks.value = false }
 }
 async function retryWorkspaceTask(task: any) {
   try {
@@ -1679,11 +1708,11 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
             <em v-if="taskTypeFilteredTotals[type]!==null" class="task-type-tabs-filter">筛选 {{taskTypeFilteredTotals[type]}}</em>
           </button>
         </nav>
-        <div class="section-heading task-center-heading"><div><span>筛选条件设置后需点击搜索；可多选任务并批量领取全部结果图。</span><div class="task-filter-row"><label v-if="activeTaskType==='sku_image'" class="task-sku-search">SKU 批量查询<textarea v-model="taskSkuQuery" rows="3" placeholder="每行输入一个SKU"></textarea></label><label>状态<select v-model="taskStatusFilter"><option value="">全部状态</option><option v-for="(label,status) in taskStatusLabel" :key="status" :value="status">{{label}}</option></select></label><label v-if="user?.role==='company_admin'">创作人<select v-model="taskCreatorFilterId"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label><label>创建开始时间<input v-model="taskCreatedFrom" type="datetime-local"/></label><label>创建结束时间<input v-model="taskCreatedTo" type="datetime-local"/></label><button class="primary task-search-button" :disabled="taskListRefreshing" @click="searchTasks">{{taskListRefreshing ? '搜索中…' : '搜索'}}</button></div></div></div>
-        <div v-if="activeTaskType==='sku_image' && selectedTaskIds.length" class="task-batch-bar"><strong>已选择 {{selectedTaskIds.length}} 个任务</strong><button class="primary" :disabled="batchClaimLoading || batchClaiming" @click="openBatchClaimDialog">批量领取</button></div>
+        <div class="section-heading task-center-heading"><div><span>筛选条件设置后需点击搜索；可多选失败任务批量重试，SKU 图任务还可批量领取结果图。</span><div class="task-filter-row"><label v-if="activeTaskType==='sku_image'" class="task-sku-search">SKU 批量查询<textarea v-model="taskSkuQuery" rows="3" placeholder="每行输入一个SKU"></textarea></label><label>状态<select v-model="taskStatusFilter"><option value="">全部状态</option><option v-for="(label,status) in taskStatusLabel" :key="status" :value="status">{{label}}</option></select></label><label v-if="user?.role==='company_admin'">创作人<select v-model="taskCreatorFilterId"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label><label>创建开始时间<input v-model="taskCreatedFrom" type="datetime-local"/></label><label>创建结束时间<input v-model="taskCreatedTo" type="datetime-local"/></label><button class="primary task-search-button" :disabled="taskListRefreshing" @click="searchTasks">{{taskListRefreshing ? '搜索中…' : '搜索'}}</button></div></div></div>
+        <div v-if="selectedTaskIds.length" class="task-batch-bar"><strong>已选择 {{selectedTaskIds.length}} 个任务</strong><span class="task-batch-actions"><button v-if="selectedRetryTaskIds.length" class="primary" :disabled="batchRetryingTasks || taskListRefreshing" @click="retrySelectedTasks">{{batchRetryingTasks ? '批量重试中…' : `批量重试（${selectedRetryTaskIds.length}）`}}</button><button v-if="activeTaskType==='sku_image' && selectedClaimableTaskIds.length" class="primary" :disabled="batchClaimLoading || batchClaiming || batchRetryingTasks" @click="openBatchClaimDialog">批量领取（{{selectedClaimableTaskIds.length}}）</button></span></div>
         <section class="draft-table task-table refreshable-list" :aria-busy="taskListRefreshing">
-          <div class="thead task-list-grid"><label class="material-checkbox material-select-all"><input type="checkbox" :checked="allClaimableTasksSelected" :indeterminate="someClaimableTasksSelected" :disabled="!claimablePagedTasks.length" aria-label="全选本页可领取任务" @change="toggleAllClaimableTasks"/><span>选择</span></label><span>任务编号</span><span>任务类型</span><span>创作素材</span><span>产品模版</span><span>AI模型</span><span>创建时间</span><span>创建人</span><span>外部任务 ID</span><span>状态</span><span>结果</span><span>处理信息</span><span>操作</span></div>
-          <div v-for="task in pagedTasks" :key="task.id" class="trow task-list-grid" :class="{selected:selectedTaskIds.includes(task.id)}"><label class="material-checkbox"><input v-if="activeTaskType==='sku_image'" type="checkbox" :checked="selectedTaskIds.includes(task.id)" :disabled="!['awaiting_selection','completed'].includes(task.status) || !(task.result_count || task.result_urls?.length)" :aria-label="`选择任务 ${task.id}`" @change="toggleTaskSelection(task.id)"/></label><strong>#{{task.id}}</strong><span>{{taskTypeLabel(task)}}</span><button v-if="task.parameters?.print_url" type="button" class="task-material-thumbnail" title="查看创作素材" aria-label="查看创作素材大图" @click.stop.prevent="openImagePreview(task.parameters.print_url, '创作素材')"><img :src="imageUrl(task.parameters.print_url)" alt="创作素材"/></button><span v-else>—</span><span>{{task.template_name || '—'}}</span><span class="ai-model-cell"><b>{{task.provider === 'grsai' ? 'Grsai' : task.provider || '默认模型'}}</b><small v-if="task.provider_model">{{task.provider_model}}</small></span><span>{{new Date(task.created_at).toLocaleString()}}</span><span>{{task.created_by_name || '历史记录缺失'}}</span><span class="provider-task-id"><code>{{task.provider_task_id || '—'}}</code><button v-if="task.provider_task_id" class="copy-icon-button" title="复制外部任务 ID" aria-label="复制外部任务 ID" @click="copyProviderTaskId(task)">⧉</button></span><span class="task-progress-cell"><span class="chip" :class="taskStatusClass(task.status)">{{taskStatusLabel[task.status] || task.status || '—'}}</span><small>{{task.progress?.total_prints || 0}} 张参考图 · 已提交 {{task.submit_attempts || 0}} 次</small></span><button v-if="task.result_urls?.[0]" type="button" class="task-material-thumbnail" title="查看结果图" aria-label="查看首张结果图" @click.stop.prevent="openImagePreview(task.result_urls[0], `任务 #${task.id} 结果图`)"><img :src="imageUrl(task.result_urls[0])" :alt="`任务 #${task.id} 结果图`"/></button><span v-else>—</span><span :class="{error: task.status==='failed'}">{{task.failure_reason || '—'}}</span><span class="task-actions"><button class="secondary" @click="openTaskDetail(task)">查看详情</button><button v-if="activeTaskType!=='sku_image'" class="secondary" @click="openImageWorkspaceFromTask(task)">打开草稿</button><button v-if="task.status==='failed'" class="secondary" :disabled="retryingTaskId===task.id" @click="retryTaskResult(task)">{{retryingTaskId===task.id ? '重试中…' : '重试任务'}}</button><button v-if="activeTaskType==='sku_image' && (task.result_count || task.result_urls?.length)" class="secondary" @click="openClaimMaterialsDialog(task)">领取素材</button></span></div>
+          <div class="thead task-list-grid"><label class="material-checkbox material-select-all"><input type="checkbox" :checked="allSelectableTasksSelected" :indeterminate="someSelectableTasksSelected" :disabled="!selectablePagedTasks.length" aria-label="全选本页可批量操作任务" @change="toggleAllSelectableTasks"/><span>选择</span></label><span>任务编号</span><span>任务类型</span><span>创作素材</span><span>产品模版</span><span>AI模型</span><span>创建时间</span><span>创建人</span><span>外部任务 ID</span><span>状态</span><span>结果</span><span>处理信息</span><span>操作</span></div>
+          <div v-for="task in pagedTasks" :key="task.id" class="trow task-list-grid" :class="{selected:selectedTaskIds.includes(task.id)}"><label class="material-checkbox"><input v-if="taskCanBeSelected(task)" type="checkbox" :checked="selectedTaskIds.includes(task.id)" :aria-label="`选择任务 ${task.id}`" @change="toggleTaskSelection(task.id)"/></label><strong>#{{task.id}}</strong><span>{{taskTypeLabel(task)}}</span><button v-if="task.parameters?.print_url" type="button" class="task-material-thumbnail" title="查看创作素材" aria-label="查看创作素材大图" @click.stop.prevent="openImagePreview(task.parameters.print_url, '创作素材')"><img :src="imageUrl(task.parameters.print_url)" alt="创作素材"/></button><span v-else>—</span><span>{{task.template_name || '—'}}</span><span class="ai-model-cell"><b>{{task.provider === 'grsai' ? 'Grsai' : task.provider || '默认模型'}}</b><small v-if="task.provider_model">{{task.provider_model}}</small></span><span>{{new Date(task.created_at).toLocaleString()}}</span><span>{{task.created_by_name || '历史记录缺失'}}</span><span class="provider-task-id"><code>{{task.provider_task_id || '—'}}</code><button v-if="task.provider_task_id" class="copy-icon-button" title="复制外部任务 ID" aria-label="复制外部任务 ID" @click="copyProviderTaskId(task)">⧉</button></span><span class="task-progress-cell"><span class="chip" :class="taskStatusClass(task.status)">{{taskStatusLabel[task.status] || task.status || '—'}}</span><small>{{task.progress?.total_prints || 0}} 张参考图 · 已提交 {{task.submit_attempts || 0}} 次</small></span><button v-if="task.result_urls?.[0]" type="button" class="task-material-thumbnail" title="查看结果图" aria-label="查看首张结果图" @click.stop.prevent="openImagePreview(task.result_urls[0], `任务 #${task.id} 结果图`)"><img :src="imageUrl(task.result_urls[0])" :alt="`任务 #${task.id} 结果图`"/></button><span v-else>—</span><span :class="{error: task.status==='failed'}">{{task.failure_reason || '—'}}</span><span class="task-actions"><button class="secondary" @click="openTaskDetail(task)">查看详情</button><button v-if="activeTaskType!=='sku_image'" class="secondary" @click="openImageWorkspaceFromTask(task)">打开草稿</button><button v-if="task.status==='failed'" class="secondary" :disabled="retryingTaskId===task.id || batchRetryingTasks" @click="retryTaskResult(task)">{{retryingTaskId===task.id ? '重试中…' : '重试任务'}}</button><button v-if="activeTaskType==='sku_image' && (task.result_count || task.result_urls?.length)" class="secondary" @click="openClaimMaterialsDialog(task)">领取素材</button></span></div>
           <p v-if="!tasks.length && !taskListRefreshing" class="empty">暂无 AI 创作任务。</p><footer v-if="taskTotal" class="draft-pagination"><span>共 {{taskTotal}} 条</span><label>每页 <select v-model.number="taskPageSize" :disabled="taskListRefreshing" @change="changeTaskPageSize"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 条</label><button :disabled="taskListRefreshing || visibleTaskPage===1" @click="changeTaskPage(visibleTaskPage-1)">上一页</button><span>第 {{visibleTaskPage}} / {{taskPageCount}} 页</span><button :disabled="taskListRefreshing || visibleTaskPage===taskPageCount" @click="changeTaskPage(visibleTaskPage+1)">下一页</button></footer>
           <div v-if="taskListRefreshing" class="list-refresh-overlay" role="status"><i></i><span>正在刷新列表…</span></div>
         </section>
