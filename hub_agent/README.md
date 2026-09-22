@@ -10,7 +10,7 @@
 
 ## 使用方式与安全边界
 
-- 执行器请求固定 API 地址 `https://api.haitoro.com`；首次授权时会打开 ERP 登录页 `https://erp.haitoro.com`。员工直接使用已有 ERP 账号密码登录并授权当前电脑，无需复制登录 Token。
+- 执行器默认请求 `https://api.haitoro.com`，首次授权时默认打开 `https://erp.haitoro.com`。腾讯云使用其他域名时，通过 `HAITOO_API_URL` 和 `HAITOO_PORTAL_URL` 指定两个 HTTPS 地址；显式配置会覆盖本机保存的旧 API 地址。员工直接使用已有 ERP 账号密码登录并授权当前电脑，无需复制登录 Token。
 - 终端名称自动取电脑名称；终端令牌仅保存到 macOS Keychain 或 Windows Credential Manager，不写入配置文件。
 - 执行器只提供本机状态页 `http://127.0.0.1:45679`，不监听局域网，不能被同一 Wi-Fi 的其它电脑访问。
 - TikTok 登录状态保留在 HubStudio 指纹环境内。ERP 不下发 TikTok 账号密码；若登录失效、验证码或页面校验失败，任务会进入人工处理。

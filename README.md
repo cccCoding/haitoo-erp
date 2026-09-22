@@ -10,22 +10,35 @@
 
 妙手接入标准：妙手 App ID 和 App Secret 归属公司级妙手账号，密钥加密后存储；店铺是通过该账号 API 同步的资源，上架也使用公司级妙手账号调用 API。
 
-## 本地启动
+## 部署方式
+
+应用容器本身只开放 Docker 内部端口。按环境选择一个公网入口：本地使用
+Cloudflare Tunnel，腾讯云服务器使用 Nginx 和腾讯域名。两套环境分别维护自己的
+`.env`，数据库、任务和前端镜像配置保持一致。
+
+本地 Cloudflare 环境从示例创建配置：
 
 ```bash
-docker compose up --build
+cp deploy/env/cloudflare.env.example .env
 ```
 
-首次启动前生成独立的 MySQL root 密码和应用密码，并限制环境文件权限：
+首次启动前生成独立的 MySQL root 密码、应用密码和服务密钥，并限制环境文件权限：
 
 ```bash
-printf 'MYSQL_ROOT_PASSWORD=%s\nMYSQL_PASSWORD=%s\n' \
-  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" >> .env
+printf 'MYSQL_ROOT_PASSWORD=%s\nMYSQL_PASSWORD=%s\nSECRET_KEY=%s\n' \
+  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" \
+  "$(openssl rand -hex 32)" >> .env
 chmod 600 .env
 ```
 
 两个密码必须是至少 32 个字符的十六进制随机字符串。MySQL 只监听 Compose
 内部网络的 `3306` 端口，不映射到宿主机；API 和 Worker 使用应用密码连接数据库。
+
+启动本地 Cloudflare 环境：
+
+```bash
+docker compose --profile cloudflare up -d --build
+```
 
 Compose 会以生产方式构建容器：API 使用两个 Uvicorn worker，两个 Vue 前端先由
 Vite 生成静态文件，再由 Nginx 提供服务。`VITE_API_URL` 是前端构建参数，修改后
@@ -74,7 +87,7 @@ docker compose run --rm migrate python -m app.db_migrate --adopt-legacy
 docker compose run --rm api alembic revision --autogenerate -m "变更说明"
 ```
 
-API 文档：`http://localhost:8001/docs`。
+API 文档地址为当前环境的 API 域名加 `/docs`。
 
 ## HubStudio 本土店自动上品
 
@@ -100,7 +113,7 @@ docker compose exec api python -m app.admin_cli create-super-admin \
   --name "平台管理员"
 ```
 
-超级管理员后台是独立前端项目，启动后访问 `http://localhost:5174`。登录后可开通公司及其首位公司管理员，公司管理员再从运营端创建普通成员。
+超级管理员后台是独立前端项目，启动后访问当前环境的管理端域名。登录后可开通公司及其首位公司管理员，公司管理员再从运营端创建普通成员。
 
 平台超级管理员的其他运维命令：
 
@@ -135,7 +148,7 @@ docker compose exec api python -m app.admin_cli enable-super-admin \
    | `api.haitoro.com` | HTTP | `http://api:8000` |
 
    不需要在 DNS 页面手动添加记录；保存 Public Hostname 时 Cloudflare 会自动创建指向 Tunnel 的记录。
-3. 将 `.env.example` 中的三项加入本机未提交的 `.env`，并填入实际 token：
+3. 从 `deploy/env/cloudflare.env.example` 创建根目录 `.env`，并填入实际 token：
 
    ```dotenv
    CLOUDFLARE_TUNNEL_TOKEN=eyJ...
@@ -146,12 +159,51 @@ docker compose exec api python -m app.admin_cli enable-super-admin \
 4. 重新创建前端以让 Vite 读取公网 API 地址，并启动 Tunnel：
 
    ```bash
-   docker compose --profile tunnel up -d --build
+   docker compose --profile cloudflare up -d --build
    ```
 
 5. 用手机蜂窝网络访问 `https://erp.haitoro.com` 验证；接口文档可访问 `https://api.haitoro.com/docs`。
 
-不要将 `3306`、`6379` 或 `8001` 配成 Cloudflare Public Hostname。它们无需对外公开。此方式未配置 Cloudflare Access；在正式给他人使用前，至少应为 `erp.haitoro.com` 添加 Access 登录策略，并更换默认 Docker 密码和 `SECRET_KEY`。
+不要将 `3306`、`6379` 或 `8001` 配成 Cloudflare Public Hostname。它们无需对外公开。此方式未配置 Cloudflare Access；在正式给他人使用前，至少应为 `erp.haitoro.com` 添加 Access 登录策略，并使用随机数据库密码和 `SECRET_KEY`。
+
+## 通过腾讯域名部署到腾讯云
+
+腾讯云使用额外的 `docker-compose.tencent.yml` 启动边缘 Nginx。应用容器继续只在
+Docker 内部网络开放端口，只有边缘 Nginx 映射宿主机的 80 和 443。
+
+1. 创建腾讯云环境配置并填写实际域名、随机密钥和 R2 配置：
+
+   ```bash
+   cp deploy/env/tencent.env.example .env
+   printf 'MYSQL_ROOT_PASSWORD=%s\nMYSQL_PASSWORD=%s\nSECRET_KEY=%s\n' \
+     "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" \
+     "$(openssl rand -hex 32)" >> .env
+   chmod 600 .env
+   ```
+
+2. 在腾讯 DNS 为 `.env` 中的 `ERP_DOMAIN`、`ADMIN_DOMAIN`、`API_DOMAIN` 创建 A
+   记录，全部指向服务器公网 IP。
+
+3. 从腾讯云 SSL 下载包含这三个域名的 SAN 或通配符证书，在服务器保存为：
+
+   ```text
+   /opt/haitoo/certs/fullchain.pem
+   /opt/haitoo/certs/private.key
+   ```
+
+   私钥权限应设为 `600`。如使用其他目录，在 `.env` 中修改 `TLS_CERT_DIR`。
+
+4. 启动腾讯云部署：
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.tencent.yml up -d --build
+   ```
+
+5. 腾讯云安全组只开放 80、443，以及仅限管理员固定 IP 的 22。不要开放 3306、
+   5173、5174 或 8001。如果服务器位于中国大陆，公开访问前还需要完成 ICP 备案。
+
+`VITE_API_URL` 会在前端构建阶段写入产物，因此两套环境切换 API 域名后都必须带
+`--build` 重建前端。Cloudflare R2 与 Tunnel 相互独立；腾讯云入口仍可继续使用 R2。
 
 ## 印花贴合模型配置
 

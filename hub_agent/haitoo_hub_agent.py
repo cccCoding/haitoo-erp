@@ -34,8 +34,10 @@ CONFIG_PATH = APP_SUPPORT_PATH / "config.json"
 LOG_PATH = LOG_DIRECTORY / "agent.log"
 POLL_SECONDS = 5
 # API 仅用于执行器与服务器通信；PORTAL_URL 仅用于员工在浏览器登录 ERP。
-API_URL = "https://api.haitoro.com"
-PORTAL_URL = "https://erp.haitoro.com"
+API_URL = os.environ.get("HAITOO_API_URL", "https://api.haitoro.com").strip().rstrip("/")
+PORTAL_URL = os.environ.get("HAITOO_PORTAL_URL", "https://erp.haitoro.com").strip().rstrip("/")
+if not API_URL.startswith("https://") or not PORTAL_URL.startswith("https://"):
+    raise RuntimeError("HAITOO_API_URL 和 HAITOO_PORTAL_URL 必须使用 https:// 地址")
 STATUS_HOST = "127.0.0.1"
 STATUS_PORT = 45679
 
@@ -110,6 +112,9 @@ class LocalStatusServer:
 
 def load_config() -> dict:
     config = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
+    # 部署环境显式指定 API 时覆盖旧配置，便于同一执行器包连接腾讯云域名。
+    if os.environ.get("HAITOO_API_URL"):
+        config["erp_url"] = API_URL
     # 旧版本把前端域名误用为 API 地址；无须用户删除配置即可自动修正。
     if config.get("erp_url") == PORTAL_URL:
         config["erp_url"] = API_URL

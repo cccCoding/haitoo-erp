@@ -61,8 +61,8 @@ services:
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
       ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-4320}
       SUPER_ADMIN_ACCESS_TOKEN_MINUTES: ${SUPER_ADMIN_ACCESS_TOKEN_MINUTES:-480}
-      # 生产隧道启动时，在 .env 中设置为 https://erp.haitoro.com。
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:5174}
+      # 每套部署只允许自己的运营端和管理端域名跨域访问。
+      CORS_ORIGINS: ${CORS_ORIGINS:?请在 .env 中配置 CORS_ORIGINS}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
       # 模型平台密钥由公司管理员在成员管理中按员工配置。
@@ -79,8 +79,8 @@ services:
       R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
       # false 时保留模型生成结果的临时 URL；生产环境建议保持 true。
       AI_GENERATED_IMAGE_UPLOAD_TO_R2: ${AI_GENERATED_IMAGE_UPLOAD_TO_R2:-true}
-    ports:
-      - "8001:8000"
+    expose:
+      - "8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -165,10 +165,10 @@ services:
       context: ./frontend
       args:
         # Vite 在镜像构建阶段写入 API 地址，修改后需重新执行 --build。
-        VITE_API_URL: ${VITE_API_URL:-http://localhost:8001}
+        VITE_API_URL: ${VITE_API_URL:?请在 .env 中配置 VITE_API_URL}
     logging: *default-logging
-    ports:
-      - "5173:80"
+    expose:
+      - "80"
     depends_on:
       - api
     restart: unless-stopped
@@ -177,20 +177,19 @@ services:
     build:
       context: ./frontend-admin
       args:
-        VITE_API_URL: ${VITE_API_URL:-http://localhost:8001}
+        VITE_API_URL: ${VITE_API_URL:?请在 .env 中配置 VITE_API_URL}
     logging: *default-logging
-    ports:
-      - "5174:80"
+    expose:
+      - "80"
     depends_on:
       - api
     restart: unless-stopped
 
-  # 使用 Cloudflare Zero Trust 控制台创建 Tunnel 后，以 token 连接。
-  # 仅在需要公网访问时启动：docker compose --profile tunnel up -d
+  # 本地 Cloudflare 部署入口；腾讯云部署不启用此 profile。
   tunnel:
     image: cloudflare/cloudflared:latest
     logging: *default-logging
-    profiles: ["tunnel"]
+    profiles: ["cloudflare"]
     # 未设置 token 时此 profile 启动会失败；不影响普通本地 docker compose up。
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
     restart: unless-stopped

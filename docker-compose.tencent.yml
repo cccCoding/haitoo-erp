@@ -1,0 +1,32 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  edge:
+    image: nginx:1.27-alpine
+    logging: *default-logging
+    environment:
+      ERP_DOMAIN: ${ERP_DOMAIN:?请在 .env 中配置 ERP_DOMAIN}
+      ADMIN_DOMAIN: ${ADMIN_DOMAIN:?请在 .env 中配置 ADMIN_DOMAIN}
+      API_DOMAIN: ${API_DOMAIN:?请在 .env 中配置 API_DOMAIN}
+      # 只替换以上三个部署变量，保留 Nginx 自己的 $host 等运行时变量。
+      NGINX_ENVSUBST_FILTER: ^(ERP_DOMAIN|ADMIN_DOMAIN|API_DOMAIN)$$
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx/templates:/etc/nginx/templates:ro
+      - ${TLS_CERT_DIR:-/opt/haitoo/certs}:/etc/nginx/certs:ro
+    depends_on:
+      - web
+      - admin-web
+      - api
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
