@@ -19,6 +19,8 @@ docker compose up --build
 Compose 会以生产方式构建容器：API 使用两个 Uvicorn worker，两个 Vue 前端先由
 Vite 生成静态文件，再由 Nginx 提供服务。`VITE_API_URL` 是前端构建参数，修改后
 必须重新执行 `docker compose up -d --build`，仅重启容器不会更新浏览器产物。
+所有容器使用 Docker `json-file` 日志驱动，每个日志文件最多 10MB，并保留最近
+5 个文件，避免长期运行产生的容器日志占满服务器磁盘。
 
 Compose 会先运行一次 `migrate` 服务，将数据库升级到代码要求的 Alembic 版本；成功后才启动 API。API 和 Worker 自身只检查版本，不会在启动时建表或执行 DDL。生产部署应在迁移前完成数据库备份，也可显式执行并检查迁移结果：
 

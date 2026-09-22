@@ -1,6 +1,13 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   mysql:
     image: mysql:8.4
+    logging: *default-logging
     environment:
       MYSQL_DATABASE: haitoro
       MYSQL_USER: haitoro
@@ -20,6 +27,7 @@ services:
   # `docker compose up` 时幂等地校正本地应用账号，避免 API 因 1045 无法重启。
   db-init:
     image: mysql:8.4
+    logging: *default-logging
     environment:
       MYSQL_PWD: ${MYSQL_ROOT_PASSWORD:-root_dev_only}
     command:
@@ -39,6 +47,7 @@ services:
 
   api:
     build: ./backend
+    logging: *default-logging
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
@@ -72,6 +81,7 @@ services:
   # 独立、串行的版本化数据库迁移；API 和 Worker 不在启动时修改表结构。
   migrate:
     build: ./backend
+    logging: *default-logging
     command: python -m app.db_migrate
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
@@ -85,6 +95,7 @@ services:
 
   submit-worker:
     build: ./backend
+    logging: *default-logging
     command: python -m app.task_worker submit
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
@@ -106,6 +117,7 @@ services:
 
   result-worker:
     build: ./backend
+    logging: *default-logging
     command: python -m app.task_worker result
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
@@ -128,6 +140,7 @@ services:
   # 公司级妙手公共采集箱同步；每 5 分钟运行一次，仅缓存外部采集商品。
   miaoshou-collect-box-worker:
     build: ./backend
+    logging: *default-logging
     command: python -m app.task_worker miaoshou-collect-box
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
@@ -145,6 +158,7 @@ services:
       args:
         # Vite 在镜像构建阶段写入 API 地址，修改后需重新执行 --build。
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8001}
+    logging: *default-logging
     ports:
       - "5173:80"
     depends_on:
@@ -156,6 +170,7 @@ services:
       context: ./frontend-admin
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8001}
+    logging: *default-logging
     ports:
       - "5174:80"
     depends_on:
@@ -166,6 +181,7 @@ services:
   # 仅在需要公网访问时启动：docker compose --profile tunnel up -d
   tunnel:
     image: cloudflare/cloudflared:latest
+    logging: *default-logging
     profiles: ["tunnel"]
     # 未设置 token 时此 profile 启动会失败；不影响普通本地 docker compose up。
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
