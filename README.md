@@ -16,6 +16,10 @@
 docker compose up --build
 ```
 
+Compose 会以生产方式构建容器：API 使用两个 Uvicorn worker，两个 Vue 前端先由
+Vite 生成静态文件，再由 Nginx 提供服务。`VITE_API_URL` 是前端构建参数，修改后
+必须重新执行 `docker compose up -d --build`，仅重启容器不会更新浏览器产物。
+
 Compose 会先运行一次 `migrate` 服务，将数据库升级到代码要求的 Alembic 版本；成功后才启动 API。API 和 Worker 自身只检查版本，不会在启动时建表或执行 DDL。生产部署应在迁移前完成数据库备份，也可显式执行并检查迁移结果：
 
 ```bash
@@ -113,8 +117,8 @@ docker compose exec api python -m app.admin_cli enable-super-admin \
 
    | Public hostname | Service type | URL |
    | --- | --- | --- |
-   | `erp.haitoro.com` | HTTP | `http://web:5173` |
-   | `admin.haitoro.com` | HTTP | `http://admin-web:5174` |
+   | `erp.haitoro.com` | HTTP | `http://web:80` |
+   | `admin.haitoro.com` | HTTP | `http://admin-web:80` |
    | `api.haitoro.com` | HTTP | `http://api:8000` |
 
    不需要在 DNS 页面手动添加记录；保存 Public Hostname 时 Cloudflare 会自动创建指向 Tunnel 的记录。

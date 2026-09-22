@@ -64,8 +64,6 @@ services:
       AI_GENERATED_IMAGE_UPLOAD_TO_R2: ${AI_GENERATED_IMAGE_UPLOAD_TO_R2:-true}
     ports:
       - "8001:8000"
-    volumes:
-      - ./backend:/app
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -80,8 +78,6 @@ services:
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
-    volumes:
-      - ./backend:/app
     depends_on:
       db-init:
         condition: service_completed_successfully
@@ -103,8 +99,6 @@ services:
       R2_ENDPOINT: ${R2_ENDPOINT:-}
       R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
       AI_GENERATED_IMAGE_UPLOAD_TO_R2: ${AI_GENERATED_IMAGE_UPLOAD_TO_R2:-true}
-    volumes:
-      - ./backend:/app
     depends_on:
       api:
         condition: service_started
@@ -126,8 +120,6 @@ services:
       R2_ENDPOINT: ${R2_ENDPOINT:-}
       R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
       AI_GENERATED_IMAGE_UPLOAD_TO_R2: ${AI_GENERATED_IMAGE_UPLOAD_TO_R2:-true}
-    volumes:
-      - ./backend:/app
     depends_on:
       api:
         condition: service_started
@@ -142,37 +134,33 @@ services:
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
-    volumes:
-      - ./backend:/app
     depends_on:
       api:
         condition: service_started
     restart: unless-stopped
 
   web:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # Vite 在镜像构建阶段写入 API 地址，修改后需重新执行 --build。
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8001}
     ports:
-      - "5173:5173"
-    environment:
-      # Vite 开发服务器启动时读取；公网时改为 https://api.haitoro.com。
-      VITE_API_URL: ${VITE_API_URL:-http://localhost:8001}
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
+      - "5173:80"
     depends_on:
       - api
+    restart: unless-stopped
 
   admin-web:
-    build: ./frontend-admin
+    build:
+      context: ./frontend-admin
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8001}
     ports:
-      - "5174:5174"
-    environment:
-      VITE_API_URL: ${VITE_API_URL:-http://localhost:8001}
-    volumes:
-      - ./frontend-admin:/app
-      - /app/node_modules
+      - "5174:80"
     depends_on:
       - api
+    restart: unless-stopped
 
   # 使用 Cloudflare Zero Trust 控制台创建 Tunnel 后，以 token 连接。
   # 仅在需要公网访问时启动：docker compose --profile tunnel up -d
@@ -184,6 +172,7 @@ services:
     restart: unless-stopped
     depends_on:
       - web
+      - admin-web
       - api
 
 volumes:

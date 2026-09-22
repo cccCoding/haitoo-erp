@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.py[cod]
+*.db
+*.db-*
+*.bak
+.pytest_cache/
+tests/
