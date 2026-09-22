@@ -11,14 +11,14 @@ services:
     environment:
       MYSQL_DATABASE: haitoro
       MYSQL_USER: haitoro
-      MYSQL_PASSWORD: haitoro_dev
-      MYSQL_ROOT_PASSWORD: root_dev_only
-    ports:
-      - "3306:3306"
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 中配置 MYSQL_ROOT_PASSWORD}
+    expose:
+      - "3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot_dev_only"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot --password=\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -29,16 +29,24 @@ services:
     image: mysql:8.4
     logging: *default-logging
     environment:
-      MYSQL_PWD: ${MYSQL_ROOT_PASSWORD:-root_dev_only}
+      MYSQL_PWD: ${MYSQL_ROOT_PASSWORD:?请在 .env 中配置 MYSQL_ROOT_PASSWORD}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}
     command:
       - /bin/sh
       - -ec
       - |
-        mysql -h mysql -uroot <<'SQL'
-        CREATE DATABASE IF NOT EXISTS `haitoro`;
-        CREATE USER IF NOT EXISTS 'haitoro'@'%' IDENTIFIED BY 'haitoro_dev';
-        ALTER USER 'haitoro'@'%' IDENTIFIED BY 'haitoro_dev';
-        GRANT ALL PRIVILEGES ON `haitoro`.* TO 'haitoro'@'%';
+        case "$${MYSQL_PASSWORD}" in
+          *[!0-9A-Fa-f]*|'') echo "MYSQL_PASSWORD 必须是十六进制随机字符串" >&2; exit 1 ;;
+        esac
+        if [ "$${#MYSQL_PASSWORD}" -lt 32 ]; then
+          echo "MYSQL_PASSWORD 至少需要 32 个十六进制字符" >&2
+          exit 1
+        fi
+        mysql -h mysql -uroot <<SQL
+        CREATE DATABASE IF NOT EXISTS haitoro;
+        CREATE USER IF NOT EXISTS 'haitoro'@'%' IDENTIFIED BY '$${MYSQL_PASSWORD}';
+        ALTER USER 'haitoro'@'%' IDENTIFIED BY '$${MYSQL_PASSWORD}';
+        GRANT ALL PRIVILEGES ON haitoro.* TO 'haitoro'@'%';
         FLUSH PRIVILEGES;
         SQL
     depends_on:
@@ -49,7 +57,7 @@ services:
     build: ./backend
     logging: *default-logging
     environment:
-      DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
+      DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
       ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-4320}
       SUPER_ADMIN_ACCESS_TOKEN_MINUTES: ${SUPER_ADMIN_ACCESS_TOKEN_MINUTES:-480}
@@ -84,7 +92,7 @@ services:
     logging: *default-logging
     command: python -m app.db_migrate
     environment:
-      DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
+      DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
@@ -98,7 +106,7 @@ services:
     logging: *default-logging
     command: python -m app.task_worker submit
     environment:
-      DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
+      DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
@@ -120,7 +128,7 @@ services:
     logging: *default-logging
     command: python -m app.task_worker result
     environment:
-      DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
+      DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
@@ -143,7 +151,7 @@ services:
     logging: *default-logging
     command: python -m app.task_worker miaoshou-collect-box
     environment:
-      DATABASE_URL: mysql+pymysql://haitoro:haitoro_dev@mysql:3306/haitoro
+      DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}

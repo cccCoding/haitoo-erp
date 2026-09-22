@@ -16,6 +16,17 @@
 docker compose up --build
 ```
 
+首次启动前生成独立的 MySQL root 密码和应用密码，并限制环境文件权限：
+
+```bash
+printf 'MYSQL_ROOT_PASSWORD=%s\nMYSQL_PASSWORD=%s\n' \
+  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" >> .env
+chmod 600 .env
+```
+
+两个密码必须是至少 32 个字符的十六进制随机字符串。MySQL 只监听 Compose
+内部网络的 `3306` 端口，不映射到宿主机；API 和 Worker 使用应用密码连接数据库。
+
 Compose 会以生产方式构建容器：API 使用两个 Uvicorn worker，两个 Vue 前端先由
 Vite 生成静态文件，再由 Nginx 提供服务。`VITE_API_URL` 是前端构建参数，修改后
 必须重新执行 `docker compose up -d --build`，仅重启容器不会更新浏览器产物。
