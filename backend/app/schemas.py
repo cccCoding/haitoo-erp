@@ -357,8 +357,8 @@ class DraftDispatchInput(BaseModel):
 class DraftImageTaskCreate(BaseModel):
     task_type: Literal["carousel", "main_image"]
     source_skus: list[str] = Field(default_factory=list, max_length=9)
-    reference_mode: Literal["random", "manual"] = "random"
-    reference_urls: list[str] = Field(default_factory=list, max_length=9)
+    reference_mode: Literal["random", "random_carousel", "random_sku", "manual"] = "random"
+    reference_urls: list[str] = Field(default_factory=list, max_length=100)
     provider: str | None = Field(default=None, max_length=40)
     ratio: Literal["1:1", "3:4"] = "1:1"
     quality: Literal["auto", "1K", "2K"] = "1K"
@@ -380,12 +380,12 @@ class BatchCarouselTaskCreate(BaseModel):
 
 class BatchMainImageDraftSelection(BaseModel):
     draft_id: int = Field(ge=1)
-    reference_urls: list[str] = Field(default_factory=list, max_length=3)
+    reference_urls: list[str] = Field(default_factory=list, max_length=100)
 
 
 class BatchMainImageTaskCreate(BaseModel):
     drafts: list[BatchMainImageDraftSelection] = Field(min_length=1, max_length=100)
-    reference_mode: Literal["random", "manual"] = "random"
+    reference_mode: Literal["random", "random_carousel", "random_sku", "manual"] = "random"
     provider: str | None = Field(default=None, max_length=40)
     ratio: Literal["1:1", "3:4"] = "1:1"
     quality: Literal["auto", "1K", "2K"] = "1K"

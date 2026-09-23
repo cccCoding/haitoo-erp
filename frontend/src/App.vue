@@ -93,12 +93,13 @@ const previewImageUrl = ref(''), previewImageAlt = ref('')
 type ImageWorkspaceMode = 'carousel' | 'full'
 const showDraftImageDialog = ref(false), imageWorkspaceMode = ref<ImageWorkspaceMode>('full'), imageDraft = ref<any>(null), imageWorkspaceLoading = ref(false), imageTasksRefreshing = ref(false), imageTaskCreatingType = ref<''|'carousel'|'main_image'>(''), imageConfirmSaving = ref(false)
 const carouselConfirmNextStage = ref<'main_image_pending'|'ready_to_publish'>('main_image_pending')
-const selectedImageSkus = ref<string[]>([]), selectedMainReferences = ref<string[]>([]), mainReferenceMode = ref<'random'|'manual'>('random')
+type MainReferenceMode = 'random_carousel'|'random_sku'|'manual'
+const selectedImageSkus = ref<string[]>([]), selectedMainReferences = ref<string[]>([]), mainReferenceMode = ref<MainReferenceMode>('random_carousel')
 // 轮播图与首图任务使用各自独立的一套生成参数，互不干扰。
 type ImageQuality = 'auto'|'1K'|'2K'
 const carouselParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:ImageQuality}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'}), mainParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:ImageQuality}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'})
 const batchCarouselParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:ImageQuality}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'})
-const batchMainImageParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:ImageQuality}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'}), batchMainImageReferenceMode = ref<'random'|'manual'>('random')
+const batchMainImageParams = ref<{prompt:string;provider:string;ratio:'1:1'|'3:4';quality:ImageQuality}>({prompt:'',provider:'',ratio:'1:1',quality:'1K'}), batchMainImageReferenceMode = ref<MainReferenceMode>('random_carousel')
 const stagedFinalImageItems = ref<any[] | null>(null), draggedFinalImageUrl = ref('')
 const showMainApplyDialog = ref(false), pendingMainApply = ref<{task:any;url:string}|null>(null), mainRemoveSku = ref('')
 const showShopManagersDialog = ref(false), managingShop = ref<any>(null), selectedManagerIds = ref<number[]>([]), shopManagersSaving = ref(false)
@@ -262,21 +263,25 @@ function toggleBatchCarouselSku(draftId:number, sku:string) {
   const selected=batchCarouselSelections.value[draftId] || []
   batchCarouselSelections.value={...batchCarouselSelections.value,[draftId]:selected.includes(sku)?selected.filter(item=>item!==sku):[...selected,sku]}
 }
-function batchMainImageReferenceItems(draft:any):any[] {
-  const carouselItems=(draft.carousel_items || []).filter((item:any)=>item?.image_url && item.source_type!=='main_image')
-  return carouselItems.length ? carouselItems : (draft.sku_items || []).filter((item:any)=>item?.image_url)
+function uniqueMainReferenceItems(items:any[]):any[] {
+  const seen=new Set<string>()
+  return items.filter(item=>{const url=String(item?.image_url || '').trim();if(!url || seen.has(url))return false;seen.add(url);return true})
 }
+function mainCarouselItems(draft:any):any[] { return uniqueMainReferenceItems((draft?.carousel_items || []).filter((item:any)=>item && item.source_type!=='sku' && item.source_type!=='main_image')) }
+function mainSkuItems(draft:any):any[] { return uniqueMainReferenceItems(draft?.sku_items || []) }
+function batchMainImageEffectiveMode(draft:any):MainReferenceMode { return batchMainImageReferenceMode.value==='random_carousel' && !mainCarouselItems(draft).length ? 'random_sku' : batchMainImageReferenceMode.value }
+function batchMainImageReferenceItems(draft:any):any[] { return batchMainImageEffectiveMode(draft)==='random_sku' ? mainSkuItems(draft) : mainCarouselItems(draft) }
 function openBatchMainImageDialog() {
   if (!batchMainImageEligible.value) { showToast('仅可选择尚未创建首图任务的待制作主图草稿'); return }
   const defaultProvider=availableAiProviders.value.find(item=>item.is_default)?.provider || availableAiProviders.value[0]?.provider || ''
   batchMainImageParams.value={prompt:mainParams.value.prompt || '以参考图为基础生成突出商品主体的电商首图，背景简洁、光线自然，保持款式与颜色准确',provider:defaultProvider,ratio:mainParams.value.ratio,quality:mainParams.value.quality}
-  batchMainImageReferenceMode.value='random'
-  batchMainImageSelections.value=Object.fromEntries(selectedDrafts.value.map(draft=>[draft.id,batchMainImageReferenceItems(draft).slice(0,3).map((item:any)=>item.image_url)]))
+  batchMainImageReferenceMode.value='random_carousel'
+  batchMainImageSelections.value=Object.fromEntries(selectedDrafts.value.map(draft=>[draft.id,[]]))
   showBatchMainImageDialog.value=true
 }
 function toggleBatchMainImageReference(draftId:number, url:string) {
   const selected=batchMainImageSelections.value[draftId] || []
-  batchMainImageSelections.value={...batchMainImageSelections.value,[draftId]:selected.includes(url)?selected.filter(item=>item!==url):[...selected,url].slice(0,3)}
+  batchMainImageSelections.value={...batchMainImageSelections.value,[draftId]:selected.includes(url)?selected.filter(item=>item!==url):[...selected,url].slice(0,9)}
 }
 function batchReviewTasks(draft:any) { return (draft.tasks || []).filter((task:any)=>task.result_urls?.length) }
 function batchReviewPendingTasks(draft:any) { return batchReviewTasks(draft).filter((task:any)=>task.status==='awaiting_selection') }
@@ -348,8 +353,9 @@ async function createBatchCarouselTasks() {
 }
 async function createBatchMainImageTasks() {
   if (!batchMainImageParams.value.prompt.trim()) { showToast('请填写首图的创作要求'); return }
-  const batchDrafts=selectedDrafts.value.map(draft=>({draft_id:draft.id,reference_urls:batchMainImageReferenceMode.value==='manual' ? batchMainImageSelections.value[draft.id] || [] : []}))
-  if (batchMainImageReferenceMode.value==='manual' && batchDrafts.some(item=>!item.reference_urls.length)) { showToast('每个草稿至少选择一张轮播图'); return }
+  const batchDrafts=selectedDrafts.value.map(draft=>({draft_id:draft.id,reference_urls:batchMainImageReferenceMode.value==='manual' ? [...new Set(batchMainImageSelections.value[draft.id] || [])] : []}))
+  if (batchMainImageReferenceMode.value==='manual' && batchDrafts.some(item=>!item.reference_urls.length)) { showToast('每个草稿至少选择一张参考图'); return }
+  if (batchMainImageReferenceMode.value!=='manual' && selectedDrafts.value.some(draft=>!batchMainImageReferenceItems(draft).length)) { showToast('所选草稿缺少可用于制作首图的轮播图或 SKU 图'); return }
   try {
     batchMainImageSaving.value=true
     const {data}=await api.post('/drafts/batch-main-image-tasks',{drafts:batchDrafts,reference_mode:batchMainImageReferenceMode.value,provider:batchMainImageParams.value.provider,ratio:batchMainImageParams.value.ratio,quality:providerUsesAutoQuality(batchMainImageParams.value.provider)?'auto':batchMainImageParams.value.quality,creative_requirement:batchMainImageParams.value.prompt.trim()},{headers:headers.value})
@@ -854,7 +860,12 @@ const draftFinalImageItems = computed(() => {
 })
 const draftImagePreviewUrls = computed(() => draftFinalImageItems.value.map((item:any)=>item.image_url))
 const adoptedCarouselItems = computed(() => (imageDraft.value?.carousel_items || []).filter((item:any)=>item?.source_type==='carousel'))
+const mainCarouselReferenceItems = computed(() => mainCarouselItems(imageDraft.value))
+const mainSkuReferenceItems = computed(() => mainSkuItems(imageDraft.value))
+const mainRandomReferenceItems = computed(() => mainReferenceMode.value==='random_sku' ? mainSkuReferenceItems.value : mainCarouselReferenceItems.value)
 const currentGeneratedMainImage = computed(() => (imageDraft.value?.carousel_items || []).find((item:any)=>item.source_type==='main_image') || null)
+function selectMainReferenceMode(mode:MainReferenceMode) { mainReferenceMode.value=mode==='random_carousel' && !mainCarouselReferenceItems.value.length ? 'random_sku' : mode }
+function retainValidMainReferences() { const allowed=new Set([...mainCarouselReferenceItems.value,...mainSkuReferenceItems.value].map(item=>item.image_url));selectedMainReferences.value=selectedMainReferences.value.filter(url=>allowed.has(url)) }
 function resetFinalImageOrder(){stagedFinalImageItems.value=null;draggedFinalImageUrl.value=''}
 async function loadImageWorkspace(draftId:number, tasksOnly=false) {
   if(tasksOnly) imageTasksRefreshing.value=true
@@ -871,12 +882,13 @@ async function loadImageWorkspace(draftId:number, tasksOnly=false) {
   }
 }
 async function openImageWorkspace(draft:any, mode:ImageWorkspaceMode='full', focusMain=false) {
-  imageWorkspaceMode.value=mode; showDraftImageDialog.value=true; imageDraft.value=null; selectedImageSkus.value=[]; selectedMainReferences.value=[]; mainReferenceMode.value='random'; carouselConfirmNextStage.value='main_image_pending';resetFinalImageOrder()
+  imageWorkspaceMode.value=mode; showDraftImageDialog.value=true; imageDraft.value=null; selectedImageSkus.value=[]; selectedMainReferences.value=[]; mainReferenceMode.value='random_carousel'; carouselConfirmNextStage.value='main_image_pending';resetFinalImageOrder()
   const defaultImageProvider=availableAiProviders.value.find(item=>item.is_default)?.provider || availableAiProviders.value[0]?.provider || ''
   carouselParams.value={prompt:'保持服装款式、颜色和印花准确，生成自然真实、适合电商展示的商品场景图',provider:defaultImageProvider,ratio:'1:1',quality:'1K'}
   mainParams.value={prompt:'以参考图为基础生成突出商品主体的电商首图，背景简洁、光线自然，保持款式与颜色准确',provider:defaultImageProvider,ratio:'1:1',quality:'1K'}
   try {
     await loadImageWorkspace(draft.id)
+    selectMainReferenceMode(mainReferenceMode.value)
     if (focusMain) {
       await nextTick()
       document.getElementById('main-image-workspace-section')?.scrollIntoView({behavior:'smooth',block:'start'})
@@ -888,17 +900,18 @@ function openFullImageWorkspace(draft:any, focusMain=false) { return openImageWo
 function toggleImageSku(sku:string) {
   selectedImageSkus.value=selectedImageSkus.value.includes(sku) ? selectedImageSkus.value.filter(item=>item!==sku) : [...selectedImageSkus.value,sku].slice(0,9)
 }
-function toggleMainReference(url:string) { selectedMainReferences.value=selectedMainReferences.value.includes(url) ? selectedMainReferences.value.filter(item=>item!==url) : [...selectedMainReferences.value,url] }
+function toggleMainReference(url:string) { selectedMainReferences.value=selectedMainReferences.value.includes(url) ? selectedMainReferences.value.filter(item=>item!==url) : [...selectedMainReferences.value,url].slice(0,9) }
 async function createDraftImageTasks(type:'carousel'|'main_image') {
   if(!imageDraft.value) return
   if(type==='carousel' && !selectedImageSkus.value.length){showToast('请至少选择一个 SKU');return}
-  if(type==='main_image' && !adoptedCarouselItems.value.length){showToast('请先保留至少一张 SKU 图或轮播图');return}
+  if(type==='main_image')selectMainReferenceMode(mainReferenceMode.value)
+  if(type==='main_image' && mainReferenceMode.value!=='manual' && !mainRandomReferenceItems.value.length){showToast('缺少可用于制作首图的轮播图或 SKU 图');return}
   if(type==='main_image' && mainReferenceMode.value==='manual' && !selectedMainReferences.value.length){showToast('请手动选择首图参考图');return}
   const params = type==='carousel' ? carouselParams.value : mainParams.value
   if(!params.prompt.trim()){showToast(type==='carousel'?'请填写轮播图的创作要求':'请填写首图的创作要求');return}
   try {
     imageTaskCreatingType.value=type
-    const mainReferenceUrls=mainReferenceMode.value==='manual' ? selectedMainReferences.value : adoptedCarouselItems.value.map((item:any)=>item.image_url)
+    const mainReferenceUrls=mainReferenceMode.value==='manual' ? [...new Set(selectedMainReferences.value)] : []
     const {data}=await api.post(`/drafts/${imageDraft.value.id}/image-tasks`,{task_type:type,source_skus:type==='carousel'?selectedImageSkus.value:[],reference_mode:mainReferenceMode.value,reference_urls:type==='main_image'?mainReferenceUrls:[],provider:params.provider,ratio:params.ratio,quality:providerUsesAutoQuality(params.provider)?'auto':params.quality,creative_requirement:params.prompt.trim()},{headers:headers.value})
     const taskKey=type==='carousel'?'carousel_tasks':'main_image_tasks'
     imageDraft.value[taskKey]=[...(data.items || []).reverse(),...(imageDraft.value[taskKey] || [])]
@@ -933,7 +946,8 @@ function stageCarouselTaskResult(task:any,url:string) {
   resetFinalImageOrder()
   imageDraft.value.carousel_items=existing
   imageDraft.value.using_sku_fallback=false
-  selectedMainReferences.value=selectedMainReferences.value.filter(referenceUrl=>(imageDraft.value.carousel_items || []).some((item:any)=>item.image_url===referenceUrl))
+  retainValidMainReferences()
+  selectMainReferenceMode(mainReferenceMode.value)
   showToast('已暂存为轮播图，确认后保存到草稿')
 }
 function stageMainTaskResult(task:any,url:string,removeSku?:string) {
@@ -982,7 +996,8 @@ function toggleWorkspaceCarouselTask(task:any) {
     }
     imageDraft.value.carousel_items=remaining.length?remaining:skuFallbackCarouselItems(imageDraft.value)
     imageDraft.value.using_sku_fallback=!remaining.length
-    selectedMainReferences.value=selectedMainReferences.value.filter(referenceUrl=>(imageDraft.value.carousel_items || []).some((item:any)=>item.image_url===referenceUrl))
+    retainValidMainReferences()
+    selectMainReferenceMode(mainReferenceMode.value)
     showToast('已取消采用该轮播图，确认后保存到草稿')
     return
   }
@@ -1005,7 +1020,7 @@ function toggleWorkspaceMainTask(task:any) {
   stageMainTaskResult(task,url)
 }
 function dropFinalImage(targetUrl:string){if(!draggedFinalImageUrl.value || draggedFinalImageUrl.value===targetUrl)return;const items=[...draftFinalImageItems.value];const from=items.findIndex((item:any)=>item.image_url===draggedFinalImageUrl.value),to=items.findIndex((item:any)=>item.image_url===targetUrl);if(from<0 || to<0)return;const [moved]=items.splice(from,1);items.splice(to,0,moved);stagedFinalImageItems.value=items;draggedFinalImageUrl.value=''}
-function removeFinalImage(imageUrl:string){const items=draftFinalImageItems.value.filter((item:any)=>item.image_url!==imageUrl);if(items.length===draftFinalImageItems.value.length)return;if(!items.length){showToast('请至少保留一张 SKU 图或轮播图');return}stagedFinalImageItems.value=items;draggedFinalImageUrl.value='';selectedMainReferences.value=selectedMainReferences.value.filter(referenceUrl=>referenceUrl!==imageUrl);showToast('已从最终商品图片中移除，确认后保存到草稿')}
+function removeFinalImage(imageUrl:string){const items=draftFinalImageItems.value.filter((item:any)=>item.image_url!==imageUrl);if(items.length===draftFinalImageItems.value.length)return;if(!items.length){showToast('请至少保留一张 SKU 图或轮播图');return}stagedFinalImageItems.value=items;draggedFinalImageUrl.value='';showToast('已从最终商品图片中移除，确认后保存到草稿')}
 async function openImageWorkspaceFromTask(task:any){const draftId=task?.parameters?.draft_id;if(!draftId)return;showTaskDetailDialog.value=false;page.value='drafts';await openImageWorkspace({id:draftId},task.task_type==='carousel'?'carousel':'full',task.task_type==='main_image');if(task.task_type==='carousel' && task.parameters?.source_sku)selectedImageSkus.value=[task.parameters.source_sku];await nextTick();document.getElementById(task.task_type==='main_image'?'main-image-workspace-section':'carousel-workspace-section')?.scrollIntoView({behavior:'smooth',block:'start'})}
 async function confirmDraftImages(){if(!imageDraft.value)return;if(!draftFinalImageItems.value.length){showToast('请至少保留一张 SKU 图或轮播图后再保存');return}try{imageConfirmSaving.value=true;const isConfirmingCarousel=imageDraft.value.workflow_stage==='carousel_pending';const payload={image_items:draftFinalImageItems.value.map((item:any)=>({result_url:item.image_url,sku:item.sku || null,task_id:item.task_id || null})),...(isConfirmingCarousel?{next_stage:carouselConfirmNextStage.value}:{})};imageDraft.value=(await api.post(`/drafts/${imageDraft.value.id}/images/confirm`,payload,{headers:headers.value})).data;await refreshDraftList();showDraftImageDialog.value=false;showToast(isConfirmingCarousel?(carouselConfirmNextStage.value==='ready_to_publish'?'轮播图已确认，商品已进入待发布':'轮播图已确认，请继续首图创作'):'商品图片已保存到草稿')}catch(e:any){showToast(e.response?.data?.detail || '保存商品图片失败')}finally{imageConfirmSaving.value=false}}
 async function saveDraftEdit() {
@@ -1827,18 +1842,20 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
     <section class="modal-card batch-carousel-dialog">
       <button class="modal-close" :disabled="batchMainImageSaving" @click="showBatchMainImageDialog=false">×</button>
       <h2>批量制作主图</h2>
-      <p>已选择 {{selectedDrafts.length}} 条草稿；可随机选择最多 3 张轮播图，或为每条草稿手动选择参考图。</p>
+      <p>已选择 {{selectedDrafts.length}} 条草稿；随机参考最多 3 张，手动选择每条最多 9 张。</p>
       <div class="reference-mode-tabs" role="tablist">
-        <button type="button" role="tab" :class="{active:batchMainImageReferenceMode==='random'}" :aria-selected="batchMainImageReferenceMode==='random'" @click="batchMainImageReferenceMode='random'"><i class="reference-mode-icon">🎲</i><b>随机选择最多 3 张</b><small>系统从每条草稿的有效轮播图中随机挑选参考图</small></button>
-        <button type="button" role="tab" :class="{active:batchMainImageReferenceMode==='manual'}" :aria-selected="batchMainImageReferenceMode==='manual'" @click="batchMainImageReferenceMode='manual'"><i class="reference-mode-icon">👆</i><b>手动选择轮播图</b><small>每条草稿选择 1–3 张参考图</small></button>
+        <button type="button" role="tab" :class="{active:batchMainImageReferenceMode==='random_carousel'}" :aria-selected="batchMainImageReferenceMode==='random_carousel'" @click="batchMainImageReferenceMode='random_carousel'"><i class="reference-mode-icon">🎲</i><b>随机选择最多 3 张轮播图</b><small>无轮播图的草稿自动使用 SKU 图</small></button>
+        <button type="button" role="tab" :class="{active:batchMainImageReferenceMode==='random_sku'}" :aria-selected="batchMainImageReferenceMode==='random_sku'" @click="batchMainImageReferenceMode='random_sku'"><i class="reference-mode-icon">🎲</i><b>随机选择最多 3 张 SKU 图</b><small>从每条草稿的原始 SKU 图中随机挑选</small></button>
+        <button type="button" role="tab" :class="{active:batchMainImageReferenceMode==='manual'}" :aria-selected="batchMainImageReferenceMode==='manual'" @click="batchMainImageReferenceMode='manual'"><i class="reference-mode-icon">👆</i><b>手动选择参考图</b><small>轮播图和 SKU 图可混选，每条最多 9 张</small></button>
       </div>
       <section class="batch-carousel-list">
         <article v-for="draft in selectedDrafts" :key="draft.id" class="batch-carousel-draft">
-          <header><b>#{{draft.id}}</b><span :title="draft.title">{{draft.title}}</span><small>{{batchMainImageReferenceMode==='manual' ? `${(batchMainImageSelections[draft.id] || []).length} / 3 已选` : `${Math.min(3,batchMainImageReferenceItems(draft).length)} 张随机参考图`}}</small></header>
-          <div class="batch-carousel-skus">
-            <button v-for="item in batchMainImageReferenceItems(draft)" :key="item.image_url" type="button" :disabled="batchMainImageReferenceMode==='random'" :class="{selected:(batchMainImageSelections[draft.id] || []).includes(item.image_url)}" @click="toggleBatchMainImageReference(draft.id,item.image_url)"><img :src="imageUrl(item.image_url)" :alt="item.sku || '轮播图'"/><i>{{item.sku || '轮播图'}}</i><span class="batch-carousel-hover"><img :src="imageUrl(item.image_url)" :alt="`${item.sku || '轮播图'} 放大图`"/></span></button>
-            <p v-if="!batchMainImageReferenceItems(draft).length" class="empty">该草稿没有可用于制作主图的轮播图。</p>
-          </div>
+          <header><b>#{{draft.id}}</b><span :title="draft.title">{{draft.title}}</span><small>{{batchMainImageReferenceMode==='manual' ? `${(batchMainImageSelections[draft.id] || []).length} / 9 已选` : `${Math.min(3,batchMainImageReferenceItems(draft).length)} 张随机参考图`}}</small></header>
+          <template v-if="batchMainImageReferenceMode==='manual'">
+            <div class="main-reference-row"><strong>轮播图</strong><div class="batch-carousel-skus"><button v-for="item in mainCarouselItems(draft)" :key="item.image_url" type="button" :disabled="(batchMainImageSelections[draft.id] || []).length>=9 && !(batchMainImageSelections[draft.id] || []).includes(item.image_url)" :class="{selected:(batchMainImageSelections[draft.id] || []).includes(item.image_url)}" @click="toggleBatchMainImageReference(draft.id,item.image_url)"><img :src="imageUrl(item.image_url)" :alt="item.sku || '轮播图'"/><i>{{item.sku || '轮播图'}}</i></button><p v-if="!mainCarouselItems(draft).length" class="empty">暂无轮播图</p></div></div>
+            <div class="main-reference-row"><strong>SKU 图</strong><div class="batch-carousel-skus"><button v-for="item in mainSkuItems(draft)" :key="item.image_url" type="button" :disabled="(batchMainImageSelections[draft.id] || []).length>=9 && !(batchMainImageSelections[draft.id] || []).includes(item.image_url)" :class="{selected:(batchMainImageSelections[draft.id] || []).includes(item.image_url)}" @click="toggleBatchMainImageReference(draft.id,item.image_url)"><img :src="imageUrl(item.image_url)" :alt="item.sku || 'SKU 图'"/><i>{{item.sku || 'SKU 图'}}</i></button><p v-if="!mainSkuItems(draft).length" class="empty">暂无 SKU 图</p></div></div>
+          </template>
+          <div v-else class="main-reference-row"><strong>{{batchMainImageEffectiveMode(draft)==='random_sku' ? 'SKU 图' : '轮播图'}}</strong><small v-if="batchMainImageReferenceMode==='random_carousel' && batchMainImageEffectiveMode(draft)==='random_sku'">无轮播图，已自动切换到随机 SKU 图</small><div class="batch-carousel-skus"><button v-for="item in batchMainImageReferenceItems(draft)" :key="item.image_url" type="button" disabled><img :src="imageUrl(item.image_url)" :alt="item.sku || '参考图'"/><i>{{item.sku || '参考图'}}</i></button><p v-if="!batchMainImageReferenceItems(draft).length" class="empty">暂无可用参考图</p></div></div>
         </article>
       </section>
       <section class="batch-carousel-params"><label>创作要求<textarea v-model="batchMainImageParams.prompt" rows="2" maxlength="1000" placeholder="请输入首图创作要求"/></label><div><label>AI 模型<select v-model="batchMainImageParams.provider"><option v-for="provider in availableAiProviders" :key="provider.provider" :value="provider.provider">{{provider.display_name}} · {{provider.model}}</option></select></label><label>比例<select v-model="batchMainImageParams.ratio"><option>1:1</option><option>3:4</option></select></label><label>清晰度<select v-model="batchMainImageParams.quality"><option>1K</option><option>2K</option></select></label></div></section>
@@ -1853,7 +1870,7 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
   <div v-if="showTiktokExportDialog" class="modal-backdrop" @click.self="!tiktokExportLoading && (showTiktokExportDialog=false)"><section class="modal-card tiktok-export-dialog"><button class="modal-close" :disabled="tiktokExportLoading" @click="showTiktokExportDialog=false">×</button><h2>导出 TikTok 批量上传表格</h2><p>已选择 {{selectedDrafts.length}} 条同一产品模板的商品草稿。下列设置仅用于本次导出。</p><div v-if="tiktokExportLoading && !tiktokExportOptions" class="empty">正在读取 TikTok 模板选项…</div><template v-else><section class="tiktok-export-grid"><label>类目库 / 店铺类型 <b class="required">*</b><select v-model="tiktokExportCatalogId" @change="changeTiktokExportCatalog"><option :value="null" disabled>请选择类目库</option><option v-for="catalog in tiktokExportCatalogs" :key="catalog.id" :value="catalog.id">{{catalog.name}}（{{tiktokCatalogTypeLabel(catalog.template_type)}}）</option></select></label><div class="export-field">商品类目 <b class="required">*</b><SearchableSelect v-model="tiktokExportCategory" :options="tiktokExportOptions?.categories || []" value-key="name" label-key="name" placeholder="请选择商品类目" search-placeholder="搜索类目名称，空格分隔多个关键词" @change="changeTiktokExportCategory"/></div><label v-if="tiktokExportIsLocal">目标本土店（自动上品）<select v-model="tiktokTargetShopId"><option :value="null">仅下载表格</option><option v-for="shop in shops.filter(shop => shop.shop_type === 'local' && shop.hubstudio_container_code && shop.hub_agent_id)" :key="shop.id" :value="shop.id">{{shop.name}}</option></select><small class="tiktok-supported-values">仅显示已绑定 HubStudio 环境与本地执行器的本土店。</small></label><label>默认售价 <b class="required">*</b><input v-model.number="tiktokExportDefaultPrice" type="number" min="0.01" max="999999" step="0.01" placeholder="请输入售价"/></label><label>默认库存 <b class="required">*</b><input v-model.number="tiktokExportDefaultQuantity" type="number" min="0" max="999999" step="1"/></label><label v-if="tiktokExportOptions?.capabilities?.supports_cod !== false">货到付款（COD） <b class="required">*</b><select v-model="tiktokExportCod"><option value="Y">Y</option><option value="N">N</option></select></label></section><section v-if="selectedTiktokCategoryAttributes.length" class="tiktok-attribute-section"><h3>类目属性</h3><p>所有属性统一直接输入。“选择”仅校验模板支持值；</p><div class="tiktok-export-grid"><label v-for="field in selectedTiktokCategoryAttributes" :key="field.field"><span class="tiktok-attribute-label">{{field.label}} <b v-if="field.required" class="required">*</b><small class="multi-value-hint">{{tiktokAttributeMode(field)}}</small></span><input v-model="tiktokExportAttributes[field.field]" type="text" maxlength="500" :placeholder="tiktokAttributePlaceholder(field)"/><small v-if="field.options?.length" class="tiktok-supported-values">支持值：{{field.options.join('、')}}</small><small v-else class="tiktok-supported-values">请根据商品实际信息手动填写。</small></label></div></section><section class="tiktok-product-overrides"><h3>单品售价与库存</h3><p>留空时使用上方默认值。</p><div class="tiktok-override-head"><span>商品</span><span>售价覆盖</span><span>库存覆盖</span></div><div v-for="draft in selectedDrafts" :key="draft.id" class="tiktok-override-row"><strong>#{{draft.id}} {{draft.title}}</strong><input v-model.number="tiktokExportOverrides[draft.id].price" type="number" min="0.01" max="999999" step="0.01" placeholder="使用默认售价"/><input v-model.number="tiktokExportOverrides[draft.id].quantity" type="number" min="0" max="999999" step="1" placeholder="使用默认库存"/></div></section></template><p v-if="tiktokExportError" class="error material-draft-error">{{tiktokExportError}}</p><div class="modal-actions"><button class="ghost" :disabled="tiktokExportLoading || tiktokSubmitting" @click="showTiktokExportDialog=false">取消</button><button class="primary" :disabled="tiktokExportLoading || !tiktokExportOptions" @click="exportSelectedDrafts">{{tiktokExportLoading ? '生成中…' : '生成并下载'}}</button><button v-if="tiktokExportIsLocal" class="primary" :disabled="tiktokExportLoading || tiktokSubmitting || !tiktokExportOptions || !tiktokTargetShopId" @click="submitSelectedDraftsToHubstudio">{{tiktokSubmitting ? '创建任务中…' : '生成并自动上品'}}</button></div></section></div>
   <div v-if="showShopeeExportDialog" class="modal-backdrop" @click.self="!shopeeExportLoading && (showShopeeExportDialog=false)"><section class="modal-card tiktok-export-dialog"><button class="modal-close" :disabled="shopeeExportLoading" @click="showShopeeExportDialog=false">×</button><h2>导出 Shopee 批量上传表格</h2><p>已选择 {{selectedDrafts.length}} 条同一产品模板的商品草稿。变体名称固定使用 Color 和 Size。</p><div v-if="shopeeExportLoading && !shopeeExportOptions" class="empty">正在读取 Shopee 模板选项…</div><template v-else><section class="tiktok-export-grid"><label>Shopee 类目库 <b class="required">*</b><select v-model="shopeeExportCatalogId" @change="changeShopeeExportCatalog"><option :value="null" disabled>请选择类目库</option><option v-for="catalog in shopeeCatalogs" :key="catalog.id" :value="catalog.id">{{catalog.name}}</option></select></label><div class="export-field">商品类目 <b class="required">*</b><SearchableSelect v-model="shopeeExportCategoryId" :options="shopeeExportOptions?.categories || []" value-key="id" label-key="name" placeholder="请选择商品类目" search-placeholder="搜索类目名称，空格分隔多个关键词"/></div><label>默认售价 <b class="required">*</b><input v-model.number="shopeeExportDefaultPrice" type="number" min="0.10" max="1000000000" step="0.01" placeholder="请输入售价"/></label><label>默认库存 <b class="required">*</b><input v-model.number="shopeeExportDefaultQuantity" type="number" min="0" max="10000000" step="1"/></label><label>危险品 <b class="required">*</b><select v-model="shopeeExportDangerousGoods"><option value="No">No</option><option value="Yes">Yes</option></select></label></section><section class="tiktok-attribute-section"><h3>物流渠道 <b class="required">*</b></h3><p>至少选择一个渠道，导出时所选渠道写为 On，其余写为 Off。</p><div class="shopee-channel-options"><label v-for="channel in shopeeExportOptions?.shipping_channels || []" :key="channel.field"><input v-model="shopeeExportChannels" type="checkbox" :value="channel.field"/>{{channel.name}}</label></div></section><section class="tiktok-product-overrides"><h3>单品售价与库存</h3><p>留空时使用上方默认值。</p><div class="tiktok-override-head"><span>商品</span><span>售价覆盖</span><span>库存覆盖</span></div><div v-for="draft in selectedDrafts" :key="draft.id" class="tiktok-override-row"><strong>#{{draft.id}} {{draft.title}}</strong><input v-model.number="shopeeExportOverrides[draft.id].price" type="number" min="0.10" max="1000000000" step="0.01" placeholder="使用默认售价"/><input v-model.number="shopeeExportOverrides[draft.id].quantity" type="number" min="0" max="10000000" step="1" placeholder="使用默认库存"/></div></section></template><p v-if="shopeeExportError" class="error material-draft-error">{{shopeeExportError}}</p><div class="modal-actions"><button class="ghost" :disabled="shopeeExportLoading" @click="showShopeeExportDialog=false">取消</button><button class="primary" :disabled="shopeeExportLoading || !shopeeExportOptions" @click="exportSelectedDraftsToShopee">{{shopeeExportLoading ? '生成中…' : '生成并下载'}}</button></div></section></div>
   <div v-if="showDraftEditDialog" class="modal-backdrop" @click.self="showDraftEditDialog=false"><section class="modal-card material-draft-dialog"><button class="modal-close" @click="showDraftEditDialog=false">×</button><h2>编辑商品草稿</h2><p>可修改商品标题和产品描述。</p><label>产品标题<input v-model="draftEditTitle" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符"/></label><label>产品描述<textarea v-model="draftEditProductDescription" class="draft-edit-description" maxlength="5000" placeholder="请输入产品描述"></textarea></label><section class="draft-edit-section"><strong>SKU 图 <small class="draft-edit-hint">共 {{draftEditSkus.length}} 个</small></strong><div class="draft-edit-preview"><div v-for="item in draftEditSkus" :key="item.sku" class="draft-edit-image-item"><code :title="item.sku">{{item.sku}}</code><button title="放大查看" @click="openImagePreview(item.image_url, item.sku)"><img :src="imageUrl(item.image_url)" :alt="item.sku"/></button></div></div><p v-if="!draftEditSkus.length" class="draft-edit-empty">该草稿暂无 SKU 图。</p></section><section class="draft-edit-section"><strong>产品图片 <small class="draft-edit-hint">首图 + 其余轮播图</small></strong><div class="draft-edit-preview"><div v-for="(url,index) in editingDraft?.image_urls" :key="url" class="draft-edit-image-item"><code>{{index===0 ? '首图' : draftSkuForImage(editingDraft, url)}}</code><button title="放大查看" @click="openImagePreview(url, editingDraft?.title || '商品素材')"><img :src="imageUrl(url)" :alt="editingDraft?.title || '商品素材'"/></button></div></div></section><section v-if="editingDraft?.size_chart_url" class="draft-edit-section"><strong>尺码图</strong><button class="draft-edit-size-chart-button" title="放大查看" @click="openImagePreview(editingDraft.size_chart_url, '尺码图')"><img class="draft-edit-size-chart" :src="imageUrl(editingDraft.size_chart_url)" alt="尺码图"/></button></section><p v-if="draftEditError" class="error material-draft-error">{{draftEditError}}</p><div class="modal-actions"><button class="ghost" @click="showDraftEditDialog=false">取消</button><button class="primary" :disabled="draftEditSaving" @click="saveDraftEdit">{{draftEditSaving ? '保存中…' : '保存修改'}}</button></div></section></div>
-  <div v-if="showTaskDetailDialog && viewingTask?.task_type!=='sku_image'" class="modal-backdrop image-result-backdrop" @click.self="showTaskDetailDialog=false"><section class="modal-card image-result-dialog"><button class="modal-close" @click="showTaskDetailDialog=false">×</button><h2>{{taskTypeLabel(viewingTask)}}任务 #{{viewingTask?.id}}</h2><p>{{viewingTask?.parameters?.source_sku ? `来源 SKU：${viewingTask.parameters.source_sku}` : `参考 ${viewingTask?.parameters?.reference_urls?.length || 0} 张轮播图`}}</p><div class="modal-actions"><button class="secondary" @click="openImageWorkspaceFromTask(viewingTask)">打开对应商品草稿</button></div><div class="image-task-candidates"><article v-for="url in viewingTask?.result_urls || []" :key="url"><button class="candidate-preview" @click="openImagePreview(url,'生成结果')"><img :src="imageUrl(url)" alt="生成结果"/></button><button class="primary" :disabled="isTaskResultSelected(viewingTask,url)" @click="applyImageTaskResult(viewingTask,url)">{{isTaskResultSelected(viewingTask,url)?'已采用':viewingTask?.task_type==='carousel'?'采用为轮播图':'采用为首图'}}</button></article><p v-if="!(viewingTask?.result_urls?.length)" class="empty">任务完成后可在这里选择采用结果。</p></div></section></div>
+  <div v-if="showTaskDetailDialog && viewingTask?.task_type!=='sku_image'" class="modal-backdrop image-result-backdrop" @click.self="showTaskDetailDialog=false"><section class="modal-card image-result-dialog"><button class="modal-close" @click="showTaskDetailDialog=false">×</button><h2>{{taskTypeLabel(viewingTask)}}任务 #{{viewingTask?.id}}</h2><p>{{viewingTask?.parameters?.source_sku ? `来源 SKU：${viewingTask.parameters.source_sku}` : `参考 ${viewingTask?.parameters?.reference_urls?.length || 0} 张${viewingTask?.parameters?.reference_mode==='random_sku' ? 'SKU 图' : viewingTask?.parameters?.reference_mode==='random_carousel' ? '轮播图' : '图片'}`}}</p><div class="modal-actions"><button class="secondary" @click="openImageWorkspaceFromTask(viewingTask)">打开对应商品草稿</button></div><div class="image-task-candidates"><article v-for="url in viewingTask?.result_urls || []" :key="url"><button class="candidate-preview" @click="openImagePreview(url,'生成结果')"><img :src="imageUrl(url)" alt="生成结果"/></button><button class="primary" :disabled="isTaskResultSelected(viewingTask,url)" @click="applyImageTaskResult(viewingTask,url)">{{isTaskResultSelected(viewingTask,url)?'已采用':viewingTask?.task_type==='carousel'?'采用为轮播图':'采用为首图'}}</button></article><p v-if="!(viewingTask?.result_urls?.length)" class="empty">任务完成后可在这里选择采用结果。</p></div></section></div>
   <div v-if="showDraftImageDialog" class="modal-backdrop image-workspace-backdrop" @click.self="showDraftImageDialog=false">
     <section class="modal-card image-workspace" :class="{'carousel-image-workspace':imageWorkspaceMode==='carousel'}">
       <button class="modal-close" @click="showDraftImageDialog=false">×</button>
@@ -1978,24 +1995,25 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
                 </div>
               </div>
               <div class="reference-mode-tabs" role="tablist">
-                <button type="button" role="tab" :class="{active: mainReferenceMode==='random'}" :aria-selected="mainReferenceMode==='random'" @click="mainReferenceMode='random'">
+                <button type="button" role="tab" :class="{active: mainReferenceMode==='random_carousel'}" :aria-selected="mainReferenceMode==='random_carousel'" @click="selectMainReferenceMode('random_carousel')">
                   <i class="reference-mode-icon">🎲</i>
-                  <b>随机选择最多 3 张</b>
-                  <small>由系统从当前有效轮播图中自动挑选参考图</small>
+                  <b>随机选择最多 3 张轮播图</b>
+                  <small>无轮播图时自动切换到 SKU 图</small>
+                </button>
+                <button type="button" role="tab" :class="{active: mainReferenceMode==='random_sku'}" :aria-selected="mainReferenceMode==='random_sku'" @click="selectMainReferenceMode('random_sku')">
+                  <i class="reference-mode-icon">🎲</i>
+                  <b>随机选择最多 3 张 SKU 图</b>
+                  <small>从原始 SKU 图中随机挑选</small>
                 </button>
                 <button type="button" role="tab" :class="{active: mainReferenceMode==='manual'}" :aria-selected="mainReferenceMode==='manual'" @click="mainReferenceMode='manual'">
                   <i class="reference-mode-icon">👆</i>
                   <b>手动选择参考图</b>
-                  <small>由您从下方挑选具体参考图</small>
+                  <small>轮播图和 SKU 图可混选，最多 9 张</small>
                 </button>
               </div>
-              <div v-if="mainReferenceMode==='manual'" class="reference-picker">
-                <label v-for="item in adoptedCarouselItems" :key="item.image_url" :class="{selected:selectedMainReferences.includes(item.image_url)}">
-                  <input type="checkbox" :checked="selectedMainReferences.includes(item.image_url)" @change="toggleMainReference(item.image_url)"/>
-                  <img :src="imageUrl(item.image_url)" :alt="item.sku || 'AI 首图'"/>
-                  <span>{{item.sku || 'AI 首图'}}</span>
-                </label>
-                <p v-if="!adoptedCarouselItems.length" class="empty">请先生成并采用轮播图。</p>
+              <div v-if="mainReferenceMode==='manual'" class="main-reference-groups">
+                <div class="main-reference-row"><strong>轮播图</strong><div class="reference-picker"><label v-for="item in mainCarouselReferenceItems" :key="item.image_url" :class="{selected:selectedMainReferences.includes(item.image_url)}"><input type="checkbox" :checked="selectedMainReferences.includes(item.image_url)" :disabled="selectedMainReferences.length>=9 && !selectedMainReferences.includes(item.image_url)" @change="toggleMainReference(item.image_url)"/><img :src="imageUrl(item.image_url)" :alt="item.sku || '轮播图'"/><span>{{item.sku || '轮播图'}}</span></label><p v-if="!mainCarouselReferenceItems.length" class="empty">暂无轮播图</p></div></div>
+                <div class="main-reference-row"><strong>SKU 图</strong><div class="reference-picker"><label v-for="item in mainSkuReferenceItems" :key="item.image_url" :class="{selected:selectedMainReferences.includes(item.image_url)}"><input type="checkbox" :checked="selectedMainReferences.includes(item.image_url)" :disabled="selectedMainReferences.length>=9 && !selectedMainReferences.includes(item.image_url)" @change="toggleMainReference(item.image_url)"/><img :src="imageUrl(item.image_url)" :alt="item.sku || 'SKU 图'"/><span>{{item.sku || 'SKU 图'}}</span></label><p v-if="!mainSkuReferenceItems.length" class="empty">暂无 SKU 图</p></div></div>
               </div>
               <div class="workspace-params">
                 <div class="workspace-settings-grid">
@@ -2007,7 +2025,7 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
                     <label>AI 模型<select v-model="mainParams.provider"><option v-for="provider in availableAiProviders" :key="provider.provider" :value="provider.provider">{{provider.display_name}} · {{provider.model}}</option></select></label>
                     <label>比例<select v-model="mainParams.ratio"><option>1:1</option><option>3:4</option></select></label>
                     <label>清晰度<select v-model="mainParams.quality"><option>1K</option><option>2K</option></select></label>
-                    <button class="primary workspace-create-button" :disabled="!!imageTaskCreatingType || !adoptedCarouselItems.length" @click="createDraftImageTasks('main_image')">{{imageTaskCreatingType==='main_image' ? '创建中…' : '开始创作首图'}}</button>
+                    <button class="primary workspace-create-button" :disabled="!!imageTaskCreatingType || (!mainCarouselReferenceItems.length && !mainSkuReferenceItems.length)" @click="createDraftImageTasks('main_image')">{{imageTaskCreatingType==='main_image' ? '创建中…' : '开始创作首图'}}</button>
                   </div>
                 </div>
               </div>

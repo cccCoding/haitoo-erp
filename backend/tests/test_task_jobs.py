@@ -777,6 +777,69 @@ class TaskJobTests(unittest.TestCase):
         self.assertEqual(retry_result, {"draft_total": 1, "total": 1})
         self.assertEqual(tasks[4].parameters["reference_urls"], ["https://img.example/carousel-6.png"])
 
+    def test_main_image_reference_modes_use_original_skus_and_fallback(self) -> None:
+        sku_items = [{"sku": f"SKU{index}", "image_url": f"https://img.example/sku-{index}.png"} for index in range(4)]
+        nine_skus = [{"sku": f"SKU{index}", "image_url": f"https://img.example/manual-{index}.png"} for index in range(8)]
+        with self.session_factory() as db:
+            no_carousel = ProductDraft(company_id=1, template_id=1, title="A" * 25, image_urls=[], sku_items=sku_items, carousel_items=[], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            with_carousel = ProductDraft(company_id=1, template_id=1, title="B" * 25, image_urls=[], sku_items=sku_items, carousel_items=[{"sku": "SKU0", "image_url": "https://img.example/carousel.png", "source_type": "carousel"}], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            manual_draft = ProductDraft(company_id=1, template_id=1, title="C" * 25, image_urls=[], sku_items=nine_skus, carousel_items=[{"sku": "SKU0", "image_url": "https://img.example/manual-carousel.png", "source_type": "carousel"}], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            db.add_all([no_carousel, with_carousel, manual_draft]); db.commit()
+            fallback = main.create_draft_image_tasks(no_carousel.id, DraftImageTaskCreate(task_type="main_image", reference_mode="random_carousel", creative_requirement="制作首图"), user=db.get(User, 1), db=db)
+            sku_only = main.create_draft_image_tasks(with_carousel.id, DraftImageTaskCreate(task_type="main_image", reference_mode="random_sku", creative_requirement="制作首图"), user=db.get(User, 1), db=db)
+            manual_urls = ["https://img.example/manual-carousel.png", *[item["image_url"] for item in nine_skus]]
+            manual = main.create_draft_image_tasks(manual_draft.id, DraftImageTaskCreate(task_type="main_image", reference_mode="manual", reference_urls=manual_urls, creative_requirement="制作首图"), user=db.get(User, 1), db=db)
+        self.assertEqual(fallback["items"][0]["parameters"]["reference_mode"], "random_sku")
+        self.assertEqual(len(fallback["items"][0]["parameters"]["reference_urls"]), 3)
+        self.assertTrue(set(fallback["items"][0]["parameters"]["reference_urls"]).issubset({item["image_url"] for item in sku_items}))
+        self.assertEqual(sku_only["items"][0]["parameters"]["reference_mode"], "random_sku")
+        self.assertFalse("https://img.example/carousel.png" in sku_only["items"][0]["parameters"]["reference_urls"])
+        self.assertEqual(manual["items"][0]["parameters"]["reference_urls"], manual_urls)
+
+    def test_batch_main_image_mixed_sources_and_nine_manual_references(self) -> None:
+        sku_items = [{"sku": f"SKU{index}", "image_url": f"https://img.example/sku-{index}.png"} for index in range(8)]
+        carousel_url = "https://img.example/carousel.png"
+        with self.session_factory() as db:
+            carousel = ProductDraft(company_id=1, template_id=1, title="A" * 25, image_urls=[], sku_items=sku_items, carousel_items=[{"sku": "SKU0", "image_url": carousel_url, "source_type": "carousel"}], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            fallback = ProductDraft(company_id=1, template_id=1, title="B" * 25, image_urls=[], sku_items=sku_items, carousel_items=[], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            manual = ProductDraft(company_id=1, template_id=1, title="C" * 25, image_urls=[], sku_items=sku_items, carousel_items=[{"sku": "SKU0", "image_url": carousel_url, "source_type": "carousel"}], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            db.add_all([carousel, fallback, manual]); db.commit()
+            main.create_batch_main_image_tasks(BatchMainImageTaskCreate(drafts=[{"draft_id": carousel.id}, {"draft_id": fallback.id}], reference_mode="random_carousel", creative_requirement="制作首图"), user=db.get(User, 1), db=db)
+            references = [carousel_url, *[item["image_url"] for item in sku_items]]
+            main.create_batch_main_image_tasks(BatchMainImageTaskCreate(drafts=[{"draft_id": manual.id, "reference_urls": references}], reference_mode="manual", creative_requirement="制作首图"), user=db.get(User, 1), db=db)
+            tasks = db.scalars(select(PodTask).where(PodTask.task_type == "main_image").order_by(PodTask.id)).all()
+        self.assertEqual(tasks[0].parameters["reference_urls"], [carousel_url])
+        self.assertEqual(tasks[0].parameters["reference_mode"], "random_carousel")
+        self.assertEqual(tasks[1].parameters["reference_mode"], "random_sku")
+        self.assertEqual(len(tasks[1].parameters["reference_urls"]), 3)
+        self.assertEqual(tasks[2].parameters["reference_urls"], references)
+
+    def test_main_image_manual_rejects_invalid_or_empty_references(self) -> None:
+        with self.session_factory() as db:
+            draft = ProductDraft(company_id=1, template_id=1, title="A" * 25, image_urls=[], sku_items=[{"sku": "SKU", "image_url": "https://img.example/sku.png"}], carousel_items=[], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            empty = ProductDraft(company_id=1, template_id=1, title="B" * 25, image_urls=[], sku_items=[], carousel_items=[], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            db.add_all([draft, empty]); db.commit()
+            for urls in ([], ["https://img.example/other.png"]):
+                with self.assertRaises(HTTPException):
+                    main.create_draft_image_tasks(draft.id, DraftImageTaskCreate(task_type="main_image", reference_mode="manual", reference_urls=urls, creative_requirement="制作首图"), user=db.get(User, 1), db=db)
+            with self.assertRaisesRegex(HTTPException, "缺少可用于制作首图"):
+                main.create_draft_image_tasks(empty.id, DraftImageTaskCreate(task_type="main_image", reference_mode="random_carousel", creative_requirement="制作首图"), user=db.get(User, 1), db=db)
+            self.assertEqual(db.scalar(select(func.count()).select_from(PodTask)), 0)
+
+    def test_batch_main_image_manual_counts_unique_urls_and_limits_to_nine(self) -> None:
+        sku_items = [{"sku": f"SKU{index}", "image_url": f"https://img.example/sku-{index}.png"} for index in range(10)]
+        with self.session_factory() as db:
+            draft = ProductDraft(company_id=1, template_id=1, title="A" * 25, image_urls=[], sku_items=sku_items, carousel_items=[], workflow_stage="main_image_pending", created_by=1, updated_by=1)
+            db.add(draft); db.commit()
+            ten_urls = [item["image_url"] for item in sku_items]
+            with self.assertRaisesRegex(HTTPException, "最多选择 9 张"):
+                main.create_batch_main_image_tasks(BatchMainImageTaskCreate(drafts=[{"draft_id": draft.id, "reference_urls": ten_urls}], reference_mode="manual", creative_requirement="制作首图"), user=db.get(User, 1), db=db)
+            self.assertEqual(db.scalar(select(func.count()).select_from(PodTask)), 0)
+            repeated_nine = [*ten_urls[:9], ten_urls[0]]
+            main.create_batch_main_image_tasks(BatchMainImageTaskCreate(drafts=[{"draft_id": draft.id, "reference_urls": repeated_nine}], reference_mode="manual", creative_requirement="制作首图"), user=db.get(User, 1), db=db)
+            task = db.scalar(select(PodTask).where(PodTask.task_type == "main_image"))
+        self.assertEqual(task.parameters["reference_urls"], ten_urls[:9])
+
     def test_manual_retry_resets_failed_task(self) -> None:
         task_id = self.add_task(status=TaskStatus.FAILED, provider_task_id="provider-1")
         with self.session_factory() as db:

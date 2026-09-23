@@ -2231,6 +2231,45 @@ def draft_base_carousel_items(draft: ProductDraft) -> list[dict]:
     return custom_items or draft_sku_carousel_items(draft)
 
 
+def draft_main_image_reference_urls(draft: ProductDraft) -> tuple[list[str], list[str]]:
+    """首图参考素材分开读取：已采用的轮播图，以及全部原始 SKU 图。"""
+    carousel_urls = list(dict.fromkeys(
+        str(item.get("image_url")).strip()
+        for item in (draft.carousel_items or [])
+        if item.get("image_url") and item.get("source_type") not in {"sku", "main_image"}
+    ))
+    sku_urls = list(dict.fromkeys(
+        str(item.get("image_url")).strip()
+        for item in (draft.sku_items or []) if item.get("image_url")
+    ))
+    return carousel_urls, sku_urls
+
+
+def choose_main_image_references(
+    mode: str, requested: list[str], carousel_urls: list[str], sku_urls: list[str],
+    *, legacy_random_pool: list[str] | None = None,
+) -> tuple[list[str], str]:
+    """按来源选图；新轮播图随机模式在来源为空时逐草稿回退到 SKU 图。"""
+    if mode == "manual":
+        if not requested:
+            raise HTTPException(400, "请手动选择至少一张首图参考图")
+        if len(requested) > 9:
+            raise HTTPException(400, "首图参考图最多选择 9 张")
+        if any(url not in set(carousel_urls) | set(sku_urls) for url in requested):
+            raise HTTPException(400, "包含无效的首图参考图")
+        return requested, mode
+    if mode == "random_sku":
+        pool, effective_mode = sku_urls, mode
+    elif mode == "random_carousel":
+        pool = carousel_urls or sku_urls
+        effective_mode = mode if carousel_urls else "random_sku"
+    else:
+        pool, effective_mode = legacy_random_pool or carousel_urls or sku_urls, mode
+    if not pool:
+        raise HTTPException(400, "缺少可用于制作首图的轮播图或 SKU 图")
+    return random.sample(pool, min(3, len(pool))), effective_mode
+
+
 def draft_working_images(draft: ProductDraft) -> list[str]:
     """图片工作台当前编排；第 1 张就是首图。"""
     return list(dict.fromkeys(item["image_url"] for item in draft_base_carousel_items(draft)))
@@ -2405,8 +2444,10 @@ def create_draft_image_tasks(draft_id: int, payload: DraftImageTaskCreate, user:
                 }, result_urls=[], result_map=[],
             ))
     else:
-        carousel_urls = [item.get("image_url") for item in (draft.carousel_items or []) if item.get("image_url")]
-        requested_references = list(dict.fromkeys(payload.reference_urls))
+        carousel_urls, sku_urls = draft_main_image_reference_urls(draft)
+        requested_references = list(dict.fromkeys(url.strip() for url in payload.reference_urls if url.strip()))
+        if len(requested_references) > 9:
+            raise HTTPException(400, "首图参考图最多选择 9 张")
         carousel_tasks = db.scalars(select(PodTask).where(
             PodTask.task_type == "carousel",
             *([] if user.role == Role.SUPER_ADMIN else [PodTask.company_id == draft.company_id]),
@@ -2418,25 +2459,21 @@ def create_draft_image_tasks(draft_id: int, payload: DraftImageTaskCreate, user:
             if isinstance(task.parameters, dict) and task.parameters.get("draft_id") == draft.id
             for url in (task.result_urls or [])
         }
+        legacy_carousel_urls = [item.get("image_url") for item in (draft.carousel_items or []) if item.get("image_url")]
         sku_carousel_urls = [item["image_url"] for item in draft_sku_carousel_items(draft)]
-        allowed_references = set(carousel_urls) | set(sku_carousel_urls) | generated_urls
+        allowed_references = set(legacy_carousel_urls) | set(sku_urls) | generated_urls
         if any(url not in allowed_references for url in requested_references):
-            raise HTTPException(400, "首图只能使用当前草稿的有效轮播图作为参考")
-        reference_pool = requested_references or carousel_urls or sku_carousel_urls
-        if not reference_pool:
-            raise HTTPException(400, "请先采用至少一张轮播图")
-        if payload.reference_mode == "manual":
-            references = requested_references
-            if not references:
-                raise HTTPException(400, "请手动选择首图参考图")
-        else:
-            references = random.sample(reference_pool, min(3, len(reference_pool)))
+            raise HTTPException(400, "首图只能使用当前草稿的轮播图或 SKU 图作为参考")
+        references, effective_mode = choose_main_image_references(
+            payload.reference_mode, requested_references, carousel_urls, sku_urls,
+            legacy_random_pool=requested_references or legacy_carousel_urls or sku_carousel_urls,
+        )
         tasks.append(PodTask(
             company_id=draft.company_id, template_id=draft.template_id, created_by=user.id,
             draft_id=draft.id,
             task_type="main_image", status=TaskStatus.QUEUED, provider=provider.provider, provider_model=provider.model,
             parameters={
-                "task_type": "main_image", "draft_id": draft.id, "reference_mode": payload.reference_mode,
+                "task_type": "main_image", "draft_id": draft.id, "reference_mode": effective_mode,
                 "reference_urls": references, "ratio": payload.ratio, "quality": quality,
                 "creative_requirement": payload.creative_requirement,
             }, result_urls=[], result_map=[],
@@ -2527,25 +2564,26 @@ def create_batch_main_image_tasks(payload: BatchMainImageTaskCreate, user: User 
             raise HTTPException(400, f"草稿 #{draft.id} 当前不在待制作主图阶段")
         if not draft.template_id:
             raise HTTPException(400, f"草稿 #{draft.id} 缺少产品模板")
-        carousel_urls = [item.get("image_url") for item in (draft.carousel_items or []) if item.get("image_url")]
+        carousel_urls, sku_urls = draft_main_image_reference_urls(draft)
+        legacy_carousel_urls = [item.get("image_url") for item in (draft.carousel_items or []) if item.get("image_url")]
         sku_carousel_urls = [item["image_url"] for item in draft_sku_carousel_items(draft)]
-        allowed_references = set(carousel_urls) | set(sku_carousel_urls) | carousel_results_by_draft.get(draft.id, set())
+        allowed_references = set(legacy_carousel_urls) | set(sku_urls) | carousel_results_by_draft.get(draft.id, set())
         requested_references = list(dict.fromkeys(url.strip() for url in selection.reference_urls if url.strip()))
+        if len(requested_references) > 9:
+            raise HTTPException(400, f"草稿 #{draft.id} 首图参考图最多选择 9 张")
         if any(url not in allowed_references for url in requested_references):
             raise HTTPException(400, f"草稿 #{draft.id} 包含无效的首图参考图")
-        reference_pool = carousel_urls or sku_carousel_urls
-        if not reference_pool:
-            raise HTTPException(400, f"草稿 #{draft.id} 缺少可用于制作首图的轮播图")
-        if payload.reference_mode == "manual":
-            if not requested_references:
-                raise HTTPException(400, f"草稿 #{draft.id} 请至少手动选择一张轮播图")
-            references = requested_references
-        else:
-            references = random.sample(reference_pool, min(3, len(reference_pool)))
+        try:
+            references, effective_mode = choose_main_image_references(
+                payload.reference_mode, requested_references, carousel_urls, sku_urls,
+                legacy_random_pool=legacy_carousel_urls or sku_carousel_urls,
+            )
+        except HTTPException as exc:
+            raise HTTPException(exc.status_code, f"草稿 #{draft.id} {exc.detail}") from exc
         tasks.append(PodTask(
             company_id=draft.company_id, template_id=draft.template_id, created_by=user.id, draft_id=draft.id,
             task_type="main_image", status=TaskStatus.QUEUED, provider=provider.provider, provider_model=provider.model,
-            parameters={"task_type": "main_image", "draft_id": draft.id, "reference_mode": payload.reference_mode,
+            parameters={"task_type": "main_image", "draft_id": draft.id, "reference_mode": effective_mode,
                         "reference_urls": references, "ratio": payload.ratio, "quality": quality,
                         "creative_requirement": payload.creative_requirement}, result_urls=[], result_map=[],
         ))
