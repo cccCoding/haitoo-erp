@@ -59,6 +59,7 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}}
       ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-4320}
       SUPER_ADMIN_ACCESS_TOKEN_MINUTES: ${SUPER_ADMIN_ACCESS_TOKEN_MINUTES:-480}
       # 每套部署只允许自己的运营端和管理端域名跨域访问。
@@ -94,6 +95,7 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
     depends_on:
@@ -108,6 +110,7 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
@@ -130,6 +133,7 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
@@ -153,6 +157,7 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
     depends_on:

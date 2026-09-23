@@ -7,7 +7,9 @@ from .config import get_settings
 
 
 def _fernet() -> Fernet:
-    key = base64.urlsafe_b64encode(hashlib.sha256(get_settings().secret_key.encode()).digest())
+    settings = get_settings()
+    secret = settings.credential_encryption_key or settings.secret_key
+    key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
     return Fernet(key)
 
 

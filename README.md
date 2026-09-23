@@ -22,17 +22,21 @@ Cloudflare Tunnel，腾讯云服务器使用 Nginx 和腾讯域名。两套环�
 cp deploy/env/cloudflare.env.example .env
 ```
 
-首次启动前生成独立的 MySQL root 密码、应用密码和服务密钥，并限制环境文件权限：
+首次启动前生成 MySQL 密码和服务密钥，并限制环境文件权限。数据库凭据加密密钥先与现有 `SECRET_KEY` 保持一致：
 
 ```bash
-printf 'MYSQL_ROOT_PASSWORD=%s\nMYSQL_PASSWORD=%s\nSECRET_KEY=%s\n' \
+credential_key=$(openssl rand -hex 32)
+printf 'MYSQL_ROOT_PASSWORD=%s\nMYSQL_PASSWORD=%s\nSECRET_KEY=%s\nCREDENTIAL_ENCRYPTION_KEY=%s\n' \
   "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" \
-  "$(openssl rand -hex 32)" >> .env
+  "$credential_key" "$credential_key" >> .env
 chmod 600 .env
 ```
 
 两个密码必须是至少 32 个字符的十六进制随机字符串。MySQL 只监听 Compose
 内部网络的 `3306` 端口，不映射到宿主机；API 和 Worker 使用应用密码连接数据库。
+已有部署升级时，将 `CREDENTIAL_ENCRYPTION_KEY` 设置为当前 `SECRET_KEY` 的值，
+确保数据库中已有的第三方凭据仍能解密。未配置新变量时，程序暂时沿用 `SECRET_KEY`；
+以后更换登录用 `SECRET_KEY` 时，需保留原加密密钥。
 
 启动本地 Cloudflare 环境：
 
@@ -55,7 +59,7 @@ docker compose run --rm api alembic current
 
 ### 代码更新后的数据库迁移
 
-当 API 日志提示“数据库版本不匹配”（例如当前 `20260916_06`、要求 `20260917_07`）时，表示代码已更新而 MySQL 还没执行对应迁移。按以下顺序处理：
+当 API 日志提示“数据库版本不匹配”时，表示代码已更新而 MySQL 还没执行对应迁移。按以下顺序处理：
 
 ```bash
 # 1. 在项目根目录执行版本化迁移（会升级 MySQL 表结构）
@@ -73,7 +77,13 @@ docker compose logs --tail=50 api
 
 如果 compose 服务尚未启动，可改用 `docker compose up -d --build`；它会先执行 `migrate`。正常版本升级只运行 `docker compose run --rm migrate`，**不要**附加 `--adopt-legacy`。
 
-从旧版启动期自动建表流程升级时，迁移服务会拒绝直接接管没有 `alembic_version` 的既有数据库。确认数据库备份可恢复后，显式执行一次：
+全新数据库直接执行普通迁移，首次启动 `docker compose up -d --build` 时也会自动执行同一流程：
+
+```bash
+docker compose run --rm migrate
+```
+
+只有从旧版启动期自动建表流程升级，且数据库已有业务表但没有 `alembic_version` 时，迁移服务才会要求显式接管。确认数据库备份可恢复后执行一次：
 
 ```bash
 docker compose run --rm migrate python -m app.db_migrate --adopt-legacy
@@ -175,9 +185,10 @@ Docker 内部网络开放端口，只有边缘 Nginx 映射宿主机的 80 和 4
 
    ```bash
    cp deploy/env/tencent.env.example .env
-   printf 'MYSQL_ROOT_PASSWORD=%s\nMYSQL_PASSWORD=%s\nSECRET_KEY=%s\n' \
+   credential_key=$(openssl rand -hex 32)
+   printf 'MYSQL_ROOT_PASSWORD=%s\nMYSQL_PASSWORD=%s\nSECRET_KEY=%s\nCREDENTIAL_ENCRYPTION_KEY=%s\n' \
      "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" \
-     "$(openssl rand -hex 32)" >> .env
+     "$credential_key" "$credential_key" >> .env
    chmod 600 .env
    ```
 

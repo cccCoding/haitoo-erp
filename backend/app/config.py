@@ -5,6 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "sqlite:///./haitoro.db"
     secret_key: str = "local-development-secret"
+    # 数据库中第三方凭据的加密密钥；未单独配置时兼容既有 SECRET_KEY 密文。
+    credential_encryption_key: str | None = None
     access_token_minutes: int = 3 * 24 * 60
     super_admin_access_token_minutes: int = 8 * 60
     cors_origins: str = "http://localhost:5173,http://localhost:5174"

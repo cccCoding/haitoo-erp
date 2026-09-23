@@ -32,11 +32,10 @@ def upgrade_database(connection, *, adopt_legacy: bool = False) -> None:
                 "检测到尚未纳入 Alembic 的既有数据库。请先备份，再执行 "
                 "python -m app.db_migrate --adopt-legacy"
             )
-        # 仅供本次从旧启动期 DDL 流程接管数据库：先补齐旧版本兼容结构，
-        # 再标记静态基线；未来结构变化仍逐版本正常 upgrade。
+        # 仅供本次从旧启动期 DDL 流程接管数据库：先把旧结构规范到静态
+        # 基线，再标记基线版本；其余变化必须由后续迁移逐版本完成。
         from .main import ensure_schema
 
-        Base.metadata.create_all(bind=connection)
         ensure_schema(connection=connection)
         command.stamp(config, "20260911_01")
 
