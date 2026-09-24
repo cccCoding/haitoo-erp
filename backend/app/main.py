@@ -789,8 +789,27 @@ async def list_miaoshou_shops(payload: MiaoshouShopQuery, user: User = Depends(r
             Shop.company_id == user.company_id, Shop.external_shop_id == external_shop_id, Shop.shop_type == "cross_border"
         ))
         if not shop:
-            shop = Shop(company_id=user.company_id, external_shop_id=external_shop_id, name=external_shop_id, shop_type="cross_border")
-            db.add(shop)
+            # 先读再写不能消除并发请求间的竞争；复合唯一键是最终裁决。
+            # 用保存点吸收竞争插入的唯一键冲突，随后读取已由另一请求创建的店铺。
+            candidate = Shop(
+                company_id=user.company_id,
+                external_shop_id=external_shop_id,
+                name=external_shop_id,
+                shop_type="cross_border",
+            )
+            try:
+                with db.begin_nested():
+                    db.add(candidate)
+                    db.flush()
+                shop = candidate
+            except IntegrityError:
+                shop = db.scalar(select(Shop).where(
+                    Shop.company_id == user.company_id,
+                    Shop.external_shop_id == external_shop_id,
+                    Shop.shop_type == "cross_border",
+                ))
+                if not shop:
+                    raise
         shop.name = str(item.get("platformShopName") or item.get("shopNick") or external_shop_id).strip()[:120]
         shop.nickname = str(item.get("shopNick") or "").strip()[:120] or None
         shop.platform = str(item.get("platform") or "").strip()[:40] or None

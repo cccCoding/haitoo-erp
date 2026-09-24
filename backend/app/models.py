@@ -53,6 +53,14 @@ class User(Base):
 
 class Shop(Base):
     __tablename__ = "shops"
+    __table_args__ = (
+        # 妙手跨境店以 company_id + external_shop_id + shop_type 作为外部身份。
+        # 本土店没有 external_shop_id；MySQL/MariaDB 允许该唯一键中的多个 NULL。
+        UniqueConstraint(
+            "company_id", "external_shop_id", "shop_type",
+            name="uq_shops_company_external_shop_type",
+        ),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     name: Mapped[str] = mapped_column(String(120))
@@ -222,7 +230,11 @@ class UserTemplatePrompt(Base):
 
 class PodTask(Base):
     __tablename__ = "pod_tasks"
-    __table_args__ = (Index("ix_pod_tasks_provider_model", "provider", "provider_model"),)
+    __table_args__ = (
+        Index("ix_pod_tasks_provider_model", "provider", "provider_model"),
+        # Worker 按状态取队列快照，并按创建顺序稳定处理。
+        Index("ix_pod_tasks_status_created_at_id", "status", "created_at", "id"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     template_id: Mapped[int] = mapped_column()

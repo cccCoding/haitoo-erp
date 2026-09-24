@@ -45,6 +45,44 @@ class SchemaMigrationTests(unittest.TestCase):
             current, expected = schema_heads(connection)
             self.assertEqual(current, expected)
 
+    def test_shop_identity_constraint_and_hub_upload_task_indexes_are_migrated(self) -> None:
+        with self.engine.begin() as connection:
+            upgrade_database(connection)
+            inspector = inspect(connection)
+            shop_constraints = inspector.get_unique_constraints("shops")
+            hub_upload_indexes = {item["name"] for item in inspector.get_indexes("hub_upload_tasks")}
+            pod_task_indexes = {item["name"] for item in inspector.get_indexes("pod_tasks")}
+
+        self.assertTrue(any(
+            item["name"] == "uq_shops_company_external_shop_type"
+            and item["column_names"] == ["company_id", "external_shop_id", "shop_type"]
+            for item in shop_constraints
+        ))
+        self.assertTrue({
+            "ix_hub_upload_tasks_status",
+            "ix_hub_upload_tasks_created_by",
+            "ix_hub_upload_tasks_claim_token",
+        }.issubset(hub_upload_indexes))
+        self.assertIn("ix_pod_tasks_status_created_at_id", pod_task_indexes)
+
+    def test_shop_identity_migration_rejects_existing_duplicate_cross_border_shops(self) -> None:
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, "20260920_15")
+            connection.execute(text("""
+                INSERT INTO companies (id, name, is_active, created_at)
+                VALUES (1, 'Test Company', 1, CURRENT_TIMESTAMP)
+            """))
+            connection.execute(text("""
+                INSERT INTO shops (id, company_id, name, region, external_shop_id, auth_status, shop_type)
+                VALUES
+                    (1, 1, 'First', 'MY', 'external-1', 'active', 'cross_border'),
+                    (2, 1, 'Second', 'MY', 'external-1', 'active', 'cross_border')
+            """))
+
+            with self.assertRaisesRegex(RuntimeError, "发现重复跨境店"):
+                command.upgrade(config, "head")
+
     def test_existing_unversioned_database_requires_explicit_adoption(self) -> None:
         with self.engine.begin() as connection:
             config = alembic_config(connection)
