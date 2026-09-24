@@ -265,6 +265,10 @@ class AdminCompanyCreate(BaseModel):
     admin_password: str = Field(min_length=8, max_length=128)
 
 
+class AdminPasswordUpdate(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
+
+
 class MiaoshouAccountUpdate(BaseModel):
     app_id: str = Field(min_length=1, max_length=255)
     app_secret: str = Field(min_length=1, max_length=500)
