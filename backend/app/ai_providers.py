@@ -104,6 +104,8 @@ class GrsaiProvider:
             headers={"Authorization": f"Bearer {api_key}"},
             params={"id": provider_task_id},
         )
+        if response.status_code == 404 and "result not exist, valid for 2 hours" in response.text.lower():
+            raise ProviderTaskTerminalError(f"grsai 结果不存在或已超过 2 小时有效期：404 {response.text[:300]}")
         _raise_for_provider_error(self.name, response)
         result = self._response_data(response)
         status = str(result.get("status", "")).lower()

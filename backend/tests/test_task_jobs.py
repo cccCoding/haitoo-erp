@@ -296,6 +296,19 @@ class TaskJobTests(unittest.TestCase):
         with self.assertRaises(ProviderTaskTerminalError):
             asyncio.run(GrsaiProvider().poll_once("provider-1", "test", Settings(), client))
 
+    def test_grsai_expired_result_404_is_terminal(self) -> None:
+        response = httpx.Response(404, request=httpx.Request("GET", "https://grsai.example/result"), json={"error": "result not exist, valid for 2 hours"})
+        client = AsyncMock(); client.get.return_value = response
+        with self.assertRaisesRegex(ProviderTaskTerminalError, "超过 2 小时有效期"):
+            asyncio.run(GrsaiProvider().poll_once("provider-1", "test", Settings(), client))
+
+    def test_grsai_other_404_remains_retryable(self) -> None:
+        response = httpx.Response(404, request=httpx.Request("GET", "https://grsai.example/result"), json={"error": "temporary routing error"})
+        client = AsyncMock(); client.get.return_value = response
+        with self.assertRaises(ProviderError) as raised:
+            asyncio.run(GrsaiProvider().poll_once("provider-1", "test", Settings(), client))
+        self.assertNotIsInstance(raised.exception, ProviderTaskTerminalError)
+
     def test_grsai_invalid_json_logs_complete_raw_response(self) -> None:
         raw_body = "event: error\ndata: upstream returned HTML <bad gateway>\n"
         response = httpx.Response(
