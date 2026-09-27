@@ -468,7 +468,6 @@ class ShopeeDraftExportInput(BaseModel):
     default_price: float = Field(ge=0.10, le=1_000_000_000)
     default_quantity: int = Field(default=999, ge=0, le=10_000_000)
     shipping_channels: list[str] = Field(min_length=1, max_length=20)
-    dangerous_goods: Literal["Yes", "No"] = "No"
     product_overrides: list[ShopeeDraftProductOverride] = Field(default_factory=list, max_length=100)
 
 

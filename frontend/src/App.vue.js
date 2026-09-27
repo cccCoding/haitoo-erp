@@ -53,7 +53,7 @@ const showBatchImageReviewDialog = ref(false), batchImageReviewLoading = ref(fal
 const MAX_DRAFT_BATCH_SIZE = 100;
 const tiktokExportCatalogId = ref(null), tiktokExportCategory = ref(''), tiktokExportDefaultPrice = ref(null), tiktokExportDefaultQuantity = ref(999), tiktokExportCod = ref('Y'), tiktokExportAttributes = ref({}), tiktokExportOverrides = ref({}), tiktokTargetShopId = ref(null), tiktokSubmitting = ref(false);
 const TIKTOK_EXPORT_ATTRIBUTE_PRESETS_VERSION = 'v1';
-const shopeeExportCatalogId = ref(null), shopeeExportCategoryId = ref(''), shopeeExportDefaultPrice = ref(null), shopeeExportDefaultQuantity = ref(999), shopeeExportDangerousGoods = ref('No'), shopeeExportChannels = ref([]), shopeeExportOverrides = ref({});
+const shopeeExportCatalogId = ref(null), shopeeExportCategoryId = ref(''), shopeeExportDefaultPrice = ref(null), shopeeExportDefaultQuantity = ref(999), shopeeExportChannels = ref([]), shopeeExportOverrides = ref({});
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null), draftListRefreshing = ref(false);
 const collectBoxItems = ref([]), collectBoxTotal = ref(0), collectBoxLoading = ref(false);
 const collectBoxConfigured = ref(false), collectBoxLastSyncedAt = ref(null), collectBoxInitialSyncedAt = ref(null);
@@ -1728,7 +1728,6 @@ async function openShopeeExportDialog() {
     shopeeExportCategoryId.value = '';
     shopeeExportDefaultPrice.value = null;
     shopeeExportDefaultQuantity.value = 999;
-    shopeeExportDangerousGoods.value = 'No';
     shopeeExportChannels.value = [];
     shopeeExportOptions.value = null;
     shopeeExportOverrides.value = Object.fromEntries(selectedDrafts.value.map(draft => [draft.id, { price: null, quantity: null }]));
@@ -1819,7 +1818,6 @@ async function exportSelectedDraftsToShopee() {
             category_id: shopeeExportCategoryId.value,
             default_price: defaultPrice,
             default_quantity: defaultQuantity,
-            dangerous_goods: shopeeExportDangerousGoods.value,
             shipping_channels: shopeeExportChannels.value,
             product_overrides: productOverrides,
         }, { headers: headers.value, responseType: 'blob' });
@@ -8176,19 +8174,6 @@ if (__VLS_ctx.showShopeeExportDialog) {
             step: "1",
         });
         (__VLS_ctx.shopeeExportDefaultQuantity);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
-            ...{ class: "required" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-            value: (__VLS_ctx.shopeeExportDangerousGoods),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-            value: "No",
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-            value: "Yes",
-        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
             ...{ class: "tiktok-attribute-section" },
         });
@@ -8197,6 +8182,8 @@ if (__VLS_ctx.showShopeeExportDialog) {
             ...{ class: "required" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        (__VLS_ctx.shopeeExportOptions?.shipping_channels?.[0]?.on_value || 'On');
+        (__VLS_ctx.shopeeExportOptions?.shipping_channels?.[0]?.off_value || 'Off');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "shopee-channel-options" },
         });
@@ -10941,7 +10928,6 @@ if (__VLS_ctx.showMaterialUploadDialog) {
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
-/** @type {__VLS_StyleScopedClasses['required']} */ ;
 /** @type {__VLS_StyleScopedClasses['tiktok-attribute-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
 /** @type {__VLS_StyleScopedClasses['shopee-channel-options']} */ ;
@@ -11372,7 +11358,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             shopeeExportCategoryId: shopeeExportCategoryId,
             shopeeExportDefaultPrice: shopeeExportDefaultPrice,
             shopeeExportDefaultQuantity: shopeeExportDefaultQuantity,
-            shopeeExportDangerousGoods: shopeeExportDangerousGoods,
             shopeeExportChannels: shopeeExportChannels,
             shopeeExportOverrides: shopeeExportOverrides,
             draftPageSize: draftPageSize,

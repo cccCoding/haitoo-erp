@@ -84,8 +84,49 @@ def _field_columns(sheet) -> dict[str, int]:
     }
 
 
-def _template_sheet_path(template_bytes: bytes) -> str:
-    """从工作簿关系中定位 Template 工作表，避免依赖固定 sheet2.xml。"""
+def _choice_values(sheet, column: int, defaults: tuple[str, str]) -> tuple[str, str]:
+    """优先读取数据验证的两个实际填入值；旧模板没有验证时读取提示或使用默认值。"""
+    coordinate = sheet.cell(DATA_START_ROW, column).coordinate
+    for validation in sheet.data_validations.dataValidation:
+        if validation.type != "list" or coordinate not in validation.sqref:
+            continue
+        formula = _clean(validation.formula1)
+        if formula.startswith('"') and formula.endswith('"'):
+            values = tuple(part.strip() for part in formula[1:-1].split(","))
+            if len(values) == 2 and all(values):
+                return values
+    hint = _clean(sheet.cell(6, column).value)
+    values = tuple(part.strip() for part in hint.split("/"))
+    if len(values) == 2 and all(values) and all(len(part) <= 20 for part in values):
+        return values
+    return defaults
+
+
+def _template_sheet(workbook):
+    """用机器字段识别商品模板，兼容不同语言的工作表名称。"""
+    for sheet in workbook:
+        fields = _field_columns(sheet)
+        if FIELD_CATEGORY in fields and FIELD_PRODUCT_NAME in fields and any(
+            field.startswith("channel_id.") for field in fields
+        ):
+            return sheet
+    raise ValueError("Shopee 模板缺少 basic 商品模板工作表")
+
+
+def _category_sheet(workbook):
+    """类目表首行是稳定的机器字段，工作表名称随模板语言变化。"""
+    for sheet in workbook:
+        if (
+            _clean(sheet.cell(1, 1).value) == "et_title_category_name"
+            and _clean(sheet.cell(1, 2).value) == "et_title_category_id"
+            and _clean(sheet.cell(1, 3).value) == "et_title_dts_range"
+        ):
+            return sheet
+    raise ValueError("Shopee 模板缺少预购出货天数范围类目工作表")
+
+
+def _template_sheet_path(template_bytes: bytes, sheet_name: str) -> str:
+    """从工作簿关系中定位商品模板工作表，避免依赖名称或固定 sheet2.xml。"""
     main_ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
     rel_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
     package_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -93,17 +134,17 @@ def _template_sheet_path(template_bytes: bytes) -> str:
         workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
         relation_id = None
         for sheet in workbook.findall(f"{{{main_ns}}}sheets/{{{main_ns}}}sheet"):
-            if sheet.attrib.get("name") == "Template":
+            if sheet.attrib.get("name") == sheet_name:
                 relation_id = sheet.attrib.get(f"{{{rel_ns}}}id")
                 break
         if not relation_id:
-            raise ValueError("Shopee 模板缺少 Template 工作表")
+            raise ValueError("无法定位 Shopee 商品模板工作表")
         relationships = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
         for relation in relationships.findall(f"{{{package_ns}}}Relationship"):
             if relation.attrib.get("Id") == relation_id:
                 target = relation.attrib["Target"].lstrip("/")
                 return target if target.startswith("xl/") else "xl/" + target
-    raise ValueError("无法定位 Shopee Template 工作表")
+    raise ValueError("无法定位 Shopee 商品模板工作表")
 
 
 def _load_workbook(template_bytes: bytes):
@@ -119,19 +160,14 @@ def parse_listing_options(template_bytes: bytes, template_type: str | None = Non
     if template_type and template_type != "shopee_basic":
         raise ValueError("所选店铺类型与上传模板不匹配，识别结果为 Shopee")
     workbook = _load_workbook(template_bytes)
-    required_sheets = {"Template", "Pre-order DTS Range"}
-    missing_sheets = sorted(required_sheets - set(workbook.sheetnames))
-    if missing_sheets:
-        raise ValueError(f"Shopee 模板缺少工作表：{', '.join(missing_sheets)}")
-    sheet = workbook["Template"]
+    sheet = _template_sheet(workbook)
     fields = _field_columns(sheet)
     missing_fields = sorted(REQUIRED_FIELDS - set(fields))
     if missing_fields:
         raise ValueError(f"Shopee 模板缺少导出字段：{', '.join(missing_fields)}")
     if _clean(sheet.cell(2, 1).value).lower() != "basic":
         raise ValueError("当前仅支持 Shopee basic 批量上传模板")
-
-    category_sheet = workbook["Pre-order DTS Range"]
+    category_sheet = _category_sheet(workbook)
     categories = []
     seen_ids = set()
     for row in range(7, category_sheet.max_row + 1):
@@ -147,17 +183,25 @@ def parse_listing_options(template_bytes: bytes, template_type: str | None = Non
         })
         seen_ids.add(category_id)
 
-    shipping_channels = [
-        {
-            "field": field,
-            "id": field.split(".", 1)[1] if "." in field else field,
-            "name": _clean(sheet.cell(3, column).value) or field,
-        }
-        for field, column in fields.items()
-        if field.startswith("channel_id.")
-    ]
+    shipping_channels = []
+    for field, column in fields.items():
+        if field.startswith("channel_id."):
+            on_value, off_value = _choice_values(sheet, column, ("On", "Off"))
+            shipping_channels.append({
+                "field": field,
+                "id": field.split(".", 1)[1] if "." in field else field,
+                "name": _clean(sheet.cell(3, column).value) or field,
+                "on_value": on_value,
+                "off_value": off_value,
+            })
     if not shipping_channels:
         raise ValueError("Shopee 模板没有可用物流渠道")
+
+    dangerous_column = fields.get(FIELD_DANGEROUS_GOODS)
+    yes_value, no_value = (
+        _choice_values(sheet, dangerous_column, ("Yes", "No"))
+        if dangerous_column else ("Yes", "No")
+    )
 
     return {
         "template_version": "basic",
@@ -170,6 +214,10 @@ def parse_listing_options(template_bytes: bytes, template_type: str | None = Non
         },
         "categories": categories,
         "shipping_channels": shipping_channels,
+        "dangerous_goods_options": [
+            {"value": "No", "label": no_value},
+            {"value": "Yes", "label": yes_value},
+        ],
         "price_limits": {"min": 0.10, "max": 1_000_000_000},
         "quantity_limits": {"min": 0, "max": 10_000_000},
         "title_limits": {"min": 20, "max": 120},
@@ -180,8 +228,8 @@ def parse_listing_options(template_bytes: bytes, template_type: str | None = Non
     }
 
 
-def _preserve_template_package(generated_bytes: bytes, template_bytes: bytes) -> bytes:
-    template_path = _template_sheet_path(template_bytes)
+def _preserve_template_package(generated_bytes: bytes, template_bytes: bytes, sheet_name: str) -> bytes:
+    template_path = _template_sheet_path(template_bytes, sheet_name)
     output = BytesIO()
     with ZipFile(BytesIO(template_bytes), "r") as source, ZipFile(BytesIO(generated_bytes), "r") as generated, ZipFile(output, "w", ZIP_DEFLATED) as target:
         generated_template_xml = generated.read(template_path)
@@ -203,7 +251,7 @@ def _preserve_template_package(generated_bytes: bytes, template_bytes: bytes) ->
 
 
 def build_workbook(
-    *, template, category_id: str, shipping_channels: list[str], dangerous_goods: str,
+    *, template, category_id: str, shipping_channels: list[str],
     products: list[dict], template_bytes: bytes,
 ) -> bytes:
     options = parse_listing_options(template_bytes, "shopee_basic")
@@ -211,12 +259,13 @@ def build_workbook(
     if category_id not in category_ids:
         raise ValueError("Shopee 类目不存在，请重新选择")
     valid_channel_fields = {item["field"] for item in options["shipping_channels"]}
+    channel_values = {item["field"]: item for item in options["shipping_channels"]}
     selected_channels = list(dict.fromkeys(shipping_channels))
     if not selected_channels or any(field not in valid_channel_fields for field in selected_channels):
         raise ValueError("请至少选择一个模板支持的 Shopee 物流渠道")
 
     workbook = _load_workbook(template_bytes)
-    sheet = workbook["Template"]
+    sheet = _template_sheet(workbook)
     field_columns = _field_columns(sheet)
     for row in sheet.iter_rows(min_row=DATA_START_ROW, max_row=max(sheet.max_row, DATA_END_ROW), min_col=1, max_col=sheet.max_column):
         for cell in row:
@@ -233,8 +282,7 @@ def build_workbook(
         if len(sku_images) * len(sizes) > 50:
             raise ValueError(f"商品草稿 #{product['draft_id']} 的 Shopee 二级变体组合不能超过 50 个")
         gallery = list(dict.fromkeys(product["image_urls"]))[:9]
-        parent_sku = f"HT-{product['draft_id']}"
-        integration_no = f"HT-{product['draft_id']}"
+        draft_id = str(product["draft_id"])
         for sku_image in sku_images:
             base_sku = sku_image["sku"]
             if len(base_sku) > 20:
@@ -251,9 +299,8 @@ def build_workbook(
                     FIELD_CATEGORY: category_id,
                     FIELD_PRODUCT_NAME: product["title"],
                     FIELD_PRODUCT_DESCRIPTION: product["description"],
-                    FIELD_PARENT_SKU: parent_sku,
-                    FIELD_DANGEROUS_GOODS: dangerous_goods,
-                    FIELD_VARIATION_INTEGRATION_NO: integration_no,
+                    FIELD_PARENT_SKU: draft_id,
+                    FIELD_VARIATION_INTEGRATION_NO: draft_id,
                     FIELD_VARIATION_NAME_1: "Color",
                     FIELD_VARIATION_VALUE_1: base_sku,
                     FIELD_VARIATION_IMAGE: sku_image["image_url"],
@@ -272,7 +319,8 @@ def build_workbook(
                 for index, image_url in enumerate(gallery[1:9], start=1):
                     values[f"ps_item_image_{index}"] = image_url
                 for channel_field in valid_channel_fields:
-                    values[channel_field] = "On" if channel_field in selected_channels else "Off"
+                    channel = channel_values[channel_field]
+                    values[channel_field] = channel["on_value"] if channel_field in selected_channels else channel["off_value"]
                 for field, value in values.items():
                     column = field_columns.get(field)
                     if column:
@@ -281,4 +329,4 @@ def build_workbook(
 
     output = BytesIO()
     workbook.save(output)
-    return _preserve_template_package(output.getvalue(), template_bytes)
+    return _preserve_template_package(output.getvalue(), template_bytes, sheet.title)

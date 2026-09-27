@@ -6,6 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import UploadFile
 from openpyxl import Workbook, load_workbook
+from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -27,13 +28,13 @@ FIELDS = [
 ]
 
 
-def shopee_template_bytes() -> bytes:
+def shopee_template_bytes(*, localized: bool = False) -> bytes:
     workbook = Workbook()
-    workbook.active.title = "Guidance"
-    sheet = workbook.create_sheet("Template")
-    workbook.create_sheet("Upload sample")
-    category_sheet = workbook.create_sheet("Pre-order DTS Range")
-    workbook.create_sheet("Size chart template list")
+    workbook.active.title = "指南" if localized else "Guidance"
+    sheet = workbook.create_sheet("模板" if localized else "Template")
+    sample_sheet = workbook.create_sheet("上传范例" if localized else "Upload sample")
+    category_sheet = workbook.create_sheet("预购出货天数范围" if localized else "Pre-order DTS Range")
+    workbook.create_sheet("尺码表模板列表" if localized else "Size chart template list")
     workbook.create_sheet("HiddenShopBrand").sheet_state = "hidden"
     workbook.create_sheet("HiddenTax").sheet_state = "hidden"
     for column, field in enumerate(FIELDS, start=1):
@@ -44,6 +45,30 @@ def shopee_template_bytes() -> bytes:
         }.get(field, field)
     sheet["A2"] = "basic"
     sheet.freeze_panes = "A5"
+    dangerous_values = ("好的", "没有") if localized else ("Yes", "No")
+    channel_values = ("开启", "关闭") if localized else ("On", "Off")
+    for column, field in enumerate(FIELDS, start=1):
+        if field == "ps_dangerous_goods":
+            sheet.cell(6, column).value = "/".join(dangerous_values)
+            validation = DataValidation(type="list", formula1=f'"{",".join(dangerous_values)}"')
+            sheet.add_data_validation(validation)
+            letter = sheet.cell(7, column).column_letter
+            validation.add(f"{letter}7:{letter}1007")
+        elif field.startswith("channel_id."):
+            sheet.cell(6, column).value = "/".join(channel_values)
+            validation = DataValidation(type="list", formula1=f'"{",".join(channel_values)}"')
+            sheet.add_data_validation(validation)
+            letter = sheet.cell(7, column).column_letter
+            validation.add(f"{letter}7:{letter}1007")
+    if localized:
+        # 上传范例也带商品机器字段，且可能排在商品模板之前。
+        for column, field in enumerate((field for field in FIELDS if not field.startswith("channel_id.")), start=1):
+            sample_sheet.cell(1, column).value = f"{field}|0|0"
+        sample_sheet["A2"] = "basic"
+        workbook.move_sheet(sample_sheet, offset=-1)
+    category_sheet["A1"] = "et_title_category_name"
+    category_sheet["B1"] = "et_title_category_id"
+    category_sheet["C1"] = "et_title_dts_range"
     category_sheet["A7"] = "100350-Women Clothes/Tops/Tanks & Camisoles"
     category_sheet["B7"] = "100350"
     category_sheet["C7"] = "3 - 30"
@@ -78,6 +103,45 @@ class ShopeeExportTests(unittest.TestCase):
             "id": "100350", "name": "Women Clothes/Tops/Tanks & Camisoles", "pre_order_dts_range": "3 - 30",
         }])
         self.assertEqual([item["field"] for item in options["shipping_channels"]], ["channel_id.2000", "channel_id.2001"])
+        self.assertEqual(options["dangerous_goods_options"], [
+            {"value": "No", "label": "No"}, {"value": "Yes", "label": "Yes"},
+        ])
+        self.assertEqual(options["shipping_channels"][0]["on_value"], "On")
+
+    def test_localized_sheet_names_parse_and_export(self) -> None:
+        template_bytes = shopee_template_bytes(localized=True)
+        options = parse_listing_options(template_bytes, "shopee_basic")
+        self.assertEqual(options["categories"][0]["id"], "100350")
+        self.assertEqual(options["dangerous_goods_options"], [
+            {"value": "No", "label": "没有"}, {"value": "Yes", "label": "好的"},
+        ])
+        self.assertEqual((options["shipping_channels"][0]["on_value"], options["shipping_channels"][0]["off_value"]), ("开启", "关闭"))
+        result = build_workbook(
+            template=SimpleNamespace(
+                sku_specifications={}, package_weight=0.28,
+                package_length=30, package_width=16, package_height=2,
+            ),
+            category_id="100350", shipping_channels=["channel_id.2000"],
+            products=[{
+                "draft_id": 42, "title": "Unique Shopee product title",
+                "description": "Detailed product description for Shopee.",
+                "image_urls": ["https://img.example/cover.jpg"],
+                "sku_images": [{"image_url": "https://img.example/color.jpg", "sku": "Y1AA000001"}],
+                "price": 12.5, "quantity": 88,
+            }],
+            template_bytes=template_bytes,
+        )
+        workbook = load_workbook(BytesIO(result))
+        self.assertEqual(workbook.sheetnames[:4], ["指南", "上传范例", "模板", "预购出货天数范围"])
+        sheet = workbook["模板"]
+        fields = {str(sheet.cell(1, column).value).split("|", 1)[0]: column for column in range(1, sheet.max_column + 1)}
+        self.assertEqual(sheet.cell(7, fields["ps_category"]).value, "100350")
+        self.assertEqual(sheet.cell(7, fields["ps_sku_parent_short"]).value, "42")
+        self.assertIsNone(sheet.cell(7, fields["ps_dangerous_goods"]).value)
+        self.assertEqual(sheet.cell(7, fields["et_title_variation_integration_no"]).value, "42")
+        self.assertEqual(sheet.cell(7, fields["channel_id.2000"]).value, "开启")
+        self.assertEqual(sheet.cell(7, fields["channel_id.2001"]).value, "关闭")
+        self.assertIsNone(workbook["上传范例"]["A7"].value)
 
     def test_builder_maps_color_size_images_and_shipping(self) -> None:
         template = SimpleNamespace(
@@ -85,7 +149,7 @@ class ShopeeExportTests(unittest.TestCase):
             package_weight=0.28, package_length=30, package_width=16, package_height=2,
         )
         result = build_workbook(
-            template=template, category_id="100350", shipping_channels=["channel_id.2000"], dangerous_goods="No",
+            template=template, category_id="100350", shipping_channels=["channel_id.2000"],
             products=[{
                 "draft_id": 1, "title": "Unique Shopee product title", "description": "Detailed product description for Shopee.",
                 "image_urls": ["https://img.example/cover.jpg", "https://img.example/gallery.jpg"],
@@ -102,6 +166,11 @@ class ShopeeExportTests(unittest.TestCase):
         self.assertEqual(sheet.cell(8, fields["ps_sku_short"]).value, "Y1AA000001-M")
         self.assertEqual(sheet.cell(7, fields["channel_id.2000"]).value, "On")
         self.assertEqual(sheet.cell(7, fields["channel_id.2001"]).value, "Off")
+        self.assertEqual(sheet.cell(7, fields["ps_sku_parent_short"]).value, "1")
+        self.assertIsNone(sheet.cell(7, fields["ps_dangerous_goods"]).value)
+        self.assertEqual(sheet.cell(7, fields["et_title_variation_integration_no"]).value, "1")
+        self.assertEqual(sheet.cell(8, fields["ps_sku_parent_short"]).value, "1")
+        self.assertEqual(sheet.cell(8, fields["et_title_variation_integration_no"]).value, "1")
         self.assertEqual(workbook.sheetnames[0], "Guidance")
 
     def test_catalog_upload_uses_shopee_parser(self) -> None:
@@ -120,6 +189,28 @@ class ShopeeExportTests(unittest.TestCase):
             self.assertEqual(result["template_version"], "basic")
             self.assertEqual(result["category_count"], 1)
             self.assertEqual(result["options"]["shipping_channels"][0]["field"], "channel_id.2000")
+
+    def test_existing_catalog_options_reparse_template_choices(self) -> None:
+        template_bytes = shopee_template_bytes(localized=True)
+        old_options = parse_listing_options(template_bytes, "shopee_basic")
+        old_options.pop("dangerous_goods_options")
+        for channel in old_options["shipping_channels"]:
+            channel.pop("on_value")
+            channel.pop("off_value")
+        with self.session_factory() as db:
+            admin = User(id=1, company_id=1, email="admin@example.com", name="Admin", password_hash="x", role=Role.COMPANY_ADMIN)
+            db.add_all([
+                admin,
+                TiktokCategoryCatalog(
+                    id=1, company_id=1, name="Shopee basic", source_filename="shopee.xlsx",
+                    template_type="shopee_basic", template_version="basic", template_blob=template_bytes,
+                    parsed_options=old_options, created_by=1,
+                ),
+            ])
+            db.commit()
+            options = main.get_tiktok_export_options(1, user=admin, db=db)
+            self.assertEqual(options["dangerous_goods_options"][0]["label"], "没有")
+            self.assertEqual(options["shipping_channels"][0]["on_value"], "开启")
 
     def test_route_exports_shopee_catalog(self) -> None:
         options = parse_listing_options(self.template_bytes, "shopee_basic")
@@ -148,13 +239,16 @@ class ShopeeExportTests(unittest.TestCase):
             db.commit()
             response = main.export_drafts_to_shopee(ShopeeDraftExportInput(
                 draft_ids=[1], category_catalog_id=1, category_id="100350", default_price=10,
-                default_quantity=99, shipping_channels=["channel_id.2000"], dangerous_goods="No",
+                default_quantity=99, shipping_channels=["channel_id.2000"],
             ), user=db.get(User, 1), db=db)
             self.assertEqual(db.get(ProductDraft, 1).export_count, 1)
             self.assertEqual(db.get(ProductDraft, 1).status, "published")
             self.assertEqual(db.get(ProductDraft, 1).workflow_stage, "published")
         exported = load_workbook(BytesIO(response.body), data_only=False)["Template"]
         self.assertEqual(exported["A7"].value, "100350")
+        self.assertEqual(exported["D7"].value, "1")
+        self.assertIsNone(exported["E7"].value)
+        self.assertEqual(exported["F7"].value, "1")
 
 
 if __name__ == "__main__":

@@ -3098,7 +3098,11 @@ def get_tiktok_export_options(
     catalog = visible_tiktok_catalog(db, user, category_catalog_id)
     if not catalog:
         raise HTTPException(404, "类目库不存在")
-    return {**catalog.parsed_options, "category_catalog": serialize_tiktok_catalog(catalog)}
+    options = catalog.parsed_options
+    if catalog.template_type == "shopee_basic" and "dangerous_goods_options" not in options:
+        # 已导入的 Shopee 类目库缺少模板选项元数据，读取原始模板以兼容旧记录。
+        options = parse_shopee_listing_options(catalog.template_blob, "shopee_basic")
+    return {**options, "category_catalog": serialize_tiktok_catalog(catalog)}
 
 
 @app.post("/drafts/export-tiktok")
@@ -3313,7 +3317,6 @@ def export_drafts_to_shopee(payload: ShopeeDraftExportInput, user: User = Depend
             template=template,
             category_id=payload.category_id,
             shipping_channels=payload.shipping_channels,
-            dangerous_goods=payload.dangerous_goods,
             products=products,
             template_bytes=catalog.template_blob,
         )

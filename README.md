@@ -12,9 +12,45 @@
 
 ## 部署方式
 
-应用容器本身只开放 Docker 内部端口。按环境选择一个公网入口：本地使用
-Cloudflare Tunnel，腾讯云服务器使用 Nginx 和腾讯域名。两套环境分别维护自己的
-`.env`，数据库、任务和前端镜像配置保持一致。
+应用容器本身只开放 Docker 内部端口。对外访问时按环境选择公网入口：
+本地可以使用 Cloudflare Tunnel，腾讯云服务器使用 Nginx 和腾讯域名。
+纯本机测试使用下述端口映射。各环境分别维护配置和数据卷。
+
+### 本机隔离测试环境
+
+本机测试使用独立的 `.env.local`、Compose 项目名和 MySQL 数据卷，不修改腾讯云服务器配置，也不要连接生产数据库。先复制配置模板并生成随机密钥：
+
+```bash
+cp deploy/env/local.env.example .env.local
+credential_key=$(openssl rand -hex 32)
+sed -i '' "s/^MYSQL_ROOT_PASSWORD=$/MYSQL_ROOT_PASSWORD=$(openssl rand -hex 32)/" .env.local
+sed -i '' "s/^MYSQL_PASSWORD=$/MYSQL_PASSWORD=$(openssl rand -hex 32)/" .env.local
+sed -i '' "s/^SECRET_KEY=$/SECRET_KEY=$credential_key/" .env.local
+sed -i '' "s/^CREDENTIAL_ENCRYPTION_KEY=$/CREDENTIAL_ENCRYPTION_KEY=$credential_key/" .env.local
+chmod 600 .env.local
+```
+
+上面的 `sed -i ''` 适用于 macOS。启动和检查：
+
+```bash
+docker compose --env-file .env.local -p haitoo-test \
+  -f docker-compose.yml -f docker-compose.local.yml up -d --build
+docker compose --env-file .env.local -p haitoo-test \
+  -f docker-compose.yml -f docker-compose.local.yml ps
+```
+
+运营端为 `http://localhost:5173`，管理端为 `http://localhost:5174`，API 文档为 `http://localhost:8001/docs`。首次启动空库后创建本机超级管理员：
+
+```bash
+docker compose --env-file .env.local -p haitoo-test \
+  -f docker-compose.yml -f docker-compose.local.yml \
+  exec api python -m app.admin_cli create-super-admin \
+  --email test-admin@example.com --name "本机管理员"
+```
+
+本地端口只绑定 `127.0.0.1`。不要加腾讯云的 `docker-compose.tencent.yml`，也不要启用 `cloudflare` profile。`VITE_API_URL` 是前端构建参数，修改后要重新执行 `up -d --build`。若需要测试图片上传，请在 `.env.local` 中填写**独立测试 R2 Bucket** 的配置，并为本地运营端域名设置 PUT CORS；留空时上传功能不可用。真实 AI、妙手、HubStudio 操作会调用外部服务，应使用测试账号和测试数据。若要导入线上数据，应先脱敏，并清除第三方凭据与待执行任务。
+
+停止本机环境时使用相同的参数执行 `docker compose ... down`；不要加 `-v`，否则会删除测试 MySQL 数据卷。
 
 本地 Cloudflare 环境从示例创建配置：
 
