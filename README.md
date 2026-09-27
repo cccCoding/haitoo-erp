@@ -243,7 +243,23 @@ Docker 内部网络开放端口，只有边缘 Nginx 映射宿主机的 80 和 4
 4. 启动腾讯云部署：
 
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.tencent.yml up -d --build
+   docker compose --env-file .env -p haitorok -f docker-compose.yml -f docker-compose.tencent.yml up -d --build
+   ```
+
+   如果重建 `web`、`admin-web` 或 `api` 后入口返回 502，先查看入口日志，
+   再重新加载入口，让现有配置重新解析容器地址以恢复当前访问：
+
+   ```bash
+   docker compose --env-file .env -p haitorok -f docker-compose.yml -f docker-compose.tencent.yml logs --tail=80 edge
+   docker compose --env-file .env -p haitorok -f docker-compose.yml -f docker-compose.tencent.yml exec edge nginx -t
+   docker compose --env-file .env -p haitorok -f docker-compose.yml -f docker-compose.tencent.yml exec edge nginx -s reload
+   ```
+
+   新版入口配置通过 Docker DNS 动态解析上游容器。模板只在容器创建时生成
+   Nginx 配置，首次部署此配置时需重建 `edge`：
+
+   ```bash
+   docker compose --env-file .env -p haitorok -f docker-compose.yml -f docker-compose.tencent.yml up -d --no-deps --force-recreate edge
    ```
 
 5. 腾讯云安全组只开放 80、443，以及仅限管理员固定 IP 的 22。不要开放 3306、
