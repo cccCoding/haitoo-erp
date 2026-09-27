@@ -213,13 +213,13 @@ class UserTemplatePromptUpdate(BaseModel):
 
 class UploadPresignInput(BaseModel):
     content_type: str
-    content_length: int = Field(gt=0, le=5 * 1024 * 1024)
+    content_length: int = Field(gt=0, le=3 * 1024 * 1024)
 
 
 class ImageUploadPresignItem(BaseModel):
     """直传单张图片的元信息；签名绑定大小与类型，防止中途替换文件。"""
     content_type: str
-    content_length: int = Field(gt=0, le=5 * 1024 * 1024)
+    content_length: int = Field(gt=0, le=3 * 1024 * 1024)
 
 
 class ImageUploadPresignInput(BaseModel):
@@ -229,7 +229,7 @@ class ImageUploadPresignInput(BaseModel):
 
 
 class MaterialUploadPresignInput(BaseModel):
-    files: list[ImageUploadPresignItem] = Field(min_length=1, max_length=100)
+    files: list[UploadPresignInput] = Field(min_length=1, max_length=100)
 
 
 class MaterialUploadCommitItem(BaseModel):
