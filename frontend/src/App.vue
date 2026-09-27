@@ -41,6 +41,7 @@ type MaterialUsageTab = 'unused' | 'used'
 const activeMaterialUsageTab = ref<MaterialUsageTab>('unused')
 const materialUsageTabs: {key: MaterialUsageTab; label: string}[] = [{key:'unused', label:'未使用'}, {key:'used', label:'已使用'}]
 const showMaterialBatchDraftDialog = ref(false), materialBatchGroupSize = ref<5|6|7|8>(5), materialBatchMode = ref<'sequential'|'random'>('sequential'), materialBatchGroups = ref<{assets:any[]; title:string; generating:boolean}[]>([]), materialBatchSaving = ref(false)
+const draggedMaterialBatchAsset = ref<{groupIndex:number; assetId:number} | null>(null)
 const pendingMaterialUploadFiles = ref<File[]>([]), showMaterialUploadDialog = ref(false), materialUploadTemplateId = ref<number | null>(null)
 const materialUploadedCount = ref(0), materialUploadTotal = ref(0), pendingMaterialUploadUrls = ref<string[]>([])
 const MATERIAL_UPLOAD_CONCURRENCY = 8, MATERIAL_UPLOAD_MAX_FILES = 100, IMAGE_UPLOAD_RETRY = 2
@@ -803,15 +804,6 @@ function dropMaterialDraftAsset(targetId: number) {
   if (draggedMaterialDraftAssetId.value !== null) moveMaterialDraftAsset(draggedMaterialDraftAssetId.value, targetId)
   draggedMaterialDraftAssetId.value = null
 }
-function moveMaterialDraftAssetBy(index: number, offset: number) {
-  const assets = [...materialDraftAssets.value]
-  const target = index + offset
-  if (target < 0 || target >= assets.length) return
-  const current = assets[index]
-  assets[index] = assets[target]
-  assets[target] = current
-  materialDraftAssets.value = assets
-}
 async function createDraftFromMaterialAssets() {
   if (!materialDraftAssets.value.length) return
   if (!materialDraftTemplateId.value) { showToast('请选择产品模板'); return }
@@ -843,9 +835,31 @@ function buildMaterialBatchGroups() {
 }
 function openMaterialBatchDraftDialog() {
   if (!canCreateMaterialBatch.value) { showToast('请选择至少 5 张属于同一产品模板的未使用素材'); return }
-  buildMaterialBatchGroups(); showMaterialBatchDraftDialog.value = true
+  buildMaterialBatchGroups(); draggedMaterialBatchAsset.value = null; showMaterialBatchDraftDialog.value = true
 }
-function rebuildMaterialBatchGroups() { if (selectedMaterialAssets.value.length >= materialBatchGroupSize.value) buildMaterialBatchGroups() }
+function rebuildMaterialBatchGroups() { draggedMaterialBatchAsset.value = null; if (selectedMaterialAssets.value.length >= materialBatchGroupSize.value) buildMaterialBatchGroups() }
+function startMaterialBatchDrag(event: DragEvent, groupIndex: number, assetId: number) {
+  draggedMaterialBatchAsset.value = {groupIndex, assetId}
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(assetId))
+  }
+}
+function moveMaterialBatchAsset(groupIndex: number, from: number, to: number) {
+  const group = materialBatchGroups.value[groupIndex]
+  if (!group || from < 0 || to < 0 || from >= group.assets.length || to >= group.assets.length || from === to) return
+  const assets = [...group.assets]
+  const [asset] = assets.splice(from, 1)
+  assets.splice(to, 0, asset)
+  group.assets = assets
+}
+function dropMaterialBatchAsset(groupIndex: number, targetId: number) {
+  const dragged = draggedMaterialBatchAsset.value
+  draggedMaterialBatchAsset.value = null
+  if (!dragged || dragged.groupIndex !== groupIndex) return
+  const assets = materialBatchGroups.value[groupIndex]?.assets || []
+  moveMaterialBatchAsset(groupIndex, assets.findIndex(asset => asset.id === dragged.assetId), assets.findIndex(asset => asset.id === targetId))
+}
 async function generateMaterialBatchTitle(group: {assets:any[]; title:string; generating:boolean}) {
   if (!selectedMaterialTemplateId.value || !group.assets[0]) return
   try { group.generating = true; const {data} = await api.post(`/templates/${selectedMaterialTemplateId.value}/generate-draft-title`, {image_url:group.assets[0].url}, {headers:headers.value}); group.title = data.title }
@@ -1913,7 +1927,7 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
         <div class="material-draft-preview-heading"><strong>图片预览</strong><span>{{materialDraftAssets.length}} 张</span></div>
         <p v-if="materialDraftAssets.length > 1" class="material-draft-sort-hint">拖动图片调整顺序，首张图片将用于 AI 生成标题。</p>
         <div class="material-draft-preview-images">
-          <div v-for="(asset, index) in materialDraftAssets" :key="asset.id" class="material-draft-sort-item" :class="{dragging: draggedMaterialDraftAssetId === asset.id}" draggable="true" tabindex="0" :aria-label="`第 ${index + 1} 张图片：${asset.name || asset.sku}，可拖动排序，也可按左右方向键调整`" @dragstart="startMaterialDraftDrag($event, asset.id)" @dragover.prevent @drop.prevent="dropMaterialDraftAsset(asset.id)" @dragend="draggedMaterialDraftAssetId=null" @keydown.left.prevent="moveMaterialDraftAssetBy(index, -1)" @keydown.right.prevent="moveMaterialDraftAssetBy(index, 1)">
+          <div v-for="(asset, index) in materialDraftAssets" :key="asset.id" class="material-draft-sort-item" :class="{dragging: draggedMaterialDraftAssetId === asset.id}" draggable="true" @dragstart="startMaterialDraftDrag($event, asset.id)" @dragover.prevent @drop.prevent="dropMaterialDraftAsset(asset.id)" @dragend="draggedMaterialDraftAssetId=null">
             <img :src="imageUrl(asset.url)" :alt="asset.name" draggable="false"/>
             <span :class="{'is-first': index === 0}">{{index === 0 ? '首' : index + 1}}</span>
           </div>
@@ -1927,7 +1941,33 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
       <div class="modal-actions"><button class="ghost" @click="showMaterialDraftDialog=false">取消</button><button class="primary" :disabled="materialDraftSaving" @click="createDraftFromMaterialAssets">{{materialDraftSaving ? '创建中…' : '确认创建'}}</button></div>
     </section>
   </div>
-  <div v-if="showMaterialBatchDraftDialog" class="modal-backdrop" @click.self="!materialBatchSaving && (showMaterialBatchDraftDialog=false)"><section class="modal-card material-batch-draft-dialog"><button class="modal-close" :disabled="materialBatchSaving" @click="showMaterialBatchDraftDialog=false">×</button><h2>组合创建商品草稿</h2><p>仅使用未使用素材；每个完整组合会创建一条草稿，产品描述固定采用模板描述。</p><div class="material-batch-options"><label>每组图片<select v-model.number="materialBatchGroupSize" @change="rebuildMaterialBatchGroups"><option :value="5">5 张</option><option :value="6">6 张</option><option :value="7">7 张</option><option :value="8">8 张</option></select></label><label>组合方式<select v-model="materialBatchMode" @change="rebuildMaterialBatchGroups"><option value="sequential">按列表顺序</option><option value="random">随机组合</option></select></label></div><p v-if="selectedMaterialAssets.length % materialBatchGroupSize" class="material-batch-remainder">最后 {{selectedMaterialAssets.length % materialBatchGroupSize}} 张不足一组，将保留为未使用素材。</p><section class="material-batch-groups"><article v-for="(group,index) in materialBatchGroups" :key="index"><header><strong>草稿 {{index + 1}}</strong><span>{{group.assets.length}} 张素材</span></header><div class="material-draft-preview-images"><img v-for="asset in group.assets" :key="asset.id" :src="imageUrl(asset.url)" :alt="asset.sku"/></div><div class="material-draft-title-row"><input v-model="group.title" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符的商品标题"/><button class="secondary" :disabled="group.generating" @click="generateMaterialBatchTitle(group)">{{group.generating?'生成中…':'AI 生成标题'}}</button></div><small :class="{error:group.title.length>0 && group.title.length<25}">{{group.title.length}} / 255 字符</small></article></section><div class="modal-actions"><button class="ghost" :disabled="materialBatchSaving" @click="showMaterialBatchDraftDialog=false">取消</button><button class="primary" :disabled="materialBatchSaving || !materialBatchGroups.length" @click="createMaterialBatchDrafts">{{materialBatchSaving?'创建中…':`确认创建 ${materialBatchGroups.length} 条草稿`}}</button></div></section></div>
+  <div v-if="showMaterialBatchDraftDialog" class="modal-backdrop" @click.self="!materialBatchSaving && (showMaterialBatchDraftDialog=false)">
+    <section class="modal-card material-batch-draft-dialog">
+      <button class="modal-close" :disabled="materialBatchSaving" @click="showMaterialBatchDraftDialog=false">×</button>
+      <h2>组合创建商品草稿</h2>
+      <p>仅使用未使用素材；每个完整组合会创建一条草稿，产品描述固定采用模板描述。</p>
+      <div class="material-batch-options">
+        <label>每组图片<select v-model.number="materialBatchGroupSize" @change="rebuildMaterialBatchGroups"><option :value="5">5 张</option><option :value="6">6 张</option><option :value="7">7 张</option><option :value="8">8 张</option></select></label>
+        <label>组合方式<select v-model="materialBatchMode" @change="rebuildMaterialBatchGroups"><option value="sequential">按列表顺序</option><option value="random">随机组合</option></select></label>
+      </div>
+      <p v-if="selectedMaterialAssets.length % materialBatchGroupSize" class="material-batch-remainder">最后 {{selectedMaterialAssets.length % materialBatchGroupSize}} 张不足一组，将保留为未使用素材。</p>
+      <section class="material-batch-groups">
+        <article v-for="(group,index) in materialBatchGroups" :key="index">
+          <header><strong>草稿 {{index + 1}}</strong><span>{{group.assets.length}} 张素材</span></header>
+          <p class="material-batch-sort-hint">拖动图片调整本草稿顺序；点击图片查看大图。</p>
+          <div class="material-draft-preview-images material-batch-preview-images">
+            <button v-for="(asset, assetIndex) in group.assets" :key="asset.id" type="button" class="material-draft-sort-item material-batch-sort-item" :class="{dragging: draggedMaterialBatchAsset?.groupIndex === index && draggedMaterialBatchAsset?.assetId === asset.id}" draggable="true" :aria-label="'草稿 ' + (index + 1) + ' 第 ' + (assetIndex + 1) + ' 张图片：' + (asset.name || asset.sku) + '，点击查看大图或拖动调整顺序'" @dragstart="startMaterialBatchDrag($event, index, asset.id)" @dragover.prevent @drop.prevent="dropMaterialBatchAsset(index, asset.id)" @dragend="draggedMaterialBatchAsset=null" @click="openImagePreview(asset.url, (asset.name || asset.sku) + ' · 草稿 ' + (index + 1))">
+              <img :src="imageUrl(asset.url)" :alt="asset.name || asset.sku" draggable="false"/>
+              <span :class="{'is-first': assetIndex === 0}">{{assetIndex === 0 ? '首' : assetIndex + 1}}</span>
+            </button>
+          </div>
+          <div class="material-draft-title-row"><input v-model="group.title" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符的商品标题"/><button class="secondary" :disabled="group.generating" @click="generateMaterialBatchTitle(group)">{{group.generating ? '生成中…' : 'AI 生成标题'}}</button></div>
+          <small :class="{error:group.title.length>0 && group.title.length<25}">{{group.title.length}} / 255 字符</small>
+        </article>
+      </section>
+      <div class="modal-actions"><button class="ghost" :disabled="materialBatchSaving" @click="showMaterialBatchDraftDialog=false">取消</button><button class="primary" :disabled="materialBatchSaving || !materialBatchGroups.length" @click="createMaterialBatchDrafts">{{materialBatchSaving ? '创建中…' : '确认创建 ' + materialBatchGroups.length + ' 条草稿'}}</button></div>
+    </section>
+  </div>
   <div v-if="showBatchCarouselDialog" class="modal-backdrop" @click.self="!batchCarouselSaving && (showBatchCarouselDialog=false)"><section class="modal-card batch-carousel-dialog"><button class="modal-close" :disabled="batchCarouselSaving" @click="showBatchCarouselDialog=false">×</button><h2>批量制作轮播图</h2><p>已选择 {{selectedDrafts.length}} 条草稿；每个草稿至少保留一张 SKU 图。</p><section class="batch-carousel-list"><article v-for="draft in selectedDrafts" :key="draft.id" class="batch-carousel-draft"><header><b>#{{draft.id}}</b><span :title="draft.title">{{draft.title}}</span><small>{{(batchCarouselSelections[draft.id] || []).length}} / {{draft.sku_items?.length || 0}} 已选</small></header><div class="batch-carousel-skus"><button v-for="item in draft.sku_items || []" :key="item.sku" type="button" :class="{selected:(batchCarouselSelections[draft.id] || []).includes(item.sku)}" @click="toggleBatchCarouselSku(draft.id,item.sku)"><img :src="imageUrl(item.image_url)" :alt="item.sku"/><i>{{item.sku}}</i><span class="batch-carousel-hover"><img :src="imageUrl(item.image_url)" :alt="`${item.sku} 放大图`"/></span></button></div></article></section><section class="batch-carousel-params"><label>创作要求<textarea v-model="batchCarouselParams.prompt" rows="2" maxlength="1000" placeholder="请输入轮播图创作要求"/></label><div><label>AI 模型<select v-model="batchCarouselParams.provider"><option v-for="provider in availableAiProviders" :key="provider.provider" :value="provider.provider">{{provider.display_name}} · {{provider.model}}</option></select></label><label>比例<select v-model="batchCarouselParams.ratio"><option>1:1</option><option>3:4</option></select></label><label>清晰度<select v-model="batchCarouselParams.quality"><option>1K</option><option>2K</option></select></label></div></section><div class="modal-actions"><button class="ghost" :disabled="batchCarouselSaving" @click="showBatchCarouselDialog=false">取消</button><button class="primary" :disabled="batchCarouselSaving" @click="createBatchCarouselTasks">{{batchCarouselSaving?'创建中…':'开始创作轮播图'}}</button></div></section></div>
   <div v-if="showTiktokExportDialog" class="modal-backdrop" @click.self="!tiktokExportLoading && (showTiktokExportDialog=false)"><section class="modal-card tiktok-export-dialog"><button class="modal-close" :disabled="tiktokExportLoading" @click="showTiktokExportDialog=false">×</button><h2>导出 TikTok 批量上传表格</h2><p>已选择 {{selectedDrafts.length}} 条同一产品模板的商品草稿。下列设置仅用于本次导出。</p><div v-if="tiktokExportLoading && !tiktokExportOptions" class="empty">正在读取 TikTok 模板选项…</div><template v-else><section class="tiktok-export-grid"><label>类目库 / 店铺类型 <b class="required">*</b><select v-model="tiktokExportCatalogId" @change="changeTiktokExportCatalog"><option :value="null" disabled>请选择类目库</option><option v-for="catalog in tiktokExportCatalogs" :key="catalog.id" :value="catalog.id">{{catalog.name}}（{{tiktokCatalogTypeLabel(catalog.template_type)}}）</option></select></label><div class="export-field">商品类目 <b class="required">*</b><SearchableSelect v-model="tiktokExportCategory" :options="tiktokExportOptions?.categories || []" value-key="name" label-key="name" placeholder="请选择商品类目" search-placeholder="搜索类目名称，空格分隔多个关键词" @change="changeTiktokExportCategory"/></div><label v-if="tiktokExportIsLocal">目标本土店（自动上品）<select v-model="tiktokTargetShopId"><option :value="null">仅下载表格</option><option v-for="shop in shops.filter(shop => shop.shop_type === 'local' && shop.hubstudio_container_code && shop.hub_agent_id)" :key="shop.id" :value="shop.id">{{shop.name}}</option></select><small class="tiktok-supported-values">仅显示已绑定 HubStudio 环境与本地执行器的本土店。</small></label><label>默认售价 <b class="required">*</b><input v-model.number="tiktokExportDefaultPrice" type="number" min="0.01" max="999999" step="0.01" placeholder="请输入售价"/></label><label>默认库存 <b class="required">*</b><input v-model.number="tiktokExportDefaultQuantity" type="number" min="0" max="999999" step="1"/></label><label v-if="tiktokExportOptions?.capabilities?.supports_cod !== false">货到付款（COD） <b class="required">*</b><select v-model="tiktokExportCod"><option value="Y">Y</option><option value="N">N</option></select></label></section><section v-if="selectedTiktokCategoryAttributes.length" class="tiktok-attribute-section"><h3>类目属性</h3><p>所有属性统一直接输入。“选择”仅校验模板支持值；</p><div class="tiktok-export-grid"><label v-for="field in selectedTiktokCategoryAttributes" :key="field.field"><span class="tiktok-attribute-label">{{field.label}} <b v-if="field.required" class="required">*</b><small class="multi-value-hint">{{tiktokAttributeMode(field)}}</small></span><input v-model="tiktokExportAttributes[field.field]" type="text" maxlength="500" :placeholder="tiktokAttributePlaceholder(field)"/><small v-if="field.options?.length" class="tiktok-supported-values">支持值：{{field.options.join('、')}}</small><small v-else class="tiktok-supported-values">请根据商品实际信息手动填写。</small></label></div></section><section class="tiktok-product-overrides"><h3>单品售价与库存</h3><p>留空时使用上方默认值。</p><div class="tiktok-override-head"><span>商品</span><span>售价覆盖</span><span>库存覆盖</span></div><div v-for="draft in selectedDrafts" :key="draft.id" class="tiktok-override-row"><strong>#{{draft.id}} {{draft.title}}</strong><input v-model.number="tiktokExportOverrides[draft.id].price" type="number" min="0.01" max="999999" step="0.01" placeholder="使用默认售价"/><input v-model.number="tiktokExportOverrides[draft.id].quantity" type="number" min="0" max="999999" step="1" placeholder="使用默认库存"/></div></section></template><p v-if="tiktokExportError" class="error material-draft-error">{{tiktokExportError}}</p><div class="modal-actions"><button class="ghost" :disabled="tiktokExportLoading || tiktokSubmitting" @click="showTiktokExportDialog=false">取消</button><button class="primary" :disabled="tiktokExportLoading || !tiktokExportOptions" @click="exportSelectedDrafts">{{tiktokExportLoading ? '生成中…' : '生成并下载'}}</button><button v-if="tiktokExportIsLocal" class="primary" :disabled="tiktokExportLoading || tiktokSubmitting || !tiktokExportOptions || !tiktokTargetShopId" @click="submitSelectedDraftsToHubstudio">{{tiktokSubmitting ? '创建任务中…' : '生成并自动上品'}}</button></div></section></div>
   <div v-if="showShopeeExportDialog" class="modal-backdrop" @click.self="!shopeeExportLoading && (showShopeeExportDialog=false)"><section class="modal-card tiktok-export-dialog"><button class="modal-close" :disabled="shopeeExportLoading" @click="showShopeeExportDialog=false">×</button><h2>导出 Shopee 批量上传表格</h2><p>已选择 {{selectedDrafts.length}} 条同一产品模板的商品草稿。变体名称固定使用 Color 和 Size。</p><div v-if="shopeeExportLoading && !shopeeExportOptions" class="empty">正在读取 Shopee 模板选项…</div><template v-else><section class="tiktok-export-grid"><label>Shopee 类目库 <b class="required">*</b><select v-model="shopeeExportCatalogId" @change="changeShopeeExportCatalog"><option :value="null" disabled>请选择类目库</option><option v-for="catalog in shopeeCatalogs" :key="catalog.id" :value="catalog.id">{{catalog.name}}</option></select></label><div class="export-field">商品类目 <b class="required">*</b><SearchableSelect v-model="shopeeExportCategoryId" :options="shopeeExportOptions?.categories || []" value-key="id" label-key="name" placeholder="请选择商品类目" search-placeholder="搜索类目名称，空格分隔多个关键词"/></div><label>默认售价 <b class="required">*</b><input v-model.number="shopeeExportDefaultPrice" type="number" min="0.10" max="1000000000" step="0.01" placeholder="请输入售价"/></label><label>默认库存 <b class="required">*</b><input v-model.number="shopeeExportDefaultQuantity" type="number" min="0" max="10000000" step="1"/></label></section><section class="tiktok-attribute-section"><h3>物流渠道 <b class="required">*</b></h3><p>至少选择一个渠道，导出时所选渠道写为 {{shopeeExportOptions?.shipping_channels?.[0]?.on_value || 'On'}}，其余写为 {{shopeeExportOptions?.shipping_channels?.[0]?.off_value || 'Off'}}。</p><div class="shopee-channel-options"><label v-for="channel in shopeeExportOptions?.shipping_channels || []" :key="channel.field"><input v-model="shopeeExportChannels" type="checkbox" :value="channel.field"/>{{channel.name}}</label></div></section><section class="tiktok-product-overrides"><h3>单品售价与库存</h3><p>主商品货号和整合规格编号使用草稿 ID；危险物品留空。售价与库存留空时使用默认值。</p><div class="tiktok-override-head"><span>商品</span><span>售价覆盖</span><span>库存覆盖</span></div><div v-for="draft in selectedDrafts" :key="draft.id" class="tiktok-override-row"><strong>#{{draft.id}} {{draft.title}}</strong><input v-model.number="shopeeExportOverrides[draft.id].price" type="number" min="0.10" max="1000000000" step="0.01" placeholder="使用默认售价"/><input v-model.number="shopeeExportOverrides[draft.id].quantity" type="number" min="0" max="10000000" step="1" placeholder="使用默认库存"/></div></section></template><p v-if="shopeeExportError" class="error material-draft-error">{{shopeeExportError}}</p><div class="modal-actions"><button class="ghost" :disabled="shopeeExportLoading" @click="showShopeeExportDialog=false">取消</button><button class="primary" :disabled="shopeeExportLoading || !shopeeExportOptions" @click="exportSelectedDraftsToShopee">{{shopeeExportLoading ? '生成中…' : '生成并下载'}}</button></div></section></div>
