@@ -119,3 +119,9 @@ nav button.subnav{width:calc(100% - 14px);margin:-3px 0 4px 14px;padding:10px 14
 .main-reference-row .empty{margin:4px 0;color:#857f91;font-size:11px}
 .reference-picker label:has(input:disabled):not(.selected),.batch-carousel-skus button:disabled:not(.selected){opacity:.55}
 @media(max-width:700px){.reference-mode-tabs{grid-template-columns:1fr}}
+
+#app{min-height:100vh;display:flex;flex-direction:column}
+.login-shell,.app-shell{min-height:0;flex:1}
+.site-footer{padding:14px 20px;text-align:center;font-size:12px;line-height:1.5;color:#77748b}
+.site-footer a{color:inherit;text-decoration:none}
+.site-footer a:hover,.site-footer a:focus-visible{text-decoration:underline}

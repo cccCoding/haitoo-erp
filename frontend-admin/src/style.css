@@ -4,3 +4,9 @@
 /* 公司后台只保留公司与管理员信息。 */
 .company-head,.company-row{grid-template-columns:.45fr 1fr 1.6fr .85fr}
 .company-admin+.company-admin{margin-top:12px;padding-top:12px;border-top:1px solid #edf0f5}.company-admin .secondary{margin-top:8px;padding:6px 9px;font-size:12px}.modal label small{color:#80899a;font-weight:400}
+
+#app{min-height:100vh;display:flex;flex-direction:column}
+.login-page,.shell{min-height:0;flex:1}
+.site-footer{padding:14px 20px;text-align:center;font-size:12px;line-height:1.5;color:#778195}
+.site-footer a{color:inherit;text-decoration:none}
+.site-footer a:hover,.site-footer a:focus-visible{text-decoration:underline}
