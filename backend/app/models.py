@@ -317,6 +317,61 @@ class ProductDraft(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class ProductLibrarySource(Base):
+    __tablename__ = "product_library_sources"
+    __table_args__ = (
+        UniqueConstraint("company_id", "platform", "site", "shop_name", name="uq_product_library_source"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    platform: Mapped[str] = mapped_column(String(80))
+    site: Mapped[str] = mapped_column(String(80))
+    shop_name: Mapped[str] = mapped_column(String(160))
+
+
+class ProductLibraryProduct(Base):
+    __tablename__ = "product_library_products"
+    __table_args__ = (
+        UniqueConstraint("source_id", "external_product_id", "sku", name="uq_product_library_product"),
+        Index("ix_product_library_products_company_sku", "company_id", "sku"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    source_id: Mapped[int] = mapped_column(index=True)
+    external_product_id: Mapped[str] = mapped_column(String(120))
+    sku: Mapped[str] = mapped_column(String(120))
+    template_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(500), default="")
+    image_url: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ProductLibraryOrder(Base):
+    __tablename__ = "product_library_orders"
+    __table_args__ = (
+        UniqueConstraint("source_id", "order_number", name="uq_product_library_order"),
+        Index("ix_product_library_orders_company_ordered_at", "company_id", "ordered_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    source_id: Mapped[int] = mapped_column(index=True)
+    order_number: Mapped[str] = mapped_column(String(120))
+    # 无时区的 Excel 时间按 UTC+8 解析，此处存 UTC naive datetime。
+    ordered_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class ProductLibraryOrderProduct(Base):
+    __tablename__ = "product_library_order_products"
+    __table_args__ = (
+        UniqueConstraint("order_id", "product_id", name="uq_product_library_order_product"),
+        Index("ix_product_library_order_products_product", "product_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(index=True)
+    product_id: Mapped[int] = mapped_column()
+
+
 class MiaoshouCollectBoxItem(Base):
     """妙手公共采集箱的公司级只读缓存。"""
     __tablename__ = "miaoshou_collect_box_items"

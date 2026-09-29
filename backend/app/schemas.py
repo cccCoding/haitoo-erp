@@ -246,6 +246,11 @@ class MaterialDownloadInput(BaseModel):
     material_asset_ids: list[int] = Field(min_length=1, max_length=100)
 
 
+class ProductLibraryBatchTemplateInput(BaseModel):
+    product_ids: list[int] = Field(min_length=1, max_length=100)
+    template_id: int = Field(ge=1)
+
+
 class AIProviderSettingUpdate(BaseModel):
     model: str = Field(min_length=1, max_length=120)
     enabled: bool

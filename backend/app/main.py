@@ -19,14 +19,15 @@ from enum import Enum
 from pathlib import Path
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import delete, func, inspect, or_, select, text, update
+from sqlalchemy import delete, func, inspect, or_, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import SessionLocal, engine, get_db
-from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
+from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, PodTask, ProductDraft, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
+from .product_library import parse_order_workbook
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
-from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
+from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
@@ -903,6 +904,219 @@ def list_templates(group_id: int | None = None, q: str | None = None, user: User
     return db.scalars(stmt.order_by(ProductTemplate.is_platform.desc(), ProductTemplate.id.desc())).all()
 
 
+@app.get("/product-library/import-template")
+def download_product_library_template(user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER))):
+    path = Path(__file__).parent / "resources" / "product_library_import_template.xlsx"
+    return Response(
+        content=path.read_bytes(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote('产品库导入模版.xlsx')}"},
+    )
+
+
+@app.get("/product-library/filters")
+def product_library_filters(user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db)):
+    sources = db.scalars(select(ProductLibrarySource).where(ProductLibrarySource.company_id == user.company_id)).all()
+    return {
+        "platforms": sorted({source.platform for source in sources}),
+        "sites": sorted({source.site for source in sources}),
+        "shop_names": sorted({source.shop_name for source in sources}),
+    }
+
+
+@app.get("/product-library")
+def list_product_library(
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    platform: str | None = None, site: str | None = None, shop_name: str | None = None,
+    template_id: int | None = Query(None, ge=1), unmatched: bool = False,
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+):
+    if template_id is not None and unmatched:
+        raise HTTPException(400, "模版筛选条件不能同时选择已匹配和未匹配")
+    conditions = [ProductLibraryProduct.company_id == user.company_id, ProductLibrarySource.company_id == user.company_id]
+    if platform:
+        conditions.append(ProductLibrarySource.platform == platform)
+    if site:
+        conditions.append(ProductLibrarySource.site == site)
+    if shop_name:
+        conditions.append(ProductLibrarySource.shop_name == shop_name)
+    if template_id is not None:
+        conditions.append(ProductLibraryProduct.template_id == template_id)
+    elif unmatched:
+        conditions.append(ProductTemplate.id.is_(None))
+    total = db.scalar(select(func.count(ProductLibraryProduct.id)).join(
+        ProductLibrarySource, ProductLibraryProduct.source_id == ProductLibrarySource.id,
+    ).outerjoin(ProductTemplate, ProductLibraryProduct.template_id == ProductTemplate.id).where(*conditions)) or 0
+    rows = db.execute(select(
+        ProductLibraryProduct, ProductLibrarySource, ProductTemplate.name,
+    ).join(ProductLibrarySource, ProductLibraryProduct.source_id == ProductLibrarySource.id)
+     .outerjoin(ProductTemplate, ProductLibraryProduct.template_id == ProductTemplate.id)
+     .where(*conditions).order_by(ProductLibraryProduct.id.desc())
+     .offset((page - 1) * page_size).limit(page_size)).all()
+    product_ids = [product.id for product, _, _ in rows]
+    order_counts = dict(db.execute(select(
+        ProductLibraryOrderProduct.product_id, func.count(ProductLibraryOrderProduct.order_id),
+    ).where(ProductLibraryOrderProduct.product_id.in_(product_ids))
+     .group_by(ProductLibraryOrderProduct.product_id)).all()) if product_ids else {}
+    return {"total": total, "page": page, "page_size": page_size, "items": [
+        {
+            "id": product.id, "sku": product.sku, "template_id": product.template_id if template_name else None,
+            "template": template_name or "未匹配",
+            "title": product.title, "image_url": product.image_url,
+            "platform": source.platform, "site": source.site, "shop_name": source.shop_name,
+            "product_id": product.external_product_id, "order_count": int(order_counts.get(product.id, 0)),
+        }
+        for product, source, template_name in rows
+    ]}
+
+
+@app.post("/product-library/templates/batch")
+def set_product_library_templates(
+    payload: ProductLibraryBatchTemplateInput,
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+):
+    if len(set(payload.product_ids)) != len(payload.product_ids):
+        raise HTTPException(400, "产品不能重复选择")
+    template = db.get(ProductTemplate, payload.template_id)
+    if not template or not (template.is_platform or template.company_id == user.company_id):
+        raise HTTPException(404, "模版不存在或无权使用")
+    products = db.scalars(select(ProductLibraryProduct).where(
+        ProductLibraryProduct.company_id == user.company_id,
+        ProductLibraryProduct.id.in_(payload.product_ids),
+    ).with_for_update()).all()
+    if len(products) != len(payload.product_ids):
+        raise HTTPException(404, "包含不存在或无权设置的产品")
+    assigned_ids = {product.template_id for product in products if product.template_id is not None}
+    live_assigned_ids = set(db.scalars(select(ProductTemplate.id).where(ProductTemplate.id.in_(assigned_ids)))) if assigned_ids else set()
+    if any(product.template_id in live_assigned_ids for product in products):
+        raise HTTPException(400, "仅可批量设置未匹配的产品")
+    for product in products:
+        product.template_id = template.id
+    db.commit()
+    return {"updated": len(products), "template_id": template.id, "template": template.name}
+
+
+@app.post("/product-library/import")
+async def import_product_library(
+    file: UploadFile = File(...),
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+):
+    if not (file.filename or "").lower().endswith(".xlsx"):
+        raise HTTPException(400, "请上传 .xlsx 格式的订单表格")
+    data = await file.read(10 * 1024 * 1024 + 1)
+    if not data or len(data) > 10 * 1024 * 1024:
+        raise HTTPException(400, "订单表格大小须在 10MB 以内")
+    try:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            if sum(info.file_size for info in archive.infolist()) > 50 * 1024 * 1024:
+                raise ValueError("表格解压后内容超过 50MB")
+        imported = parse_order_workbook(data)
+    except (ValueError, zipfile.BadZipFile) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    templates = db.scalars(select(ProductTemplate).where(or_(
+        ProductTemplate.is_platform.is_(True), ProductTemplate.company_id == user.company_id,
+    ))).all()
+    templates.sort(key=lambda template: len(template.name or ""), reverse=True)
+    sources: dict[tuple[str, str, str], ProductLibrarySource] = {
+        (source.platform, source.site, source.shop_name): source
+        for source in db.scalars(select(ProductLibrarySource).where(ProductLibrarySource.company_id == user.company_id))
+    }
+    try:
+        for item in imported:
+            source_key = (item.platform, item.site, item.shop_name)
+            if source_key not in sources:
+                source = ProductLibrarySource(company_id=user.company_id, platform=item.platform, site=item.site, shop_name=item.shop_name)
+                db.add(source); db.flush()
+                sources[source_key] = source
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "数据导入冲突，请重试") from exc
+    product_keys = {
+        (sources[(item.platform, item.site, item.shop_name)].id, item.external_product_id, item.sku)
+        for item in imported
+    }
+    order_keys = {
+        (sources[(item.platform, item.site, item.shop_name)].id, item.order_number)
+        for item in imported
+    }
+    products: dict[tuple[int, str, str], ProductLibraryProduct] = {}
+    orders: dict[tuple[int, str], ProductLibraryOrder] = {}
+    product_key_list = list(product_keys)
+    order_key_list = list(order_keys)
+    for keys in (product_key_list[offset:offset + 200] for offset in range(0, len(product_key_list), 200)):
+        products.update({(product.source_id, product.external_product_id, product.sku): product for product in db.scalars(
+            select(ProductLibraryProduct).where(tuple_(
+                ProductLibraryProduct.source_id, ProductLibraryProduct.external_product_id, ProductLibraryProduct.sku,
+            ).in_(keys))
+        )})
+    for keys in (order_key_list[offset:offset + 200] for offset in range(0, len(order_key_list), 200)):
+        orders.update({(order.source_id, order.order_number): order for order in db.scalars(
+            select(ProductLibraryOrder).where(tuple_(ProductLibraryOrder.source_id, ProductLibraryOrder.order_number).in_(keys))
+        )})
+    links: set[tuple[int, int]] = set()
+    created_products = 0
+    created_product_ids: set[int] = set()
+    updated_product_ids: set[int] = set()
+    created_orders = 0
+    try:
+        for item in imported:
+            source_key = (item.platform, item.site, item.shop_name)
+            source = sources[source_key]
+            product_key = (source.id, item.external_product_id, item.sku)
+            product = products.get(product_key)
+            if product is None:
+                matched_template = next((template for template in templates if item.sku.upper().startswith(template.name.upper()) and len(item.sku) >= len(template.name) + 2), None)
+                product = ProductLibraryProduct(
+                    company_id=user.company_id, source_id=source.id, external_product_id=item.external_product_id,
+                    sku=item.sku, template_id=matched_template.id if matched_template else None,
+                    title=item.title, image_url=item.image_url,
+                )
+                db.add(product); db.flush()
+                created_products += 1
+                created_product_ids.add(product.id)
+                products[product_key] = product
+            if item.title and item.title != product.title:
+                product.title = item.title
+                if product.id not in created_product_ids:
+                    updated_product_ids.add(product.id)
+            if item.image_url and item.image_url != product.image_url:
+                product.image_url = item.image_url
+                if product.id not in created_product_ids:
+                    updated_product_ids.add(product.id)
+            order_key = (source.id, item.order_number)
+            order = orders.get(order_key)
+            if order is None:
+                order = ProductLibraryOrder(
+                    company_id=user.company_id, source_id=source.id,
+                    order_number=item.order_number, ordered_at=item.ordered_at,
+                )
+                db.add(order); db.flush()
+                created_orders += 1
+                orders[order_key] = order
+            if order.ordered_at != item.ordered_at:
+                raise ValueError(f"第 {item.row_number} 行「下单时间」与同一订单编号的已有记录不一致")
+            links.add((order.id, product.id))
+        existing_links: set[tuple[int, int]] = set()
+        link_list = list(links)
+        for offset in range(0, len(link_list), 200):
+            existing_links.update(db.execute(select(
+                ProductLibraryOrderProduct.order_id, ProductLibraryOrderProduct.product_id,
+            ).where(tuple_(ProductLibraryOrderProduct.order_id, ProductLibraryOrderProduct.product_id).in_(
+                link_list[offset:offset + 200],
+            ))).all())
+        db.add_all(ProductLibraryOrderProduct(order_id=order_id, product_id=product_id)
+                   for order_id, product_id in links - existing_links)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "数据导入冲突，请重试") from exc
+    return {"created_products": created_products, "updated_products": len(updated_product_ids), "created_orders": created_orders}
+
+
 @app.post("/templates")
 def create_template(payload: TemplateCreate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
     data = payload.model_dump()
@@ -1439,6 +1653,8 @@ def delete_template(template_id: int, user: User = Depends(require_roles(Role.CO
     template = get_company_template(db, user, template_id)
     if db.scalar(select(PodTask.id).where(PodTask.template_id == template.id).limit(1)):
         raise HTTPException(400, "该模板已有创作任务，无法删除")
+    if db.scalar(select(ProductLibraryProduct.id).where(ProductLibraryProduct.template_id == template.id).limit(1)):
+        raise HTTPException(400, "该模版已被产品库使用，无法删除")
     db.delete(template); db.commit()
     return {"deleted": True}
 

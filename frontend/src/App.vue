@@ -8,7 +8,7 @@ const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://loca
 const token = ref(localStorage.getItem('haitoro_token') || '')
 const route = useRoute()
 const router = useRouter()
-const workspaceRouteNames = new Set(['dashboard', 'templates', 'pod', 'tasks', 'materials', 'drafts', 'miaoshou-collect-box', 'members', 'shops', 'tiktok-catalogs'])
+const workspaceRouteNames = new Set(['dashboard', 'templates', 'pod', 'tasks', 'materials', 'drafts', 'product-library', 'miaoshou-collect-box', 'members', 'shops', 'tiktok-catalogs'])
 const page = computed<string>({
   get: () => workspaceRouteNames.has(String(route.name)) ? String(route.name) : 'dashboard',
   set: value => { if (workspaceRouteNames.has(value) && value !== route.name) void router.push({ name: value }) },
@@ -60,6 +60,12 @@ const TIKTOK_EXPORT_ATTRIBUTE_PRESETS_VERSION = 'v1'
 const shopeeExportCatalogId = ref<number | null>(null), shopeeExportCategoryId = ref(''), shopeeExportDefaultPrice = ref<number | null>(null), shopeeExportDefaultQuantity = ref<number>(999), shopeeExportChannels = ref<string[]>([]), shopeeExportOverrides = ref<Record<number,{price:number|null;quantity:number|null}>>({})
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref<number | null>(null), draftCreatorFilterId = ref<number | null>(null), draftListRefreshing = ref(false)
 const collectBoxItems = ref<any[]>([]), collectBoxTotal = ref(0), collectBoxLoading = ref(false)
+const productLibraryItems = ref<any[]>([]), productLibraryTotal = ref(0), productLibraryPage = ref(1), productLibraryPageSize = ref(20), productLibraryLoading = ref(false), productLibraryImporting = ref(false), productLibraryDownloading = ref(false)
+const productLibraryFilters = ref<{platforms:string[];sites:string[];shop_names:string[]}>({platforms:[],sites:[],shop_names:[]})
+const productLibraryPlatform = ref(''), productLibrarySite = ref(''), productLibraryShopName = ref(''), productLibraryTemplateFilter = ref('')
+const selectedProductLibraryIds = ref<number[]>([]), productLibraryBrokenImages = ref<number[]>([])
+const showProductLibraryTemplateDialog = ref(false), productLibraryTargetTemplateId = ref<number | null>(null), productLibraryTemplateSaving = ref(false)
+const productLibraryFileInput = ref<HTMLInputElement | null>(null)
 const collectBoxConfigured = ref(false), collectBoxLastSyncedAt = ref<number | null>(null), collectBoxInitialSyncedAt = ref<number | null>(null)
 const collectBoxQuery = ref(''), collectBoxPage = ref(1), collectBoxPageSize = ref(20)
 type DraftTab = 'all' | 'pending' | 'carousel_pending' | 'main_image_pending' | 'ready_to_publish' | 'published'
@@ -117,7 +123,7 @@ const showPersonalResourcesDialog = ref(false), personalResourceTab = ref<'white
 const showTeamResourcesDialog = ref(false), teamResourceTab = ref<'white-images' | 'prompts'>('white-images'), teamResourceUserId = ref<number | null>(null), teamResourceTemplateId = ref<number | null>(null), teamWhiteImages = ref<any[]>([]), teamPrompts = ref<any[]>([]), teamResourcesLoading = ref(false), teamResourceQuery = ref('')
 const editingWhiteImage = ref<any>(null), whiteImageForm = ref({ template_id: null as number | null, name: '', file: null as File | null })
 const editingPersonalPrompt = ref<any>(null), personalPromptForm = ref({ template_id: null as number | null, name: '', content: '' })
-const nav = [{key:'dashboard', icon:'◈', label:'工作台'}, {key:'templates', icon:'▦', label:'产品模板'}, {key:'pod', icon:'✦', label:'AI创作'}, {key:'tasks', icon:'◌', label:'任务中心'}, {key:'materials', icon:'◈', label:'素材库'}, {key:'drafts', icon:'▤', label:'商品草稿'}, {key:'miaoshou-collect-box', icon:'▤', label:'妙手采集箱'}, {key:'members', icon:'♙', label:'成员管理', adminOnly:true}, {key:'shops', icon:'▣', label:'店铺管理', adminOnly:true}, {key:'tiktok-catalogs', icon:'▧', label:'类目管理', adminOnly:true}]
+const nav = [{key:'dashboard', icon:'◈', label:'工作台'}, {key:'templates', icon:'▦', label:'产品模板'}, {key:'pod', icon:'✦', label:'AI创作'}, {key:'tasks', icon:'◌', label:'任务中心'}, {key:'materials', icon:'◈', label:'素材库'}, {key:'drafts', icon:'▤', label:'商品草稿'}, {key:'product-library', icon:'▤', label:'产品库'}, {key:'miaoshou-collect-box', icon:'▤', label:'妙手采集箱'}, {key:'members', icon:'♙', label:'成员管理', adminOnly:true}, {key:'shops', icon:'▣', label:'店铺管理', adminOnly:true}, {key:'tiktok-catalogs', icon:'▧', label:'类目管理', adminOnly:true}]
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }))
 const visibleNav = computed(() => nav.filter(item => !item.adminOnly || user.value?.role === 'company_admin'))
 const pageTitle = computed(() => nav.find(x => x.key === page.value)?.label || '')
@@ -429,6 +435,8 @@ function clearTaskUrl() { if (route.query.task_type) void router.replace({ name:
 watch(page,value=>{
   value==='tasks'?syncTaskUrl():clearTaskUrl()
   if (value === 'miaoshou-collect-box') void loadCollectBox()
+  if (value === 'product-library') void loadProductLibrary(true)
+  else selectedProductLibraryIds.value = []
 })
 function applyTaskPage(data: any) {
   tasks.value = data.items || []
@@ -502,6 +510,99 @@ async function loadCollectBox() {
 }
 function changeCollectBoxFilters() { collectBoxPage.value=1; void loadCollectBox() }
 function changeCollectBoxPage(page:number) { if (page < 1 || page > collectBoxPageCount.value || collectBoxLoading.value) return; collectBoxPage.value=page; void loadCollectBox() }
+const productLibraryPageCount = computed(() => Math.max(1, Math.ceil(productLibraryTotal.value / productLibraryPageSize.value)))
+const unmatchedProductLibraryItems = computed(() => productLibraryItems.value.filter(item => item.template_id === null))
+const allPagedUnmatchedSelected = computed(() => unmatchedProductLibraryItems.value.length > 0 && unmatchedProductLibraryItems.value.every(item => selectedProductLibraryIds.value.includes(item.id)))
+async function loadProductLibrary(withFilters = false) {
+  try {
+    productLibraryLoading.value = true
+    const params = {page:productLibraryPage.value, page_size:productLibraryPageSize.value,
+      platform:productLibraryPlatform.value || undefined, site:productLibrarySite.value || undefined,
+      shop_name:productLibraryShopName.value || undefined,
+      template_id:productLibraryTemplateFilter.value && productLibraryTemplateFilter.value !== 'unmatched' ? Number(productLibraryTemplateFilter.value) : undefined,
+      unmatched:productLibraryTemplateFilter.value === 'unmatched' ? true : undefined}
+    const [list, filters] = await Promise.all([
+      api.get('/product-library', {headers:headers.value, params}),
+      withFilters ? api.get('/product-library/filters', {headers:headers.value}) : Promise.resolve(null),
+    ])
+    productLibraryItems.value = list.data.items || []
+    productLibraryTotal.value = list.data.total || 0
+    productLibraryBrokenImages.value = []
+    if (filters) productLibraryFilters.value = filters.data
+  } catch(e:any) { showToast(e.response?.data?.detail || '加载产品库失败') }
+  finally { productLibraryLoading.value = false }
+}
+function changeProductLibraryFilters() { productLibraryPage.value=1; selectedProductLibraryIds.value=[]; void loadProductLibrary() }
+function changeProductLibraryPage(next:number) {
+  if (productLibraryLoading.value || next < 1 || next > productLibraryPageCount.value) return
+  productLibraryPage.value=next; void loadProductLibrary()
+}
+function toggleProductLibrarySelection(item:any) {
+  if (item.template_id !== null) return
+  if (selectedProductLibraryIds.value.includes(item.id)) {
+    selectedProductLibraryIds.value = selectedProductLibraryIds.value.filter(id => id !== item.id)
+  } else if (selectedProductLibraryIds.value.length >= 100) {
+    showToast('一次最多选择 100 条未匹配产品')
+  } else {
+    selectedProductLibraryIds.value = [...selectedProductLibraryIds.value, item.id]
+  }
+}
+function togglePagedUnmatchedProducts() {
+  const ids = unmatchedProductLibraryItems.value.map(item => item.id)
+  if (allPagedUnmatchedSelected.value) {
+    selectedProductLibraryIds.value = selectedProductLibraryIds.value.filter(id => !ids.includes(id))
+    return
+  }
+  const merged = [...new Set([...selectedProductLibraryIds.value, ...ids])]
+  if (merged.length > 100) { showToast('一次最多选择 100 条未匹配产品'); return }
+  selectedProductLibraryIds.value = merged
+}
+function openProductLibraryTemplateDialog() {
+  if (!selectedProductLibraryIds.value.length) return
+  productLibraryTargetTemplateId.value = null
+  showProductLibraryTemplateDialog.value = true
+}
+async function saveProductLibraryTemplate() {
+  if (!productLibraryTargetTemplateId.value || !selectedProductLibraryIds.value.length) return
+  try {
+    productLibraryTemplateSaving.value = true
+    const {data} = await api.post('/product-library/templates/batch', {
+      product_ids:selectedProductLibraryIds.value, template_id:productLibraryTargetTemplateId.value,
+    }, {headers:headers.value})
+    showProductLibraryTemplateDialog.value = false
+    selectedProductLibraryIds.value = []
+    productLibraryPage.value = 1
+    await loadProductLibrary()
+    showToast(`已为 ${data.updated} 条产品设置模版：${data.template}`)
+  } catch(e:any) { showToast(e.response?.data?.detail || '批量设置模版失败') }
+  finally { productLibraryTemplateSaving.value = false }
+}
+async function downloadProductLibraryTemplate() {
+  try {
+    productLibraryDownloading.value = true
+    const response = await api.get('/product-library/import-template', {headers:headers.value, responseType:'blob'})
+    const url = URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = url; link.download = '产品库导入模版.xlsx'; document.body.appendChild(link); link.click(); link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch { showToast('下载导入模版失败') }
+  finally { productLibraryDownloading.value = false }
+}
+async function importProductLibrary(event:Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  try {
+    productLibraryImporting.value = true
+    const form = new FormData(); form.append('file', file)
+    const {data} = await api.post('/product-library/import', form, {headers:headers.value})
+    productLibraryPage.value=1
+    selectedProductLibraryIds.value=[]
+    await loadProductLibrary(true)
+    showToast(`导入完成：新增 ${data.created_products} 个产品、${data.created_orders} 个订单，更新 ${data.updated_products} 个产品`)
+  } catch(e:any) { showToast(e.response?.data?.detail || '导入产品库失败') }
+  finally { productLibraryImporting.value = false; input.value = '' }
+}
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
 const nativeToLocaleString = Date.prototype.toLocaleString
 const nativeToLocaleDateString = Date.prototype.toLocaleDateString
@@ -544,6 +645,7 @@ async function refresh() {
   } else { members.value = []; managedShops.value = []; hubAgents.value = [] }
   if (!selectedTemplateId.value && templates.value[0]) selectedTemplateId.value=templates.value[0].id
   if (selectedTemplateId.value) await loadMyTemplateResources(false)
+  if (page.value === 'product-library') await loadProductLibrary(true)
   if (hubAgentPairingCode.value) {
     try {
       const {data} = await api.post('/hub-agent/pairings/complete', {code:hubAgentPairingCode.value}, h)
@@ -1747,7 +1849,7 @@ function openHubBindingDialog(shop:any) { bindingShop.value=shop; hubBindingForm
 async function saveHubBinding() { if (!bindingShop.value || !hubBindingForm.value.container_code.trim() || !hubBindingForm.value.agent_id) return; try { hubBindingSaving.value=true; await api.put(`/shops/${bindingShop.value.id}/hubstudio-binding`,{hubstudio_container_code:hubBindingForm.value.container_code.trim(),hub_agent_id:hubBindingForm.value.agent_id},{headers:headers.value}); showHubBindingDialog.value=false; await refresh(); showToast('店铺 HubStudio 环境已绑定') } catch(e:any) { shopError.value=e.response?.data?.detail || '保存 HubStudio 店铺绑定失败' } finally { hubBindingSaving.value=false } }
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 function showToast(message: string) { toast.value = message; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = '' }, 3000) }
-function logout(){ localStorage.removeItem('haitoro_token'); token.value=''; user.value=null; taskCreatorFilterId.value=null; materialCreatorFilterId.value=null; draftCreatorFilterId.value=null; creatorFiltersInitialized.value=false }
+function logout(){ localStorage.removeItem('haitoro_token'); token.value=''; user.value=null; taskCreatorFilterId.value=null; materialCreatorFilterId.value=null; draftCreatorFilterId.value=null; creatorFiltersInitialized.value=false; productLibraryItems.value=[]; productLibraryTotal.value=0; productLibraryPage.value=1; productLibraryPlatform.value=''; productLibrarySite.value=''; productLibraryShopName.value=''; productLibraryTemplateFilter.value=''; selectedProductLibraryIds.value=[]; productLibraryFilters.value={platforms:[],sites:[],shop_names:[]} }
 api.interceptors.response.use(
   response => response,
   requestError => {
@@ -1843,6 +1945,35 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
           <div v-if="!filteredDrafts.length && !draftListRefreshing" class="empty">{{draftTotal ? '没有符合筛选条件的商品草稿。' : '暂无商品草稿，请先在任务中心领取素材，或上传本地素材。'}}</div>
           <footer v-else-if="!draftListRefreshing || draftTotal" class="draft-pagination"><span>共 {{draftTotal}} 条</span><label>每页 <select v-model.number="draftPageSize" :disabled="draftListRefreshing" @change="changeDraftPageSize"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option><option :value="500">500</option><option :value="1000">1000</option></select> 条</label><button :disabled="draftListRefreshing || visibleDraftPage===1" @click="changeDraftPage(visibleDraftPage-1)">上一页</button><span>第 {{visibleDraftPage}} / {{draftPageCount}} 页</span><button :disabled="draftListRefreshing || visibleDraftPage===draftPageCount" @click="changeDraftPage(visibleDraftPage+1)">下一页</button></footer>
           <div v-if="draftListRefreshing" class="list-refresh-overlay" role="status"><i></i><span>正在刷新列表…</span></div>
+        </div>
+      </section>
+      <section v-else-if="page==='product-library'" class="page">
+        <div class="section-heading product-library-heading">
+          <div><span>历史订单导入后，同一基础 SKU 的不同尺码按订单编号去重。</span></div>
+          <div class="product-library-actions">
+            <button class="secondary" :disabled="productLibraryDownloading" @click="downloadProductLibraryTemplate">{{productLibraryDownloading ? '下载中…' : '下载导入模版'}}</button>
+            <button class="primary" :disabled="productLibraryImporting" @click="productLibraryFileInput?.click()">{{productLibraryImporting ? '导入中…' : '导入'}}</button>
+            <input ref="productLibraryFileInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden @change="importProductLibrary"/>
+          </div>
+        </div>
+        <div class="product-library-filters">
+          <label>平台<select v-model="productLibraryPlatform" :disabled="productLibraryLoading" @change="changeProductLibraryFilters"><option value="">全部平台</option><option v-for="value in productLibraryFilters.platforms" :key="value" :value="value">{{value}}</option></select></label>
+          <label>站点<select v-model="productLibrarySite" :disabled="productLibraryLoading" @change="changeProductLibraryFilters"><option value="">全部站点</option><option v-for="value in productLibraryFilters.sites" :key="value" :value="value">{{value}}</option></select></label>
+          <label>店铺名称<select v-model="productLibraryShopName" :disabled="productLibraryLoading" @change="changeProductLibraryFilters"><option value="">全部店铺</option><option v-for="value in productLibraryFilters.shop_names" :key="value" :value="value">{{value}}</option></select></label>
+          <label>模版<select v-model="productLibraryTemplateFilter" :disabled="productLibraryLoading" @change="changeProductLibraryFilters"><option value="">全部模版</option><option value="unmatched">未匹配</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
+        </div>
+        <section v-if="selectedProductLibraryIds.length" class="draft-export-bar product-library-selection-bar"><strong>已选 {{selectedProductLibraryIds.length}} / 100 条未匹配产品</strong><button class="primary" @click="openProductLibraryTemplateDialog">批量设置模版</button><button class="ghost" @click="selectedProductLibraryIds=[]">取消选择</button></section>
+        <div class="draft-table product-library-table" :aria-busy="productLibraryLoading">
+          <div class="thead product-library-head"><label class="product-library-select-heading"><input type="checkbox" :checked="allPagedUnmatchedSelected" :disabled="!unmatchedProductLibraryItems.length || productLibraryLoading" aria-label="选择当前页未匹配产品" @change="togglePagedUnmatchedProducts"/>商品</label><span>SKU</span><span>模版</span><span>标题</span><span>站点</span><span>店铺名称</span><span>产品 ID</span><span>订单数</span></div>
+          <div v-for="item in productLibraryItems" :key="item.id" class="trow product-library-row">
+            <div class="product-library-product-cell"><input v-if="item.template_id === null" type="checkbox" :checked="selectedProductLibraryIds.includes(item.id)" :disabled="selectedProductLibraryIds.length >= 100 && !selectedProductLibraryIds.includes(item.id)" :aria-label="`选择未匹配产品 ${item.sku}`" @change="toggleProductLibrarySelection(item)"/><span v-else class="product-library-check-spacer"></span><button v-if="item.image_url && !productLibraryBrokenImages.includes(item.id)" class="product-library-image" title="查看大图" :aria-label="`查看 ${item.sku} 商品大图`" @click="openImagePreview(item.image_url, item.title || item.sku)"><img :key="item.image_url" :src="imageUrl(item.image_url)" :alt="item.title || item.sku" @error="productLibraryBrokenImages.push(item.id)"/></button><span v-else class="product-library-image">暂无图片</span></div>
+            <span class="product-library-code" :title="item.sku">{{item.sku}}</span><span>{{item.template}}</span>
+            <span class="product-library-title" :title="item.title">{{item.title || '—'}}</span><span>{{item.site}}</span><span :title="item.shop_name">{{item.shop_name}}</span>
+            <span class="product-library-code" :title="item.product_id">{{item.product_id}}</span><strong>{{item.order_count}}</strong>
+          </div>
+          <div v-if="!productLibraryItems.length && !productLibraryLoading" class="empty">{{productLibraryTotal ? '没有符合筛选条件的产品。' : '暂无产品，请先下载模版并导入历史订单。'}}</div>
+          <footer class="draft-pagination product-library-pagination"><span>共 {{productLibraryTotal}} 条</span><label>每页 <select v-model.number="productLibraryPageSize" :disabled="productLibraryLoading" @change="changeProductLibraryFilters"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 条</label><button :disabled="productLibraryLoading || productLibraryPage===1" @click="changeProductLibraryPage(productLibraryPage-1)">上一页</button><span>第 {{productLibraryPage}} / {{productLibraryPageCount}} 页</span><button :disabled="productLibraryLoading || productLibraryPage===productLibraryPageCount" @click="changeProductLibraryPage(productLibraryPage+1)">下一页</button></footer>
+          <div v-if="productLibraryLoading" class="list-refresh-overlay" role="status"><i></i><span>正在加载产品库…</span></div>
         </div>
       </section>
       <section v-else-if="page==='miaoshou-collect-box'" class="page">
@@ -2229,6 +2360,7 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
   <div v-if="showShopManagersDialog" class="modal-backdrop" @click.self="showShopManagersDialog=false"><section class="modal-card"><h2>分配店铺管理人员</h2><p>{{managingShop?.name}}。被选中的普通成员可在该店铺创建、管理并上架商品。</p><label v-for="member in members.filter(item => item.role === 'member')" :key="member.id" class="manager-option"><input v-model="selectedManagerIds" :value="member.id" type="checkbox" />{{member.name}} <small>{{member.email}}</small></label><p v-if="!members.some(item => item.role === 'member')" class="empty">请先在成员管理中新增普通成员。</p><div class="modal-actions"><button class="ghost" @click="showShopManagersDialog=false">取消</button><button class="primary" :disabled="shopManagersSaving" @click="saveShopManagers">{{shopManagersSaving ? '保存中…' : '保存分配'}}</button></div></section></div>
   <div v-if="showTemplateDialog" class="drawer-backdrop"><section class="template-drawer"><header><div><h2>{{editingTemplate ? '编辑产品模板' : '新增产品模板'}}</h2><p>完善模板信息后可直接用于 AI 创作。</p></div><button class="drawer-close" aria-label="关闭" :disabled="templateSaving" @click="showTemplateDialog=false">×</button></header><nav class="drawer-tabs"><button :class="{active:templateFormTab==='basic'}" @click="templateFormTab='basic'">模版信息</button><button :class="{active:templateFormTab==='product'}" @click="templateFormTab='product'">商品信息</button><button :class="{active:templateFormTab==='sku'}" @click="templateFormTab='sku'">SKU</button><button :class="{active:templateFormTab==='logistics'}" @click="templateFormTab='logistics'">物流信息</button><button :class="{active:templateFormTab==='ai-prompts'}" @click="templateFormTab='ai-prompts'">AI提示词</button></nav><div class="drawer-content"><div v-if="templateFormTab==='basic'" class="drawer-form"><label>模板名称<span>*</span><input v-model="newTemplateName" placeholder="例如：宽松短袖上衣" /></label><label>模板图片<span>*</span><input accept="image/png,image/jpeg,image/webp" type="file" @change="onCoverChange" /><small>{{newTemplateImage ? newTemplateImage.name : editingTemplate?.cover_url ? '保留当前图片' : '支持 JPG、PNG、WebP，最大 3MB'}}</small><div v-if="newTemplateImagePreview" class="template-upload-preview"><img :src="newTemplateImagePreview" alt="模板图片预览" /></div></label><label>模板描述<span>*</span><textarea v-model="newTemplateDescription" maxlength="500" placeholder="描述产品材质、版型和适用的印花区域"></textarea></label><label>模板分类<span>*</span><select v-model="newTemplateGroupId"><option :value="null" disabled>请选择模板分类</option><option v-for="group in templateGroups" :key="group.id" :value="group.id">{{group.name}}</option></select></label></div><div v-else-if="templateFormTab==='product'" class="drawer-form product-info-form"><label>AI生成标题约束<span>*</span><input v-model="newTemplateTitleTemplate" maxlength="500" placeholder="例如：突出材质、款式与适用场景，不包含夸大宣传" /></label><label>产品描述<span>*</span><textarea v-model="newTemplateProductDescription" maxlength="5000" placeholder="填写商品详情页的产品描述"></textarea></label><label>尺码图<span>*</span><input accept="image/png,image/jpeg,image/webp" type="file" @change="onSizeChartChange" /><small>{{newTemplateSizeChart ? newTemplateSizeChart.name : editingTemplate?.size_chart_url ? '保留当前尺码图' : '支持 JPG、PNG、WebP，最多上传 1 张，最大 3MB'}}</small><div v-if="newTemplateSizeChartPreview" class="template-upload-preview"><img :src="newTemplateSizeChartPreview" alt="尺码图预览" /></div></label></div><div v-else-if="templateFormTab==='sku'" class="sku-form"><section><strong><b>*</b> 尺码</strong><div class="sku-size-grid"><div v-for="(_, index) in newSkuSizeOptions" :key="index" class="sku-size-row"><input v-model="newSkuSizeOptions[index]" maxlength="50" placeholder="例如：M"/><small>{{newSkuSizeOptions[index].length}} / 50</small><button title="删除尺码" @click="newSkuSizeOptions.splice(index,1)">×</button></div></div><button class="sku-add-option" @click="addSkuSize">＋ 添加选项</button></section><small class="sku-total">预计生成 {{Math.max(1,newSkuSizeOptions.filter(value=>value.trim()).length)}} 个 SKU</small></div><div v-else-if="templateFormTab==='ai-prompts'" class="drawer-form ai-prompts-form"><div><h3>AI 提示词</h3><p>为印花贴合保存可复用的创作要求；在 AI 创作页选择模板后可一键填充并继续修改。</p></div><section v-for="(prompt, index) in newTemplateAiPrompts" :key="index" class="ai-prompt-editor"><div><b>提示词 {{index + 1}}</b><button type="button" class="danger" @click="removeTemplateAiPrompt(index)">删除</button></div><label>名称<input v-model="prompt.name" maxlength="80" placeholder="例如：自然布料贴合" /></label><label>提示词内容<textarea v-model="prompt.content" maxlength="1000" placeholder="描述印花贴合方式、细节、光影等创作要求"></textarea></label></section><button type="button" class="secondary ai-prompt-add" @click="addTemplateAiPrompt">＋ 新增提示词</button></div><div v-else class="drawer-form logistics-form"><h3>物流信息 <span title="用于运费及配送计算">?</span></h3><label><b>*</b> 包裹重量<div class="unit-input"><input v-model.number="newPackageWeight" type="number" min="0.001" step="0.001" placeholder="请输入重量" /><span>KG</span></div></label><label><b>*</b> 包裹尺寸<div class="dimension-inputs"><label><input v-model.number="newPackageLength" type="number" min="0.1" step="0.1" placeholder="长" /><span>cm</span></label><label><input v-model.number="newPackageWidth" type="number" min="0.1" step="0.1" placeholder="宽" /><span>cm</span></label><label><input v-model.number="newPackageHeight" type="number" min="0.1" step="0.1" placeholder="高" /><span>cm</span></label></div></label></div></div><footer><button class="ghost" :disabled="templateSaving" @click="showTemplateDialog=false">取消</button><button class="primary" :disabled="templateSaving" @click="createTemplate">{{templateSaving ? '上传中…' : (editingTemplate ? '保存修改' : '确认新增')}}</button></footer></section></div>
   <div v-if="previewImageUrl" class="image-preview-backdrop" @click.self="previewImageUrl=''"><section class="image-preview-modal"><button class="modal-close" aria-label="关闭大图" @click="previewImageUrl=''">×</button><img :src="previewImageUrl" :alt="previewImageAlt"/></section></div>
+  <div v-if="showProductLibraryTemplateDialog" class="modal-backdrop" @click.self="!productLibraryTemplateSaving && (showProductLibraryTemplateDialog=false)"><section class="modal-card product-library-template-dialog"><button class="modal-close" :disabled="productLibraryTemplateSaving" aria-label="关闭批量设置模版" @click="showProductLibraryTemplateDialog=false">×</button><h2>批量设置模版</h2><p>将为 {{selectedProductLibraryIds.length}} 条未匹配产品设置同一模版。</p><label>目标模版<select v-model="productLibraryTargetTemplateId" :disabled="productLibraryTemplateSaving"><option :value="null" disabled>请选择模版</option><option v-for="item in templates" :key="item.id" :value="item.id">{{item.name}}</option></select></label><div class="modal-actions"><button class="ghost" :disabled="productLibraryTemplateSaving" @click="showProductLibraryTemplateDialog=false">取消</button><button class="primary" :disabled="productLibraryTemplateSaving || !productLibraryTargetTemplateId" @click="saveProductLibraryTemplate">{{productLibraryTemplateSaving ? '保存中…' : '确认设置'}}</button></div></section></div>
   <div v-if="toast" class="toast" role="alert" style="position:fixed;top:24px;left:50%;z-index:1000;transform:translateX(-50%);padding:12px 18px;border-radius:10px;background:#302954;color:#fff;box-shadow:0 10px 28px #30295440;font-size:14px">{{ toast }}</div>
   <div v-if="showMaterialUploadDialog" class="modal-backdrop" @click.self="showMaterialUploadDialog=false"><section class="modal-card material-template-dialog"><button class="modal-close" @click="showMaterialUploadDialog=false">×</button><h2>上传本地素材</h2><p>已选择 {{pendingMaterialUploadFiles.length}} 张图片，请先选择产品模板。</p><p v-if="materialUploading" style="margin:-10px 0 16px;color:#5545ca">正在上传 {{materialUploadedCount}} / {{materialUploadTotal}}…</p><label>产品模板<select v-model="materialUploadTemplateId" :disabled="materialUploading"><option :value="null" disabled>请选择产品模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><p v-if="materialUploadError" style="margin:14px 0 0;color:#d34b5f">{{materialUploadError}}</p><div class="modal-actions"><button class="ghost" :disabled="materialUploading" @click="showMaterialUploadDialog=false">取消</button><button class="primary" :disabled="materialUploading" @click="uploadMaterialAssets">{{materialUploading ? '上传中…' : '确认上传'}}</button></div></section></div>
   <footer class="site-footer">
