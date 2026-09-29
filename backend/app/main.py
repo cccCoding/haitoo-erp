@@ -970,6 +970,44 @@ def list_product_library(
     ]}
 
 
+@app.get("/product-library/{product_id}/orders")
+def list_product_library_orders(
+    product_id: int, page: int = Query(1, ge=1),
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+):
+    product = db.scalar(select(ProductLibraryProduct).join(
+        ProductLibrarySource, ProductLibraryProduct.source_id == ProductLibrarySource.id,
+    ).where(
+        ProductLibraryProduct.id == product_id,
+        ProductLibraryProduct.company_id == user.company_id,
+        ProductLibrarySource.company_id == user.company_id,
+    ))
+    if product is None:
+        raise HTTPException(404, "产品不存在或无权查看")
+
+    linked_sku = select(ProductLibraryOrderProduct.id).join(
+        ProductLibraryProduct, ProductLibraryOrderProduct.product_id == ProductLibraryProduct.id,
+    ).where(
+        ProductLibraryOrderProduct.order_id == ProductLibraryOrder.id,
+        ProductLibraryProduct.company_id == user.company_id,
+        ProductLibraryProduct.source_id == product.source_id,
+        ProductLibraryProduct.sku == product.sku,
+    ).exists()
+    conditions = (
+        ProductLibraryOrder.company_id == user.company_id,
+        ProductLibraryOrder.source_id == product.source_id,
+        linked_sku,
+    )
+    total = db.scalar(select(func.count(ProductLibraryOrder.id)).where(*conditions)) or 0
+    orders = db.scalars(select(ProductLibraryOrder).where(*conditions)
+        .order_by(ProductLibraryOrder.ordered_at.desc(), ProductLibraryOrder.id.desc())
+        .offset((page - 1) * 20).limit(20)).all()
+    return {"total": total, "page": page, "page_size": 20, "items": [
+        {"ordered_at": timestamp_ms(order.ordered_at), "order_number": order.order_number}
+        for order in orders
+    ]}
+
+
 @app.post("/product-library/templates/batch")
 def set_product_library_templates(
     payload: ProductLibraryBatchTemplateInput,

@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 import unittest
@@ -111,6 +111,32 @@ class ProductLibraryTests(unittest.TestCase):
         self.assertEqual((item["title"], item["image_url"]), ("Updated title", "https://example.com/new.jpg"))
         self.assertEqual(item["order_count"], 1)
 
+    def test_shop_sku_order_details_are_deduplicated_sorted_and_paginated(self):
+        start = datetime(2026, 9, 1, 10, 0, 0)
+        rows = [row(order=f"order-{index:02d}", ordered_at=(start + timedelta(hours=index)).strftime("%Y-%m-%d %H:%M:%S"))
+                for index in range(25)]
+        rows += [row(order="order-00", product_id="another-product", ordered_at=rows[0]["下单时间"]),
+                 row(order="another-shop-order", shop="Another Shop"),
+                 row(order="another-sku-order", sku="M05LFSPE7Y65-L")]
+        self.import_bytes(xlsx(rows))
+        product = next(item for item in self.list_items()["items"]
+                       if item["product_id"] == rows[0]["产品ID"] and item["sku"] == "M06LFSKA9RPG7B6A"
+                       and item["shop_name"] == "KK Cantik")
+        same_sku_product = next(item for item in self.list_items()["items"] if item["product_id"] == "another-product")
+        with self.sessions() as db:
+            user = db.get(User, 1)
+            first = main.list_product_library_orders(product["id"], page=1, user=user, db=db)
+            second = main.list_product_library_orders(product["id"], page=2, user=user, db=db)
+            self.assertEqual(main.list_product_library_orders(same_sku_product["id"], page=1, user=user, db=db)["total"], 25)
+            self.assertEqual((first["total"], first["page_size"], len(first["items"])), (25, 20, 20))
+            self.assertEqual([item["order_number"] for item in first["items"]],
+                             [f"order-{index:02d}" for index in range(24, 4, -1)])
+            self.assertEqual([item["order_number"] for item in second["items"]],
+                             [f"order-{index:02d}" for index in range(4, -1, -1)])
+            self.assertEqual(first["items"][0]["ordered_at"], main.timestamp_ms(start + timedelta(hours=24) - timedelta(hours=8)))
+            with self.assertRaisesRegex(HTTPException, "无权查看"):
+                main.list_product_library_orders(product["id"], page=1, user=db.get(User, 2), db=db)
+
     def test_template_filter_and_batch_assignment_only_accept_unmatched_company_products(self):
         unmatched = row(sku="OTHERAA123456-S", product_id="unmatched-product", order="unmatched-order")
         self.import_bytes(xlsx([row(), unmatched]))
@@ -221,6 +247,9 @@ class ProductLibraryTests(unittest.TestCase):
                 json={"product_ids": [product_id], "template_id": 1})
             self.assertEqual(assigned.status_code, 200, assigned.text)
             self.assertEqual(client.get("/product-library?template_id=1", headers={"Authorization": f"Bearer {token_a}"}).json()["total"], 1)
+            self.assertEqual(client.get(f"/product-library/{product_id}/orders", headers={"Authorization": f"Bearer {token_a}"}).json()["total"], 1)
+            self.assertEqual(client.get(f"/product-library/{product_id}/orders?page=0", headers={"Authorization": f"Bearer {token_a}"}).status_code, 422)
+            self.assertEqual(client.get(f"/product-library/{product_id}/orders", headers={"Authorization": f"Bearer {token_b}"}).status_code, 404)
             self.assertEqual(client.post("/product-library/templates/batch", headers={"Authorization": f"Bearer {token_a}"},
                 json={"product_ids": list(range(1, 102)), "template_id": 1}).status_code, 422)
             self.assertEqual(client.get("/product-library", headers={"Authorization": f"Bearer {token_b}"}).json()["total"], 0)
