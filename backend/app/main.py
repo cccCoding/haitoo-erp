@@ -775,7 +775,7 @@ def delete_member_ai_provider_credential(
 async def list_miaoshou_shops(payload: MiaoshouShopQuery, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
     company = db.get(Company, user.company_id)
     if not company or not company.miaoshou_app_id or not company.miaoshou_secret_encrypted:
-        raise HTTPException(400, "尚未配置妙手 API Key，请先在店铺管理中完成配置")
+        raise HTTPException(400, "尚未配置妙手 API Key，请先在妙手管理的店铺管理中完成配置")
 
     body = {"platform": "tiktok", "pageNo": payload.page_no, "pageSize": payload.page_size}
     if payload.site:
@@ -1462,7 +1462,7 @@ def miaoshou_collect_box_item_values(item: dict, synced_at: datetime) -> dict:
 async def sync_miaoshou_collect_box(company: Company, db: Session) -> dict:
     """全量扫描妙手列表，将首次三天窗口或后续增量写入公司缓存。"""
     if not company.miaoshou_app_id or not company.miaoshou_secret_encrypted:
-        raise HTTPException(400, "尚未配置妙手 API Key，请先在店铺管理中完成配置")
+        raise HTTPException(400, "尚未配置妙手 API Key，请先在妙手管理的店铺管理中完成配置")
     started_at = datetime.utcnow()
     first_sync = company.miaoshou_collect_box_initial_synced_at is None
     retention_start = started_at - timedelta(days=7)
@@ -3697,7 +3697,7 @@ async def claim_draft_to_tiktok(draft_id: int, payload: DraftMiaoshouPublishInpu
         raise HTTPException(400, "只能选择当前公司的店铺")
     company = db.get(Company, draft.company_id)
     if not company or not company.miaoshou_app_id or not company.miaoshou_secret_encrypted:
-        raise HTTPException(400, "尚未配置妙手 API Key，请联系公司管理员在店铺管理中配置")
+        raise HTTPException(400, "尚未配置妙手 API Key，请联系公司管理员在妙手管理的店铺管理中配置")
     template = db.get(ProductTemplate, draft.template_id) if draft.template_id else None
     if not template:
         raise HTTPException(400, "该商品草稿缺少产品模板信息，无法生成公共采集箱商品")
