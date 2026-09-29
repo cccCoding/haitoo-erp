@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 from sqlalchemy import Boolean, DateTime, Enum, Float, Index, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
-from sqlalchemy.dialects.mysql import MEDIUMBLOB
+from sqlalchemy.dialects.mysql import DATETIME as MYSQL_DATETIME, MEDIUMBLOB
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
@@ -49,6 +49,14 @@ class User(Base):
     role: Mapped[Role] = mapped_column(Enum(Role), default=Role.MEMBER)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class LoginRateLimit(Base):
+    __tablename__ = "login_rate_limits"
+
+    key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expires_at: Mapped[datetime] = mapped_column(DateTime().with_variant(MYSQL_DATETIME(fsp=6), "mysql"), nullable=False, index=True)
 
 
 class Shop(Base):

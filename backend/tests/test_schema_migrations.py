@@ -28,6 +28,7 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertEqual(current, expected)
         self.assertIn("users", inspect(self.engine).get_table_names())
         self.assertIn("alembic_version", inspect(self.engine).get_table_names())
+        self.assertIn("login_rate_limits", inspect(self.engine).get_table_names())
         draft_columns = {column["name"]: column for column in inspect(self.engine).get_columns("product_drafts")}
         self.assertIn("pending", str(draft_columns["workflow_stage"]["default"]))
         assert_schema_current(self.engine)

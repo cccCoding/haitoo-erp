@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +13,8 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
     log_level: str = "INFO"
     log_timezone: str = "Asia/Hong_Kong"
+    # auto 仅在请求来自内部代理时读取 Cloudflare / Nginx 覆写的客户端 IP 头。
+    login_client_ip_source: Literal["peer", "auto"] = "peer"
     # Grsai 异步图像生成接口，用于印花贴合。
     grsai_base_url: str = "https://grsaiapi.com"
     # DeepSeek 图像理解采用 OpenAI 兼容接口，用于根据模板约束和商品首图生成标题。

@@ -43,7 +43,7 @@ async function login() {
     await loadAdmin()
   } catch (e: any) {
     localStorage.removeItem('haitoro_admin_token'); token.value = ''
-    error.value = e.response?.data?.detail || e.message || '登录失败，请使用超级管理员账号'
+    error.value = e.response?.status === 429 ? '尝试过于频繁，请稍后再试' : (e.response?.data?.detail || e.message || '登录失败，请使用超级管理员账号')
   } finally { loading.value = false }
 }
 async function saveProvider(provider: any) {

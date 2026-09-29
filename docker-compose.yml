@@ -67,6 +67,7 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:?请在 .env 中配置 CORS_ORIGINS}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
+      LOGIN_CLIENT_IP_SOURCE: ${LOGIN_CLIENT_IP_SOURCE:-auto}
       # 模型平台密钥由公司管理员在成员管理中按员工配置。
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}

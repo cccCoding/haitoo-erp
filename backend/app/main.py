@@ -1,4 +1,4 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 import asyncio
 import hashlib
 import hmac
@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import SessionLocal, engine, get_db
 from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, PodTask, ProductDraft, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
+from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
 from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
@@ -255,6 +256,15 @@ def ensure_schema(connection=None) -> None:
                         connection.execute(text(f"ALTER TABLE {quote(table_name)} DROP FOREIGN KEY {quote(constraint_name)}"))
 
 
+async def _cleanup_login_counters_loop() -> None:
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            await asyncio.to_thread(cleanup_expired_login_counters)
+        except Exception:
+            logger.exception("清理过期登录限流计数失败")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("应用初始化开始")
@@ -262,9 +272,13 @@ async def lifespan(_: FastAPI):
 
     assert_schema_current(engine)
     logger.info("应用初始化完成")
+    cleanup_task = asyncio.create_task(_cleanup_login_counters_loop())
     try:
         yield
     finally:
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
         logger.info("应用关闭")
 
 
@@ -275,7 +289,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition"],
+    expose_headers=["Content-Disposition", "Retry-After"],
 )
 
 
@@ -299,7 +313,7 @@ async def log_request(request: Request, call_next):
     logger.info(
         "HTTP 请求完成 | request_id=%s method=%s path=%s status=%s duration_ms=%.2f client=%s",
         request_id, request.method, request.url.path, response.status_code, duration_ms,
-        request.client.host if request.client else "unknown",
+        client_ip(request),
     )
     return response
 
@@ -403,12 +417,17 @@ def health():
 
 
 @app.post("/auth/login")
-def login(payload: LoginInput, db: Session = Depends(get_db)):
+def login(payload: LoginInput, request: Request, db: Session = Depends(get_db)):
+    count_ip_attempt(db, client_ip(request))
+    failures = lock_email_failures(db, payload.email)
     user = db.scalar(select(User).where(User.email == payload.email))
     if not user or not verify_password(payload.password, user.password_hash):
+        record_email_failure(db, failures)
         raise HTTPException(401, "邮箱或密码错误")
     if not user.is_active:
+        db.commit()
         raise HTTPException(403, "该账号已被停用，请联系管理员")
+    clear_email_failures(db, failures)
     return {"access_token": create_access_token(user), "token_type": "bearer", "user": UserOut.model_validate(user)}
 
 

@@ -1,6 +1,8 @@
 # 仅供本机测试；端口只监听回环地址，不对局域网开放。
 services:
   api:
+    environment:
+      LOGIN_CLIENT_IP_SOURCE: peer
     ports:
       - "127.0.0.1:8001:8000"
 
