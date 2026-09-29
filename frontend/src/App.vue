@@ -555,7 +555,21 @@ async function refresh() {
     } catch (e:any) { showToast(e.response?.data?.detail || '本机执行器配对失败') }
   }
 }
-async function login() { try { loading.value=true; error.value=''; const {data}=await api.post('/auth/login',{email:email.value,password:password.value}); token.value=data.access_token; localStorage.setItem('haitoro_token',token.value); await refresh() } catch (e:any) { error.value=e.response?.status===429 ? '尝试过于频繁，请稍后再试' : '登录失败，请检查账号密码' } finally { loading.value=false } }
+async function login() {
+  loading.value = true
+  error.value = ''
+  try {
+    const { data } = await api.post('/auth/login', { email: email.value, password: password.value })
+    token.value = data.access_token
+    localStorage.setItem('haitoro_token', token.value)
+    await refresh()
+  } catch (e: any) {
+    const detail = e.response?.data?.detail
+    error.value = typeof detail === 'string' && detail.trim() ? detail : '登录失败，请检查账号密码'
+  } finally {
+    loading.value = false
+  }
+}
 function onCreativeAssetChange(event: Event) {
   if (creativeUploading.value) { showToast('图片上传处理中，请等待本轮上传结束'); (event.target as HTMLInputElement).value = ''; return }
   const files = Array.from((event.target as HTMLInputElement).files || [])
