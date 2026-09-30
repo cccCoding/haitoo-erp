@@ -17,6 +17,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, inspect, or_, select, text, tuple_, update
@@ -24,8 +25,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import SessionLocal, engine, get_db
-from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, PodTask, ProductDraft, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
+from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, PodTask, ProductDraft, ProductLibraryDailySnapshot, ProductLibraryDailySnapshotItem, ProductLibraryRankingTask, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
 from .product_library import parse_order_workbook
+from .product_library_rankings import enqueue_ranking_task, task_payload
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
 from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
@@ -924,6 +926,174 @@ def product_library_filters(user: User = Depends(require_roles(Role.COMPANY_ADMI
     }
 
 
+def product_library_material_details(db: Session, company_id: int, skus: list[str]) -> dict[str, dict]:
+    """仅从本公司素材库按完整 SKU 读取创建人和创建时间。"""
+    if not skus:
+        return {}
+    rows = db.execute(select(MaterialAsset.sku, User.name, MaterialAsset.created_at)
+        .select_from(MaterialAsset)
+        .outerjoin(User, (User.id == MaterialAsset.claimed_by) & (User.company_id == company_id))
+        .where(MaterialAsset.company_id == company_id, MaterialAsset.sku.in_(set(skus)))).all()
+    return {sku: {"material_created_by_name": name, "material_created_at": timestamp_ms(created_at)}
+            for sku, name, created_at in rows}
+
+
+def stagnant_material_cutoff() -> datetime:
+    """素材入库时间按 UTC 保存；严格超过 90 个完整的 24 小时。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=90)
+
+
+@app.get("/product-library/stagnant")
+def list_stagnant_materials(
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    creator_id: int | None = Query(None, ge=1),
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+):
+    # 先按公司和完整 SKU 定位产品，再用产品 ID 索引判断是否关联过订单。
+    linked_order = select(ProductLibraryOrderProduct.id).where(
+        ProductLibraryOrderProduct.product_id == ProductLibraryProduct.id,
+    ).exists()
+    has_order = select(ProductLibraryProduct.id).where(
+        ProductLibraryProduct.company_id == user.company_id,
+        ProductLibraryProduct.sku == MaterialAsset.sku,
+        linked_order,
+    ).correlate(MaterialAsset).exists()
+    conditions = [
+        MaterialAsset.company_id == user.company_id,
+        MaterialAsset.created_at < stagnant_material_cutoff(),
+        MaterialAsset.sku.is_not(None), MaterialAsset.sku != "",
+        ~has_order,
+    ]
+    if user.role == Role.MEMBER:
+        conditions.append(MaterialAsset.claimed_by == user.id)
+    elif creator_id is not None:
+        conditions.append(MaterialAsset.claimed_by == creator_id)
+    total = db.scalar(select(func.count(MaterialAsset.id)).where(*conditions)) or 0
+    page = min(page, max(1, (total + page_size - 1) // page_size))
+    rows = db.execute(select(MaterialAsset, ProductTemplate.name, User.name)
+        .outerjoin(ProductTemplate, ProductTemplate.id == MaterialAsset.template_id)
+        .outerjoin(User, (User.id == MaterialAsset.claimed_by) & (User.company_id == user.company_id))
+        .where(*conditions)
+        .order_by(MaterialAsset.created_at.asc(), MaterialAsset.id.asc())
+        .offset((page - 1) * page_size).limit(page_size)).all()
+    return {"total": total, "page": page, "page_size": page_size, "items": [
+        {"id": asset.id, "image_url": asset.url, "sku": asset.sku,
+         "template": template_name or ("未设置模板" if asset.template_id is None else "历史模板已删除"),
+         "created_by_id": asset.claimed_by, "created_by_name": creator_name or "历史记录缺失",
+         "created_at": timestamp_ms(asset.created_at)}
+        for asset, template_name, creator_name in rows
+    ]}
+
+
+def new_images_window() -> tuple[datetime, datetime]:
+    """按素材库 UTC 创建时间读取最近五个完整的 24 小时。"""
+    end = datetime.now(timezone.utc).replace(tzinfo=None)
+    return end - timedelta(days=5), end
+
+
+@app.get("/product-library/new-images")
+def list_new_images(
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    creator_id: int | None = Query(None, ge=1),
+    usage_status: Literal["all", "unused", "used"] = "all",
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+):
+    start, end = new_images_window()
+    conditions = [
+        MaterialAsset.company_id == user.company_id,
+        MaterialAsset.created_at >= start,
+        MaterialAsset.created_at <= end,
+    ]
+    if user.role == Role.MEMBER:
+        conditions.append(MaterialAsset.claimed_by == user.id)
+    elif creator_id is not None:
+        conditions.append(MaterialAsset.claimed_by == creator_id)
+    if usage_status != "all":
+        conditions.append(MaterialAsset.usage_status == usage_status)
+    total = db.scalar(select(func.count(MaterialAsset.id)).where(*conditions)) or 0
+    page = min(page, max(1, (total + page_size - 1) // page_size))
+    rows = db.execute(select(MaterialAsset, ProductTemplate.name, User.name)
+        .outerjoin(ProductTemplate, ProductTemplate.id == MaterialAsset.template_id)
+        .outerjoin(User, (User.id == MaterialAsset.claimed_by) & (User.company_id == user.company_id))
+        .where(*conditions)
+        .order_by(MaterialAsset.created_at.desc(), MaterialAsset.id.desc())
+        .offset((page - 1) * page_size).limit(page_size)).all()
+    return {"total": total, "page": page, "page_size": page_size, "items": [
+        {"id": asset.id, "image_url": asset.url, "sku": asset.sku,
+         "template": template_name or ("未设置模板" if asset.template_id is None else "历史模板已删除"),
+         "created_by_id": asset.claimed_by, "created_by_name": creator_name or "历史记录缺失",
+         "created_at": timestamp_ms(asset.created_at), "usage_status": asset.usage_status}
+        for asset, template_name, creator_name in rows
+    ]}
+
+
+@app.get("/product-library/rankings")
+def list_product_library_rankings(
+    category: Literal["top7", "top15", "top30", "potential", "hot", "booming"],
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+):
+    snapshot = db.scalar(select(ProductLibraryDailySnapshot).where(
+        ProductLibraryDailySnapshot.company_id == user.company_id,
+    ).order_by(ProductLibraryDailySnapshot.snapshot_date.desc()).limit(1))
+    if snapshot is None:
+        return {"snapshot_date": None, "through_date": None, "total": 0,
+                "page": page, "page_size": page_size, "items": []}
+    item = ProductLibraryDailySnapshotItem
+    count_column = {"top7": item.count_7, "top15": item.count_15, "top30": item.count_30}.get(category, item.count_7)
+    if category.startswith("top"):
+        rank_column = {"top7": item.rank_7, "top15": item.rank_15, "top30": item.rank_30}[category]
+        condition = rank_column.is_not(None)
+        order_columns = (rank_column.asc(),)
+    else:
+        condition = item.tier == category
+        order_columns = (item.count_7.desc(), item.product_id.asc())
+    conditions = (item.snapshot_id == snapshot.id, condition)
+    total = db.scalar(select(func.count(item.id)).where(*conditions)) or 0
+    rows = db.execute(select(item, ProductLibraryProduct, ProductLibrarySource, ProductTemplate.name)
+        .join(ProductLibraryProduct, ProductLibraryProduct.id == item.product_id)
+        .join(ProductLibrarySource, ProductLibrarySource.id == ProductLibraryProduct.source_id)
+        .outerjoin(ProductTemplate, ProductTemplate.id == ProductLibraryProduct.template_id)
+        .where(*conditions, ProductLibraryProduct.company_id == user.company_id,
+               ProductLibrarySource.company_id == user.company_id)
+        .order_by(*order_columns).offset((page - 1) * page_size).limit(page_size)).all()
+    material_details = product_library_material_details(db, user.company_id, [product.sku for _, product, _, _ in rows])
+    return {
+        "snapshot_date": snapshot.snapshot_date.isoformat(),
+        "through_date": (snapshot.snapshot_date - timedelta(days=1)).isoformat(),
+        "total": total, "page": page, "page_size": page_size,
+        "items": [{
+            "id": product.id, "rank": (entry.rank_7 if category == "top7" else
+                                    entry.rank_15 if category == "top15" else
+                                    entry.rank_30 if category == "top30" else (page - 1) * page_size + index),
+            "order_count": int(getattr(entry, count_column.key)),
+            "count_7": entry.count_7, "count_15": entry.count_15, "count_30": entry.count_30,
+            "sku": product.sku, "template": template_name or "未匹配", "title": product.title,
+            "image_url": product.image_url, "platform": source.platform, "site": source.site,
+            "shop_name": source.shop_name, "product_id": product.external_product_id,
+            **material_details.get(product.sku, {"material_created_by_name": None, "material_created_at": None}),
+        } for index, (entry, product, source, template_name) in enumerate(rows, start=1)],
+    }
+
+
+@app.get("/product-library/rankings/refresh/status")
+def product_library_ranking_task_status(
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+):
+    return task_payload(db.get(ProductLibraryRankingTask, user.company_id))
+
+
+@app.post("/product-library/rankings/refresh", status_code=202)
+def refresh_product_library_rankings(
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+):
+    try:
+        return enqueue_ranking_task(db, user.company_id)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(404, str(exc)) from exc
+
+
 @app.get("/product-library")
 def list_product_library(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
@@ -949,26 +1119,31 @@ def list_product_library(
     total = db.scalar(select(func.count(ProductLibraryProduct.id)).join(
         ProductLibrarySource, ProductLibraryProduct.source_id == ProductLibrarySource.id,
     ).outerjoin(ProductTemplate, ProductLibraryProduct.template_id == ProductTemplate.id).where(*conditions)) or 0
+    sales = (select(
+        ProductLibraryOrderProduct.product_id.label("product_id"),
+        func.count(ProductLibraryOrderProduct.order_id).label("order_count"),
+    ).join(ProductLibraryProduct, ProductLibraryProduct.id == ProductLibraryOrderProduct.product_id)
+     .where(ProductLibraryProduct.company_id == user.company_id)
+     .group_by(ProductLibraryOrderProduct.product_id).subquery())
+    order_count = func.coalesce(sales.c.order_count, 0)
     rows = db.execute(select(
-        ProductLibraryProduct, ProductLibrarySource, ProductTemplate.name,
+        ProductLibraryProduct, ProductLibrarySource, ProductTemplate.name, order_count,
     ).join(ProductLibrarySource, ProductLibraryProduct.source_id == ProductLibrarySource.id)
      .outerjoin(ProductTemplate, ProductLibraryProduct.template_id == ProductTemplate.id)
-     .where(*conditions).order_by(ProductLibraryProduct.id.desc())
+     .outerjoin(sales, sales.c.product_id == ProductLibraryProduct.id)
+     .where(*conditions).order_by(order_count.desc(), ProductLibraryProduct.id.desc())
      .offset((page - 1) * page_size).limit(page_size)).all()
-    product_ids = [product.id for product, _, _ in rows]
-    order_counts = dict(db.execute(select(
-        ProductLibraryOrderProduct.product_id, func.count(ProductLibraryOrderProduct.order_id),
-    ).where(ProductLibraryOrderProduct.product_id.in_(product_ids))
-     .group_by(ProductLibraryOrderProduct.product_id)).all()) if product_ids else {}
+    material_details = product_library_material_details(db, user.company_id, [product.sku for product, _, _, _ in rows])
     return {"total": total, "page": page, "page_size": page_size, "items": [
         {
             "id": product.id, "sku": product.sku, "template_id": product.template_id if template_name else None,
             "template": template_name or "未匹配",
             "title": product.title, "image_url": product.image_url,
             "platform": source.platform, "site": source.site, "shop_name": source.shop_name,
-            "product_id": product.external_product_id, "order_count": int(order_counts.get(product.id, 0)),
+            "product_id": product.external_product_id, "order_count": int(count),
+            **material_details.get(product.sku, {"material_created_by_name": None, "material_created_at": None}),
         }
-        for product, source, template_name in rows
+        for product, source, template_name, count in rows
     ]}
 
 

@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 from app import main
 from app.database import Base
 from app.database import get_db
-from app.models import Company, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductTemplate, Role, User
+from app.models import Company, MaterialAsset, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductTemplate, Role, User
 from app.schemas import ProductLibraryBatchTemplateInput
 from app.security import create_access_token
 
@@ -112,6 +112,52 @@ class ProductLibraryTests(unittest.TestCase):
                 .join(ProductLibraryProduct, ProductLibraryProduct.id == ProductLibraryOrderProduct.product_id)
                 .where(ProductLibraryProduct.company_id == 1, ProductLibraryProduct.sku == "M06LFSKA9RPG7B6A"))
             self.assertEqual(company_sku_orders, 3)
+
+    def test_product_list_sorts_by_sales_before_pagination(self):
+        records = [
+            row(sku=sku, product_id=product_id, order=f"{product_id}-{index}")
+            for product_id, sku, count in (
+                ("p1", "M06LFSKA9RPG7B6A-S", 3),
+                ("p2", "M05LFSPE7Y65-S", 2),
+                ("p3", "OTHERAA123456-S", 2),
+            ) for index in range(count)
+        ]
+        self.import_bytes(xlsx(records))
+        with self.sessions() as db:
+            source_id = db.scalar(select(ProductLibraryProduct.source_id).where(ProductLibraryProduct.external_product_id == "p1"))
+            db.add(ProductLibraryProduct(company_id=1, source_id=source_id, external_product_id="zero",
+                                         sku="ZEROAA123456", title="Zero", image_url=""))
+            db.commit()
+            user = db.get(User, 1)
+            def listing(page):
+                return main.list_product_library(page=page, page_size=2, platform=None, site=None,
+                    shop_name=None, sku=None, template_id=None, unmatched=False, user=user, db=db)
+            first, second = listing(1), listing(2)
+        self.assertEqual(first["total"], 4)
+        self.assertEqual([(item["product_id"], item["order_count"]) for item in first["items"]],
+                         [("p1", 3), ("p3", 2)])
+        self.assertEqual([(item["product_id"], item["order_count"]) for item in second["items"]],
+                         [("p2", 2), ("zero", 0)])
+
+    def test_product_list_looks_up_material_creator_with_company_scope(self):
+        self.import_bytes(xlsx([
+            row(product_id="matched", order="matched-order"),
+            row(sku="OTHERAA123456-S", product_id="foreign", order="foreign-order"),
+        ]))
+        created_at = datetime(2026, 9, 20, 8, 30)
+        with self.sessions() as db:
+            db.add_all([
+                MaterialAsset(company_id=1, url="https://example.com/a.jpg", name="A",
+                              sku="M06LFSKA9RPG7B6A", claimed_by=1, created_at=created_at),
+                MaterialAsset(company_id=2, url="https://example.com/b.jpg", name="B",
+                              sku="OTHERAA123456", claimed_by=2, created_at=created_at),
+            ])
+            db.commit()
+        items = {item["product_id"]: item for item in self.list_items()["items"]}
+        self.assertEqual(items["matched"]["material_created_by_name"], "A")
+        self.assertEqual(items["matched"]["material_created_at"], main.timestamp_ms(created_at))
+        self.assertIsNone(items["foreign"]["material_created_by_name"])
+        self.assertIsNone(items["foreign"]["material_created_at"])
 
     def test_reimport_updates_nonempty_product_details(self):
         self.import_bytes(xlsx([row()]))

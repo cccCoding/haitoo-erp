@@ -29,6 +29,10 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertIn("users", inspect(self.engine).get_table_names())
         self.assertIn("alembic_version", inspect(self.engine).get_table_names())
         self.assertIn("login_rate_limits", inspect(self.engine).get_table_names())
+        self.assertIn("product_library_ranking_tasks", inspect(self.engine).get_table_names())
+        task_columns = {column["name"] for column in inspect(self.engine).get_columns("product_library_ranking_tasks")}
+        self.assertTrue({"company_id", "task_id", "status", "snapshot_date", "requested_at",
+                         "started_at", "finished_at", "error"}.issubset(task_columns))
         self.assertTrue({
             "product_library_sources", "product_library_products", "product_library_orders",
             "product_library_order_products",
@@ -57,6 +61,7 @@ class SchemaMigrationTests(unittest.TestCase):
             shop_constraints = inspector.get_unique_constraints("shops")
             hub_upload_indexes = {item["name"] for item in inspector.get_indexes("hub_upload_tasks")}
             pod_task_indexes = {item["name"] for item in inspector.get_indexes("pod_tasks")}
+            material_indexes = {item["name"] for item in inspector.get_indexes("material_assets")}
 
         self.assertTrue(any(
             item["name"] == "uq_shops_company_external_shop_type"
@@ -69,6 +74,8 @@ class SchemaMigrationTests(unittest.TestCase):
             "ix_hub_upload_tasks_claim_token",
         }.issubset(hub_upload_indexes))
         self.assertIn("ix_pod_tasks_status_created_at_id", pod_task_indexes)
+        self.assertIn("ix_material_assets_company_created_id", material_indexes)
+        self.assertIn("ix_material_assets_company_creator_created_id", material_indexes)
 
     def test_shop_identity_migration_rejects_existing_duplicate_cross_border_shops(self) -> None:
         with self.engine.begin() as connection:

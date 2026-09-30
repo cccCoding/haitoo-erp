@@ -1,6 +1,6 @@
 import enum
-from datetime import datetime
-from sqlalchemy import Boolean, DateTime, Enum, Float, Index, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
+from datetime import date, datetime
+from sqlalchemy import Boolean, Date, DateTime, Enum, Float, Index, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import DATETIME as MYSQL_DATETIME, MEDIUMBLOB
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
@@ -272,7 +272,11 @@ class PodTask(Base):
 class MaterialAsset(Base):
     """公司级素材库中的 AI 领取或本地上传图片。"""
     __tablename__ = "material_assets"
-    __table_args__ = (UniqueConstraint("sku", name="uq_material_assets_sku"),)
+    __table_args__ = (
+        UniqueConstraint("sku", name="uq_material_assets_sku"),
+        Index("ix_material_assets_company_created_id", "company_id", "created_at", "id"),
+        Index("ix_material_assets_company_creator_created_id", "company_id", "claimed_by", "created_at", "id"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     source_task_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
@@ -370,6 +374,47 @@ class ProductLibraryOrderProduct(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     order_id: Mapped[int] = mapped_column(index=True)
     product_id: Mapped[int] = mapped_column()
+
+
+class ProductLibraryDailySnapshot(Base):
+    __tablename__ = "product_library_daily_snapshots"
+    __table_args__ = (UniqueConstraint("company_id", "snapshot_date", name="uq_product_library_snapshot_company_date"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ProductLibraryDailySnapshotItem(Base):
+    __tablename__ = "product_library_daily_snapshot_items"
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "product_id", name="uq_product_library_snapshot_product"),
+        Index("ix_product_library_snapshot_items_tier", "snapshot_id", "tier"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    snapshot_id: Mapped[int] = mapped_column(index=True)
+    product_id: Mapped[int] = mapped_column(index=True)
+    count_7: Mapped[int] = mapped_column(Integer)
+    count_15: Mapped[int] = mapped_column(Integer)
+    count_30: Mapped[int] = mapped_column(Integer)
+    rank_7: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rank_15: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rank_30: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tier: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+
+class ProductLibraryRankingTask(Base):
+    """每家公司最近一次产品库统计任务。"""
+    __tablename__ = "product_library_ranking_tasks"
+    __table_args__ = (UniqueConstraint("task_id", name="uq_product_library_ranking_task_id"),)
+    company_id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class MiaoshouCollectBoxItem(Base):
