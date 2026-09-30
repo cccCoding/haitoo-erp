@@ -60,12 +60,31 @@ const shopeeExportCatalogId = ref(null), shopeeExportCategoryId = ref(''), shope
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref(null), draftCreatorFilterId = ref(null), draftListRefreshing = ref(false);
 const collectBoxItems = ref([]), collectBoxTotal = ref(0), collectBoxLoading = ref(false);
 const productLibraryItems = ref([]), productLibraryTotal = ref(0), productLibraryPage = ref(1), productLibraryPageSize = ref(20), productLibraryLoading = ref(false), productLibraryImporting = ref(false), productLibraryDownloading = ref(false);
+const productLibraryStatisticsSubmitting = ref(false);
+const productLibraryStatisticsTask = ref(null);
+const productLibraryStatisticsRunning = computed(() => ['queued', 'running'].includes(productLibraryStatisticsTask.value?.status));
+const productLibraryRankingItems = ref([]), productLibraryRankingTotal = ref(0), productLibraryRankingPage = ref(1), productLibraryRankingPageSize = ref(20), productLibraryRankingLoading = ref(false);
+const productLibraryRankingDate = ref(null), productLibraryRankingThroughDate = ref(null), productLibraryRankingError = ref('');
+let productLibraryRankingRequestId = 0;
+const stagnantMaterials = ref([]), stagnantTotal = ref(0), stagnantPage = ref(1), stagnantPageSize = ref(20), stagnantCreatorId = ref(null), stagnantLoading = ref(false), stagnantError = ref('');
+let stagnantRequestId = 0;
+const newImages = ref([]), newImagesTotal = ref(0), newImagesPage = ref(1), newImagesPageSize = ref(20), newImagesCreatorId = ref(null), newImagesUsageStatus = ref('all'), newImagesLoading = ref(false), newImagesError = ref('');
+let newImagesRequestId = 0;
 const activeProductLibraryTab = ref('products');
 const productLibraryTabs = [
-    { key: 'products', label: '产品列表' }, { key: 'top7', label: '7天热销TOP50' }, { key: 'top15', label: '15天热销TOP50' },
-    { key: 'top30', label: '30天热销TOP50' }, { key: 'new_images', label: '新图' }, { key: 'stagnant', label: '滞销款' },
-    { key: 'potential', label: '潜力款' }, { key: 'hot', label: '热销款' }, { key: 'booming', label: '旺款' },
+    { key: 'products', label: '排行榜' }, { key: 'top7', label: '7天热销TOP50' }, { key: 'top15', label: '15天热销TOP50' },
+    { key: 'top30', label: '30天热销TOP50' }, { key: 'potential', label: '潜力款' },
+    { key: 'hot', label: '热销款' }, { key: 'booming', label: '旺款' }, { key: 'stagnant', label: '滞销款' }, { key: 'new_images', label: '新图' },
 ];
+const productLibraryRankingTabKeys = new Set(['top7', 'top15', 'top30', 'potential', 'hot', 'booming']);
+const productLibraryTopTabKeys = new Set(['top7', 'top15', 'top30']);
+const productLibraryCategoryDescriptions = {
+    stagnant: '素材创建超过 90 天且历史累计 0 订单',
+    new_images: '近 5 天新增的素材',
+    potential: '近7天出单大于30',
+    hot: '近7天出单大于70',
+    booming: '近7天出单大于130',
+};
 const productLibraryFilters = ref({ platforms: [], sites: [], shop_names: [] });
 const productLibraryPlatform = ref(''), productLibrarySite = ref(''), productLibraryShopName = ref(''), productLibraryTemplateFilter = ref(''), productLibrarySku = ref('');
 const appliedProductLibraryFilters = ref({ platform: '', site: '', shopName: '', template: '', sku: '' });
@@ -553,10 +572,21 @@ watch(page, value => {
     shopError.value = '';
     if (value === 'miaoshou-collect-box' && activeMiaoshouTab.value === 'collect_box')
         void loadCollectBox();
-    if (value === 'product-library')
-        void loadProductLibrary(true);
+    if (value === 'product-library') {
+        void loadProductLibraryStatisticsStatus();
+        if (activeProductLibraryTab.value === 'products')
+            void loadProductLibrary(true);
+        else if (activeProductLibraryTab.value === 'stagnant')
+            void loadStagnantMaterials();
+        else if (activeProductLibraryTab.value === 'new_images')
+            void loadNewImages();
+        else if (productLibraryRankingTabKeys.has(activeProductLibraryTab.value))
+            void loadProductLibraryRankings();
+    }
     else {
         selectedProductLibraryIds.value = [];
+        stagnantRequestId++;
+        newImagesRequestId++;
         closeProductLibraryOrders();
     }
 });
@@ -671,6 +701,9 @@ function changeCollectBoxFilters() { collectBoxPage.value = 1; void loadCollectB
 function changeCollectBoxPage(page) { if (page < 1 || page > collectBoxPageCount.value || collectBoxLoading.value)
     return; collectBoxPage.value = page; void loadCollectBox(); }
 const productLibraryPageCount = computed(() => Math.max(1, Math.ceil(productLibraryTotal.value / productLibraryPageSize.value)));
+const productLibraryRankingPageCount = computed(() => Math.max(1, Math.ceil(productLibraryRankingTotal.value / productLibraryRankingPageSize.value)));
+const stagnantPageCount = computed(() => Math.max(1, Math.ceil(stagnantTotal.value / stagnantPageSize.value)));
+const newImagesPageCount = computed(() => Math.max(1, Math.ceil(newImagesTotal.value / newImagesPageSize.value)));
 const productLibraryOrderPageCount = computed(() => Math.max(1, Math.ceil(productLibraryOrderTotal.value / 20)));
 const unmatchedProductLibraryItems = computed(() => productLibraryItems.value.filter(item => item.template_id === null));
 const allPagedUnmatchedSelected = computed(() => unmatchedProductLibraryItems.value.length > 0 && unmatchedProductLibraryItems.value.every(item => selectedProductLibraryIds.value.includes(item.id)));
@@ -700,6 +733,112 @@ async function loadProductLibrary(withFilters = false) {
         productLibraryLoading.value = false;
     }
 }
+async function loadProductLibraryRankings() {
+    if (!productLibraryRankingTabKeys.has(activeProductLibraryTab.value))
+        return;
+    const requestId = ++productLibraryRankingRequestId;
+    const category = activeProductLibraryTab.value;
+    const isTop50 = productLibraryTopTabKeys.has(category);
+    try {
+        productLibraryRankingLoading.value = true;
+        productLibraryRankingError.value = '';
+        const { data } = await api.get('/product-library/rankings', { headers: headers.value, params: { category, page: isTop50 ? 1 : productLibraryRankingPage.value, page_size: isTop50 ? 50 : productLibraryRankingPageSize.value } });
+        if (requestId !== productLibraryRankingRequestId)
+            return;
+        productLibraryRankingItems.value = data.items || [];
+        productLibraryRankingTotal.value = data.total || 0;
+        productLibraryRankingDate.value = data.snapshot_date || null;
+        productLibraryRankingThroughDate.value = data.through_date || null;
+        productLibraryBrokenImages.value = [];
+    }
+    catch (e) {
+        if (requestId === productLibraryRankingRequestId)
+            productLibraryRankingError.value = e.response?.data?.detail || '加载榜单失败';
+    }
+    finally {
+        if (requestId === productLibraryRankingRequestId)
+            productLibraryRankingLoading.value = false;
+    }
+}
+async function loadStagnantMaterials() {
+    const requestId = ++stagnantRequestId;
+    try {
+        stagnantLoading.value = true;
+        stagnantError.value = '';
+        const { data } = await api.get('/product-library/stagnant', { headers: headers.value, params: {
+                page: stagnantPage.value, page_size: stagnantPageSize.value,
+                creator_id: user.value?.role === 'company_admin' ? stagnantCreatorId.value : undefined,
+            } });
+        if (requestId !== stagnantRequestId)
+            return;
+        stagnantMaterials.value = data.items || [];
+        stagnantTotal.value = data.total || 0;
+        stagnantPage.value = data.page || 1;
+        productLibraryBrokenImages.value = [];
+    }
+    catch (e) {
+        if (requestId === stagnantRequestId)
+            stagnantError.value = e.response?.data?.detail || '加载滞销素材失败';
+    }
+    finally {
+        if (requestId === stagnantRequestId)
+            stagnantLoading.value = false;
+    }
+}
+function changeStagnantCreator() { stagnantPage.value = 1; void loadStagnantMaterials(); }
+function changeStagnantPageSize() { stagnantPage.value = 1; void loadStagnantMaterials(); }
+function changeStagnantPage(next) {
+    if (stagnantLoading.value || next < 1 || next > stagnantPageCount.value)
+        return;
+    stagnantPage.value = next;
+    void loadStagnantMaterials();
+}
+async function loadNewImages() {
+    const requestId = ++newImagesRequestId;
+    try {
+        newImagesLoading.value = true;
+        newImagesError.value = '';
+        const { data } = await api.get('/product-library/new-images', { headers: headers.value, params: {
+                page: newImagesPage.value, page_size: newImagesPageSize.value,
+                creator_id: user.value?.role === 'company_admin' ? newImagesCreatorId.value : undefined,
+                usage_status: newImagesUsageStatus.value,
+            } });
+        if (requestId !== newImagesRequestId)
+            return;
+        newImages.value = data.items || [];
+        newImagesTotal.value = data.total || 0;
+        newImagesPage.value = data.page || 1;
+        productLibraryBrokenImages.value = [];
+    }
+    catch (e) {
+        if (requestId === newImagesRequestId)
+            newImagesError.value = e.response?.data?.detail || '加载新图失败';
+    }
+    finally {
+        if (requestId === newImagesRequestId)
+            newImagesLoading.value = false;
+    }
+}
+function changeNewImagesFilters() { newImagesPage.value = 1; void loadNewImages(); }
+function changeNewImagesPageSize() { newImagesPage.value = 1; void loadNewImages(); }
+function changeNewImagesPage(next) {
+    if (newImagesLoading.value || next < 1 || next > newImagesPageCount.value)
+        return;
+    newImagesPage.value = next;
+    void loadNewImages();
+}
+function changeProductLibraryRankingPage(next) {
+    if (productLibraryTopTabKeys.has(activeProductLibraryTab.value) || productLibraryRankingLoading.value || next < 1 || next > productLibraryRankingPageCount.value)
+        return;
+    productLibraryRankingPage.value = next;
+    void loadProductLibraryRankings();
+}
+function changeProductLibraryRankingPageSize() {
+    if (productLibraryTopTabKeys.has(activeProductLibraryTab.value))
+        return;
+    productLibraryRankingPage.value = 1;
+    void loadProductLibraryRankings();
+}
 function searchProductLibrary() {
     if (productLibraryLoading.value)
         return;
@@ -718,6 +857,26 @@ function changeProductLibraryTab(tab) {
         return;
     activeProductLibraryTab.value = tab;
     selectedProductLibraryIds.value = [];
+    productLibraryRankingRequestId++;
+    stagnantRequestId++;
+    newImagesRequestId++;
+    if (tab === 'products')
+        void loadProductLibrary(true);
+    else if (tab === 'stagnant') {
+        stagnantPage.value = 1;
+        void loadStagnantMaterials();
+    }
+    else if (tab === 'new_images') {
+        newImagesPage.value = 1;
+        void loadNewImages();
+    }
+    else if (productLibraryRankingTabKeys.has(tab)) {
+        productLibraryRankingPage.value = 1;
+        productLibraryRankingItems.value = [];
+        productLibraryRankingTotal.value = 0;
+        productLibraryRankingDate.value = null;
+        void loadProductLibraryRankings();
+    }
 }
 function changeProductLibraryPage(next) {
     if (productLibraryLoading.value || next < 1 || next > productLibraryPageCount.value)
@@ -854,6 +1013,8 @@ async function importProductLibrary(event) {
         productLibraryPage.value = 1;
         selectedProductLibraryIds.value = [];
         await loadProductLibrary(true);
+        if (activeProductLibraryTab.value === 'stagnant')
+            await loadStagnantMaterials();
         showToast(`导入完成：新增 ${data.created_products} 个产品、${data.created_orders} 个订单，更新 ${data.updated_products} 个产品`);
     }
     catch (e) {
@@ -862,6 +1023,47 @@ async function importProductLibrary(event) {
     finally {
         productLibraryImporting.value = false;
         input.value = '';
+    }
+}
+async function loadProductLibraryStatisticsStatus() {
+    if (!token.value)
+        return;
+    const currentToken = token.value;
+    const currentTaskId = productLibraryStatisticsTask.value?.task_id;
+    try {
+        const { data } = await api.get('/product-library/rankings/refresh/status', { headers: headers.value });
+        if (currentToken !== token.value)
+            return;
+        if (currentTaskId !== productLibraryStatisticsTask.value?.task_id)
+            return;
+        const previous = productLibraryStatisticsTask.value;
+        productLibraryStatisticsTask.value = data.task;
+        if (previous?.task_id === data.task?.task_id && ['queued', 'running'].includes(previous.status) && data.task?.status === 'succeeded') {
+            if (productLibraryRankingTabKeys.has(activeProductLibraryTab.value))
+                await loadProductLibraryRankings();
+            showToast(`数据统计完成：截至 ${data.task.through_date}`);
+        }
+        if (previous?.task_id === data.task?.task_id && ['queued', 'running'].includes(previous.status) && data.task?.status === 'failed')
+            showToast('数据统计失败，请重试');
+    }
+    catch { /* 轮询失败时保留当前状态，下次继续查询。 */ }
+}
+async function runProductLibraryStatistics() {
+    if (productLibraryStatisticsSubmitting.value || productLibraryImporting.value)
+        return;
+    try {
+        productLibraryStatisticsSubmitting.value = true;
+        const { data } = await api.post('/product-library/rankings/refresh', null, { headers: headers.value });
+        productLibraryStatisticsTask.value = data.task;
+        showToast(data.message || (data.existing ? '已有统计任务正在执行' : '统计任务已提交'));
+        if (data.task?.status === 'succeeded' && productLibraryRankingTabKeys.has(activeProductLibraryTab.value))
+            await loadProductLibraryRankings();
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '数据统计失败，请重试');
+    }
+    finally {
+        productLibraryStatisticsSubmitting.value = false;
     }
 }
 // 后端统一返回 Unix 毫秒时间戳；所有日期时间固定按 UTC+8 展示。
@@ -926,8 +1128,17 @@ async function refresh() {
         selectedTemplateId.value = templates.value[0].id;
     if (selectedTemplateId.value)
         await loadMyTemplateResources(false);
-    if (page.value === 'product-library')
-        await loadProductLibrary(true);
+    if (page.value === 'product-library') {
+        void loadProductLibraryStatisticsStatus();
+        if (activeProductLibraryTab.value === 'products')
+            await loadProductLibrary(true);
+        else if (activeProductLibraryTab.value === 'stagnant')
+            await loadStagnantMaterials();
+        else if (activeProductLibraryTab.value === 'new_images')
+            await loadNewImages();
+        else if (productLibraryRankingTabKeys.has(activeProductLibraryTab.value))
+            await loadProductLibraryRankings();
+    }
     if (page.value === 'miaoshou-collect-box' && activeMiaoshouTab.value === 'collect_box')
         await loadCollectBox();
     if (hubAgentPairingCode.value) {
@@ -1604,6 +1815,7 @@ const draftEditSkus = computed(() => {
     });
 });
 function openImagePreview(url, alt) { previewImageUrl.value = imageUrl(url); previewImageAlt.value = alt; }
+function openTemplateCoverPreview(template) { previewImageUrl.value = templateCoverUrl(template); previewImageAlt.value = template.name; }
 const imageDraftSkus = computed(() => {
     const seen = new Set();
     const adoptedSourceSkus = new Set((imageDraft.value?.carousel_items || [])
@@ -2993,7 +3205,7 @@ finally {
 let toastTimer;
 function showToast(message) { toast.value = message; if (toastTimer)
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = ''; }, 3000); }
-function logout() { localStorage.removeItem('haitoro_token'); token.value = ''; user.value = null; taskCreatorFilterId.value = null; materialCreatorFilterId.value = null; draftCreatorFilterId.value = null; creatorFiltersInitialized.value = false; productLibraryItems.value = []; productLibraryTotal.value = 0; productLibraryPage.value = 1; productLibraryPlatform.value = ''; productLibrarySite.value = ''; productLibraryShopName.value = ''; productLibraryTemplateFilter.value = ''; productLibrarySku.value = ''; appliedProductLibraryFilters.value = { platform: '', site: '', shopName: '', template: '', sku: '' }; selectedProductLibraryIds.value = []; productLibraryFilters.value = { platforms: [], sites: [], shop_names: [] }; }
+function logout() { localStorage.removeItem('haitoro_token'); token.value = ''; user.value = null; taskCreatorFilterId.value = null; materialCreatorFilterId.value = null; draftCreatorFilterId.value = null; creatorFiltersInitialized.value = false; productLibraryItems.value = []; productLibraryTotal.value = 0; productLibraryPage.value = 1; productLibraryRankingRequestId++; productLibraryRankingItems.value = []; productLibraryRankingTotal.value = 0; productLibraryRankingDate.value = null; productLibraryRankingThroughDate.value = null; stagnantRequestId++; stagnantMaterials.value = []; stagnantTotal.value = 0; stagnantPage.value = 1; stagnantCreatorId.value = null; stagnantError.value = ''; stagnantLoading.value = false; newImagesRequestId++; newImages.value = []; newImagesTotal.value = 0; newImagesPage.value = 1; newImagesCreatorId.value = null; newImagesUsageStatus.value = 'all'; newImagesError.value = ''; newImagesLoading.value = false; productLibraryStatisticsTask.value = null; activeProductLibraryTab.value = 'products'; productLibraryPlatform.value = ''; productLibrarySite.value = ''; productLibraryShopName.value = ''; productLibraryTemplateFilter.value = ''; productLibrarySku.value = ''; appliedProductLibraryFilters.value = { platform: '', site: '', shopName: '', template: '', sku: '' }; selectedProductLibraryIds.value = []; productLibraryFilters.value = { platforms: [], sites: [], shop_names: [] }; }
 api.interceptors.response.use(response => response, requestError => {
     if (requestError.response?.data?.detail === '登录已失效') {
         logout();
@@ -3014,8 +3226,18 @@ onMounted(() => {
     if (token.value)
         refresh().catch(logout);
     taskResultPollingTimer = setInterval(refreshPendingTaskResults, 5000);
+    productLibraryStatisticsPollingTimer = setInterval(() => {
+        if (page.value === 'product-library' && productLibraryStatisticsRunning.value)
+            void loadProductLibraryStatisticsStatus();
+    }, 5000);
 });
-onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer));
+let productLibraryStatisticsPollingTimer;
+onUnmounted(() => {
+    if (taskResultPollingTimer)
+        clearInterval(taskResultPollingTimer);
+    if (productLibraryStatisticsPollingTimer)
+        clearInterval(productLibraryStatisticsPollingTimer);
+});
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
 let __VLS_components;
@@ -3511,37 +3733,44 @@ if (__VLS_ctx.token) {
                 key: (t.id),
                 ...{ class: "template-card" },
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "template-image" },
-                ...{ class: ({ hasCover: __VLS_ctx.hasTemplateCover(t) }) },
-            });
             if (__VLS_ctx.hasTemplateCover(t)) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!(__VLS_ctx.hasTemplateCover(t)))
+                                return;
+                            __VLS_ctx.openTemplateCoverPreview(t);
+                        } },
+                    type: "button",
+                    ...{ class: "template-image hasCover template-image-button" },
+                    'aria-label': (`查看 ${t.name} 大图`),
+                    title: "查看大图",
+                });
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
                     src: (__VLS_ctx.templateCoverUrl(t)),
                     alt: (t.name),
                 });
             }
             else {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "template-image" },
+                });
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
                 (t.name.includes('T恤') ? '♧' : '♔');
             }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
             (t.name);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "chip" },
-                ...{ class: (t.is_platform ? 'blue' : 'purple') },
-            });
-            (t.is_platform ? '平台模板' : '公司私有');
             if (t.description) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                     ...{ class: "template-description" },
                 });
                 (t.description);
             }
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-            (t.color_count);
-            (t.sku_count);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "template-actions" },
             });
@@ -5493,6 +5722,13 @@ if (__VLS_ctx.token) {
             disabled: (__VLS_ctx.productLibraryImporting),
         });
         (__VLS_ctx.productLibraryImporting ? '导入中…' : '导入');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.runProductLibraryStatistics) },
+            ...{ class: "secondary" },
+            type: "button",
+            disabled: (__VLS_ctx.productLibraryStatisticsSubmitting || __VLS_ctx.productLibraryImporting),
+        });
+        (__VLS_ctx.productLibraryStatisticsSubmitting ? '提交中…' : '数据统计');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
             ...{ onChange: (__VLS_ctx.importProductLibrary) },
             ref: "productLibraryFileInput",
@@ -5501,6 +5737,23 @@ if (__VLS_ctx.token) {
             hidden: true,
         });
         /** @type {typeof __VLS_ctx.productLibraryFileInput} */ ;
+        if (__VLS_ctx.productLibraryStatisticsTask) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "product-library-category-description" },
+                role: "status",
+            });
+            if (__VLS_ctx.productLibraryStatisticsTask.status === 'queued') {
+                (__VLS_ctx.productLibraryStatisticsTask.snapshot_date);
+            }
+            else if (__VLS_ctx.productLibraryStatisticsTask.status === 'running') {
+                (__VLS_ctx.productLibraryStatisticsTask.snapshot_date);
+            }
+            else if (__VLS_ctx.productLibraryStatisticsTask.status === 'succeeded') {
+                (__VLS_ctx.productLibraryStatisticsTask.through_date);
+            }
+            else {
+            }
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "material-usage-tabs product-library-tabs" },
             role: "tablist",
@@ -5534,6 +5787,12 @@ if (__VLS_ctx.token) {
                 ...{ class: ({ active: __VLS_ctx.activeProductLibraryTab === tab.key }) },
             });
             (tab.label);
+        }
+        if (__VLS_ctx.productLibraryCategoryDescriptions[__VLS_ctx.activeProductLibraryTab]) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "product-library-category-description" },
+            });
+            (__VLS_ctx.productLibraryCategoryDescriptions[__VLS_ctx.activeProductLibraryTab]);
         }
         if (__VLS_ctx.activeProductLibraryTab === 'products') {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -5651,76 +5910,172 @@ if (__VLS_ctx.token) {
                 ...{ class: "ghost" },
             });
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "draft-table product-library-table" },
-            'aria-busy': (__VLS_ctx.activeProductLibraryTab === 'products' && __VLS_ctx.productLibraryLoading),
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "thead product-library-head" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
-            ...{ class: "product-library-select-heading" },
-        });
         if (__VLS_ctx.activeProductLibraryTab === 'products') {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-                ...{ onChange: (__VLS_ctx.togglePagedUnmatchedProducts) },
-                type: "checkbox",
-                checked: (__VLS_ctx.allPagedUnmatchedSelected),
-                disabled: (!__VLS_ctx.unmatchedProductLibraryItems.length || __VLS_ctx.productLibraryLoading),
-                'aria-label': "选择当前页未匹配产品",
-            });
-        }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        for (const [item] of __VLS_getVForSourceType((__VLS_ctx.activeProductLibraryTab === 'products' ? __VLS_ctx.productLibraryItems : []))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                key: (item.id),
-                ...{ class: "trow product-library-row" },
+                ...{ class: "draft-table product-library-table" },
+                'aria-busy': (__VLS_ctx.productLibraryLoading),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "product-library-product-cell" },
+                ...{ class: "thead product-library-head" },
             });
-            if (item.template_id === null) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+                ...{ class: "product-library-select-heading" },
+            });
+            if (__VLS_ctx.activeProductLibraryTab === 'products') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-                    ...{ onChange: (...[$event]) => {
-                            if (!(__VLS_ctx.token))
-                                return;
-                            if (!!(__VLS_ctx.page === 'dashboard'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'templates'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'pod'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'tasks'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'materials'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'drafts'))
-                                return;
-                            if (!(__VLS_ctx.page === 'product-library'))
-                                return;
-                            if (!(item.template_id === null))
-                                return;
-                            __VLS_ctx.toggleProductLibrarySelection(item);
-                        } },
+                    ...{ onChange: (__VLS_ctx.togglePagedUnmatchedProducts) },
                     type: "checkbox",
-                    checked: (__VLS_ctx.selectedProductLibraryIds.includes(item.id)),
-                    disabled: (__VLS_ctx.selectedProductLibraryIds.length >= 100 && !__VLS_ctx.selectedProductLibraryIds.includes(item.id)),
-                    'aria-label': (`选择未匹配产品 ${item.sku}`),
+                    checked: (__VLS_ctx.allPagedUnmatchedSelected),
+                    disabled: (!__VLS_ctx.unmatchedProductLibraryItems.length || __VLS_ctx.productLibraryLoading),
+                    'aria-label': "选择当前页未匹配产品",
                 });
             }
-            else {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            for (const [item] of __VLS_getVForSourceType((__VLS_ctx.activeProductLibraryTab === 'products' ? __VLS_ctx.productLibraryItems : []))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    key: (item.id),
+                    ...{ class: "trow product-library-row" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "product-library-product-cell" },
+                });
+                if (item.template_id === null) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                        ...{ onChange: (...[$event]) => {
+                                if (!(__VLS_ctx.token))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'dashboard'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'templates'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'pod'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'tasks'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'materials'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'drafts'))
+                                    return;
+                                if (!(__VLS_ctx.page === 'product-library'))
+                                    return;
+                                if (!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                    return;
+                                if (!(item.template_id === null))
+                                    return;
+                                __VLS_ctx.toggleProductLibrarySelection(item);
+                            } },
+                        type: "checkbox",
+                        checked: (__VLS_ctx.selectedProductLibraryIds.includes(item.id)),
+                        disabled: (__VLS_ctx.selectedProductLibraryIds.length >= 100 && !__VLS_ctx.selectedProductLibraryIds.includes(item.id)),
+                        'aria-label': (`选择未匹配产品 ${item.sku}`),
+                    });
+                }
+                else {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        ...{ class: "product-library-check-spacer" },
+                    });
+                }
+                if (item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!(__VLS_ctx.token))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'dashboard'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'templates'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'pod'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'tasks'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'materials'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'drafts'))
+                                    return;
+                                if (!(__VLS_ctx.page === 'product-library'))
+                                    return;
+                                if (!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                    return;
+                                if (!(item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)))
+                                    return;
+                                __VLS_ctx.openImagePreview(item.image_url, item.title || item.sku);
+                            } },
+                        ...{ class: "product-library-image" },
+                        title: "查看大图",
+                        'aria-label': (`查看 ${item.sku} 商品大图`),
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                        ...{ onError: (...[$event]) => {
+                                if (!(__VLS_ctx.token))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'dashboard'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'templates'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'pod'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'tasks'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'materials'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'drafts'))
+                                    return;
+                                if (!(__VLS_ctx.page === 'product-library'))
+                                    return;
+                                if (!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                    return;
+                                if (!(item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)))
+                                    return;
+                                __VLS_ctx.productLibraryBrokenImages.push(item.id);
+                            } },
+                        key: (item.image_url),
+                        src: (__VLS_ctx.imageUrl(item.image_url)),
+                        alt: (item.title || item.sku),
+                    });
+                }
+                else {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        ...{ class: "product-library-image" },
+                    });
+                }
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                    ...{ class: "product-library-check-spacer" },
+                    ...{ class: "product-library-code" },
+                    title: (item.sku),
                 });
-            }
-            if (item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)) {
+                (item.sku);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.template);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "product-library-title" },
+                    title: (item.title),
+                });
+                (item.title || '—');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.site);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    title: (item.shop_name),
+                });
+                (item.shop_name);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "product-library-code" },
+                    title: (item.product_id),
+                });
+                (item.product_id);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.material_created_by_name || '');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.material_created_at != null ? new Date(item.material_created_at).toLocaleString() : '');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+                (item.order_count);
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!(__VLS_ctx.token))
@@ -5739,16 +6094,67 @@ if (__VLS_ctx.token) {
                                 return;
                             if (!(__VLS_ctx.page === 'product-library'))
                                 return;
-                            if (!(item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)))
+                            if (!(__VLS_ctx.activeProductLibraryTab === 'products'))
                                 return;
-                            __VLS_ctx.openImagePreview(item.image_url, item.title || item.sku);
+                            __VLS_ctx.openProductLibraryOrders(item);
                         } },
-                    ...{ class: "product-library-image" },
-                    title: "查看大图",
-                    'aria-label': (`查看 ${item.sku} 商品大图`),
+                    ...{ class: "product-library-detail-button" },
+                    type: "button",
+                    title: "查看详情",
+                    'aria-label': (`查看 ${item.shop_name} ${item.sku} 的订单详情`),
                 });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                    ...{ onError: (...[$event]) => {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.svg, __VLS_intrinsicElements.svg)({
+                    viewBox: "0 0 24 24",
+                    fill: "none",
+                    stroke: "currentColor",
+                    'stroke-width': "1.8",
+                    'stroke-linecap': "round",
+                    'stroke-linejoin': "round",
+                    'aria-hidden': "true",
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.path)({
+                    d: "M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z",
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.circle)({
+                    cx: "12",
+                    cy: "12",
+                    r: "2.8",
+                });
+            }
+            if (__VLS_ctx.activeProductLibraryTab !== 'products') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "empty" },
+                });
+            }
+            else if (!__VLS_ctx.productLibraryItems.length && !__VLS_ctx.productLibraryLoading) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "empty" },
+                });
+                (__VLS_ctx.productLibraryTotal ? '没有符合筛选条件的产品。' : '暂无产品，请先下载模版并导入历史订单。');
+            }
+            if (__VLS_ctx.activeProductLibraryTab === 'products') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
+                    ...{ class: "draft-pagination product-library-pagination" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (__VLS_ctx.productLibraryTotal);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                    ...{ onChange: (__VLS_ctx.changeProductLibraryPageSize) },
+                    value: (__VLS_ctx.productLibraryPageSize),
+                    disabled: (__VLS_ctx.productLibraryLoading),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    value: (20),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    value: (50),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    value: (100),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
                             if (!(__VLS_ctx.token))
                                 return;
                             if (!!(__VLS_ctx.page === 'dashboard'))
@@ -5765,110 +6171,207 @@ if (__VLS_ctx.token) {
                                 return;
                             if (!(__VLS_ctx.page === 'product-library'))
                                 return;
-                            if (!(item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)))
+                            if (!(__VLS_ctx.activeProductLibraryTab === 'products'))
                                 return;
-                            __VLS_ctx.productLibraryBrokenImages.push(item.id);
+                            if (!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                return;
+                            __VLS_ctx.changeProductLibraryPage(__VLS_ctx.productLibraryPage - 1);
                         } },
-                    key: (item.image_url),
-                    src: (__VLS_ctx.imageUrl(item.image_url)),
-                    alt: (item.title || item.sku),
+                    disabled: (__VLS_ctx.productLibraryLoading || __VLS_ctx.productLibraryPage === 1),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (__VLS_ctx.productLibraryPage);
+                (__VLS_ctx.productLibraryPageCount);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!(__VLS_ctx.page === 'product-library'))
+                                return;
+                            if (!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                return;
+                            if (!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                return;
+                            __VLS_ctx.changeProductLibraryPage(__VLS_ctx.productLibraryPage + 1);
+                        } },
+                    disabled: (__VLS_ctx.productLibraryLoading || __VLS_ctx.productLibraryPage === __VLS_ctx.productLibraryPageCount),
                 });
             }
             else {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                    ...{ class: "product-library-image" },
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
+                    ...{ class: "draft-pagination product-library-pagination" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            }
+            if (__VLS_ctx.activeProductLibraryTab === 'products' && __VLS_ctx.productLibraryLoading) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "list-refresh-overlay" },
+                    role: "status",
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            }
+        }
+        else if (__VLS_ctx.activeProductLibraryTab === 'stagnant') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "product-library-ranking-section" },
+            });
+            if (__VLS_ctx.user?.role === 'company_admin') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "product-library-filters" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                    ...{ onChange: (__VLS_ctx.changeStagnantCreator) },
+                    value: (__VLS_ctx.stagnantCreatorId),
+                    disabled: (__VLS_ctx.stagnantLoading),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    value: (null),
+                });
+                for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                        key: (member.id),
+                        value: (member.id),
+                    });
+                    (member.name);
+                }
+            }
+            if (__VLS_ctx.stagnantError) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                    ...{ class: "error" },
+                });
+                (__VLS_ctx.stagnantError);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.loadStagnantMaterials) },
+                    ...{ class: "ghost" },
                 });
             }
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "product-library-code" },
-                title: (item.sku),
-            });
-            (item.sku);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (item.template);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "product-library-title" },
-                title: (item.title),
-            });
-            (item.title || '—');
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (item.site);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                title: (item.shop_name),
-            });
-            (item.shop_name);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "product-library-code" },
-                title: (item.product_id),
-            });
-            (item.product_id);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-            (item.order_count);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!(__VLS_ctx.token))
-                            return;
-                        if (!!(__VLS_ctx.page === 'dashboard'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'templates'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'pod'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'tasks'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'materials'))
-                            return;
-                        if (!!(__VLS_ctx.page === 'drafts'))
-                            return;
-                        if (!(__VLS_ctx.page === 'product-library'))
-                            return;
-                        __VLS_ctx.openProductLibraryOrders(item);
-                    } },
-                ...{ class: "product-library-detail-button" },
-                type: "button",
-                title: "查看详情",
-                'aria-label': (`查看 ${item.shop_name} ${item.sku} 的订单详情`),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.svg, __VLS_intrinsicElements.svg)({
-                viewBox: "0 0 24 24",
-                fill: "none",
-                stroke: "currentColor",
-                'stroke-width': "1.8",
-                'stroke-linecap': "round",
-                'stroke-linejoin': "round",
-                'aria-hidden': "true",
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.path)({
-                d: "M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z",
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.circle)({
-                cx: "12",
-                cy: "12",
-                r: "2.8",
-            });
-        }
-        if (__VLS_ctx.activeProductLibraryTab !== 'products') {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "empty" },
+                ...{ class: "draft-table product-library-table" },
+                'aria-busy': (__VLS_ctx.stagnantLoading),
             });
-        }
-        else if (!__VLS_ctx.productLibraryItems.length && !__VLS_ctx.productLibraryLoading) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "empty" },
+                ...{ class: "thead product-library-stagnant-grid" },
             });
-            (__VLS_ctx.productLibraryTotal ? '没有符合筛选条件的产品。' : '暂无产品，请先下载模版并导入历史订单。');
-        }
-        if (__VLS_ctx.activeProductLibraryTab === 'products') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            for (const [item] of __VLS_getVForSourceType((__VLS_ctx.stagnantMaterials))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    key: (item.id),
+                    ...{ class: "trow product-library-stagnant-grid" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "product-library-product-cell" },
+                });
+                if (item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!(__VLS_ctx.token))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'dashboard'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'templates'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'pod'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'tasks'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'materials'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'drafts'))
+                                    return;
+                                if (!(__VLS_ctx.page === 'product-library'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                    return;
+                                if (!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                                    return;
+                                if (!(item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)))
+                                    return;
+                                __VLS_ctx.openImagePreview(item.image_url, item.sku);
+                            } },
+                        ...{ class: "product-library-image" },
+                        title: "查看大图",
+                        'aria-label': (`查看 ${item.sku} 素材大图`),
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                        ...{ onError: (...[$event]) => {
+                                if (!(__VLS_ctx.token))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'dashboard'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'templates'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'pod'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'tasks'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'materials'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'drafts'))
+                                    return;
+                                if (!(__VLS_ctx.page === 'product-library'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                    return;
+                                if (!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                                    return;
+                                if (!(item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)))
+                                    return;
+                                __VLS_ctx.productLibraryBrokenImages.push(item.id);
+                            } },
+                        src: (__VLS_ctx.imageUrl(item.image_url)),
+                        alt: (item.sku),
+                    });
+                }
+                else {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        ...{ class: "product-library-image" },
+                    });
+                }
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "product-library-code" },
+                    title: (item.sku),
+                });
+                (item.sku);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.template);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.created_by_name);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (new Date(item.created_at).toLocaleString());
+            }
+            if (!__VLS_ctx.stagnantMaterials.length && !__VLS_ctx.stagnantLoading && !__VLS_ctx.stagnantError) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "empty" },
+                });
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
-                ...{ class: "draft-pagination product-library-pagination" },
+                ...{ class: "draft-pagination product-library-stagnant-pagination" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (__VLS_ctx.productLibraryTotal);
+            (__VLS_ctx.stagnantTotal);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-                ...{ onChange: (__VLS_ctx.changeProductLibraryPageSize) },
-                value: (__VLS_ctx.productLibraryPageSize),
-                disabled: (__VLS_ctx.productLibraryLoading),
+                ...{ onChange: (__VLS_ctx.changeStagnantPageSize) },
+                value: (__VLS_ctx.stagnantPageSize),
+                disabled: (__VLS_ctx.stagnantLoading),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
                 value: (20),
@@ -5897,15 +6400,17 @@ if (__VLS_ctx.token) {
                             return;
                         if (!(__VLS_ctx.page === 'product-library'))
                             return;
-                        if (!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                        if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
                             return;
-                        __VLS_ctx.changeProductLibraryPage(__VLS_ctx.productLibraryPage - 1);
+                        if (!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                            return;
+                        __VLS_ctx.changeStagnantPage(__VLS_ctx.stagnantPage - 1);
                     } },
-                disabled: (__VLS_ctx.productLibraryLoading || __VLS_ctx.productLibraryPage === 1),
+                disabled: (__VLS_ctx.stagnantLoading || __VLS_ctx.stagnantPage === 1),
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (__VLS_ctx.productLibraryPage);
-            (__VLS_ctx.productLibraryPageCount);
+            (__VLS_ctx.stagnantPage);
+            (__VLS_ctx.stagnantPageCount);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!(__VLS_ctx.token))
@@ -5924,26 +6429,547 @@ if (__VLS_ctx.token) {
                             return;
                         if (!(__VLS_ctx.page === 'product-library'))
                             return;
-                        if (!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                        if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
                             return;
-                        __VLS_ctx.changeProductLibraryPage(__VLS_ctx.productLibraryPage + 1);
+                        if (!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                            return;
+                        __VLS_ctx.changeStagnantPage(__VLS_ctx.stagnantPage + 1);
                     } },
-                disabled: (__VLS_ctx.productLibraryLoading || __VLS_ctx.productLibraryPage === __VLS_ctx.productLibraryPageCount),
+                disabled: (__VLS_ctx.stagnantLoading || __VLS_ctx.stagnantPage === __VLS_ctx.stagnantPageCount),
             });
+            if (__VLS_ctx.stagnantLoading) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "list-refresh-overlay" },
+                    role: "status",
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            }
         }
-        else {
+        else if (__VLS_ctx.activeProductLibraryTab === 'new_images') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "product-library-ranking-section" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "product-library-filters" },
+            });
+            if (__VLS_ctx.user?.role === 'company_admin') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                    ...{ onChange: (__VLS_ctx.changeNewImagesFilters) },
+                    value: (__VLS_ctx.newImagesCreatorId),
+                    disabled: (__VLS_ctx.newImagesLoading),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    value: (null),
+                });
+                for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                        key: (member.id),
+                        value: (member.id),
+                    });
+                    (member.name);
+                }
+            }
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                ...{ onChange: (__VLS_ctx.changeNewImagesFilters) },
+                value: (__VLS_ctx.newImagesUsageStatus),
+                disabled: (__VLS_ctx.newImagesLoading),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: "all",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: "unused",
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: "used",
+            });
+            if (__VLS_ctx.newImagesError) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                    ...{ class: "error" },
+                });
+                (__VLS_ctx.newImagesError);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.loadNewImages) },
+                    ...{ class: "ghost" },
+                });
+            }
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "draft-table product-library-table" },
+                'aria-busy': (__VLS_ctx.newImagesLoading),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "thead product-library-new-images-grid" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            for (const [item] of __VLS_getVForSourceType((__VLS_ctx.newImages))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    key: (item.id),
+                    ...{ class: "trow product-library-new-images-grid" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "product-library-product-cell" },
+                });
+                if (item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!(__VLS_ctx.token))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'dashboard'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'templates'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'pod'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'tasks'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'materials'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'drafts'))
+                                    return;
+                                if (!(__VLS_ctx.page === 'product-library'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                                    return;
+                                if (!(__VLS_ctx.activeProductLibraryTab === 'new_images'))
+                                    return;
+                                if (!(item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)))
+                                    return;
+                                __VLS_ctx.openImagePreview(item.image_url, item.sku || '素材');
+                            } },
+                        ...{ class: "product-library-image" },
+                        title: "查看大图",
+                        'aria-label': (`查看 ${item.sku || '素材'} 大图`),
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                        ...{ onError: (...[$event]) => {
+                                if (!(__VLS_ctx.token))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'dashboard'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'templates'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'pod'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'tasks'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'materials'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'drafts'))
+                                    return;
+                                if (!(__VLS_ctx.page === 'product-library'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                                    return;
+                                if (!(__VLS_ctx.activeProductLibraryTab === 'new_images'))
+                                    return;
+                                if (!(item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)))
+                                    return;
+                                __VLS_ctx.productLibraryBrokenImages.push(item.id);
+                            } },
+                        src: (__VLS_ctx.imageUrl(item.image_url)),
+                        alt: (item.sku || '素材'),
+                    });
+                }
+                else {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        ...{ class: "product-library-image" },
+                    });
+                }
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "product-library-code" },
+                    title: (item.sku || ''),
+                });
+                (item.sku || '—');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.template);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.created_by_name);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (new Date(item.created_at).toLocaleString());
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.usage_status === 'used' ? '已使用' : '未使用');
+            }
+            if (!__VLS_ctx.newImages.length && !__VLS_ctx.newImagesLoading && !__VLS_ctx.newImagesError) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "empty" },
+                });
+            }
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
+                ...{ class: "draft-pagination product-library-new-images-pagination" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.newImagesTotal);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                ...{ onChange: (__VLS_ctx.changeNewImagesPageSize) },
+                value: (__VLS_ctx.newImagesPageSize),
+                disabled: (__VLS_ctx.newImagesLoading),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (20),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (50),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                value: (100),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!(__VLS_ctx.page === 'product-library'))
+                            return;
+                        if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                            return;
+                        if (!!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                            return;
+                        if (!(__VLS_ctx.activeProductLibraryTab === 'new_images'))
+                            return;
+                        __VLS_ctx.changeNewImagesPage(__VLS_ctx.newImagesPage - 1);
+                    } },
+                disabled: (__VLS_ctx.newImagesLoading || __VLS_ctx.newImagesPage === 1),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.newImagesPage);
+            (__VLS_ctx.newImagesPageCount);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!(__VLS_ctx.page === 'product-library'))
+                            return;
+                        if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                            return;
+                        if (!!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                            return;
+                        if (!(__VLS_ctx.activeProductLibraryTab === 'new_images'))
+                            return;
+                        __VLS_ctx.changeNewImagesPage(__VLS_ctx.newImagesPage + 1);
+                    } },
+                disabled: (__VLS_ctx.newImagesLoading || __VLS_ctx.newImagesPage === __VLS_ctx.newImagesPageCount),
+            });
+            if (__VLS_ctx.newImagesLoading) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "list-refresh-overlay" },
+                    role: "status",
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            }
+        }
+        else if (!__VLS_ctx.productLibraryRankingTabKeys.has(__VLS_ctx.activeProductLibraryTab)) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "draft-table product-library-table" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "empty" },
+            });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
                 ...{ class: "draft-pagination product-library-pagination" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         }
-        if (__VLS_ctx.activeProductLibraryTab === 'products' && __VLS_ctx.productLibraryLoading) {
+        else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "list-refresh-overlay" },
-                role: "status",
+                ...{ class: "product-library-ranking-section" },
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+            if (__VLS_ctx.productLibraryRankingDate) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                    ...{ class: "product-library-ranking-date" },
+                });
+                (__VLS_ctx.productLibraryRankingDate);
+                (__VLS_ctx.productLibraryRankingThroughDate);
+            }
+            if (__VLS_ctx.productLibraryRankingError) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                    ...{ class: "error" },
+                });
+                (__VLS_ctx.productLibraryRankingError);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (__VLS_ctx.loadProductLibraryRankings) },
+                    ...{ class: "ghost" },
+                });
+            }
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "draft-table product-library-table" },
+                'aria-busy': (__VLS_ctx.productLibraryRankingLoading),
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "thead product-library-ranking-grid" },
+            });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            for (const [item] of __VLS_getVForSourceType((__VLS_ctx.productLibraryRankingItems))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    key: (item.id),
+                    ...{ class: "trow product-library-ranking-grid" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({
+                    ...{ class: "product-library-ranking-rank" },
+                });
+                (item.rank);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "product-library-product-cell" },
+                });
+                if (item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!(__VLS_ctx.token))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'dashboard'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'templates'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'pod'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'tasks'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'materials'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'drafts'))
+                                    return;
+                                if (!(__VLS_ctx.page === 'product-library'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'new_images'))
+                                    return;
+                                if (!!(!__VLS_ctx.productLibraryRankingTabKeys.has(__VLS_ctx.activeProductLibraryTab)))
+                                    return;
+                                if (!(item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)))
+                                    return;
+                                __VLS_ctx.openImagePreview(item.image_url, item.title || item.sku);
+                            } },
+                        ...{ class: "product-library-image" },
+                        title: "查看大图",
+                        'aria-label': (`查看 ${item.sku} 商品大图`),
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                        ...{ onError: (...[$event]) => {
+                                if (!(__VLS_ctx.token))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'dashboard'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'templates'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'pod'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'tasks'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'materials'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'drafts'))
+                                    return;
+                                if (!(__VLS_ctx.page === 'product-library'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'new_images'))
+                                    return;
+                                if (!!(!__VLS_ctx.productLibraryRankingTabKeys.has(__VLS_ctx.activeProductLibraryTab)))
+                                    return;
+                                if (!(item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)))
+                                    return;
+                                __VLS_ctx.productLibraryBrokenImages.push(item.id);
+                            } },
+                        src: (__VLS_ctx.imageUrl(item.image_url)),
+                        alt: (item.title || item.sku),
+                    });
+                }
+                else {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        ...{ class: "product-library-image" },
+                    });
+                }
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "product-library-code" },
+                    title: (item.sku),
+                });
+                (item.sku);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.template);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "product-library-title" },
+                    title: (item.title),
+                });
+                (item.title || '—');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.site);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    title: (item.shop_name),
+                });
+                (item.shop_name);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                    ...{ class: "product-library-code" },
+                    title: (item.product_id),
+                });
+                (item.product_id);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.material_created_by_name || '');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (item.material_created_at != null ? new Date(item.material_created_at).toLocaleString() : '');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+                (item.order_count);
+            }
+            if (!__VLS_ctx.productLibraryRankingItems.length && !__VLS_ctx.productLibraryRankingLoading && !__VLS_ctx.productLibraryRankingError) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "empty" },
+                });
+                (__VLS_ctx.productLibraryRankingDate ? '该榜单暂无符合条件的产品。' : '尚未生成榜单，点击“数据统计”开始后台统计。');
+            }
+            if (__VLS_ctx.productLibraryRankingDate) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
+                    ...{ class: "draft-pagination product-library-ranking-pagination" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                (__VLS_ctx.productLibraryRankingTotal);
+                if (!__VLS_ctx.productLibraryTopTabKeys.has(__VLS_ctx.activeProductLibraryTab)) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                        ...{ onChange: (__VLS_ctx.changeProductLibraryRankingPageSize) },
+                        value: (__VLS_ctx.productLibraryRankingPageSize),
+                        disabled: (__VLS_ctx.productLibraryRankingLoading),
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                        value: (20),
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                        value: (50),
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                        value: (100),
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!(__VLS_ctx.token))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'dashboard'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'templates'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'pod'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'tasks'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'materials'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'drafts'))
+                                    return;
+                                if (!(__VLS_ctx.page === 'product-library'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'new_images'))
+                                    return;
+                                if (!!(!__VLS_ctx.productLibraryRankingTabKeys.has(__VLS_ctx.activeProductLibraryTab)))
+                                    return;
+                                if (!(__VLS_ctx.productLibraryRankingDate))
+                                    return;
+                                if (!(!__VLS_ctx.productLibraryTopTabKeys.has(__VLS_ctx.activeProductLibraryTab)))
+                                    return;
+                                __VLS_ctx.changeProductLibraryRankingPage(__VLS_ctx.productLibraryRankingPage - 1);
+                            } },
+                        disabled: (__VLS_ctx.productLibraryRankingLoading || __VLS_ctx.productLibraryRankingPage === 1),
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                    (__VLS_ctx.productLibraryRankingPage);
+                    (__VLS_ctx.productLibraryRankingPageCount);
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!(__VLS_ctx.token))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'dashboard'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'templates'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'pod'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'tasks'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'materials'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'drafts'))
+                                    return;
+                                if (!(__VLS_ctx.page === 'product-library'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                                    return;
+                                if (!!(__VLS_ctx.activeProductLibraryTab === 'new_images'))
+                                    return;
+                                if (!!(!__VLS_ctx.productLibraryRankingTabKeys.has(__VLS_ctx.activeProductLibraryTab)))
+                                    return;
+                                if (!(__VLS_ctx.productLibraryRankingDate))
+                                    return;
+                                if (!(!__VLS_ctx.productLibraryTopTabKeys.has(__VLS_ctx.activeProductLibraryTab)))
+                                    return;
+                                __VLS_ctx.changeProductLibraryRankingPage(__VLS_ctx.productLibraryRankingPage + 1);
+                            } },
+                        disabled: (__VLS_ctx.productLibraryRankingLoading || __VLS_ctx.productLibraryRankingPage === __VLS_ctx.productLibraryRankingPageCount),
+                    });
+                }
+            }
+            if (__VLS_ctx.productLibraryRankingLoading) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "list-refresh-overlay" },
+                    role: "status",
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.i, __VLS_intrinsicElements.i)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            }
         }
     }
     else if (__VLS_ctx.page === 'miaoshou-collect-box') {
@@ -11518,7 +12544,9 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['template-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['template-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['template-image']} */ ;
-/** @type {__VLS_StyleScopedClasses['chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['hasCover']} */ ;
+/** @type {__VLS_StyleScopedClasses['template-image-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['template-image']} */ ;
 /** @type {__VLS_StyleScopedClasses['template-description']} */ ;
 /** @type {__VLS_StyleScopedClasses['template-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['danger']} */ ;
@@ -11688,8 +12716,11 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['product-library-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-category-description']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-usage-tabs']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-tabs']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-category-description']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-filters']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-search-button']} */ ;
@@ -11718,6 +12749,68 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['product-library-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-pagination']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-ranking-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-filters']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-stagnant-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-stagnant-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-product-cell']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-image']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-image']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-code']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-stagnant-pagination']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-ranking-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-filters']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-new-images-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-new-images-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-product-cell']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-image']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-image']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-code']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-new-images-pagination']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-pagination']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-ranking-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-ranking-date']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-table']} */ ;
+/** @type {__VLS_StyleScopedClasses['thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-ranking-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-ranking-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-ranking-rank']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-product-cell']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-image']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-image']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-code']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-code']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-ranking-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['material-usage-tabs']} */ ;
@@ -12503,8 +13596,36 @@ const __VLS_self = (await import('vue')).defineComponent({
             productLibraryLoading: productLibraryLoading,
             productLibraryImporting: productLibraryImporting,
             productLibraryDownloading: productLibraryDownloading,
+            productLibraryStatisticsSubmitting: productLibraryStatisticsSubmitting,
+            productLibraryStatisticsTask: productLibraryStatisticsTask,
+            productLibraryRankingItems: productLibraryRankingItems,
+            productLibraryRankingTotal: productLibraryRankingTotal,
+            productLibraryRankingPage: productLibraryRankingPage,
+            productLibraryRankingPageSize: productLibraryRankingPageSize,
+            productLibraryRankingLoading: productLibraryRankingLoading,
+            productLibraryRankingDate: productLibraryRankingDate,
+            productLibraryRankingThroughDate: productLibraryRankingThroughDate,
+            productLibraryRankingError: productLibraryRankingError,
+            stagnantMaterials: stagnantMaterials,
+            stagnantTotal: stagnantTotal,
+            stagnantPage: stagnantPage,
+            stagnantPageSize: stagnantPageSize,
+            stagnantCreatorId: stagnantCreatorId,
+            stagnantLoading: stagnantLoading,
+            stagnantError: stagnantError,
+            newImages: newImages,
+            newImagesTotal: newImagesTotal,
+            newImagesPage: newImagesPage,
+            newImagesPageSize: newImagesPageSize,
+            newImagesCreatorId: newImagesCreatorId,
+            newImagesUsageStatus: newImagesUsageStatus,
+            newImagesLoading: newImagesLoading,
+            newImagesError: newImagesError,
             activeProductLibraryTab: activeProductLibraryTab,
             productLibraryTabs: productLibraryTabs,
+            productLibraryRankingTabKeys: productLibraryRankingTabKeys,
+            productLibraryTopTabKeys: productLibraryTopTabKeys,
+            productLibraryCategoryDescriptions: productLibraryCategoryDescriptions,
             productLibraryFilters: productLibraryFilters,
             productLibraryPlatform: productLibraryPlatform,
             productLibrarySite: productLibrarySite,
@@ -12729,9 +13850,23 @@ const __VLS_self = (await import('vue')).defineComponent({
             changeCollectBoxFilters: changeCollectBoxFilters,
             changeCollectBoxPage: changeCollectBoxPage,
             productLibraryPageCount: productLibraryPageCount,
+            productLibraryRankingPageCount: productLibraryRankingPageCount,
+            stagnantPageCount: stagnantPageCount,
+            newImagesPageCount: newImagesPageCount,
             productLibraryOrderPageCount: productLibraryOrderPageCount,
             unmatchedProductLibraryItems: unmatchedProductLibraryItems,
             allPagedUnmatchedSelected: allPagedUnmatchedSelected,
+            loadProductLibraryRankings: loadProductLibraryRankings,
+            loadStagnantMaterials: loadStagnantMaterials,
+            changeStagnantCreator: changeStagnantCreator,
+            changeStagnantPageSize: changeStagnantPageSize,
+            changeStagnantPage: changeStagnantPage,
+            loadNewImages: loadNewImages,
+            changeNewImagesFilters: changeNewImagesFilters,
+            changeNewImagesPageSize: changeNewImagesPageSize,
+            changeNewImagesPage: changeNewImagesPage,
+            changeProductLibraryRankingPage: changeProductLibraryRankingPage,
+            changeProductLibraryRankingPageSize: changeProductLibraryRankingPageSize,
             searchProductLibrary: searchProductLibrary,
             changeProductLibraryPageSize: changeProductLibraryPageSize,
             changeProductLibraryTab: changeProductLibraryTab,
@@ -12746,6 +13881,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             saveProductLibraryTemplate: saveProductLibraryTemplate,
             downloadProductLibraryTemplate: downloadProductLibraryTemplate,
             importProductLibrary: importProductLibrary,
+            runProductLibraryStatistics: runProductLibraryStatistics,
             login: login,
             onCreativeAssetChange: onCreativeAssetChange,
             removeCreativeAsset: removeCreativeAsset,
@@ -12804,6 +13940,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             draftSkuForImage: draftSkuForImage,
             draftEditSkus: draftEditSkus,
             openImagePreview: openImagePreview,
+            openTemplateCoverPreview: openTemplateCoverPreview,
             imageDraftSkus: imageDraftSkus,
             draftFinalImageItems: draftFinalImageItems,
             draftImagePreviewUrls: draftImagePreviewUrls,
