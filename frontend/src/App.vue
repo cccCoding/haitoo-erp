@@ -62,8 +62,16 @@ const shopeeExportCatalogId = ref<number | null>(null), shopeeExportCategoryId =
 const draftPageSize = ref(20), currentDraftPage = ref(1), draftTemplateFilterId = ref<number | null>(null), draftCreatorFilterId = ref<number | null>(null), draftListRefreshing = ref(false)
 const collectBoxItems = ref<any[]>([]), collectBoxTotal = ref(0), collectBoxLoading = ref(false)
 const productLibraryItems = ref<any[]>([]), productLibraryTotal = ref(0), productLibraryPage = ref(1), productLibraryPageSize = ref(20), productLibraryLoading = ref(false), productLibraryImporting = ref(false), productLibraryDownloading = ref(false)
+type ProductLibraryTab = 'products' | 'top7' | 'top15' | 'top30' | 'new_images' | 'stagnant' | 'potential' | 'hot' | 'booming'
+const activeProductLibraryTab = ref<ProductLibraryTab>('products')
+const productLibraryTabs: {key:ProductLibraryTab;label:string}[] = [
+  {key:'products',label:'产品列表'}, {key:'top7',label:'7天热销TOP50'}, {key:'top15',label:'15天热销TOP50'},
+  {key:'top30',label:'30天热销TOP50'}, {key:'new_images',label:'新图'}, {key:'stagnant',label:'滞销款'},
+  {key:'potential',label:'潜力款'}, {key:'hot',label:'热销款'}, {key:'booming',label:'旺款'},
+]
 const productLibraryFilters = ref<{platforms:string[];sites:string[];shop_names:string[]}>({platforms:[],sites:[],shop_names:[]})
-const productLibraryPlatform = ref(''), productLibrarySite = ref(''), productLibraryShopName = ref(''), productLibraryTemplateFilter = ref('')
+const productLibraryPlatform = ref(''), productLibrarySite = ref(''), productLibraryShopName = ref(''), productLibraryTemplateFilter = ref(''), productLibrarySku = ref('')
+const appliedProductLibraryFilters = ref({platform:'', site:'', shopName:'', template:'', sku:''})
 const selectedProductLibraryIds = ref<number[]>([]), productLibraryBrokenImages = ref<number[]>([])
 const showProductLibraryTemplateDialog = ref(false), productLibraryTargetTemplateId = ref<number | null>(null), productLibraryTemplateSaving = ref(false)
 const productLibraryOrderProduct = ref<any | null>(null), productLibraryOrders = ref<any[]>([]), productLibraryOrderTotal = ref(0), productLibraryOrderPage = ref(1), productLibraryOrderLoading = ref(false), productLibraryOrderError = ref('')
@@ -527,11 +535,12 @@ const allPagedUnmatchedSelected = computed(() => unmatchedProductLibraryItems.va
 async function loadProductLibrary(withFilters = false) {
   try {
     productLibraryLoading.value = true
+    const applied = appliedProductLibraryFilters.value
     const params = {page:productLibraryPage.value, page_size:productLibraryPageSize.value,
-      platform:productLibraryPlatform.value || undefined, site:productLibrarySite.value || undefined,
-      shop_name:productLibraryShopName.value || undefined,
-      template_id:productLibraryTemplateFilter.value && productLibraryTemplateFilter.value !== 'unmatched' ? Number(productLibraryTemplateFilter.value) : undefined,
-      unmatched:productLibraryTemplateFilter.value === 'unmatched' ? true : undefined}
+      platform:applied.platform || undefined, site:applied.site || undefined,
+      shop_name:applied.shopName || undefined, sku:applied.sku || undefined,
+      template_id:applied.template && applied.template !== 'unmatched' ? Number(applied.template) : undefined,
+      unmatched:applied.template === 'unmatched' ? true : undefined}
     const [list, filters] = await Promise.all([
       api.get('/product-library', {headers:headers.value, params}),
       withFilters ? api.get('/product-library/filters', {headers:headers.value}) : Promise.resolve(null),
@@ -543,7 +552,23 @@ async function loadProductLibrary(withFilters = false) {
   } catch(e:any) { showToast(e.response?.data?.detail || '加载产品库失败') }
   finally { productLibraryLoading.value = false }
 }
-function changeProductLibraryFilters() { productLibraryPage.value=1; selectedProductLibraryIds.value=[]; void loadProductLibrary() }
+function searchProductLibrary() {
+  if (productLibraryLoading.value) return
+  appliedProductLibraryFilters.value = {
+    platform:productLibraryPlatform.value, site:productLibrarySite.value,
+    shopName:productLibraryShopName.value, template:productLibraryTemplateFilter.value,
+    sku:productLibrarySku.value.trim(),
+  }
+  productLibraryPage.value=1
+  selectedProductLibraryIds.value=[]
+  void loadProductLibrary()
+}
+function changeProductLibraryPageSize() { productLibraryPage.value=1; selectedProductLibraryIds.value=[]; void loadProductLibrary() }
+function changeProductLibraryTab(tab: ProductLibraryTab) {
+  if (activeProductLibraryTab.value === tab) return
+  activeProductLibraryTab.value = tab
+  selectedProductLibraryIds.value = []
+}
 function changeProductLibraryPage(next:number) {
   if (productLibraryLoading.value || next < 1 || next > productLibraryPageCount.value) return
   productLibraryPage.value=next; void loadProductLibrary()
@@ -1899,7 +1924,7 @@ function openHubBindingDialog(shop:any) { bindingShop.value=shop; hubBindingForm
 async function saveHubBinding() { if (!bindingShop.value || !hubBindingForm.value.container_code.trim() || !hubBindingForm.value.agent_id) return; try { hubBindingSaving.value=true; await api.put(`/shops/${bindingShop.value.id}/hubstudio-binding`,{hubstudio_container_code:hubBindingForm.value.container_code.trim(),hub_agent_id:hubBindingForm.value.agent_id},{headers:headers.value}); showHubBindingDialog.value=false; await refresh(); showToast('店铺 HubStudio 环境已绑定') } catch(e:any) { shopError.value=e.response?.data?.detail || '保存 HubStudio 店铺绑定失败' } finally { hubBindingSaving.value=false } }
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 function showToast(message: string) { toast.value = message; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = '' }, 3000) }
-function logout(){ localStorage.removeItem('haitoro_token'); token.value=''; user.value=null; taskCreatorFilterId.value=null; materialCreatorFilterId.value=null; draftCreatorFilterId.value=null; creatorFiltersInitialized.value=false; productLibraryItems.value=[]; productLibraryTotal.value=0; productLibraryPage.value=1; productLibraryPlatform.value=''; productLibrarySite.value=''; productLibraryShopName.value=''; productLibraryTemplateFilter.value=''; selectedProductLibraryIds.value=[]; productLibraryFilters.value={platforms:[],sites:[],shop_names:[]} }
+function logout(){ localStorage.removeItem('haitoro_token'); token.value=''; user.value=null; taskCreatorFilterId.value=null; materialCreatorFilterId.value=null; draftCreatorFilterId.value=null; creatorFiltersInitialized.value=false; productLibraryItems.value=[]; productLibraryTotal.value=0; productLibraryPage.value=1; productLibraryPlatform.value=''; productLibrarySite.value=''; productLibraryShopName.value=''; productLibraryTemplateFilter.value=''; productLibrarySku.value=''; appliedProductLibraryFilters.value={platform:'',site:'',shopName:'',template:'',sku:''}; selectedProductLibraryIds.value=[]; productLibraryFilters.value={platforms:[],sites:[],shop_names:[]} }
 api.interceptors.response.use(
   response => response,
   requestError => {
@@ -2006,24 +2031,29 @@ onUnmounted(() => taskResultPollingTimer && clearInterval(taskResultPollingTimer
             <input ref="productLibraryFileInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden @change="importProductLibrary"/>
           </div>
         </div>
-        <div class="product-library-filters">
-          <label>平台<select v-model="productLibraryPlatform" :disabled="productLibraryLoading" @change="changeProductLibraryFilters"><option value="">全部平台</option><option v-for="value in productLibraryFilters.platforms" :key="value" :value="value">{{value}}</option></select></label>
-          <label>站点<select v-model="productLibrarySite" :disabled="productLibraryLoading" @change="changeProductLibraryFilters"><option value="">全部站点</option><option v-for="value in productLibraryFilters.sites" :key="value" :value="value">{{value}}</option></select></label>
-          <label>店铺名称<select v-model="productLibraryShopName" :disabled="productLibraryLoading" @change="changeProductLibraryFilters"><option value="">全部店铺</option><option v-for="value in productLibraryFilters.shop_names" :key="value" :value="value">{{value}}</option></select></label>
-          <label>模版<select v-model="productLibraryTemplateFilter" :disabled="productLibraryLoading" @change="changeProductLibraryFilters"><option value="">全部模版</option><option value="unmatched">未匹配</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
+        <div class="material-usage-tabs product-library-tabs" role="tablist" aria-label="产品库分类"><button v-for="tab in productLibraryTabs" :key="tab.key" type="button" role="tab" :aria-selected="activeProductLibraryTab===tab.key" :class="{active:activeProductLibraryTab===tab.key}" @click="changeProductLibraryTab(tab.key)">{{tab.label}}</button></div>
+        <div v-if="activeProductLibraryTab==='products'" class="product-library-filters">
+          <label>平台<select v-model="productLibraryPlatform" :disabled="productLibraryLoading"><option value="">全部平台</option><option v-for="value in productLibraryFilters.platforms" :key="value" :value="value">{{value}}</option></select></label>
+          <label>站点<select v-model="productLibrarySite" :disabled="productLibraryLoading"><option value="">全部站点</option><option v-for="value in productLibraryFilters.sites" :key="value" :value="value">{{value}}</option></select></label>
+          <label>店铺名称<select v-model="productLibraryShopName" :disabled="productLibraryLoading"><option value="">全部店铺</option><option v-for="value in productLibraryFilters.shop_names" :key="value" :value="value">{{value}}</option></select></label>
+          <label>模版<select v-model="productLibraryTemplateFilter" :disabled="productLibraryLoading"><option value="">全部模版</option><option value="unmatched">未匹配</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
+          <label>SKU<input v-model="productLibrarySku" type="search" placeholder="输入 SKU" :disabled="productLibraryLoading"/></label>
+          <button type="button" class="primary product-library-search-button" :disabled="productLibraryLoading" @click="searchProductLibrary">搜索</button>
         </div>
-        <section v-if="selectedProductLibraryIds.length" class="draft-export-bar product-library-selection-bar"><strong>已选 {{selectedProductLibraryIds.length}} / 100 条未匹配产品</strong><button class="primary" @click="openProductLibraryTemplateDialog">批量设置模版</button><button class="ghost" @click="selectedProductLibraryIds=[]">取消选择</button></section>
-        <div class="draft-table product-library-table" :aria-busy="productLibraryLoading">
-          <div class="thead product-library-head"><label class="product-library-select-heading"><input type="checkbox" :checked="allPagedUnmatchedSelected" :disabled="!unmatchedProductLibraryItems.length || productLibraryLoading" aria-label="选择当前页未匹配产品" @change="togglePagedUnmatchedProducts"/>商品</label><span>SKU</span><span>模版</span><span>标题</span><span>站点</span><span>店铺名称</span><span>产品 ID</span><span>订单数</span><span>操作</span></div>
-          <div v-for="item in productLibraryItems" :key="item.id" class="trow product-library-row">
+        <section v-if="activeProductLibraryTab==='products' && selectedProductLibraryIds.length" class="draft-export-bar product-library-selection-bar"><strong>已选 {{selectedProductLibraryIds.length}} / 100 条未匹配产品</strong><button class="primary" @click="openProductLibraryTemplateDialog">批量设置模版</button><button class="ghost" @click="selectedProductLibraryIds=[]">取消选择</button></section>
+        <div class="draft-table product-library-table" :aria-busy="activeProductLibraryTab==='products' && productLibraryLoading">
+          <div class="thead product-library-head"><label class="product-library-select-heading"><input v-if="activeProductLibraryTab==='products'" type="checkbox" :checked="allPagedUnmatchedSelected" :disabled="!unmatchedProductLibraryItems.length || productLibraryLoading" aria-label="选择当前页未匹配产品" @change="togglePagedUnmatchedProducts"/>商品</label><span>SKU</span><span>模版</span><span>标题</span><span>站点</span><span>店铺名称</span><span>产品 ID</span><span>订单数</span><span>操作</span></div>
+          <div v-for="item in activeProductLibraryTab==='products' ? productLibraryItems : []" :key="item.id" class="trow product-library-row">
             <div class="product-library-product-cell"><input v-if="item.template_id === null" type="checkbox" :checked="selectedProductLibraryIds.includes(item.id)" :disabled="selectedProductLibraryIds.length >= 100 && !selectedProductLibraryIds.includes(item.id)" :aria-label="`选择未匹配产品 ${item.sku}`" @change="toggleProductLibrarySelection(item)"/><span v-else class="product-library-check-spacer"></span><button v-if="item.image_url && !productLibraryBrokenImages.includes(item.id)" class="product-library-image" title="查看大图" :aria-label="`查看 ${item.sku} 商品大图`" @click="openImagePreview(item.image_url, item.title || item.sku)"><img :key="item.image_url" :src="imageUrl(item.image_url)" :alt="item.title || item.sku" @error="productLibraryBrokenImages.push(item.id)"/></button><span v-else class="product-library-image">暂无图片</span></div>
             <span class="product-library-code" :title="item.sku">{{item.sku}}</span><span>{{item.template}}</span>
             <span class="product-library-title" :title="item.title">{{item.title || '—'}}</span><span>{{item.site}}</span><span :title="item.shop_name">{{item.shop_name}}</span>
             <span class="product-library-code" :title="item.product_id">{{item.product_id}}</span><strong>{{item.order_count}}</strong><button class="product-library-detail-button" type="button" title="查看详情" :aria-label="`查看 ${item.shop_name} ${item.sku} 的订单详情`" @click="openProductLibraryOrders(item)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.8"/></svg></button>
           </div>
-          <div v-if="!productLibraryItems.length && !productLibraryLoading" class="empty">{{productLibraryTotal ? '没有符合筛选条件的产品。' : '暂无产品，请先下载模版并导入历史订单。'}}</div>
-          <footer class="draft-pagination product-library-pagination"><span>共 {{productLibraryTotal}} 条</span><label>每页 <select v-model.number="productLibraryPageSize" :disabled="productLibraryLoading" @change="changeProductLibraryFilters"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 条</label><button :disabled="productLibraryLoading || productLibraryPage===1" @click="changeProductLibraryPage(productLibraryPage-1)">上一页</button><span>第 {{productLibraryPage}} / {{productLibraryPageCount}} 页</span><button :disabled="productLibraryLoading || productLibraryPage===productLibraryPageCount" @click="changeProductLibraryPage(productLibraryPage+1)">下一页</button></footer>
-          <div v-if="productLibraryLoading" class="list-refresh-overlay" role="status"><i></i><span>正在加载产品库…</span></div>
+          <div v-if="activeProductLibraryTab!=='products'" class="empty">暂无产品。</div>
+          <div v-else-if="!productLibraryItems.length && !productLibraryLoading" class="empty">{{productLibraryTotal ? '没有符合筛选条件的产品。' : '暂无产品，请先下载模版并导入历史订单。'}}</div>
+          <footer v-if="activeProductLibraryTab==='products'" class="draft-pagination product-library-pagination"><span>共 {{productLibraryTotal}} 条</span><label>每页 <select v-model.number="productLibraryPageSize" :disabled="productLibraryLoading" @change="changeProductLibraryPageSize"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 条</label><button :disabled="productLibraryLoading || productLibraryPage===1" @click="changeProductLibraryPage(productLibraryPage-1)">上一页</button><span>第 {{productLibraryPage}} / {{productLibraryPageCount}} 页</span><button :disabled="productLibraryLoading || productLibraryPage===productLibraryPageCount" @click="changeProductLibraryPage(productLibraryPage+1)">下一页</button></footer>
+          <footer v-else class="draft-pagination product-library-pagination"><span>共 0 条</span></footer>
+          <div v-if="activeProductLibraryTab==='products' && productLibraryLoading" class="list-refresh-overlay" role="status"><i></i><span>正在加载产品库…</span></div>
         </div>
       </section>
       <section v-else-if="page==='miaoshou-collect-box'" class="page">

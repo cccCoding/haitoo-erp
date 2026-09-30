@@ -68,9 +68,19 @@ class ProductLibraryTests(unittest.TestCase):
         with self.sessions() as db:
             return main.list_product_library(
                 page=1, page_size=20, platform=filters.get("platform"), site=filters.get("site"),
-                shop_name=filters.get("shop_name"), template_id=filters.get("template_id"),
+                shop_name=filters.get("shop_name"), sku=filters.get("sku"), template_id=filters.get("template_id"),
                 unmatched=filters.get("unmatched", False), user=db.get(User, user_id), db=db,
             )
+
+    def test_sku_search_matches_part_of_sku_and_treats_wildcards_as_text(self):
+        self.import_bytes(xlsx([
+            row(sku="SKU_100-S", product_id="product-1", order="order-1"),
+            row(sku="SKUX100-S", product_id="product-2", order="order-2"),
+        ]))
+
+        self.assertEqual(self.list_items(sku="_100")["total"], 1)
+        self.assertEqual(self.list_items(sku="  sku_100  ")["items"][0]["sku"], "SKU_100")
+        self.assertEqual(self.list_items(sku="missing")["total"], 0)
 
     def test_import_groups_sizes_deduplicates_orders_and_filters_by_shop(self):
         first = row()
@@ -242,6 +252,9 @@ class ProductLibraryTests(unittest.TestCase):
             self.assertEqual(result.status_code, 200, result.text)
             unmatched_list = client.get("/product-library?unmatched=true", headers={"Authorization": f"Bearer {token_a}"}).json()
             self.assertEqual(unmatched_list["total"], 1)
+            sku_list = client.get("/product-library", params={"sku": "unknownaa"}, headers={"Authorization": f"Bearer {token_a}"}).json()
+            self.assertEqual(sku_list["total"], 1)
+            self.assertEqual(client.get("/product-library", params={"sku": "missing"}, headers={"Authorization": f"Bearer {token_a}"}).json()["total"], 0)
             product_id = unmatched_list["items"][0]["id"]
             assigned = client.post("/product-library/templates/batch", headers={"Authorization": f"Bearer {token_a}"},
                 json={"product_ids": [product_id], "template_id": 1})

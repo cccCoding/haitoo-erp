@@ -927,7 +927,7 @@ def product_library_filters(user: User = Depends(require_roles(Role.COMPANY_ADMI
 @app.get("/product-library")
 def list_product_library(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
-    platform: str | None = None, site: str | None = None, shop_name: str | None = None,
+    platform: str | None = None, site: str | None = None, shop_name: str | None = None, sku: str | None = None,
     template_id: int | None = Query(None, ge=1), unmatched: bool = False,
     user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
 ):
@@ -940,6 +940,8 @@ def list_product_library(
         conditions.append(ProductLibrarySource.site == site)
     if shop_name:
         conditions.append(ProductLibrarySource.shop_name == shop_name)
+    if sku and sku.strip():
+        conditions.append(ProductLibraryProduct.sku.icontains(sku.strip(), autoescape=True))
     if template_id is not None:
         conditions.append(ProductLibraryProduct.template_id == template_id)
     elif unmatched:
