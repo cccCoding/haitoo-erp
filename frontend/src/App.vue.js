@@ -15,12 +15,13 @@ const page = computed({
 const hubAgentPairingCode = ref(new URLSearchParams(location.search).get('hub_agent_pair') || '');
 const email = ref('');
 const password = ref('');
-const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), materialAssets = ref([]), drafts = ref([]), members = ref([]), aiProviders = ref([]);
+const user = ref(null), company = ref(null), shops = ref([]), templates = ref([]), templateGroups = ref([]), tasks = ref([]), materialAssets = ref([]), drafts = ref([]), members = ref([]), operatorGroups = ref([]), aiProviders = ref([]);
 const loading = ref(false), error = ref('');
 const toast = ref('');
 const templateQuery = ref(''), activeGroupId = ref(null), selectedTemplateId = ref(null);
 const showGroupDialog = ref(false), showTemplateDialog = ref(false), templateFormTab = ref('basic'), newGroupName = ref(''), newTemplateName = ref(''), newTemplateDescription = ref(''), newTemplateTitleTemplate = ref(''), newTemplateProductDescription = ref(''), newTemplateSizeChart = ref(null), newTemplateSizeChartPreview = ref(''), newTemplateGroupId = ref(null), newTemplateImage = ref(null), newTemplateImagePreview = ref(''), newPackageWeight = ref(null), newPackageLength = ref(null), newPackageWidth = ref(null), newPackageHeight = ref(null), newSkuSizeOptions = ref([]), newTemplateAiPrompts = ref([]), editingTemplate = ref(null);
-const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', user_code: '', email: '', password: '', is_active: true }), memberSaving = ref(false), memberFormError = ref(''), memberListRefreshing = ref(false);
+const showMemberDialog = ref(false), editingMember = ref(null), memberForm = ref({ name: '', user_code: '', email: '', password: '', is_active: true, role: 'member', group_id: null }), memberSaving = ref(false), memberFormError = ref(''), memberListRefreshing = ref(false);
+const showOperatorGroupDialog = ref(false), editingOperatorGroup = ref(null), operatorGroupForm = ref({ name: '', leader_user_id: null }), operatorGroupSaving = ref(false), operatorGroupError = ref('');
 const showMemberCredentialDialog = ref(false), credentialMember = ref(null), credentialProvider = ref(null), credentialApiKey = ref(''), credentialSaving = ref(false);
 const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), myAccountSaving = ref(false);
 const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
@@ -1127,13 +1128,15 @@ async function refresh() {
         creativeProvider.value = availableAiProviders.value.find(item => item.is_default)?.provider || availableAiProviders.value[0]?.provider || '';
     }
     if (user.value.role === 'company_admin') {
-        const [companyMembers, companyShops, agents] = await Promise.all([api.get('/members', h), api.get('/shops/manage', h), api.get('/hub-agents', h)]);
+        const [companyMembers, companyGroups, companyShops, agents] = await Promise.all([api.get('/members', h), api.get('/operator-groups', h), api.get('/shops/manage', h), api.get('/hub-agents', h)]);
         members.value = companyMembers.data;
+        operatorGroups.value = companyGroups.data;
         managedShops.value = companyShops.data;
         hubAgents.value = agents.data;
     }
     else {
         members.value = [];
+        operatorGroups.value = [];
         managedShops.value = [];
         hubAgents.value = [];
     }
@@ -2992,7 +2995,9 @@ async function refreshMemberList() {
         return;
     try {
         memberListRefreshing.value = true;
-        members.value = (await api.get('/members', { headers: headers.value })).data;
+        const [memberResponse, groupResponse] = await Promise.all([api.get('/members', { headers: headers.value }), api.get('/operator-groups', { headers: headers.value })]);
+        members.value = memberResponse.data;
+        operatorGroups.value = groupResponse.data;
     }
     catch (e) {
         showToast(e.response?.data?.detail || '刷新成员列表失败');
@@ -3001,7 +3006,53 @@ async function refreshMemberList() {
         memberListRefreshing.value = false;
     }
 }
-function openMemberDialog(member) { editingMember.value = member || null; memberForm.value = { name: member?.name || '', user_code: member?.user_code || '', email: member?.email || '', password: '', is_active: member?.is_active ?? true }; memberFormError.value = ''; showMemberDialog.value = true; }
+function operatorGroupName(groupId) { return operatorGroups.value.find(group => group.id === groupId)?.name || '未分组'; }
+function operatorGroupMembers(groupId) { return members.value.filter(member => member.group_id === groupId); }
+function memberRoleLabel(member) { return member.role === 'company_admin' ? '公司管理员' : member.role === 'team_leader' ? '运营组长' : member.group_id ? '组员' : '普通运营'; }
+function openOperatorGroupDialog(group) { editingOperatorGroup.value = group || null; operatorGroupForm.value = { name: group?.name || '', leader_user_id: null }; operatorGroupError.value = ''; showOperatorGroupDialog.value = true; }
+async function saveOperatorGroup() {
+    const name = operatorGroupForm.value.name.trim();
+    if (!name) {
+        operatorGroupError.value = '请输入组名';
+        return;
+    }
+    if (!editingOperatorGroup.value && !operatorGroupForm.value.leader_user_id) {
+        operatorGroupError.value = '请选择组长';
+        return;
+    }
+    try {
+        operatorGroupSaving.value = true;
+        operatorGroupError.value = '';
+        if (editingOperatorGroup.value)
+            await api.patch(`/operator-groups/${editingOperatorGroup.value.id}`, { name }, { headers: headers.value });
+        else
+            await api.post('/operator-groups', { name, leader_user_id: operatorGroupForm.value.leader_user_id }, { headers: headers.value });
+        showOperatorGroupDialog.value = false;
+        await refreshMemberList();
+        showToast('运营组已保存');
+    }
+    catch (e) {
+        operatorGroupError.value = e.response?.data?.detail || '保存运营组失败';
+    }
+    finally {
+        operatorGroupSaving.value = false;
+    }
+}
+async function deleteOperatorGroup(group) {
+    const affected = operatorGroupMembers(group.id);
+    const otherCount = affected.filter(member => member.id !== group.leader_user_id).length;
+    if (!confirm(`确定删除“${group.name}”吗？该组组长和 ${otherCount} 位组员（共 ${affected.length} 人）都将恢复为未分组普通运营。`))
+        return;
+    try {
+        await api.delete(`/operator-groups/${group.id}`, { headers: headers.value });
+        await refreshMemberList();
+        showToast('运营组已删除');
+    }
+    catch (e) {
+        showToast(e.response?.data?.detail || '删除运营组失败');
+    }
+}
+function openMemberDialog(member) { editingMember.value = member || null; memberForm.value = { name: member?.name || '', user_code: member?.user_code || '', email: member?.email || '', password: '', is_active: member?.is_active ?? true, role: member?.role || 'member', group_id: member?.group_id ?? null }; memberFormError.value = ''; showMemberDialog.value = true; }
 function openMyAccountDialog() { myName.value = user.value?.name || ''; myUserCode.value = user.value?.user_code || ''; showMyAccountDialog.value = true; }
 async function saveMyUserCode() { const name = myName.value.trim(), userCode = myUserCode.value.trim(); if (!name) {
     showToast('请输入管理员名称');
@@ -3050,10 +3101,14 @@ async function saveMember() {
         invalid('登录密码至少 8 个字符');
         return;
     }
+    if (memberForm.value.role === 'team_leader' && !memberForm.value.group_id) {
+        invalid('请选择组长所属运营组');
+        return;
+    }
     try {
         memberSaving.value = true;
         error.value = '';
-        const payload = { name, user_code: userCode, email };
+        const payload = { name, user_code: userCode, email, role: memberForm.value.role, group_id: memberForm.value.group_id };
         if (memberForm.value.password)
             payload.password = memberForm.value.password;
         if (editingMember.value)
@@ -3515,7 +3570,8 @@ if (__VLS_ctx.token) {
         ...{ class: "member account-button" },
     });
     (__VLS_ctx.user?.name);
-    (__VLS_ctx.user?.role === 'company_admin' ? '管理员' : '运营成员');
+    (__VLS_ctx.user?.role === 'company_admin' ? '管理员' : __VLS_ctx.user?.role === 'team_leader' ? '运营组长' : '运营成员');
+    (__VLS_ctx.user?.group_name ? ` · ${__VLS_ctx.user.group_name}` : '');
     (__VLS_ctx.user?.user_code ? ` · ${__VLS_ctx.user.user_code}` : '');
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.logout) },
@@ -7349,6 +7405,119 @@ if (__VLS_ctx.token) {
             disabled: (__VLS_ctx.memberListRefreshing),
         });
         (__VLS_ctx.memberListRefreshing ? '刷新中…' : '↻ 刷新');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "section-heading operator-groups-heading" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.token))
+                        return;
+                    if (!!(__VLS_ctx.page === 'dashboard'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'templates'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'pod'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'tasks'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'materials'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'drafts'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'product-library'))
+                        return;
+                    if (!!(__VLS_ctx.page === 'miaoshou-collect-box'))
+                        return;
+                    if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                        return;
+                    __VLS_ctx.openOperatorGroupDialog();
+                } },
+            ...{ class: "primary" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "operator-group-list" },
+        });
+        for (const [group] of __VLS_getVForSourceType((__VLS_ctx.operatorGroups))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+                key: (group.id),
+                ...{ class: "operator-group-card" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+            (group.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+            (__VLS_ctx.members.find(member => member.id === group.leader_user_id)?.name || '—');
+            (__VLS_ctx.operatorGroupMembers(group.id).length);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "operator-group-actions" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'product-library'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'miaoshou-collect-box'))
+                            return;
+                        if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        __VLS_ctx.openOperatorGroupDialog(group);
+                    } },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'product-library'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'miaoshou-collect-box'))
+                            return;
+                        if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        __VLS_ctx.deleteOperatorGroup(group);
+                    } },
+                ...{ class: "negative" },
+            });
+        }
+        if (!__VLS_ctx.operatorGroups.length) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "operator-groups-empty" },
+            });
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "section-heading member-list-heading" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "member-list-title" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (__VLS_ctx.members.length);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
                     if (!(__VLS_ctx.token))
@@ -7376,13 +7545,13 @@ if (__VLS_ctx.token) {
             ...{ class: "primary" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "draft-table refreshable-list" },
+            ...{ class: "draft-table refreshable-list member-list-scroll" },
             'aria-busy': (__VLS_ctx.memberListRefreshing),
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "thead" },
-            ...{ style: {} },
+            ...{ class: "thead member-grid" },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -7393,8 +7562,7 @@ if (__VLS_ctx.token) {
         for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 key: (member.id),
-                ...{ class: "trow" },
-                ...{ style: {} },
+                ...{ class: "trow member-grid" },
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
@@ -7402,7 +7570,9 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (member.user_code || '—');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (member.role === 'company_admin' ? '公司管理员' : '普通成员');
+            (__VLS_ctx.memberRoleLabel(member));
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (member.group_id ? __VLS_ctx.operatorGroupName(member.group_id) : '—');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (member.email);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
@@ -7415,7 +7585,7 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                 ...{ class: "member-row-actions" },
             });
-            if (member.role === 'member') {
+            if (member.role === 'member' || member.role === 'team_leader') {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!(__VLS_ctx.token))
@@ -7438,40 +7608,44 @@ if (__VLS_ctx.token) {
                                 return;
                             if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
                                 return;
-                            if (!(member.role === 'member'))
+                            if (!(member.role === 'member' || member.role === 'team_leader'))
                                 return;
                             __VLS_ctx.openMemberDialog(member);
                         } },
                 });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                    ...{ onClick: (...[$event]) => {
-                            if (!(__VLS_ctx.token))
-                                return;
-                            if (!!(__VLS_ctx.page === 'dashboard'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'templates'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'pod'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'tasks'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'materials'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'drafts'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'product-library'))
-                                return;
-                            if (!!(__VLS_ctx.page === 'miaoshou-collect-box'))
-                                return;
-                            if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
-                                return;
-                            if (!(member.role === 'member'))
-                                return;
-                            __VLS_ctx.toggleMember(member);
-                        } },
-                    ...{ class: (member.is_active ? 'negative' : 'positive') },
-                });
-                (member.is_active ? '停用' : '启用');
+                if (member.role !== 'team_leader') {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!(__VLS_ctx.token))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'dashboard'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'templates'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'pod'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'tasks'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'materials'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'drafts'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'product-library'))
+                                    return;
+                                if (!!(__VLS_ctx.page === 'miaoshou-collect-box'))
+                                    return;
+                                if (!(__VLS_ctx.page === 'members' && __VLS_ctx.user?.role === 'company_admin'))
+                                    return;
+                                if (!(member.role === 'member' || member.role === 'team_leader'))
+                                    return;
+                                if (!(member.role !== 'team_leader'))
+                                    return;
+                                __VLS_ctx.toggleMember(member);
+                            } },
+                        ...{ class: (member.is_active ? 'negative' : 'positive') },
+                    });
+                    (member.is_active ? '停用' : '启用');
+                }
             }
             for (const [provider] of __VLS_getVForSourceType((__VLS_ctx.memberCredentialProviders))) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
@@ -11484,6 +11658,80 @@ if (__VLS_ctx.showGroupDialog) {
         });
     }
 }
+if (__VLS_ctx.showOperatorGroupDialog) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showOperatorGroupDialog))
+                    return;
+                __VLS_ctx.showOperatorGroupDialog = false;
+            } },
+        ...{ class: "modal-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "modal-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    (__VLS_ctx.editingOperatorGroup ? '运营组更名' : '新增运营组');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+    (__VLS_ctx.editingOperatorGroup ? '更改组名不会影响成员归属。' : '每组必须有一位组长；可以选择本公司已启用的普通运营。');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+        ...{ class: "required" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        maxlength: "80",
+        placeholder: "请输入组名",
+    });
+    (__VLS_ctx.operatorGroupForm.name);
+    if (!__VLS_ctx.editingOperatorGroup) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
+            ...{ class: "required" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            value: (__VLS_ctx.operatorGroupForm.leader_user_id),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: (null),
+        });
+        for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members.filter(item => item.role === 'member' && item.is_active)))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (member.id),
+                value: (member.id),
+            });
+            (member.name);
+            (__VLS_ctx.operatorGroupName(member.group_id));
+        }
+    }
+    if (!__VLS_ctx.editingOperatorGroup && !__VLS_ctx.members.some(item => item.role === 'member' && item.is_active)) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "operator-group-hint" },
+        });
+    }
+    if (__VLS_ctx.operatorGroupError) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "error modal-error" },
+        });
+        (__VLS_ctx.operatorGroupError);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "modal-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showOperatorGroupDialog))
+                    return;
+                __VLS_ctx.showOperatorGroupDialog = false;
+            } },
+        ...{ class: "ghost" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveOperatorGroup) },
+        ...{ class: "primary" },
+        disabled: (__VLS_ctx.operatorGroupSaving),
+    });
+    (__VLS_ctx.operatorGroupSaving ? '保存中…' : '保存');
+}
 if (__VLS_ctx.showMemberDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
@@ -11499,7 +11747,7 @@ if (__VLS_ctx.showMemberDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     (__VLS_ctx.editingMember ? '编辑成员' : '新增成员');
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    (__VLS_ctx.editingMember ? '姓名、用户代码、邮箱为必填项；留空密码即可保持原密码不变。' : '姓名、用户代码、邮箱为必填项；新成员将作为普通成员加入当前公司。');
+    (__VLS_ctx.editingMember ? '留空密码即可保持原密码不变。' : '姓名、用户代码、邮箱和密码为必填项。');
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
         ...{ class: "required" },
@@ -11534,6 +11782,42 @@ if (__VLS_ctx.showMemberDialog) {
         placeholder: (__VLS_ctx.editingMember ? '留空则不修改' : '至少 8 个字符'),
     });
     (__VLS_ctx.memberForm.password);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.memberForm.role),
+        disabled: (__VLS_ctx.editingMember?.role === 'team_leader'),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "member",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "team_leader",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.memberForm.group_id),
+        disabled: (__VLS_ctx.editingMember?.role === 'team_leader'),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: (null),
+    });
+    for (const [group] of __VLS_getVForSourceType((__VLS_ctx.operatorGroups))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (group.id),
+            value: (group.id),
+        });
+        (group.name);
+    }
+    if (__VLS_ctx.memberForm.role === 'team_leader' && __VLS_ctx.editingMember?.role !== 'team_leader') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "operator-group-hint" },
+        });
+    }
+    if (__VLS_ctx.editingMember?.role === 'team_leader') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "operator-group-hint" },
+        });
+    }
     if (__VLS_ctx.memberFormError) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
             ...{ class: "error modal-error" },
@@ -11847,7 +12131,7 @@ if (__VLS_ctx.showShopManagersDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     (__VLS_ctx.managingShop?.name);
-    for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members.filter(item => item.role === 'member')))) {
+    for (const [member] of __VLS_getVForSourceType((__VLS_ctx.members.filter(item => item.role === 'member' || item.role === 'team_leader')))) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             key: (member.id),
             ...{ class: "manager-option" },
@@ -11861,7 +12145,7 @@ if (__VLS_ctx.showShopManagersDialog) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
         (member.email);
     }
-    if (!__VLS_ctx.members.some(item => item.role === 'member')) {
+    if (!__VLS_ctx.members.some(item => item.role === 'member' || item.role === 'team_leader')) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
             ...{ class: "empty" },
         });
@@ -12820,11 +13104,25 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-heading-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['operator-groups-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['operator-group-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['operator-group-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['operator-group-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['negative']} */ ;
+/** @type {__VLS_StyleScopedClasses['operator-groups-empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['member-list-heading']} */ ;
+/** @type {__VLS_StyleScopedClasses['member-list-title']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['refreshable-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['member-list-scroll']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
+/** @type {__VLS_StyleScopedClasses['member-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['trow']} */ ;
+/** @type {__VLS_StyleScopedClasses['member-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['member-row-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['credential-button']} */ ;
@@ -13285,7 +13583,19 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['operator-group-hint']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-error']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['required']} */ ;
+/** @type {__VLS_StyleScopedClasses['operator-group-hint']} */ ;
+/** @type {__VLS_StyleScopedClasses['operator-group-hint']} */ ;
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
@@ -13402,6 +13712,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             tasks: tasks,
             drafts: drafts,
             members: members,
+            operatorGroups: operatorGroups,
             loading: loading,
             error: error,
             toast: toast,
@@ -13434,6 +13745,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             memberSaving: memberSaving,
             memberFormError: memberFormError,
             memberListRefreshing: memberListRefreshing,
+            showOperatorGroupDialog: showOperatorGroupDialog,
+            editingOperatorGroup: editingOperatorGroup,
+            operatorGroupForm: operatorGroupForm,
+            operatorGroupSaving: operatorGroupSaving,
+            operatorGroupError: operatorGroupError,
             showMemberCredentialDialog: showMemberCredentialDialog,
             credentialMember: credentialMember,
             credentialProvider: credentialProvider,
@@ -13973,6 +14289,12 @@ const __VLS_self = (await import('vue')).defineComponent({
             deleteSelectedMaterialAssets: deleteSelectedMaterialAssets,
             downloadSelectedMaterialAssets: downloadSelectedMaterialAssets,
             refreshMemberList: refreshMemberList,
+            operatorGroupName: operatorGroupName,
+            operatorGroupMembers: operatorGroupMembers,
+            memberRoleLabel: memberRoleLabel,
+            openOperatorGroupDialog: openOperatorGroupDialog,
+            saveOperatorGroup: saveOperatorGroup,
+            deleteOperatorGroup: deleteOperatorGroup,
             openMemberDialog: openMemberDialog,
             openMyAccountDialog: openMyAccountDialog,
             saveMyUserCode: saveMyUserCode,

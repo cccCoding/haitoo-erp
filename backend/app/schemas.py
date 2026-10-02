@@ -15,6 +15,7 @@ class UserOut(BaseModel):
     user_code: str | None
     email: EmailStr
     role: Role
+    group_id: int | None
     company_id: int | None
     is_active: bool
     created_at: datetime
@@ -507,11 +508,38 @@ class TiktokCategoryCatalogUpdate(BaseModel):
         return value
 
 
+class OperatorGroupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    leader_user_id: int = Field(ge=1)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("组名不能为空")
+        return name
+
+
+class OperatorGroupUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("组名不能为空")
+        return name
+
+
 class MemberCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     user_code: str = Field(min_length=2, max_length=2)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+    role: Literal[Role.MEMBER, Role.TEAM_LEADER] = Role.MEMBER
+    group_id: int | None = Field(default=None, ge=1)
 
     @field_validator("user_code", mode="before")
     @classmethod
@@ -528,6 +556,8 @@ class MemberUpdate(BaseModel):
     email: EmailStr | None = None
     password: str | None = Field(default=None, min_length=8, max_length=128)
     is_active: bool | None = None
+    role: Literal[Role.MEMBER, Role.TEAM_LEADER] | None = None
+    group_id: int | None = Field(default=None, ge=1)
 
     @field_validator("user_code", mode="before")
     @classmethod

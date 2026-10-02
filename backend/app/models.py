@@ -10,6 +10,7 @@ class Role(str, enum.Enum):
     SUPER_ADMIN = "super_admin"
     COMPANY_ADMIN = "company_admin"
     MEMBER = "member"
+    TEAM_LEADER = "team_leader"
 
 
 class TaskStatus(str, enum.Enum):
@@ -36,6 +37,16 @@ class Company(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class OperatorGroup(Base):
+    __tablename__ = "operator_groups"
+    __table_args__ = (UniqueConstraint("company_id", "name", name="uq_operator_groups_company_name"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    leader_user_id: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (UniqueConstraint("company_id", "user_code", name="uq_users_company_user_code"),)
@@ -47,6 +58,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     token_version: Mapped[int] = mapped_column(Integer, default=0)
     role: Mapped[Role] = mapped_column(Enum(Role), default=Role.MEMBER)
+    group_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
