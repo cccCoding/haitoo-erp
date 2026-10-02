@@ -90,7 +90,7 @@ const productLibraryPlatform = ref(''), productLibrarySite = ref(''), productLib
 const appliedProductLibraryFilters = ref({ platform: '', site: '', shopName: '', template: '', sku: '' });
 const selectedProductLibraryIds = ref([]), productLibraryBrokenImages = ref([]);
 const showProductLibraryTemplateDialog = ref(false), productLibraryTargetTemplateId = ref(null), productLibraryTemplateSaving = ref(false);
-const productLibraryOrderProduct = ref(null), productLibraryOrders = ref([]), productLibraryOrderTotal = ref(0), productLibraryOrderPage = ref(1), productLibraryOrderLoading = ref(false), productLibraryOrderError = ref('');
+const productLibraryOrderProduct = ref(null), productLibraryOrders = ref([]), productLibraryOrderTotal = ref(0), productLibraryOrderPage = ref(1), productLibraryOrderLoading = ref(false);
 let productLibraryOrderRequestId = 0;
 const productLibraryFileInput = ref(null);
 const collectBoxConfigured = ref(false), collectBoxLastSyncedAt = ref(null), collectBoxInitialSyncedAt = ref(null);
@@ -573,7 +573,10 @@ watch(page, value => {
     if (value === 'miaoshou-collect-box' && activeMiaoshouTab.value === 'collect_box')
         void loadCollectBox();
     if (value === 'product-library') {
-        void loadProductLibraryStatisticsStatus();
+        if (user.value?.role !== 'company_admin' && activeProductLibraryTab.value !== 'stagnant' && activeProductLibraryTab.value !== 'new_images')
+            activeProductLibraryTab.value = 'stagnant';
+        if (user.value?.role === 'company_admin')
+            void loadProductLibraryStatisticsStatus();
         if (activeProductLibraryTab.value === 'products')
             void loadProductLibrary(true);
         else if (activeProductLibraryTab.value === 'stagnant')
@@ -727,11 +730,17 @@ async function loadProductLibrary(withFilters = false) {
             productLibraryFilters.value = filters.data;
     }
     catch (e) {
-        showToast(e.response?.data?.detail || '加载产品库失败');
+        showProductLibraryErrorToast(e, '加载产品库失败');
     }
     finally {
         productLibraryLoading.value = false;
     }
+}
+function showProductLibraryErrorToast(error, fallback) {
+    const detail = error.response?.data?.detail;
+    const message = typeof detail === 'string' && detail.trim() ? detail : fallback;
+    showToast(message);
+    return message;
 }
 async function loadProductLibraryRankings() {
     if (!productLibraryRankingTabKeys.has(activeProductLibraryTab.value))
@@ -753,7 +762,7 @@ async function loadProductLibraryRankings() {
     }
     catch (e) {
         if (requestId === productLibraryRankingRequestId)
-            productLibraryRankingError.value = e.response?.data?.detail || '加载榜单失败';
+            productLibraryRankingError.value = showProductLibraryErrorToast(e, '加载榜单失败');
     }
     finally {
         if (requestId === productLibraryRankingRequestId)
@@ -778,7 +787,7 @@ async function loadStagnantMaterials() {
     }
     catch (e) {
         if (requestId === stagnantRequestId)
-            stagnantError.value = e.response?.data?.detail || '加载滞销素材失败';
+            stagnantError.value = showProductLibraryErrorToast(e, '加载滞销素材失败');
     }
     finally {
         if (requestId === stagnantRequestId)
@@ -812,7 +821,7 @@ async function loadNewImages() {
     }
     catch (e) {
         if (requestId === newImagesRequestId)
-            newImagesError.value = e.response?.data?.detail || '加载新图失败';
+            newImagesError.value = showProductLibraryErrorToast(e, '加载新图失败');
     }
     finally {
         if (requestId === newImagesRequestId)
@@ -853,6 +862,10 @@ function searchProductLibrary() {
 }
 function changeProductLibraryPageSize() { productLibraryPage.value = 1; selectedProductLibraryIds.value = []; void loadProductLibrary(); }
 function changeProductLibraryTab(tab) {
+    if (user.value?.role !== 'company_admin' && tab !== 'stagnant' && tab !== 'new_images') {
+        showToast('当前账号没有此操作权限');
+        return;
+    }
     if (activeProductLibraryTab.value === tab)
         return;
     activeProductLibraryTab.value = tab;
@@ -889,7 +902,6 @@ function openProductLibraryOrders(item) {
     productLibraryOrderPage.value = 1;
     productLibraryOrders.value = [];
     productLibraryOrderTotal.value = 0;
-    productLibraryOrderError.value = '';
     void loadProductLibraryOrders();
 }
 function closeProductLibraryOrders() {
@@ -904,7 +916,6 @@ async function loadProductLibraryOrders() {
     const requestId = ++productLibraryOrderRequestId;
     try {
         productLibraryOrderLoading.value = true;
-        productLibraryOrderError.value = '';
         productLibraryOrders.value = [];
         const { data } = await api.get(`/product-library/${product.id}/orders`, { headers: headers.value, params: { page: productLibraryOrderPage.value } });
         if (requestId !== productLibraryOrderRequestId)
@@ -913,8 +924,10 @@ async function loadProductLibraryOrders() {
         productLibraryOrderTotal.value = data.total || 0;
     }
     catch (e) {
-        if (requestId === productLibraryOrderRequestId)
-            productLibraryOrderError.value = e.response?.data?.detail || '加载订单详情失败';
+        if (requestId === productLibraryOrderRequestId) {
+            showProductLibraryErrorToast(e, '加载订单详情失败');
+            closeProductLibraryOrders();
+        }
     }
     finally {
         if (requestId === productLibraryOrderRequestId)
@@ -1026,7 +1039,7 @@ async function importProductLibrary(event) {
     }
 }
 async function loadProductLibraryStatisticsStatus() {
-    if (!token.value)
+    if (!token.value || user.value?.role !== 'company_admin')
         return;
     const currentToken = token.value;
     const currentTaskId = productLibraryStatisticsTask.value?.task_id;
@@ -1049,7 +1062,7 @@ async function loadProductLibraryStatisticsStatus() {
     catch { /* 轮询失败时保留当前状态，下次继续查询。 */ }
 }
 async function runProductLibraryStatistics() {
-    if (productLibraryStatisticsSubmitting.value || productLibraryImporting.value)
+    if (user.value?.role !== 'company_admin' || productLibraryStatisticsSubmitting.value || productLibraryImporting.value)
         return;
     try {
         productLibraryStatisticsSubmitting.value = true;
@@ -1129,7 +1142,10 @@ async function refresh() {
     if (selectedTemplateId.value)
         await loadMyTemplateResources(false);
     if (page.value === 'product-library') {
-        void loadProductLibraryStatisticsStatus();
+        if (user.value.role !== 'company_admin' && activeProductLibraryTab.value !== 'stagnant' && activeProductLibraryTab.value !== 'new_images')
+            activeProductLibraryTab.value = 'stagnant';
+        if (user.value.role === 'company_admin')
+            void loadProductLibraryStatisticsStatus();
         if (activeProductLibraryTab.value === 'products')
             await loadProductLibrary(true);
         else if (activeProductLibraryTab.value === 'stagnant')
@@ -5689,54 +5705,58 @@ if (__VLS_ctx.token) {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "product-library-actions" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (__VLS_ctx.downloadProductLibraryTemplate) },
-            ...{ class: "secondary" },
-            disabled: (__VLS_ctx.productLibraryDownloading),
-        });
-        (__VLS_ctx.productLibraryDownloading ? '下载中…' : '下载导入模版');
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (...[$event]) => {
-                    if (!(__VLS_ctx.token))
-                        return;
-                    if (!!(__VLS_ctx.page === 'dashboard'))
-                        return;
-                    if (!!(__VLS_ctx.page === 'templates'))
-                        return;
-                    if (!!(__VLS_ctx.page === 'pod'))
-                        return;
-                    if (!!(__VLS_ctx.page === 'tasks'))
-                        return;
-                    if (!!(__VLS_ctx.page === 'materials'))
-                        return;
-                    if (!!(__VLS_ctx.page === 'drafts'))
-                        return;
-                    if (!(__VLS_ctx.page === 'product-library'))
-                        return;
-                    __VLS_ctx.productLibraryFileInput?.click();
-                } },
-            ...{ class: "primary" },
-            disabled: (__VLS_ctx.productLibraryImporting),
-        });
-        (__VLS_ctx.productLibraryImporting ? '导入中…' : '导入');
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (__VLS_ctx.runProductLibraryStatistics) },
-            ...{ class: "secondary" },
-            type: "button",
-            disabled: (__VLS_ctx.productLibraryStatisticsSubmitting || __VLS_ctx.productLibraryImporting),
-        });
-        (__VLS_ctx.productLibraryStatisticsSubmitting ? '提交中…' : '数据统计');
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-            ...{ onChange: (__VLS_ctx.importProductLibrary) },
-            ref: "productLibraryFileInput",
-            type: "file",
-            accept: ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            hidden: true,
-        });
-        /** @type {typeof __VLS_ctx.productLibraryFileInput} */ ;
+        if (__VLS_ctx.user?.role === 'company_admin') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "product-library-actions" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.downloadProductLibraryTemplate) },
+                ...{ class: "secondary" },
+                disabled: (__VLS_ctx.productLibraryDownloading),
+            });
+            (__VLS_ctx.productLibraryDownloading ? '下载中…' : '下载导入模版');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.token))
+                            return;
+                        if (!!(__VLS_ctx.page === 'dashboard'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'templates'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'pod'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'tasks'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'materials'))
+                            return;
+                        if (!!(__VLS_ctx.page === 'drafts'))
+                            return;
+                        if (!(__VLS_ctx.page === 'product-library'))
+                            return;
+                        if (!(__VLS_ctx.user?.role === 'company_admin'))
+                            return;
+                        __VLS_ctx.productLibraryFileInput?.click();
+                    } },
+                ...{ class: "primary" },
+                disabled: (__VLS_ctx.productLibraryImporting),
+            });
+            (__VLS_ctx.productLibraryImporting ? '导入中…' : '导入');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.runProductLibraryStatistics) },
+                ...{ class: "secondary" },
+                type: "button",
+                disabled: (__VLS_ctx.productLibraryStatisticsSubmitting || __VLS_ctx.productLibraryImporting),
+            });
+            (__VLS_ctx.productLibraryStatisticsSubmitting ? '提交中…' : '数据统计');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                ...{ onChange: (__VLS_ctx.importProductLibrary) },
+                ref: "productLibraryFileInput",
+                type: "file",
+                accept: ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                hidden: true,
+            });
+            /** @type {typeof __VLS_ctx.productLibraryFileInput} */ ;
+        }
         if (__VLS_ctx.productLibraryStatisticsTask) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "product-library-category-description" },
@@ -6249,16 +6269,6 @@ if (__VLS_ctx.token) {
                     (member.name);
                 }
             }
-            if (__VLS_ctx.stagnantError) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
-                    ...{ class: "error" },
-                });
-                (__VLS_ctx.stagnantError);
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                    ...{ onClick: (__VLS_ctx.loadStagnantMaterials) },
-                    ...{ class: "ghost" },
-                });
-            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "draft-table product-library-table" },
                 'aria-busy': (__VLS_ctx.stagnantLoading),
@@ -6486,16 +6496,6 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
                 value: "used",
             });
-            if (__VLS_ctx.newImagesError) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
-                    ...{ class: "error" },
-                });
-                (__VLS_ctx.newImagesError);
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                    ...{ onClick: (__VLS_ctx.loadNewImages) },
-                    ...{ class: "ghost" },
-                });
-            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "draft-table product-library-table" },
                 'aria-busy': (__VLS_ctx.newImagesLoading),
@@ -6716,16 +6716,6 @@ if (__VLS_ctx.token) {
                 });
                 (__VLS_ctx.productLibraryRankingDate);
                 (__VLS_ctx.productLibraryRankingThroughDate);
-            }
-            if (__VLS_ctx.productLibraryRankingError) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
-                    ...{ class: "error" },
-                });
-                (__VLS_ctx.productLibraryRankingError);
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                    ...{ onClick: (__VLS_ctx.loadProductLibraryRankings) },
-                    ...{ class: "ghost" },
-                });
             }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "draft-table product-library-table" },
@@ -12288,17 +12278,7 @@ if (__VLS_ctx.productLibraryOrderProduct) {
         });
         (order.order_number);
     }
-    if (__VLS_ctx.productLibraryOrderError) {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "product-library-orders-loading error" },
-        });
-        (__VLS_ctx.productLibraryOrderError);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (__VLS_ctx.loadProductLibraryOrders) },
-            ...{ class: "ghost" },
-        });
-    }
-    else if (!__VLS_ctx.productLibraryOrders.length && !__VLS_ctx.productLibraryOrderLoading) {
+    if (!__VLS_ctx.productLibraryOrders.length && !__VLS_ctx.productLibraryOrderLoading) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "empty" },
         });
@@ -12752,8 +12732,6 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-ranking-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-filters']} */ ;
-/** @type {__VLS_StyleScopedClasses['error']} */ ;
-/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
@@ -12770,8 +12748,6 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['list-refresh-overlay']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-ranking-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-filters']} */ ;
-/** @type {__VLS_StyleScopedClasses['error']} */ ;
-/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
@@ -12793,8 +12769,6 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['product-library-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-ranking-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-ranking-date']} */ ;
-/** @type {__VLS_StyleScopedClasses['error']} */ ;
-/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
@@ -13391,9 +13365,6 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['product-library-orders-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-orders-head']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-orders-row']} */ ;
-/** @type {__VLS_StyleScopedClasses['product-library-orders-loading']} */ ;
-/** @type {__VLS_StyleScopedClasses['error']} */ ;
-/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-orders-loading']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
@@ -13642,7 +13613,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             productLibraryOrderTotal: productLibraryOrderTotal,
             productLibraryOrderPage: productLibraryOrderPage,
             productLibraryOrderLoading: productLibraryOrderLoading,
-            productLibraryOrderError: productLibraryOrderError,
             productLibraryFileInput: productLibraryFileInput,
             collectBoxConfigured: collectBoxConfigured,
             collectBoxLastSyncedAt: collectBoxLastSyncedAt,
@@ -13856,12 +13826,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             productLibraryOrderPageCount: productLibraryOrderPageCount,
             unmatchedProductLibraryItems: unmatchedProductLibraryItems,
             allPagedUnmatchedSelected: allPagedUnmatchedSelected,
-            loadProductLibraryRankings: loadProductLibraryRankings,
-            loadStagnantMaterials: loadStagnantMaterials,
             changeStagnantCreator: changeStagnantCreator,
             changeStagnantPageSize: changeStagnantPageSize,
             changeStagnantPage: changeStagnantPage,
-            loadNewImages: loadNewImages,
             changeNewImagesFilters: changeNewImagesFilters,
             changeNewImagesPageSize: changeNewImagesPageSize,
             changeNewImagesPage: changeNewImagesPage,
@@ -13873,7 +13840,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             changeProductLibraryPage: changeProductLibraryPage,
             openProductLibraryOrders: openProductLibraryOrders,
             closeProductLibraryOrders: closeProductLibraryOrders,
-            loadProductLibraryOrders: loadProductLibraryOrders,
             changeProductLibraryOrderPage: changeProductLibraryOrderPage,
             toggleProductLibrarySelection: toggleProductLibrarySelection,
             togglePagedUnmatchedProducts: togglePagedUnmatchedProducts,

@@ -229,10 +229,24 @@ class ProductLibraryRankingTests(TestCase):
         main.app.dependency_overrides[get_db] = override_db
         try:
             with self.sessions() as db:
+                db.get(User, 1).role = Role.COMPANY_ADMIN
+                db.get(User, 2).role = Role.COMPANY_ADMIN
+                db.add(User(id=3, company_id=1, email="member@example.com", name="Member",
+                            password_hash="x", role=Role.MEMBER))
+                db.commit()
                 token_a = create_access_token(db.get(User, 1))
                 token_b = create_access_token(db.get(User, 2))
+                token_member = create_access_token(db.get(User, 3))
             client = TestClient(main.app)
             self.assertEqual(client.get("/product-library/rankings", params={"category": "top7"}).status_code, 403)
+            member_headers = {"Authorization": f"Bearer {token_member}"}
+            for category in ("top7", "top15", "top30", "potential", "hot", "booming"):
+                self.assertEqual(client.get("/product-library/rankings", params={"category": category},
+                    headers=member_headers).status_code, 403)
+            self.assertEqual(client.post("/product-library/rankings/refresh", headers=member_headers).status_code, 403)
+            self.assertEqual(client.get("/product-library/rankings/refresh/status", headers=member_headers).status_code, 403)
+            self.assertEqual(client.get("/product-library/stagnant", headers=member_headers).status_code, 200)
+            self.assertEqual(client.get("/product-library/new-images", headers=member_headers).status_code, 200)
             self.assertEqual(client.get("/product-library/rankings", params={"category": "unknown"},
                 headers={"Authorization": f"Bearer {token_a}"}).status_code, 422)
             first = client.get("/product-library/rankings", params={"category": "top7"},

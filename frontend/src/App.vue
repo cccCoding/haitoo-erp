@@ -93,7 +93,7 @@ const productLibraryPlatform = ref(''), productLibrarySite = ref(''), productLib
 const appliedProductLibraryFilters = ref({platform:'', site:'', shopName:'', template:'', sku:''})
 const selectedProductLibraryIds = ref<number[]>([]), productLibraryBrokenImages = ref<number[]>([])
 const showProductLibraryTemplateDialog = ref(false), productLibraryTargetTemplateId = ref<number | null>(null), productLibraryTemplateSaving = ref(false)
-const productLibraryOrderProduct = ref<any | null>(null), productLibraryOrders = ref<any[]>([]), productLibraryOrderTotal = ref(0), productLibraryOrderPage = ref(1), productLibraryOrderLoading = ref(false), productLibraryOrderError = ref('')
+const productLibraryOrderProduct = ref<any | null>(null), productLibraryOrders = ref<any[]>([]), productLibraryOrderTotal = ref(0), productLibraryOrderPage = ref(1), productLibraryOrderLoading = ref(false)
 let productLibraryOrderRequestId = 0
 const productLibraryFileInput = ref<HTMLInputElement | null>(null)
 const collectBoxConfigured = ref(false), collectBoxLastSyncedAt = ref<number | null>(null), collectBoxInitialSyncedAt = ref<number | null>(null)
@@ -467,7 +467,8 @@ watch(page,value=>{
   shopError.value = ''
   if (value === 'miaoshou-collect-box' && activeMiaoshouTab.value === 'collect_box') void loadCollectBox()
   if (value === 'product-library') {
-    void loadProductLibraryStatisticsStatus()
+    if (user.value?.role !== 'company_admin' && activeProductLibraryTab.value !== 'stagnant' && activeProductLibraryTab.value !== 'new_images') activeProductLibraryTab.value = 'stagnant'
+    if (user.value?.role === 'company_admin') void loadProductLibraryStatisticsStatus()
     if (activeProductLibraryTab.value === 'products') void loadProductLibrary(true)
     else if (activeProductLibraryTab.value === 'stagnant') void loadStagnantMaterials()
     else if (activeProductLibraryTab.value === 'new_images') void loadNewImages()
@@ -577,8 +578,14 @@ async function loadProductLibrary(withFilters = false) {
     productLibraryTotal.value = list.data.total || 0
     productLibraryBrokenImages.value = []
     if (filters) productLibraryFilters.value = filters.data
-  } catch(e:any) { showToast(e.response?.data?.detail || '加载产品库失败') }
+  } catch(e:any) { showProductLibraryErrorToast(e, '加载产品库失败') }
   finally { productLibraryLoading.value = false }
+}
+function showProductLibraryErrorToast(error:any, fallback:string): string {
+  const detail = error.response?.data?.detail
+  const message = typeof detail === 'string' && detail.trim() ? detail : fallback
+  showToast(message)
+  return message
 }
 async function loadProductLibraryRankings() {
   if (!productLibraryRankingTabKeys.has(activeProductLibraryTab.value)) return
@@ -596,7 +603,8 @@ async function loadProductLibraryRankings() {
     productLibraryRankingThroughDate.value = data.through_date || null
     productLibraryBrokenImages.value = []
   } catch(e:any) {
-    if (requestId === productLibraryRankingRequestId) productLibraryRankingError.value = e.response?.data?.detail || '加载榜单失败'
+    if (requestId === productLibraryRankingRequestId)
+      productLibraryRankingError.value = showProductLibraryErrorToast(e, '加载榜单失败')
   } finally {
     if (requestId === productLibraryRankingRequestId) productLibraryRankingLoading.value = false
   }
@@ -616,7 +624,8 @@ async function loadStagnantMaterials() {
     stagnantPage.value = data.page || 1
     productLibraryBrokenImages.value = []
   } catch(e:any) {
-    if (requestId === stagnantRequestId) stagnantError.value = e.response?.data?.detail || '加载滞销素材失败'
+    if (requestId === stagnantRequestId)
+      stagnantError.value = showProductLibraryErrorToast(e, '加载滞销素材失败')
   } finally {
     if (requestId === stagnantRequestId) stagnantLoading.value = false
   }
@@ -644,7 +653,8 @@ async function loadNewImages() {
     newImagesPage.value = data.page || 1
     productLibraryBrokenImages.value = []
   } catch(e:any) {
-    if (requestId === newImagesRequestId) newImagesError.value = e.response?.data?.detail || '加载新图失败'
+    if (requestId === newImagesRequestId)
+      newImagesError.value = showProductLibraryErrorToast(e, '加载新图失败')
   } finally {
     if (requestId === newImagesRequestId) newImagesLoading.value = false
   }
@@ -679,6 +689,10 @@ function searchProductLibrary() {
 }
 function changeProductLibraryPageSize() { productLibraryPage.value=1; selectedProductLibraryIds.value=[]; void loadProductLibrary() }
 function changeProductLibraryTab(tab: ProductLibraryTab) {
+  if (user.value?.role !== 'company_admin' && tab !== 'stagnant' && tab !== 'new_images') {
+    showToast('当前账号没有此操作权限')
+    return
+  }
   if (activeProductLibraryTab.value === tab) return
   activeProductLibraryTab.value = tab
   selectedProductLibraryIds.value = []
@@ -705,7 +719,6 @@ function openProductLibraryOrders(item:any) {
   productLibraryOrderPage.value = 1
   productLibraryOrders.value = []
   productLibraryOrderTotal.value = 0
-  productLibraryOrderError.value = ''
   void loadProductLibraryOrders()
 }
 function closeProductLibraryOrders() {
@@ -719,14 +732,16 @@ async function loadProductLibraryOrders() {
   const requestId = ++productLibraryOrderRequestId
   try {
     productLibraryOrderLoading.value = true
-    productLibraryOrderError.value = ''
     productLibraryOrders.value = []
     const {data} = await api.get(`/product-library/${product.id}/orders`, {headers:headers.value, params:{page:productLibraryOrderPage.value}})
     if (requestId !== productLibraryOrderRequestId) return
     productLibraryOrders.value = data.items || []
     productLibraryOrderTotal.value = data.total || 0
   } catch(e:any) {
-    if (requestId === productLibraryOrderRequestId) productLibraryOrderError.value = e.response?.data?.detail || '加载订单详情失败'
+    if (requestId === productLibraryOrderRequestId) {
+      showProductLibraryErrorToast(e, '加载订单详情失败')
+      closeProductLibraryOrders()
+    }
   } finally {
     if (requestId === productLibraryOrderRequestId) productLibraryOrderLoading.value = false
   }
@@ -804,7 +819,7 @@ async function importProductLibrary(event:Event) {
   finally { productLibraryImporting.value = false; input.value = '' }
 }
 async function loadProductLibraryStatisticsStatus() {
-  if (!token.value) return
+  if (!token.value || user.value?.role !== 'company_admin') return
   const currentToken = token.value
   const currentTaskId = productLibraryStatisticsTask.value?.task_id
   try {
@@ -821,7 +836,7 @@ async function loadProductLibraryStatisticsStatus() {
   } catch { /* 轮询失败时保留当前状态，下次继续查询。 */ }
 }
 async function runProductLibraryStatistics() {
-  if (productLibraryStatisticsSubmitting.value || productLibraryImporting.value) return
+  if (user.value?.role !== 'company_admin' || productLibraryStatisticsSubmitting.value || productLibraryImporting.value) return
   try {
     productLibraryStatisticsSubmitting.value = true
     const {data} = await api.post('/product-library/rankings/refresh', null, {headers:headers.value})
@@ -876,7 +891,8 @@ async function refresh() {
   if (!selectedTemplateId.value && templates.value[0]) selectedTemplateId.value=templates.value[0].id
   if (selectedTemplateId.value) await loadMyTemplateResources(false)
   if (page.value === 'product-library') {
-    void loadProductLibraryStatisticsStatus()
+    if (user.value.role !== 'company_admin' && activeProductLibraryTab.value !== 'stagnant' && activeProductLibraryTab.value !== 'new_images') activeProductLibraryTab.value = 'stagnant'
+    if (user.value.role === 'company_admin') void loadProductLibraryStatisticsStatus()
     if (activeProductLibraryTab.value === 'products') await loadProductLibrary(true)
     else if (activeProductLibraryTab.value === 'stagnant') await loadStagnantMaterials()
     else if (activeProductLibraryTab.value === 'new_images') await loadNewImages()
@@ -2195,7 +2211,7 @@ onUnmounted(() => {
       <section v-else-if="page==='product-library'" class="page">
         <div class="section-heading product-library-heading">
           <div><span>历史订单导入后，同一基础 SKU 的不同尺码按订单编号去重。</span></div>
-          <div class="product-library-actions">
+          <div v-if="user?.role==='company_admin'" class="product-library-actions">
             <button class="secondary" :disabled="productLibraryDownloading" @click="downloadProductLibraryTemplate">{{productLibraryDownloading ? '下载中…' : '下载导入模版'}}</button>
             <button class="primary" :disabled="productLibraryImporting" @click="productLibraryFileInput?.click()">{{productLibraryImporting ? '导入中…' : '导入'}}</button>
             <button class="secondary" type="button" :disabled="productLibraryStatisticsSubmitting || productLibraryImporting" @click="runProductLibraryStatistics">{{productLibraryStatisticsSubmitting ? '提交中…' : '数据统计'}}</button>
@@ -2235,7 +2251,6 @@ onUnmounted(() => {
         </div>
         <div v-else-if="activeProductLibraryTab==='stagnant'" class="product-library-ranking-section">
           <div v-if="user?.role==='company_admin'" class="product-library-filters"><label>创建人<select v-model="stagnantCreatorId" :disabled="stagnantLoading" @change="changeStagnantCreator"><option :value="null">全部创建人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label></div>
-          <p v-if="stagnantError" class="error">{{stagnantError}} <button class="ghost" @click="loadStagnantMaterials">重试</button></p>
           <div class="draft-table product-library-table" :aria-busy="stagnantLoading">
             <div class="thead product-library-stagnant-grid"><span>商品</span><span>SKU</span><span>模版</span><span>创建人</span><span>创建时间</span></div>
             <div v-for="item in stagnantMaterials" :key="item.id" class="trow product-library-stagnant-grid">
@@ -2252,7 +2267,6 @@ onUnmounted(() => {
             <label v-if="user?.role==='company_admin'">创建人<select v-model="newImagesCreatorId" :disabled="newImagesLoading" @change="changeNewImagesFilters"><option :value="null">全部创建人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label>
             <label>使用状态<select v-model="newImagesUsageStatus" :disabled="newImagesLoading" @change="changeNewImagesFilters"><option value="all">全部状态</option><option value="unused">未使用</option><option value="used">已使用</option></select></label>
           </div>
-          <p v-if="newImagesError" class="error">{{newImagesError}} <button class="ghost" @click="loadNewImages">重试</button></p>
           <div class="draft-table product-library-table" :aria-busy="newImagesLoading">
             <div class="thead product-library-new-images-grid"><span>商品</span><span>SKU</span><span>模版</span><span>创建人</span><span>创建时间</span><span>使用状态</span></div>
             <div v-for="item in newImages" :key="item.id" class="trow product-library-new-images-grid">
@@ -2267,7 +2281,6 @@ onUnmounted(() => {
         <div v-else-if="!productLibraryRankingTabKeys.has(activeProductLibraryTab)" class="draft-table product-library-table"><div class="empty">暂无产品。</div><footer class="draft-pagination product-library-pagination"><span>共 0 条</span></footer></div>
         <div v-else class="product-library-ranking-section">
           <p v-if="productLibraryRankingDate" class="product-library-ranking-date">{{productLibraryRankingDate}} 榜单 · 统计截至 {{productLibraryRankingThroughDate}}</p>
-          <p v-if="productLibraryRankingError" class="error">{{productLibraryRankingError}} <button class="ghost" @click="loadProductLibraryRankings">重试</button></p>
           <div class="draft-table product-library-table" :aria-busy="productLibraryRankingLoading">
             <div class="thead product-library-ranking-grid"><span>名次</span><span>商品</span><span>SKU</span><span>模版</span><span>标题</span><span>站点</span><span>店铺名称</span><span>产品 ID</span><span>创建人</span><span>创建时间</span><span>出单数</span></div>
             <div v-for="item in productLibraryRankingItems" :key="item.id" class="trow product-library-ranking-grid">
@@ -2670,7 +2683,7 @@ onUnmounted(() => {
   <div v-if="showShopManagersDialog" class="modal-backdrop" @click.self="showShopManagersDialog=false"><section class="modal-card"><h2>分配店铺管理人员</h2><p>{{managingShop?.name}}。被选中的普通成员可在该店铺创建、管理并上架商品。</p><label v-for="member in members.filter(item => item.role === 'member')" :key="member.id" class="manager-option"><input v-model="selectedManagerIds" :value="member.id" type="checkbox" />{{member.name}} <small>{{member.email}}</small></label><p v-if="!members.some(item => item.role === 'member')" class="empty">请先在成员管理中新增普通成员。</p><div class="modal-actions"><button class="ghost" @click="showShopManagersDialog=false">取消</button><button class="primary" :disabled="shopManagersSaving" @click="saveShopManagers">{{shopManagersSaving ? '保存中…' : '保存分配'}}</button></div></section></div>
   <div v-if="showTemplateDialog" class="drawer-backdrop"><section class="template-drawer"><header><div><h2>{{editingTemplate ? '编辑产品模板' : '新增产品模板'}}</h2><p>完善模板信息后可直接用于 AI 创作。</p></div><button class="drawer-close" aria-label="关闭" :disabled="templateSaving" @click="showTemplateDialog=false">×</button></header><nav class="drawer-tabs"><button :class="{active:templateFormTab==='basic'}" @click="templateFormTab='basic'">模版信息</button><button :class="{active:templateFormTab==='product'}" @click="templateFormTab='product'">商品信息</button><button :class="{active:templateFormTab==='sku'}" @click="templateFormTab='sku'">SKU</button><button :class="{active:templateFormTab==='logistics'}" @click="templateFormTab='logistics'">物流信息</button><button :class="{active:templateFormTab==='ai-prompts'}" @click="templateFormTab='ai-prompts'">AI提示词</button></nav><div class="drawer-content"><div v-if="templateFormTab==='basic'" class="drawer-form"><label>模板名称<span>*</span><input v-model="newTemplateName" placeholder="例如：宽松短袖上衣" /></label><label>模板图片<span>*</span><input accept="image/png,image/jpeg,image/webp" type="file" @change="onCoverChange" /><small>{{newTemplateImage ? newTemplateImage.name : editingTemplate?.cover_url ? '保留当前图片' : '支持 JPG、PNG、WebP，最大 3MB'}}</small><div v-if="newTemplateImagePreview" class="template-upload-preview"><img :src="newTemplateImagePreview" alt="模板图片预览" /></div></label><label>模板描述<span>*</span><textarea v-model="newTemplateDescription" maxlength="500" placeholder="描述产品材质、版型和适用的印花区域"></textarea></label><label>模板分类<span>*</span><select v-model="newTemplateGroupId"><option :value="null" disabled>请选择模板分类</option><option v-for="group in templateGroups" :key="group.id" :value="group.id">{{group.name}}</option></select></label></div><div v-else-if="templateFormTab==='product'" class="drawer-form product-info-form"><label>AI生成标题约束<span>*</span><input v-model="newTemplateTitleTemplate" maxlength="500" placeholder="例如：突出材质、款式与适用场景，不包含夸大宣传" /></label><label>产品描述<span>*</span><textarea v-model="newTemplateProductDescription" maxlength="5000" placeholder="填写商品详情页的产品描述"></textarea></label><label>尺码图<span>*</span><input accept="image/png,image/jpeg,image/webp" type="file" @change="onSizeChartChange" /><small>{{newTemplateSizeChart ? newTemplateSizeChart.name : editingTemplate?.size_chart_url ? '保留当前尺码图' : '支持 JPG、PNG、WebP，最多上传 1 张，最大 3MB'}}</small><div v-if="newTemplateSizeChartPreview" class="template-upload-preview"><img :src="newTemplateSizeChartPreview" alt="尺码图预览" /></div></label></div><div v-else-if="templateFormTab==='sku'" class="sku-form"><section><strong><b>*</b> 尺码</strong><div class="sku-size-grid"><div v-for="(_, index) in newSkuSizeOptions" :key="index" class="sku-size-row"><input v-model="newSkuSizeOptions[index]" maxlength="50" placeholder="例如：M"/><small>{{newSkuSizeOptions[index].length}} / 50</small><button title="删除尺码" @click="newSkuSizeOptions.splice(index,1)">×</button></div></div><button class="sku-add-option" @click="addSkuSize">＋ 添加选项</button></section><small class="sku-total">预计生成 {{Math.max(1,newSkuSizeOptions.filter(value=>value.trim()).length)}} 个 SKU</small></div><div v-else-if="templateFormTab==='ai-prompts'" class="drawer-form ai-prompts-form"><div><h3>AI 提示词</h3><p>为印花贴合保存可复用的创作要求；在 AI 创作页选择模板后可一键填充并继续修改。</p></div><section v-for="(prompt, index) in newTemplateAiPrompts" :key="index" class="ai-prompt-editor"><div><b>提示词 {{index + 1}}</b><button type="button" class="danger" @click="removeTemplateAiPrompt(index)">删除</button></div><label>名称<input v-model="prompt.name" maxlength="80" placeholder="例如：自然布料贴合" /></label><label>提示词内容<textarea v-model="prompt.content" maxlength="1000" placeholder="描述印花贴合方式、细节、光影等创作要求"></textarea></label></section><button type="button" class="secondary ai-prompt-add" @click="addTemplateAiPrompt">＋ 新增提示词</button></div><div v-else class="drawer-form logistics-form"><h3>物流信息 <span title="用于运费及配送计算">?</span></h3><label><b>*</b> 包裹重量<div class="unit-input"><input v-model.number="newPackageWeight" type="number" min="0.001" step="0.001" placeholder="请输入重量" /><span>KG</span></div></label><label><b>*</b> 包裹尺寸<div class="dimension-inputs"><label><input v-model.number="newPackageLength" type="number" min="0.1" step="0.1" placeholder="长" /><span>cm</span></label><label><input v-model.number="newPackageWidth" type="number" min="0.1" step="0.1" placeholder="宽" /><span>cm</span></label><label><input v-model.number="newPackageHeight" type="number" min="0.1" step="0.1" placeholder="高" /><span>cm</span></label></div></label></div></div><footer><button class="ghost" :disabled="templateSaving" @click="showTemplateDialog=false">取消</button><button class="primary" :disabled="templateSaving" @click="createTemplate">{{templateSaving ? '上传中…' : (editingTemplate ? '保存修改' : '确认新增')}}</button></footer></section></div>
   <div v-if="previewImageUrl" class="image-preview-backdrop" @click.self="previewImageUrl=''"><section class="image-preview-modal"><button class="modal-close" aria-label="关闭大图" @click="previewImageUrl=''">×</button><img :src="previewImageUrl" :alt="previewImageAlt"/></section></div>
-  <div v-if="productLibraryOrderProduct" class="modal-backdrop" @click.self="closeProductLibraryOrders"><section class="modal-card product-library-orders-dialog" role="dialog" aria-modal="true" aria-labelledby="product-library-orders-heading"><button class="modal-close" aria-label="关闭订单详情" @click="closeProductLibraryOrders">×</button><h2 id="product-library-orders-heading">订单详情</h2><p>{{productLibraryOrderProduct.shop_name}} · {{productLibraryOrderProduct.sku}}</p><div class="product-library-orders-table" :aria-busy="productLibraryOrderLoading"><div class="product-library-orders-head"><span>下单时间</span><span>订单编号</span></div><div v-for="order in productLibraryOrders" :key="order.order_number" class="product-library-orders-row"><span>{{new Date(order.ordered_at).toLocaleString()}}</span><span :title="order.order_number">{{order.order_number}}</span></div><div v-if="productLibraryOrderError" class="product-library-orders-loading error">{{productLibraryOrderError}} <button class="ghost" @click="loadProductLibraryOrders">重试</button></div><div v-else-if="!productLibraryOrders.length && !productLibraryOrderLoading" class="empty">暂无订单</div><div v-if="productLibraryOrderLoading" class="product-library-orders-loading" role="status">正在加载订单…</div></div><footer class="draft-pagination product-library-orders-pagination"><span>共 {{productLibraryOrderTotal}} 单</span><button :disabled="productLibraryOrderLoading || productLibraryOrderPage===1" @click="changeProductLibraryOrderPage(productLibraryOrderPage-1)">上一页</button><span>第 {{productLibraryOrderPage}} / {{productLibraryOrderPageCount}} 页</span><button :disabled="productLibraryOrderLoading || productLibraryOrderPage===productLibraryOrderPageCount" @click="changeProductLibraryOrderPage(productLibraryOrderPage+1)">下一页</button></footer></section></div>
+  <div v-if="productLibraryOrderProduct" class="modal-backdrop" @click.self="closeProductLibraryOrders"><section class="modal-card product-library-orders-dialog" role="dialog" aria-modal="true" aria-labelledby="product-library-orders-heading"><button class="modal-close" aria-label="关闭订单详情" @click="closeProductLibraryOrders">×</button><h2 id="product-library-orders-heading">订单详情</h2><p>{{productLibraryOrderProduct.shop_name}} · {{productLibraryOrderProduct.sku}}</p><div class="product-library-orders-table" :aria-busy="productLibraryOrderLoading"><div class="product-library-orders-head"><span>下单时间</span><span>订单编号</span></div><div v-for="order in productLibraryOrders" :key="order.order_number" class="product-library-orders-row"><span>{{new Date(order.ordered_at).toLocaleString()}}</span><span :title="order.order_number">{{order.order_number}}</span></div><div v-if="!productLibraryOrders.length && !productLibraryOrderLoading" class="empty">暂无订单</div><div v-if="productLibraryOrderLoading" class="product-library-orders-loading" role="status">正在加载订单…</div></div><footer class="draft-pagination product-library-orders-pagination"><span>共 {{productLibraryOrderTotal}} 单</span><button :disabled="productLibraryOrderLoading || productLibraryOrderPage===1" @click="changeProductLibraryOrderPage(productLibraryOrderPage-1)">上一页</button><span>第 {{productLibraryOrderPage}} / {{productLibraryOrderPageCount}} 页</span><button :disabled="productLibraryOrderLoading || productLibraryOrderPage===productLibraryOrderPageCount" @click="changeProductLibraryOrderPage(productLibraryOrderPage+1)">下一页</button></footer></section></div>
   <div v-if="showProductLibraryTemplateDialog" class="modal-backdrop" @click.self="!productLibraryTemplateSaving && (showProductLibraryTemplateDialog=false)"><section class="modal-card product-library-template-dialog"><button class="modal-close" :disabled="productLibraryTemplateSaving" aria-label="关闭批量设置模版" @click="showProductLibraryTemplateDialog=false">×</button><h2>批量设置模版</h2><p>将为 {{selectedProductLibraryIds.length}} 条未匹配产品设置同一模版。</p><label>目标模版<select v-model="productLibraryTargetTemplateId" :disabled="productLibraryTemplateSaving"><option :value="null" disabled>请选择模版</option><option v-for="item in templates" :key="item.id" :value="item.id">{{item.name}}</option></select></label><div class="modal-actions"><button class="ghost" :disabled="productLibraryTemplateSaving" @click="showProductLibraryTemplateDialog=false">取消</button><button class="primary" :disabled="productLibraryTemplateSaving || !productLibraryTargetTemplateId" @click="saveProductLibraryTemplate">{{productLibraryTemplateSaving ? '保存中…' : '确认设置'}}</button></div></section></div>
   <div v-if="toast" class="toast" role="alert" style="position:fixed;top:24px;left:50%;z-index:1000;transform:translateX(-50%);padding:12px 18px;border-radius:10px;background:#302954;color:#fff;box-shadow:0 10px 28px #30295440;font-size:14px">{{ toast }}</div>
   <div v-if="showMaterialUploadDialog" class="modal-backdrop" @click.self="showMaterialUploadDialog=false"><section class="modal-card material-template-dialog"><button class="modal-close" @click="showMaterialUploadDialog=false">×</button><h2>上传本地素材</h2><p>已选择 {{pendingMaterialUploadFiles.length}} 张图片，请先选择产品模板。</p><p v-if="materialUploading" style="margin:-10px 0 16px;color:#5545ca">正在上传 {{materialUploadedCount}} / {{materialUploadTotal}}…</p><label>产品模板<select v-model="materialUploadTemplateId" :disabled="materialUploading"><option :value="null" disabled>请选择产品模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><p v-if="materialUploadError" style="margin:14px 0 0;color:#d34b5f">{{materialUploadError}}</p><div class="modal-actions"><button class="ghost" :disabled="materialUploading" @click="showMaterialUploadDialog=false">取消</button><button class="primary" :disabled="materialUploading" @click="uploadMaterialAssets">{{materialUploading ? '上传中…' : '确认上传'}}</button></div></section></div>

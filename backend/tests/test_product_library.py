@@ -279,7 +279,7 @@ class ProductLibraryTests(unittest.TestCase):
         output = BytesIO(); workbook.save(output)
         self.assertEqual(self.import_bytes(output.getvalue())["created_products"], 1)
 
-    def test_authenticated_member_can_import_and_other_company_cannot_see_data(self):
+    def test_only_admin_can_import_and_view_product_rankings(self):
         def override_db():
             with self.sessions() as db:
                 yield db
@@ -287,10 +287,22 @@ class ProductLibraryTests(unittest.TestCase):
         main.app.dependency_overrides[get_db] = override_db
         try:
             with self.sessions() as db:
+                db.get(User, 1).role = Role.COMPANY_ADMIN
+                db.get(User, 2).role = Role.COMPANY_ADMIN
+                db.add(User(id=3, company_id=1, email="member@example.com", name="Member",
+                            password_hash="x", role=Role.MEMBER))
+                db.commit()
                 token_a = create_access_token(db.get(User, 1))
                 token_b = create_access_token(db.get(User, 2))
+                token_member = create_access_token(db.get(User, 3))
             client = TestClient(main.app)
             self.assertEqual(client.get("/product-library").status_code, 403)
+            member_headers = {"Authorization": f"Bearer {token_member}"}
+            self.assertEqual(client.get("/product-library", headers=member_headers).status_code, 403)
+            self.assertEqual(client.get("/product-library/filters", headers=member_headers).status_code, 403)
+            self.assertEqual(client.get("/product-library/import-template", headers=member_headers).status_code, 403)
+            self.assertEqual(client.post("/product-library/import", headers=member_headers,
+                files={"file": ("orders.xlsx", xlsx([row()]), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}).status_code, 403)
             result = client.post(
                 "/product-library/import", headers={"Authorization": f"Bearer {token_a}"},
                 files={"file": ("orders.xlsx", xlsx([row(sku="UNKNOWNAA123456-S")]), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
@@ -302,6 +314,9 @@ class ProductLibraryTests(unittest.TestCase):
             self.assertEqual(sku_list["total"], 1)
             self.assertEqual(client.get("/product-library", params={"sku": "missing"}, headers={"Authorization": f"Bearer {token_a}"}).json()["total"], 0)
             product_id = unmatched_list["items"][0]["id"]
+            self.assertEqual(client.get(f"/product-library/{product_id}/orders", headers=member_headers).status_code, 403)
+            self.assertEqual(client.post("/product-library/templates/batch", headers=member_headers,
+                json={"product_ids": [product_id], "template_id": 1}).status_code, 403)
             assigned = client.post("/product-library/templates/batch", headers={"Authorization": f"Bearer {token_a}"},
                 json={"product_ids": [product_id], "template_id": 1})
             self.assertEqual(assigned.status_code, 200, assigned.text)

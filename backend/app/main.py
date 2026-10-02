@@ -907,7 +907,7 @@ def list_templates(group_id: int | None = None, q: str | None = None, user: User
 
 
 @app.get("/product-library/import-template")
-def download_product_library_template(user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER))):
+def download_product_library_template(user: User = Depends(require_roles(Role.COMPANY_ADMIN))):
     path = Path(__file__).parent / "resources" / "product_library_import_template.xlsx"
     return Response(
         content=path.read_bytes(),
@@ -917,7 +917,7 @@ def download_product_library_template(user: User = Depends(require_roles(Role.CO
 
 
 @app.get("/product-library/filters")
-def product_library_filters(user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db)):
+def product_library_filters(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
     sources = db.scalars(select(ProductLibrarySource).where(ProductLibrarySource.company_id == user.company_id)).all()
     return {
         "platforms": sorted({source.platform for source in sources}),
@@ -1031,7 +1031,7 @@ def list_new_images(
 def list_product_library_rankings(
     category: Literal["top7", "top15", "top30", "potential", "hot", "booming"],
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
-    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
 ):
     snapshot = db.scalar(select(ProductLibraryDailySnapshot).where(
         ProductLibraryDailySnapshot.company_id == user.company_id,
@@ -1078,14 +1078,14 @@ def list_product_library_rankings(
 
 @app.get("/product-library/rankings/refresh/status")
 def product_library_ranking_task_status(
-    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
 ):
     return task_payload(db.get(ProductLibraryRankingTask, user.company_id))
 
 
 @app.post("/product-library/rankings/refresh", status_code=202)
 def refresh_product_library_rankings(
-    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
 ):
     try:
         return enqueue_ranking_task(db, user.company_id)
@@ -1099,7 +1099,7 @@ def list_product_library(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     platform: str | None = None, site: str | None = None, shop_name: str | None = None, sku: str | None = None,
     template_id: int | None = Query(None, ge=1), unmatched: bool = False,
-    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
 ):
     if template_id is not None and unmatched:
         raise HTTPException(400, "模版筛选条件不能同时选择已匹配和未匹配")
@@ -1150,7 +1150,7 @@ def list_product_library(
 @app.get("/product-library/{product_id}/orders")
 def list_product_library_orders(
     product_id: int, page: int = Query(1, ge=1),
-    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
 ):
     product = db.scalar(select(ProductLibraryProduct).join(
         ProductLibrarySource, ProductLibraryProduct.source_id == ProductLibrarySource.id,
@@ -1188,7 +1188,7 @@ def list_product_library_orders(
 @app.post("/product-library/templates/batch")
 def set_product_library_templates(
     payload: ProductLibraryBatchTemplateInput,
-    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
 ):
     if len(set(payload.product_ids)) != len(payload.product_ids):
         raise HTTPException(400, "产品不能重复选择")
@@ -1214,7 +1214,7 @@ def set_product_library_templates(
 @app.post("/product-library/import")
 async def import_product_library(
     file: UploadFile = File(...),
-    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER)), db: Session = Depends(get_db),
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
 ):
     if not (file.filename or "").lower().endswith(".xlsx"):
         raise HTTPException(400, "请上传 .xlsx 格式的订单表格")
