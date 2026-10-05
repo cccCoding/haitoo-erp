@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 from app import main
 from app.database import Base
 from app.database import get_db
-from app.models import Company, MaterialAsset, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductTemplate, Role, User
+from app.models import Company, MaterialAsset, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, User
 from app.schemas import ProductLibraryBatchTemplateInput
 from app.security import create_access_token
 
@@ -48,8 +48,8 @@ class ProductLibraryTests(unittest.TestCase):
         with self.sessions() as db:
             db.add_all([
                 Company(id=1, name="First"), Company(id=2, name="Second"),
-                User(id=1, company_id=1, email="a@example.com", name="A", password_hash="x", role=Role.MEMBER),
-                User(id=2, company_id=2, email="b@example.com", name="B", password_hash="x", role=Role.MEMBER),
+                User(id=1, company_id=1, email="a@example.com", name="A", password_hash="x", role=Role.COMPANY_ADMIN),
+                User(id=2, company_id=2, email="b@example.com", name="B", password_hash="x", role=Role.COMPANY_ADMIN),
                 ProductTemplate(id=1, company_id=1, name="M06L"),
                 ProductTemplate(id=2, company_id=1, name="M05L"),
             ])
@@ -69,7 +69,8 @@ class ProductLibraryTests(unittest.TestCase):
             return main.list_product_library(
                 page=1, page_size=20, platform=filters.get("platform"), site=filters.get("site"),
                 shop_name=filters.get("shop_name"), sku=filters.get("sku"), template_id=filters.get("template_id"),
-                unmatched=filters.get("unmatched", False), user=db.get(User, user_id), db=db,
+                unmatched=filters.get("unmatched", False), source_ids=filters.get("source_ids"),
+                user=db.get(User, user_id), db=db,
             )
 
     def test_sku_search_matches_part_of_sku_and_treats_wildcards_as_text(self):
@@ -112,6 +113,47 @@ class ProductLibraryTests(unittest.TestCase):
                 .join(ProductLibraryProduct, ProductLibraryProduct.id == ProductLibraryOrderProduct.product_id)
                 .where(ProductLibraryProduct.company_id == 1, ProductLibraryProduct.sku == "M06LFSKA9RPG7B6A"))
             self.assertEqual(company_sku_orders, 3)
+
+    def test_shop_multi_filter_uses_full_source_identity(self):
+        first = row(shop="Same Shop", product_id="p1", order="o1")
+        second = row(shop="Same Shop", product_id="p2", order="o2", sku="M05LFSPE7Y65-S")
+        second["站点"] = "泰国"
+        third = row(shop="Other Shop", product_id="p3", order="o3", sku="OTHERAA123456-S")
+        self.import_bytes(xlsx([first, second, third]))
+        with self.sessions() as db:
+            db.add(User(id=3, company_id=1, email="operator@example.com", name="Operator",
+                        password_hash="x", role=Role.MEMBER))
+            db.scalar(select(ProductLibrarySource).where(ProductLibrarySource.company_id == 1,
+                ProductLibrarySource.site == "马来", ProductLibrarySource.shop_name == "Same Shop")).assigned_user_id = 3
+            db.commit()
+            user = db.get(User, 1)
+            options = main.product_library_filters(user=user, db=db)["shops"]
+            self.assertEqual([option["label"] for option in options], [
+                "TikTok-泰国-Same Shop-未分配", "TikTok-马来-Other Shop-未分配", "TikTok-马来-Same Shop-Operator",
+            ])
+            ids = {option["label"]: option["id"] for option in options}
+        first_id = ids["TikTok-马来-Same Shop-Operator"]
+        second_id = ids["TikTok-泰国-Same Shop-未分配"]
+        self.assertEqual(self.list_items(source_ids=[first_id])["total"], 1)
+        self.assertEqual(self.list_items(source_ids=[first_id, second_id])["total"], 2)
+        self.assertEqual(self.list_items(source_ids=[second_id])["items"][0]["site"], "泰国")
+        self.assertEqual(self.list_items(source_ids=[999999])["total"], 0)
+
+        def override_db():
+            with self.sessions() as db:
+                yield db
+
+        main.app.dependency_overrides[get_db] = override_db
+        try:
+            with self.sessions() as db:
+                token = create_access_token(db.get(User, 1))
+            response = TestClient(main.app).get("/product-library", params=[
+                ("source_ids", first_id), ("source_ids", second_id),
+            ], headers={"Authorization": f"Bearer {token}"})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["total"], 2)
+        finally:
+            main.app.dependency_overrides.clear()
 
     def test_product_list_sorts_by_sales_before_pagination(self):
         records = [
@@ -298,8 +340,8 @@ class ProductLibraryTests(unittest.TestCase):
             client = TestClient(main.app)
             self.assertEqual(client.get("/product-library").status_code, 403)
             member_headers = {"Authorization": f"Bearer {token_member}"}
-            self.assertEqual(client.get("/product-library", headers=member_headers).status_code, 403)
-            self.assertEqual(client.get("/product-library/filters", headers=member_headers).status_code, 403)
+            self.assertEqual(client.get("/product-library", headers=member_headers).json()["total"], 0)
+            self.assertEqual(client.get("/product-library/filters", headers=member_headers).status_code, 200)
             self.assertEqual(client.get("/product-library/import-template", headers=member_headers).status_code, 403)
             self.assertEqual(client.post("/product-library/import", headers=member_headers,
                 files={"file": ("orders.xlsx", xlsx([row()]), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}).status_code, 403)
@@ -314,7 +356,7 @@ class ProductLibraryTests(unittest.TestCase):
             self.assertEqual(sku_list["total"], 1)
             self.assertEqual(client.get("/product-library", params={"sku": "missing"}, headers={"Authorization": f"Bearer {token_a}"}).json()["total"], 0)
             product_id = unmatched_list["items"][0]["id"]
-            self.assertEqual(client.get(f"/product-library/{product_id}/orders", headers=member_headers).status_code, 403)
+            self.assertEqual(client.get(f"/product-library/{product_id}/orders", headers=member_headers).status_code, 404)
             self.assertEqual(client.post("/product-library/templates/batch", headers=member_headers,
                 json={"product_ids": [product_id], "template_id": 1}).status_code, 403)
             assigned = client.post("/product-library/templates/batch", headers={"Authorization": f"Bearer {token_a}"},

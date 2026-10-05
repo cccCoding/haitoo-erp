@@ -129,14 +129,12 @@ def create_daily_snapshot(
         for rank, (product_id, _) in enumerate(ordered[:50], start=1):
             ranks.setdefault(product_id, {})[window_index] = rank
 
-    snapshot = ProductLibraryDailySnapshot(company_id=company_id, snapshot_date=snapshot_date)
+    snapshot = ProductLibraryDailySnapshot(company_id=company_id, snapshot_date=snapshot_date, is_complete=True)
     db.add(snapshot)
     db.flush()
     for product_id, (c7, c15, c30) in counts.items():
         tier = "booming" if c7 > 130 else "hot" if c7 > 70 else "potential" if c7 > 30 else None
         product_ranks = ranks.get(product_id, {})
-        if tier is None and not product_ranks:
-            continue
         db.add(ProductLibraryDailySnapshotItem(
             snapshot_id=snapshot.id, product_id=product_id,
             count_7=c7, count_15=c15, count_30=c30,

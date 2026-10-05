@@ -39,8 +39,8 @@ class ProductLibraryRankingTests(TestCase):
         with self.sessions() as db:
             db.add_all([
                 Company(id=1, name="First"), Company(id=2, name="Second"),
-                User(id=1, company_id=1, email="a@example.com", name="A", password_hash="x", role=Role.MEMBER),
-                User(id=2, company_id=2, email="b@example.com", name="B", password_hash="x", role=Role.MEMBER),
+                User(id=1, company_id=1, email="a@example.com", name="A", password_hash="x", role=Role.COMPANY_ADMIN),
+                User(id=2, company_id=2, email="b@example.com", name="B", password_hash="x", role=Role.COMPANY_ADMIN),
                 ProductLibrarySource(id=1, company_id=1, platform="TikTok", site="马来", shop_name="First Shop"),
                 ProductLibrarySource(id=2, company_id=2, platform="Shopee", site="马来", shop_name="Second Shop"),
             ])
@@ -241,8 +241,9 @@ class ProductLibraryRankingTests(TestCase):
             self.assertEqual(client.get("/product-library/rankings", params={"category": "top7"}).status_code, 403)
             member_headers = {"Authorization": f"Bearer {token_member}"}
             for category in ("top7", "top15", "top30", "potential", "hot", "booming"):
-                self.assertEqual(client.get("/product-library/rankings", params={"category": category},
-                    headers=member_headers).status_code, 403)
+                response = client.get("/product-library/rankings", params={"category": category}, headers=member_headers)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["total"], 0)
             self.assertEqual(client.post("/product-library/rankings/refresh", headers=member_headers).status_code, 403)
             self.assertEqual(client.get("/product-library/rankings/refresh/status", headers=member_headers).status_code, 403)
             self.assertEqual(client.get("/product-library/stagnant", headers=member_headers).status_code, 200)

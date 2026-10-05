@@ -50,6 +50,10 @@ class ShopManagerUpdate(BaseModel):
     member_ids: list[int] = Field(default_factory=list, max_length=100)
 
 
+class ProductLibraryShopAssignment(BaseModel):
+    assigned_user_id: int | None = Field(default=None, ge=1)
+
+
 class LocalShopCreate(BaseModel):
     """本土店不从妙手同步，专用于 HubStudio 指纹环境上品。"""
     name: str = Field(min_length=1, max_length=120)

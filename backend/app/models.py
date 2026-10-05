@@ -343,6 +343,7 @@ class ProductLibrarySource(Base):
     platform: Mapped[str] = mapped_column(String(80))
     site: Mapped[str] = mapped_column(String(80))
     shop_name: Mapped[str] = mapped_column(String(160))
+    assigned_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
 
 class ProductLibraryProduct(Base):
@@ -394,6 +395,7 @@ class ProductLibraryDailySnapshot(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     snapshot_date: Mapped[date] = mapped_column(Date, index=True)
+    is_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

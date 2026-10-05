@@ -17,7 +17,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, inspect, or_, select, text, tuple_, update
@@ -27,7 +27,8 @@ from .config import get_settings
 from .database import SessionLocal, engine, get_db
 from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, OperatorGroup, PodTask, ProductDraft, ProductLibraryDailySnapshot, ProductLibraryDailySnapshotItem, ProductLibraryRankingTask, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
 from .product_library import parse_order_workbook
-from .product_library_rankings import enqueue_ranking_task, task_payload
+from .product_library_rankings import SnapshotAlreadyRunning, company_run_lock, create_daily_snapshot, enqueue_ranking_task, task_payload
+from .schemas import ProductLibraryShopAssignment
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
 from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, OperatorGroupCreate, OperatorGroupUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
@@ -1019,13 +1020,107 @@ def download_product_library_template(user: User = Depends(require_roles(Role.CO
     )
 
 
+def product_library_visible_member_ids(user: User):
+    """普通运营仅本人；组长按当前组内成员决定可见店铺与素材。"""
+    members = select(User.id).where(User.company_id == user.company_id, User.role.in_(OPERATOR_ROLES))
+    if user.role == Role.TEAM_LEADER and user.group_id is not None:
+        return members.where(User.group_id == user.group_id)
+    return members.where(User.id == user.id)
+
+
+def product_library_source_scope(user: User):
+    if user.role == Role.COMPANY_ADMIN:
+        return None
+    return ProductLibrarySource.assigned_user_id.in_(product_library_visible_member_ids(user))
+
+
+def product_library_ranking_scope(user: User, db: Session, group_id: int | None, member_id: int | None):
+    if user.role == Role.MEMBER:
+        if group_id is not None or member_id is not None:
+            raise HTTPException(403, "无权使用组或成员筛选")
+        return ProductLibrarySource.assigned_user_id == user.id
+    if user.role == Role.TEAM_LEADER:
+        if user.group_id is None or (group_id is not None and group_id != user.group_id):
+            raise HTTPException(403, "无权查看该运营组")
+        selected_group = user.group_id
+    else:
+        if group_id is None:
+            if member_id is not None:
+                raise HTTPException(400, "请先选择运营组")
+            return None
+        company_operator_group(db, user.company_id, group_id)
+        selected_group = group_id
+    if member_id is not None:
+        member = db.scalar(select(User).where(User.id == member_id, User.company_id == user.company_id,
+                                              User.group_id == selected_group, User.role.in_(OPERATOR_ROLES)))
+        if member is None:
+            raise HTTPException(403, "成员不在可查看的运营组内")
+        return ProductLibrarySource.assigned_user_id == member_id
+    return ProductLibrarySource.assigned_user_id.in_(select(User.id).where(
+        User.company_id == user.company_id, User.group_id == selected_group, User.role.in_(OPERATOR_ROLES)))
+
+
+@app.get("/product-library/shops")
+def list_product_library_shops(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
+    rows = db.execute(select(ProductLibrarySource, User.name).outerjoin(
+        User, (User.id == ProductLibrarySource.assigned_user_id) & (User.company_id == user.company_id))
+        .where(ProductLibrarySource.company_id == user.company_id)
+        .order_by(ProductLibrarySource.platform, ProductLibrarySource.site, ProductLibrarySource.shop_name)).all()
+    return [{"id": source.id, "platform": source.platform, "site": source.site,
+             "shop_name": source.shop_name, "assigned_user_id": source.assigned_user_id,
+             "assigned_user_name": name} for source, name in rows]
+
+
+@app.put("/product-library/shops/{source_id}/assignment")
+def assign_product_library_shop(source_id: int, payload: ProductLibraryShopAssignment,
+                                user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
+    source = db.scalar(select(ProductLibrarySource).where(ProductLibrarySource.id == source_id,
+                    ProductLibrarySource.company_id == user.company_id).with_for_update())
+    if source is None:
+        raise HTTPException(404, "产品库店铺不存在")
+    if payload.assigned_user_id is not None:
+        assignee = db.scalar(select(User).where(User.id == payload.assigned_user_id,
+            User.company_id == user.company_id, User.role.in_(OPERATOR_ROLES), User.is_active.is_(True)))
+        if assignee is None:
+            raise HTTPException(400, "请选择本公司已启用的运营成员")
+    source.assigned_user_id = payload.assigned_user_id
+    db.commit()
+    return {"id": source.id, "assigned_user_id": source.assigned_user_id}
+
+
+@app.get("/product-library/ranking-scope-options")
+def product_library_ranking_scope_options(
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)),
+    db: Session = Depends(get_db),
+):
+    if user.role == Role.MEMBER:
+        return {"groups": [], "members": []}
+    groups = db.scalars(select(OperatorGroup).where(OperatorGroup.company_id == user.company_id,
+        *([OperatorGroup.id == user.group_id] if user.role == Role.TEAM_LEADER else [])).order_by(OperatorGroup.id)).all()
+    group_ids = [group.id for group in groups]
+    members = db.scalars(select(User).where(User.company_id == user.company_id, User.group_id.in_(group_ids),
+        User.role.in_(OPERATOR_ROLES)).order_by(User.id)).all() if group_ids else []
+    return {"groups": [{"id": group.id, "name": group.name} for group in groups],
+            "members": [{"id": member.id, "name": member.name, "group_id": member.group_id,
+                         "role": member.role.value} for member in members]}
+
+
 @app.get("/product-library/filters")
-def product_library_filters(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
-    sources = db.scalars(select(ProductLibrarySource).where(ProductLibrarySource.company_id == user.company_id)).all()
+def product_library_filters(user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db)):
+    conditions = [ProductLibrarySource.company_id == user.company_id]
+    scope = product_library_source_scope(user)
+    if scope is not None:
+        conditions.append(scope)
+    rows = db.execute(select(ProductLibrarySource, User.name).outerjoin(
+        User, (User.id == ProductLibrarySource.assigned_user_id) & (User.company_id == user.company_id))
+        .where(*conditions)).all()
+    sources = [source for source, _ in rows]
     return {
         "platforms": sorted({source.platform for source in sources}),
         "sites": sorted({source.site for source in sources}),
         "shop_names": sorted({source.shop_name for source in sources}),
+        "shops": [{"id": source.id, "label": f"{source.platform}-{source.site}-{source.shop_name}-{assignee_name or '未分配'}"}
+                  for source, assignee_name in sorted(rows, key=lambda row: (row[0].platform, row[0].site, row[0].shop_name, row[0].id))],
     }
 
 
@@ -1068,7 +1163,7 @@ def list_stagnant_materials(
         ~has_order,
     ]
     if is_operator(user):
-        conditions.append(MaterialAsset.claimed_by == user.id)
+        conditions.append(MaterialAsset.claimed_by.in_(product_library_visible_member_ids(user)))
     elif creator_id is not None:
         conditions.append(MaterialAsset.claimed_by == creator_id)
     total = db.scalar(select(func.count(MaterialAsset.id)).where(*conditions)) or 0
@@ -1108,7 +1203,7 @@ def list_new_images(
         MaterialAsset.created_at <= end,
     ]
     if is_operator(user):
-        conditions.append(MaterialAsset.claimed_by == user.id)
+        conditions.append(MaterialAsset.claimed_by.in_(product_library_visible_member_ids(user)))
     elif creator_id is not None:
         conditions.append(MaterialAsset.claimed_by == creator_id)
     if usage_status != "all":
@@ -1134,41 +1229,59 @@ def list_new_images(
 def list_product_library_rankings(
     category: Literal["top7", "top15", "top30", "potential", "hot", "booming"],
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
-    user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
+    group_id: int | None = None, member_id: int | None = None,
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db),
 ):
+    if not category.startswith("top") and (group_id is not None or member_id is not None):
+        raise HTTPException(400, "组和成员筛选仅适用于 TOP50")
+    scope = product_library_ranking_scope(user, db, group_id, member_id) if category.startswith("top") else product_library_source_scope(user)
     snapshot = db.scalar(select(ProductLibraryDailySnapshot).where(
         ProductLibraryDailySnapshot.company_id == user.company_id,
     ).order_by(ProductLibraryDailySnapshot.snapshot_date.desc()).limit(1))
     if snapshot is None:
         return {"snapshot_date": None, "through_date": None, "total": 0,
                 "page": page, "page_size": page_size, "items": []}
+    if not snapshot.is_complete:
+        try:
+            with company_run_lock(db, user.company_id):
+                create_daily_snapshot(db, user.company_id, snapshot.snapshot_date, replace_existing=True)
+        except SnapshotAlreadyRunning as exc:
+            raise HTTPException(503, "榜单正在补算，请稍后重试") from exc
+        snapshot = db.scalar(select(ProductLibraryDailySnapshot).where(
+            ProductLibraryDailySnapshot.company_id == user.company_id,
+        ).order_by(ProductLibraryDailySnapshot.snapshot_date.desc()).limit(1))
     item = ProductLibraryDailySnapshotItem
     count_column = {"top7": item.count_7, "top15": item.count_15, "top30": item.count_30}.get(category, item.count_7)
     if category.startswith("top"):
-        rank_column = {"top7": item.rank_7, "top15": item.rank_15, "top30": item.rank_30}[category]
-        condition = rank_column.is_not(None)
-        order_columns = (rank_column.asc(),)
+        condition = count_column > 0
+        order_columns = (count_column.desc(), item.product_id.asc())
     else:
         condition = item.tier == category
         order_columns = (item.count_7.desc(), item.product_id.asc())
-    conditions = (item.snapshot_id == snapshot.id, condition)
-    total = db.scalar(select(func.count(item.id)).where(*conditions)) or 0
+    conditions = [item.snapshot_id == snapshot.id, condition,
+                  ProductLibraryProduct.company_id == user.company_id,
+                  ProductLibrarySource.company_id == user.company_id]
+    if scope is not None:
+        conditions.append(scope)
+    count = db.scalar(select(func.count(item.id)).join(
+        ProductLibraryProduct, ProductLibraryProduct.id == item.product_id).join(
+        ProductLibrarySource, ProductLibrarySource.id == ProductLibraryProduct.source_id).where(*conditions)) or 0
+    total = min(count, 50) if category.startswith("top") else count
+    offset = (page - 1) * page_size
+    limit = min(page_size, max(0, total - offset))
     rows = db.execute(select(item, ProductLibraryProduct, ProductLibrarySource, ProductTemplate.name)
         .join(ProductLibraryProduct, ProductLibraryProduct.id == item.product_id)
         .join(ProductLibrarySource, ProductLibrarySource.id == ProductLibraryProduct.source_id)
         .outerjoin(ProductTemplate, ProductTemplate.id == ProductLibraryProduct.template_id)
-        .where(*conditions, ProductLibraryProduct.company_id == user.company_id,
-               ProductLibrarySource.company_id == user.company_id)
-        .order_by(*order_columns).offset((page - 1) * page_size).limit(page_size)).all()
+        .where(*conditions)
+        .order_by(*order_columns).offset(offset).limit(limit)).all()
     material_details = product_library_material_details(db, user.company_id, [product.sku for _, product, _, _ in rows])
     return {
         "snapshot_date": snapshot.snapshot_date.isoformat(),
         "through_date": (snapshot.snapshot_date - timedelta(days=1)).isoformat(),
         "total": total, "page": page, "page_size": page_size,
         "items": [{
-            "id": product.id, "rank": (entry.rank_7 if category == "top7" else
-                                    entry.rank_15 if category == "top15" else
-                                    entry.rank_30 if category == "top30" else (page - 1) * page_size + index),
+            "id": product.id, "rank": offset + index,
             "order_count": int(getattr(entry, count_column.key)),
             "count_7": entry.count_7, "count_15": entry.count_15, "count_30": entry.count_30,
             "sku": product.sku, "template": template_name or "未匹配", "title": product.title,
@@ -1202,17 +1315,23 @@ def list_product_library(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     platform: str | None = None, site: str | None = None, shop_name: str | None = None, sku: str | None = None,
     template_id: int | None = Query(None, ge=1), unmatched: bool = False,
-    user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
+    source_ids: Annotated[list[int] | None, Query()] = None,
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db),
 ):
     if template_id is not None and unmatched:
         raise HTTPException(400, "模版筛选条件不能同时选择已匹配和未匹配")
     conditions = [ProductLibraryProduct.company_id == user.company_id, ProductLibrarySource.company_id == user.company_id]
+    scope = product_library_source_scope(user)
+    if scope is not None:
+        conditions.append(scope)
     if platform:
         conditions.append(ProductLibrarySource.platform == platform)
     if site:
         conditions.append(ProductLibrarySource.site == site)
     if shop_name:
         conditions.append(ProductLibrarySource.shop_name == shop_name)
+    if source_ids:
+        conditions.append(ProductLibrarySource.id.in_(source_ids))
     if sku and sku.strip():
         conditions.append(ProductLibraryProduct.sku.icontains(sku.strip(), autoescape=True))
     if template_id is not None:
@@ -1253,15 +1372,17 @@ def list_product_library(
 @app.get("/product-library/{product_id}/orders")
 def list_product_library_orders(
     product_id: int, page: int = Query(1, ge=1),
-    user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db),
 ):
+    conditions = [ProductLibraryProduct.id == product_id,
+                  ProductLibraryProduct.company_id == user.company_id,
+                  ProductLibrarySource.company_id == user.company_id]
+    scope = product_library_source_scope(user)
+    if scope is not None:
+        conditions.append(scope)
     product = db.scalar(select(ProductLibraryProduct).join(
         ProductLibrarySource, ProductLibraryProduct.source_id == ProductLibrarySource.id,
-    ).where(
-        ProductLibraryProduct.id == product_id,
-        ProductLibraryProduct.company_id == user.company_id,
-        ProductLibrarySource.company_id == user.company_id,
-    ))
+    ).where(*conditions))
     if product is None:
         raise HTTPException(404, "产品不存在或无权查看")
 
