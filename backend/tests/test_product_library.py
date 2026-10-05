@@ -389,7 +389,7 @@ class ProductLibraryTests(unittest.TestCase):
         self.assertEqual(sheet["A2"].value, None)
         validations = {str(v.sqref): v for v in sheet.data_validations.dataValidation}
         for column, allowed in (("B", ALLOWED_SITES), ("C", ALLOWED_PLATFORMS)):
-            validation = validations[f"{column}2:{column}20001"]
+            validation = validations[f"{column}2:{column}50001"]
             self.assertEqual(validation.formula1, '"' + ','.join(allowed) + '"')
             self.assertTrue(validation.showErrorMessage)
             self.assertEqual(validation.errorStyle, "stop")

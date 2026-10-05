@@ -13,7 +13,7 @@ IMPORT_HEADERS = (
     "店铺名称", "站点", "平台", "订单编号", "数量", "下单时间", "标题", "平台SKU", "产品图片链接", "产品ID",
 )
 LOCAL_TIMEZONE = timezone(timedelta(hours=8))
-MAX_IMPORT_ROWS = 20000
+MAX_IMPORT_ROWS = 50000
 ALLOWED_SITES = ("泰国", "越南", "菲律宾", "马来西亚", "新加坡", "印度尼西亚")
 ALLOWED_PLATFORMS = ("TikTok", "Shopee", "Temu")
 
