@@ -313,7 +313,7 @@ class ProductLibraryTests(unittest.TestCase):
             with self.assertRaisesRegex(HTTPException, "无权查看"):
                 main.list_product_library_orders(product["id"], page=1, user=db.get(User, 2), db=db)
 
-    def test_template_filter_and_batch_assignment_only_accept_unmatched_company_products(self):
+    def test_template_filter_and_batch_assignment_accept_all_company_products(self):
         unmatched = row(sku="OTHERAA123456-S", product_id="unmatched-product", order="unmatched-order")
         self.import_bytes(xlsx([row(), unmatched]))
         self.assertEqual(self.list_items(template_id=1)["total"], 1)
@@ -323,22 +323,18 @@ class ProductLibraryTests(unittest.TestCase):
 
         with self.sessions() as db:
             user = db.get(User, 1)
-            with self.assertRaisesRegex(HTTPException, "仅可批量设置未匹配"):
-                main.set_product_library_templates(ProductLibraryBatchTemplateInput(
-                    product_ids=[unmatched_id, matched_id], template_id=2,
-                ), user=user, db=db)
-            self.assertIsNone(db.get(ProductLibraryProduct, unmatched_id).template_id)
             with self.assertRaisesRegex(HTTPException, "产品不能重复选择"):
                 main.set_product_library_templates(ProductLibraryBatchTemplateInput(
                     product_ids=[unmatched_id, unmatched_id], template_id=2,
                 ), user=user, db=db)
             self.assertEqual(main.set_product_library_templates(ProductLibraryBatchTemplateInput(
-                product_ids=[unmatched_id], template_id=2,
-            ), user=user, db=db)["updated"], 1)
+                product_ids=[unmatched_id, matched_id], template_id=2,
+            ), user=user, db=db)["updated"], 2)
+            self.assertEqual(db.get(ProductLibraryProduct, matched_id).template_id, 2)
         self.assertEqual(self.list_items(unmatched=True)["total"], 0)
-        self.assertEqual(self.list_items(template_id=2)["items"][0]["id"], unmatched_id)
+        self.assertEqual({item["id"] for item in self.list_items(template_id=2)["items"]}, {unmatched_id, matched_id})
         self.import_bytes(xlsx([unmatched]))
-        self.assertEqual(self.list_items(template_id=2)["total"], 1)
+        self.assertEqual(self.list_items(template_id=2)["total"], 2)
 
         with self.sessions() as db:
             source_id = db.get(ProductLibraryProduct, unmatched_id).source_id

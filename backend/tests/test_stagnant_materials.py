@@ -84,7 +84,7 @@ class StagnantMaterialTests(unittest.TestCase):
         self.assertEqual([item["sku"] for item in result["items"]], ["FOREIGN_ORDER_ONLY", "NO_IMPORT"])
         self.assertEqual(result["total"], 2)
         self.assertEqual(result["items"][1], {
-            "id": eligible, "image_url": "https://example.com/NO_IMPORT.jpg", "sku": "NO_IMPORT",
+            "id": eligible, "source_type": "material", "template_id": 1, "title": "", "image_url": "https://example.com/NO_IMPORT.jpg", "sku": "NO_IMPORT",
             "template": "M06L", "created_by_id": 2, "created_by_name": "Member",
             "created_at": main.timestamp_ms(self.cutoff - timedelta(seconds=1)),
         })
@@ -114,7 +114,7 @@ class StagnantMaterialTests(unittest.TestCase):
         workbook = Workbook()
         sheet = workbook.active
         sheet.append(["店铺名称", "站点", "平台", "订单编号", "下单时间", "标题", "平台SKU", "产品图片链接", "产品ID"])
-        sheet.append(["Shop A", "MY", "TikTok", "imported-1", "2026-01-01 12:00:00",
+        sheet.append(["Shop A", "马来西亚", "TikTok", "imported-1", "2026-01-01 12:00:00",
                       "Product", "M06LZERO123-M", "https://example.com/product.jpg", "external-1"])
         output = BytesIO()
         workbook.save(output)

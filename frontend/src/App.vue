@@ -38,11 +38,12 @@ const showTiktokCatalogDetailDialog = ref(false), managingTiktokCatalog = ref<an
 const materialUploading = ref(false), materialUploadError = ref('')
 const materialDownloading = ref(false)
 const selectedMaterialAssetIds = ref<number[]>([]), materialTemplateFilterId = ref<number | null>(null), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref<number | null>(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false)
+const libraryDraftMode = ref(false), libraryDraftSelection = ref<any[]>([]), materialDraftTitleEdited = ref(false)
 const materialDraftAssets = ref<any[]>([]), draggedMaterialDraftAssetId = ref<number | null>(null)
 type MaterialUsageTab = 'unused' | 'used'
 const activeMaterialUsageTab = ref<MaterialUsageTab>('unused')
 const materialUsageTabs: {key: MaterialUsageTab; label: string}[] = [{key:'unused', label:'未使用'}, {key:'used', label:'已使用'}]
-const showMaterialBatchDraftDialog = ref(false), materialBatchGroupSize = ref<5|6|7|8>(5), materialBatchMode = ref<'sequential'|'random'>('sequential'), materialBatchGroups = ref<{assets:any[]; title:string; generating:boolean}[]>([]), materialBatchSaving = ref(false)
+const showMaterialBatchDraftDialog = ref(false), materialBatchGroupSize = ref<5|6|7|8>(5), materialBatchMode = ref<'sequential'|'random'>('sequential'), materialBatchGroups = ref<{assets:any[]; title:string; generating:boolean; edited?:boolean}[]>([]), materialBatchSaving = ref(false)
 const draggedMaterialBatchAsset = ref<{groupIndex:number; assetId:number} | null>(null)
 const pendingMaterialUploadFiles = ref<File[]>([]), showMaterialUploadDialog = ref(false), materialUploadTemplateId = ref<number | null>(null)
 const materialUploadedCount = ref(0), materialUploadTotal = ref(0), pendingMaterialUploadUrls = ref<string[]>([])
@@ -572,8 +573,11 @@ const productLibraryRankingPageCount = computed(() => Math.max(1, Math.ceil(prod
 const stagnantPageCount = computed(() => Math.max(1, Math.ceil(stagnantTotal.value / stagnantPageSize.value)))
 const newImagesPageCount = computed(() => Math.max(1, Math.ceil(newImagesTotal.value / newImagesPageSize.value)))
 const productLibraryOrderPageCount = computed(() => Math.max(1, Math.ceil(productLibraryOrderTotal.value / 20)))
-const unmatchedProductLibraryItems = computed(() => productLibraryItems.value.filter(item => item.template_id === null))
-const allPagedUnmatchedSelected = computed(() => unmatchedProductLibraryItems.value.length > 0 && unmatchedProductLibraryItems.value.every(item => selectedProductLibraryIds.value.includes(item.id)))
+const selectableProductLibraryItems = computed(() => activeProductLibraryTab.value === 'products' ? productLibraryItems.value : activeProductLibraryTab.value === 'stagnant' ? stagnantMaterials.value : activeProductLibraryTab.value === 'new_images' ? newImages.value : productLibraryRankingItems.value)
+const productLibrarySelectionLoading = computed(() => productLibraryLoading.value || productLibraryRankingLoading.value || stagnantLoading.value || newImagesLoading.value)
+const draftSelectionAssets = computed(() => libraryDraftMode.value ? libraryDraftSelection.value : selectedMaterialAssets.value)
+const draftSelectionTemplateId = computed(() => libraryDraftMode.value ? libraryDraftSelection.value[0]?.template_id : selectedMaterialTemplateId.value)
+const allPagedProductsSelected = computed(() => selectableProductLibraryItems.value.length > 0 && selectableProductLibraryItems.value.every(item => selectedProductLibraryIds.value.includes(item.id)))
 async function loadProductLibraryShops() {
   if (user.value?.role !== 'company_admin') return
   try {
@@ -640,6 +644,7 @@ function showProductLibraryErrorToast(error:any, fallback:string): string {
   return message
 }
 async function loadProductLibraryRankings() {
+  selectedProductLibraryIds.value = []
   if (!productLibraryRankingTabKeys.has(activeProductLibraryTab.value)) return
   const requestId = ++productLibraryRankingRequestId
   const category = activeProductLibraryTab.value
@@ -664,6 +669,7 @@ async function loadProductLibraryRankings() {
   }
 }
 async function loadStagnantMaterials() {
+  selectedProductLibraryIds.value = []
   const requestId = ++stagnantRequestId
   try {
     stagnantLoading.value = true
@@ -692,6 +698,7 @@ function changeStagnantPage(next:number) {
   void loadStagnantMaterials()
 }
 async function loadNewImages() {
+  selectedProductLibraryIds.value = []
   const requestId = ++newImagesRequestId
   try {
     newImagesLoading.value = true
@@ -806,42 +813,45 @@ function changeProductLibraryOrderPage(next:number) {
   void loadProductLibraryOrders()
 }
 function toggleProductLibrarySelection(item:any) {
-  if (item.template_id !== null) return
+  if (productLibrarySelectionLoading.value) return
   if (selectedProductLibraryIds.value.includes(item.id)) {
     selectedProductLibraryIds.value = selectedProductLibraryIds.value.filter(id => id !== item.id)
   } else if (selectedProductLibraryIds.value.length >= 100) {
-    showToast('一次最多选择 100 条未匹配产品')
+    showToast('一次最多选择 100 条产品')
   } else {
     selectedProductLibraryIds.value = [...selectedProductLibraryIds.value, item.id]
   }
 }
-function togglePagedUnmatchedProducts() {
-  const ids = unmatchedProductLibraryItems.value.map(item => item.id)
-  if (allPagedUnmatchedSelected.value) {
+function togglePagedProducts() {
+  if (productLibrarySelectionLoading.value) return
+  const ids = selectableProductLibraryItems.value.map(item => item.id)
+  if (allPagedProductsSelected.value) {
     selectedProductLibraryIds.value = selectedProductLibraryIds.value.filter(id => !ids.includes(id))
     return
   }
   const merged = [...new Set([...selectedProductLibraryIds.value, ...ids])]
-  if (merged.length > 100) { showToast('一次最多选择 100 条未匹配产品'); return }
+  if (merged.length > 100) { showToast('一次最多选择 100 条产品'); return }
   selectedProductLibraryIds.value = merged
 }
 function openProductLibraryTemplateDialog() {
-  if (!selectedProductLibraryIds.value.length) return
+  if (productLibrarySelectionLoading.value || !selectedProductLibraryIds.value.length || user.value?.role !== 'company_admin' || activeProductLibraryTab.value === 'shops') return
   productLibraryTargetTemplateId.value = null
   showProductLibraryTemplateDialog.value = true
 }
 async function saveProductLibraryTemplate() {
-  if (!productLibraryTargetTemplateId.value || !selectedProductLibraryIds.value.length) return
+  if (productLibraryTemplateSaving.value || !productLibraryTargetTemplateId.value || !selectedProductLibraryIds.value.length) return
   try {
     productLibraryTemplateSaving.value = true
     const {data} = await api.post('/product-library/templates/batch', {
-      product_ids:selectedProductLibraryIds.value, template_id:productLibraryTargetTemplateId.value,
+      ...(activeProductLibraryTab.value === 'new_images' || activeProductLibraryTab.value === 'stagnant'
+        ? {material_asset_ids:selectedProductLibraryIds.value}
+        : {product_ids:selectedProductLibraryIds.value}),
+      template_id:productLibraryTargetTemplateId.value,
     }, {headers:headers.value})
     showProductLibraryTemplateDialog.value = false
     selectedProductLibraryIds.value = []
-    productLibraryPage.value = 1
-    await loadProductLibrary()
-    showToast(`已为 ${data.updated} 条产品设置模版：${data.template}`)
+    await refreshLibraryDraftSource()
+    showToast(`已为 ${data.updated} 条数据设置模版：${data.template}`)
   } catch(e:any) { showToast(e.response?.data?.detail || '批量设置模版失败') }
   finally { productLibraryTemplateSaving.value = false }
 }
@@ -1198,17 +1208,49 @@ function onMaterialDraftTemplateChange() {
 }
 async function generateMaterialDraftTitle() {
   if (!materialDraftTemplateId.value || !materialDraftAssets.value[0]) return
+  const firstAsset = materialDraftAssets.value[0], fromLibrary = libraryDraftMode.value
   try {
     materialDraftTitleGenerating.value = true
-    const { data } = await api.post(`/templates/${materialDraftTemplateId.value}/generate-draft-title`, { image_url: materialDraftAssets.value[0].url }, { headers: headers.value })
+    const { data } = await api.post(libraryDraftMode.value ? '/product-library/generate-draft-title' : `/templates/${materialDraftTemplateId.value}/generate-draft-title`, libraryDraftMode.value ? librarySource(materialDraftAssets.value[0]) : { image_url: materialDraftAssets.value[0].url }, { headers: headers.value })
+    if (libraryDraftMode.value !== fromLibrary || materialDraftAssets.value[0]?.id !== firstAsset.id) return
     materialDraftTitle.value = data.title
+    materialDraftTitleEdited.value = true
   } catch (e:any) {
     showToast(e.response?.data?.detail || 'AI 生成标题失败，请稍后重试')
   } finally {
     materialDraftTitleGenerating.value = false
   }
 }
-function openMaterialDraftDialog() { if(!selectedMaterialTemplateId.value){showToast('请选择属于同一产品模板的素材');return} materialDraftAssets.value = [...selectedMaterialAssets.value]; draggedMaterialDraftAssetId.value = null; materialDraftTemplateId.value = selectedMaterialTemplateId.value; materialDraftTitle.value = ''; materialDraftProductDescription.value = ''; materialDraftSizeChartPreview.value = ''; onMaterialDraftTemplateChange(); showMaterialDraftDialog.value = true }
+function openMaterialDraftDialog() { libraryDraftMode.value = false; if(!selectedMaterialTemplateId.value){showToast('请选择属于同一产品模板的素材');return} materialDraftAssets.value = [...selectedMaterialAssets.value]; draggedMaterialDraftAssetId.value = null; materialDraftTemplateId.value = selectedMaterialTemplateId.value; materialDraftTitle.value = ''; materialDraftProductDescription.value = ''; materialDraftSizeChartPreview.value = ''; onMaterialDraftTemplateChange(); showMaterialDraftDialog.value = true }
+function librarySource(asset:any) { return {source_type:asset.source_type, id:asset.id} }
+function openProductLibraryDraftDialog(batch = false) {
+  if (productLibrarySelectionLoading.value) return
+  const assets = selectableProductLibraryItems.value.filter(item => selectedProductLibraryIds.value.includes(item.id)).map(item => ({...item, url:item.image_url}))
+  if (!assets.length) return
+  if (assets.some(asset => !asset.url?.trim() || !asset.sku?.trim())) { showToast('所选数据缺少图片或 SKU，请修正后再创建'); return }
+  const templateId = assets[0].template_id
+  if (!templateId || !templates.value.some(template => template.id === templateId) || assets.some(asset => asset.template_id !== templateId)) { showToast('请先匹配同一有效产品模板，或调整选择'); return }
+  if (!batch && new Set(assets.map(asset => asset.sku.trim())).size !== assets.length) { showToast('所选数据包含重复 SKU，请调整选择'); return }
+  if (batch && assets.length < 5) { showToast('组合创建至少需要 5 张图片'); return }
+  libraryDraftMode.value = true
+  libraryDraftSelection.value = assets
+  if (batch) {
+    if (assets.length < materialBatchGroupSize.value) materialBatchGroupSize.value = 5
+    buildMaterialBatchGroups(); draggedMaterialBatchAsset.value = null; showMaterialBatchDraftDialog.value = true
+  } else {
+    materialDraftAssets.value = [...assets]; draggedMaterialDraftAssetId.value = null
+    materialDraftTemplateId.value = templateId; onMaterialDraftTemplateChange()
+    materialDraftTitle.value = assets[0].title || ''; materialDraftTitleEdited.value = false
+    showMaterialDraftDialog.value = true
+  }
+}
+async function refreshLibraryDraftSource() {
+  selectedProductLibraryIds.value = []
+  if (activeProductLibraryTab.value === 'products') await loadProductLibrary()
+  else if (activeProductLibraryTab.value === 'stagnant') await loadStagnantMaterials()
+  else if (activeProductLibraryTab.value === 'new_images') await loadNewImages()
+  else await loadProductLibraryRankings()
+}
 function startMaterialDraftDrag(event: DragEvent, assetId: number) {
   draggedMaterialDraftAssetId.value = assetId
   if (event.dataTransfer) {
@@ -1225,21 +1267,23 @@ function moveMaterialDraftAsset(assetId: number, targetId: number) {
   const [asset] = assets.splice(from, 1)
   assets.splice(to, 0, asset)
   materialDraftAssets.value = assets
+  if (libraryDraftMode.value && !materialDraftTitleEdited.value) materialDraftTitle.value = assets[0]?.title || ''
 }
 function dropMaterialDraftAsset(targetId: number) {
   if (draggedMaterialDraftAssetId.value !== null) moveMaterialDraftAsset(draggedMaterialDraftAssetId.value, targetId)
   draggedMaterialDraftAssetId.value = null
 }
 async function createDraftFromMaterialAssets() {
-  if (!materialDraftAssets.value.length) return
+  if (materialDraftSaving.value || !materialDraftAssets.value.length) return
   if (!materialDraftTemplateId.value) { showToast('请选择产品模板'); return }
   const title = materialDraftTitle.value.trim()
   if (title.length < 25 || title.length > 255) { showToast('商品标题长度须为 25-255 个字符'); return }
   try {
     materialDraftSaving.value = true
-    await api.post('/drafts/from-material-assets', { material_asset_ids: materialDraftAssets.value.map(asset => asset.id), template_id: materialDraftTemplateId.value, title, product_description: materialDraftProductDescription.value.trim() || null }, { headers: headers.value })
+    await api.post(libraryDraftMode.value ? '/drafts/from-product-library' : '/drafts/from-material-assets', { ...(libraryDraftMode.value ? {sources:materialDraftAssets.value.map(librarySource)} : {material_asset_ids: materialDraftAssets.value.map(asset => asset.id)}), template_id: materialDraftTemplateId.value, title, product_description: materialDraftProductDescription.value.trim() || null }, { headers: headers.value })
     selectedMaterialAssetIds.value = []
     showMaterialDraftDialog.value = false
+    if (libraryDraftMode.value) await refreshLibraryDraftSource()
     await refresh()
     page.value = 'drafts'
     showToast('商品草稿已创建，请在列表中手动发布至妙手')
@@ -1255,15 +1299,16 @@ function shuffleAssets(items: any[]) {
   return shuffled
 }
 function buildMaterialBatchGroups() {
-  const assets = materialBatchMode.value === 'random' ? shuffleAssets(selectedMaterialAssets.value) : [...selectedMaterialAssets.value]
+  const assets = materialBatchMode.value === 'random' ? shuffleAssets(draftSelectionAssets.value) : [...draftSelectionAssets.value]
   const completeCount = Math.floor(assets.length / materialBatchGroupSize.value) * materialBatchGroupSize.value
-  materialBatchGroups.value = Array.from({length: completeCount / materialBatchGroupSize.value}, (_, index) => ({ assets: assets.slice(index * materialBatchGroupSize.value, (index + 1) * materialBatchGroupSize.value), title: '', generating: false }))
+  materialBatchGroups.value = Array.from({length: completeCount / materialBatchGroupSize.value}, (_, index) => ({ assets: assets.slice(index * materialBatchGroupSize.value, (index + 1) * materialBatchGroupSize.value), title: libraryDraftMode.value ? assets[index * materialBatchGroupSize.value]?.title || '' : '', generating: false, edited:false }))
 }
 function openMaterialBatchDraftDialog() {
+  libraryDraftMode.value = false
   if (!canCreateMaterialBatch.value) { showToast('请选择至少 5 张属于同一产品模板的未使用素材'); return }
   buildMaterialBatchGroups(); draggedMaterialBatchAsset.value = null; showMaterialBatchDraftDialog.value = true
 }
-function rebuildMaterialBatchGroups() { draggedMaterialBatchAsset.value = null; if (selectedMaterialAssets.value.length >= materialBatchGroupSize.value) buildMaterialBatchGroups() }
+function rebuildMaterialBatchGroups() { draggedMaterialBatchAsset.value = null; if (draftSelectionAssets.value.length >= materialBatchGroupSize.value) buildMaterialBatchGroups(); else materialBatchGroups.value = [] }
 function startMaterialBatchDrag(event: DragEvent, groupIndex: number, assetId: number) {
   draggedMaterialBatchAsset.value = {groupIndex, assetId}
   if (event.dataTransfer) {
@@ -1278,6 +1323,7 @@ function moveMaterialBatchAsset(groupIndex: number, from: number, to: number) {
   const [asset] = assets.splice(from, 1)
   assets.splice(to, 0, asset)
   group.assets = assets
+  if (libraryDraftMode.value && !group.edited) group.title = assets[0]?.title || ''
 }
 function dropMaterialBatchAsset(groupIndex: number, targetId: number) {
   const dragged = draggedMaterialBatchAsset.value
@@ -1286,19 +1332,21 @@ function dropMaterialBatchAsset(groupIndex: number, targetId: number) {
   const assets = materialBatchGroups.value[groupIndex]?.assets || []
   moveMaterialBatchAsset(groupIndex, assets.findIndex(asset => asset.id === dragged.assetId), assets.findIndex(asset => asset.id === targetId))
 }
-async function generateMaterialBatchTitle(group: {assets:any[]; title:string; generating:boolean}) {
-  if (!selectedMaterialTemplateId.value || !group.assets[0]) return
-  try { group.generating = true; const {data} = await api.post(`/templates/${selectedMaterialTemplateId.value}/generate-draft-title`, {image_url:group.assets[0].url}, {headers:headers.value}); group.title = data.title }
+async function generateMaterialBatchTitle(group: {assets:any[]; title:string; generating:boolean; edited?:boolean}) {
+  if (!draftSelectionTemplateId.value || !group.assets[0]) return
+  const firstAsset = group.assets[0]
+  try { group.generating = true; const {data} = await api.post(libraryDraftMode.value ? '/product-library/generate-draft-title' : `/templates/${draftSelectionTemplateId.value}/generate-draft-title`, libraryDraftMode.value ? librarySource(group.assets[0]) : {image_url:group.assets[0].url}, {headers:headers.value}); if (group.assets[0]?.id === firstAsset.id) { group.title = data.title; group.edited = true } }
   catch (e:any) { showToast(e.response?.data?.detail || 'AI 生成标题失败，请稍后重试') }
   finally { group.generating = false }
 }
 async function createMaterialBatchDrafts() {
-  if (!selectedMaterialTemplateId.value || !materialBatchGroups.value.length) return
+  if (materialBatchSaving.value || !draftSelectionTemplateId.value || !materialBatchGroups.value.length) return
+  if (libraryDraftMode.value && materialBatchGroups.value.some(group => new Set(group.assets.map(asset => asset.sku.trim())).size !== group.assets.length)) { showToast('同一草稿不能包含重复 SKU，请调整组合'); return }
   if (materialBatchGroups.value.some(group => group.title.trim().length < 25 || group.title.trim().length > 255)) { showToast('请为每个组合填写 25-255 个字符的商品标题'); return }
   try {
     materialBatchSaving.value = true
-    const {data} = await api.post('/drafts/from-material-assets/batch', { template_id: selectedMaterialTemplateId.value, groups: materialBatchGroups.value.map(group => ({material_asset_ids:group.assets.map(asset => asset.id), title:group.title.trim()})) }, {headers:headers.value})
-    selectedMaterialAssetIds.value = []; showMaterialBatchDraftDialog.value = false; await refresh(); page.value = 'drafts'; showToast(`已创建 ${data.total} 条商品草稿`)
+    const {data} = await api.post(libraryDraftMode.value ? '/drafts/from-product-library/batch' : '/drafts/from-material-assets/batch', { template_id: draftSelectionTemplateId.value, groups: materialBatchGroups.value.map(group => ({...(libraryDraftMode.value ? {sources:group.assets.map(librarySource)} : {material_asset_ids:group.assets.map(asset => asset.id)}), title:group.title.trim()})) }, {headers:headers.value})
+    selectedMaterialAssetIds.value = []; showMaterialBatchDraftDialog.value = false; if (libraryDraftMode.value) await refreshLibraryDraftSource(); await refresh(); page.value = 'drafts'; showToast(`已创建 ${data.total} 条商品草稿`)
   } catch (e:any) { showToast(e.response?.data?.detail || '批量创建商品草稿失败，请稍后重试') }
   finally { materialBatchSaving.value = false }
 }
@@ -2317,11 +2365,11 @@ onUnmounted(() => {
           <label>SKU<input v-model="productLibrarySku" type="search" placeholder="输入 SKU" :disabled="productLibraryLoading"/></label>
           <button type="button" class="primary product-library-search-button" :disabled="productLibraryLoading" @click="searchProductLibrary">搜索</button>
         </div>
-        <section v-if="(activeProductLibraryTab==='products' || productLibraryRankingTabKeys.has(activeProductLibraryTab)) && user?.role==='company_admin' && selectedProductLibraryIds.length" class="draft-export-bar product-library-selection-bar"><strong>已选 {{selectedProductLibraryIds.length}} / 100 条产品</strong><button class="primary" @click="openProductLibraryTemplateDialog">批量设置模版</button><button class="ghost" @click="selectedProductLibraryIds=[]">取消选择</button></section>
+        <section v-if="activeProductLibraryTab!=='shops' && selectedProductLibraryIds.length" class="draft-export-bar product-library-selection-bar"><strong>已选 {{selectedProductLibraryIds.length}} / 100 条</strong><button class="primary" :disabled="productLibrarySelectionLoading" @click="openProductLibraryDraftDialog()">创建商品草稿</button><button class="primary" :disabled="productLibrarySelectionLoading" @click="openProductLibraryDraftDialog(true)">组合创建草稿</button><button v-if="user?.role==='company_admin'" class="primary" :disabled="productLibrarySelectionLoading" @click="openProductLibraryTemplateDialog">批量设置模版</button><button class="ghost" @click="selectedProductLibraryIds=[]">取消选择</button></section>
         <div v-if="activeProductLibraryTab==='products'" class="draft-table product-library-table" :aria-busy="productLibraryLoading">
-          <div class="thead product-library-head"><label class="product-library-select-heading"><input v-if="user?.role==='company_admin'" type="checkbox" :checked="allPagedProductsSelected" :disabled="!selectableProductLibraryItems.length || productLibraryLoading" aria-label="选择当前页产品" @change="togglePagedProducts"/>商品</label><span>SKU</span><span>模版</span><span>标题</span><span>站点</span><span>店铺名称</span><span>产品 ID</span><span>创建人</span><span>创建时间</span><span>订单数</span><span>操作</span></div>
+          <div class="thead product-library-head"><label class="product-library-select-heading"><input type="checkbox" :checked="allPagedProductsSelected" :disabled="!selectableProductLibraryItems.length || productLibraryLoading" aria-label="选择当前页产品" @change="togglePagedProducts"/>商品</label><span>SKU</span><span>模版</span><span>标题</span><span>站点</span><span>店铺名称</span><span>产品 ID</span><span>创建人</span><span>创建时间</span><span>订单数</span><span>操作</span></div>
           <div v-for="item in activeProductLibraryTab==='products' ? productLibraryItems : []" :key="item.id" class="trow product-library-row">
-            <div class="product-library-product-cell"><input v-if="user?.role==='company_admin'" type="checkbox" :checked="selectedProductLibraryIds.includes(item.id)" :disabled="selectedProductLibraryIds.length >= 100 && !selectedProductLibraryIds.includes(item.id)" :aria-label="`选择产品 ${item.sku}`" @change="toggleProductLibrarySelection(item)"/><span v-else class="product-library-check-spacer"></span><button v-if="item.image_url && !productLibraryBrokenImages.includes(item.id)" class="product-library-image" title="查看大图" :aria-label="`查看 ${item.sku} 商品大图`" @click="openImagePreview(item.image_url, item.title || item.sku)"><img :key="item.image_url" :src="imageUrl(item.image_url)" :alt="item.title || item.sku" @error="productLibraryBrokenImages.push(item.id)"/></button><span v-else class="product-library-image">暂无图片</span></div>
+            <div class="product-library-product-cell"><input type="checkbox" :checked="selectedProductLibraryIds.includes(item.id)" :disabled="selectedProductLibraryIds.length >= 100 && !selectedProductLibraryIds.includes(item.id)" :aria-label="`选择产品 ${item.sku}`" @change="toggleProductLibrarySelection(item)"/><button v-if="item.image_url && !productLibraryBrokenImages.includes(item.id)" class="product-library-image" title="查看大图" :aria-label="`查看 ${item.sku} 商品大图`" @click="openImagePreview(item.image_url, item.title || item.sku)"><img :key="item.image_url" :src="imageUrl(item.image_url)" :alt="item.title || item.sku" @error="productLibraryBrokenImages.push(item.id)"/></button><span v-else class="product-library-image">暂无图片</span></div>
             <span class="product-library-code" :title="item.sku">{{item.sku}}</span><span>{{item.template}}</span>
             <span class="product-library-title" :title="item.title">{{item.title || '—'}}</span><span>{{item.site}}</span><span :title="item.shop_name">{{item.shop_name}}</span>
             <span class="product-library-code" :title="item.product_id">{{item.product_id}}</span><span>{{item.material_created_by_name || ''}}</span><span>{{item.material_created_at != null ? new Date(item.material_created_at).toLocaleString() : ''}}</span><strong>{{item.order_count}}</strong><button class="product-library-detail-button" type="button" title="查看详情" :aria-label="`查看 ${item.shop_name} ${item.sku} 的订单详情`" @click="openProductLibraryOrders(item)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.8"/></svg></button>
@@ -2344,9 +2392,9 @@ onUnmounted(() => {
         <div v-else-if="activeProductLibraryTab==='stagnant'" class="product-library-ranking-section">
           <div v-if="user?.role==='company_admin'" class="product-library-filters"><label>创建人<select v-model="stagnantCreatorId" :disabled="stagnantLoading" @change="changeStagnantCreator"><option :value="null">全部创建人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label></div>
           <div class="draft-table product-library-table" :aria-busy="stagnantLoading">
-            <div class="thead product-library-stagnant-grid"><span>商品</span><span>SKU</span><span>模版</span><span>创建人</span><span>创建时间</span></div>
+            <div class="thead product-library-stagnant-grid"><label class="product-library-select-heading"><input type="checkbox" :checked="allPagedProductsSelected" :disabled="!selectableProductLibraryItems.length || productLibrarySelectionLoading" aria-label="选择当前页数据" @change="togglePagedProducts"/>商品</label><span>SKU</span><span>模版</span><span>创建人</span><span>创建时间</span></div>
             <div v-for="item in stagnantMaterials" :key="item.id" class="trow product-library-stagnant-grid">
-              <div class="product-library-product-cell"><button v-if="item.image_url && !productLibraryBrokenImages.includes(item.id)" class="product-library-image" title="查看大图" :aria-label="`查看 ${item.sku} 素材大图`" @click="openImagePreview(item.image_url, item.sku)"><img :src="imageUrl(item.image_url)" :alt="item.sku" @error="productLibraryBrokenImages.push(item.id)"/></button><span v-else class="product-library-image">暂无图片</span></div>
+              <div class="product-library-product-cell"><input type="checkbox" :checked="selectedProductLibraryIds.includes(item.id)" :disabled="productLibrarySelectionLoading || (selectedProductLibraryIds.length >= 100 && !selectedProductLibraryIds.includes(item.id))" :aria-label="`选择 ${item.sku || '素材'}`" @change="toggleProductLibrarySelection(item)"/><button v-if="item.image_url && !productLibraryBrokenImages.includes(item.id)" class="product-library-image" title="查看大图" :aria-label="`查看 ${item.sku} 素材大图`" @click="openImagePreview(item.image_url, item.sku)"><img :src="imageUrl(item.image_url)" :alt="item.sku" @error="productLibraryBrokenImages.push(item.id)"/></button><span v-else class="product-library-image">暂无图片</span></div>
               <span class="product-library-code" :title="item.sku">{{item.sku}}</span><span>{{item.template}}</span><span>{{item.created_by_name}}</span><span>{{new Date(item.created_at).toLocaleString()}}</span>
             </div>
             <div v-if="!stagnantMaterials.length && !stagnantLoading && !stagnantError" class="empty">暂无符合条件的素材。</div>
@@ -2360,9 +2408,9 @@ onUnmounted(() => {
             <label>使用状态<select v-model="newImagesUsageStatus" :disabled="newImagesLoading" @change="changeNewImagesFilters"><option value="all">全部状态</option><option value="unused">未使用</option><option value="used">已使用</option></select></label>
           </div>
           <div class="draft-table product-library-table" :aria-busy="newImagesLoading">
-            <div class="thead product-library-new-images-grid"><span>商品</span><span>SKU</span><span>模版</span><span>创建人</span><span>创建时间</span><span>使用状态</span></div>
+            <div class="thead product-library-new-images-grid"><label class="product-library-select-heading"><input type="checkbox" :checked="allPagedProductsSelected" :disabled="!selectableProductLibraryItems.length || productLibrarySelectionLoading" aria-label="选择当前页数据" @change="togglePagedProducts"/>商品</label><span>SKU</span><span>模版</span><span>创建人</span><span>创建时间</span><span>使用状态</span></div>
             <div v-for="item in newImages" :key="item.id" class="trow product-library-new-images-grid">
-              <div class="product-library-product-cell"><button v-if="item.image_url && !productLibraryBrokenImages.includes(item.id)" class="product-library-image" title="查看大图" :aria-label="`查看 ${item.sku || '素材'} 大图`" @click="openImagePreview(item.image_url, item.sku || '素材')"><img :src="imageUrl(item.image_url)" :alt="item.sku || '素材'" @error="productLibraryBrokenImages.push(item.id)"/></button><span v-else class="product-library-image">暂无图片</span></div>
+              <div class="product-library-product-cell"><input type="checkbox" :checked="selectedProductLibraryIds.includes(item.id)" :disabled="productLibrarySelectionLoading || (selectedProductLibraryIds.length >= 100 && !selectedProductLibraryIds.includes(item.id))" :aria-label="`选择 ${item.sku || '素材'}`" @change="toggleProductLibrarySelection(item)"/><button v-if="item.image_url && !productLibraryBrokenImages.includes(item.id)" class="product-library-image" title="查看大图" :aria-label="`查看 ${item.sku || '素材'} 大图`" @click="openImagePreview(item.image_url, item.sku || '素材')"><img :src="imageUrl(item.image_url)" :alt="item.sku || '素材'" @error="productLibraryBrokenImages.push(item.id)"/></button><span v-else class="product-library-image">暂无图片</span></div>
               <span class="product-library-code" :title="item.sku || ''">{{item.sku || '—'}}</span><span>{{item.template}}</span><span>{{item.created_by_name}}</span><span>{{new Date(item.created_at).toLocaleString()}}</span><span>{{item.usage_status==='used'?'已使用':'未使用'}}</span>
             </div>
             <div v-if="!newImages.length && !newImagesLoading && !newImagesError" class="empty">暂无符合条件的素材。</div>
@@ -2378,10 +2426,10 @@ onUnmounted(() => {
             <label v-if="user?.role==='team_leader' || rankingGroupId !== null">成员<select v-model="rankingMemberId" :disabled="productLibraryRankingLoading" @change="changeRankingMember"><option :value="null">全部成员</option><option v-for="member in rankingFilteredMembers" :key="member.id" :value="member.id">{{member.name}}{{member.role==='team_leader' ? ' · 组长' : ''}}</option></select></label>
           </div>
           <div class="draft-table product-library-table" :aria-busy="productLibraryRankingLoading">
-            <div class="thead product-library-ranking-grid"><span>名次</span><label class="product-library-select-heading"><input v-if="user?.role==='company_admin'" type="checkbox" :checked="allPagedProductsSelected" :disabled="!selectableProductLibraryItems.length || productLibraryRankingLoading" aria-label="选择当前页产品" @change="togglePagedProducts"/>商品</label><span>SKU</span><span>模版</span><span>标题</span><span>站点</span><span>店铺名称</span><span>产品 ID</span><span>创建人</span><span>创建时间</span><span>出单数</span></div>
+            <div class="thead product-library-ranking-grid"><span>名次</span><label class="product-library-select-heading"><input type="checkbox" :checked="allPagedProductsSelected" :disabled="!selectableProductLibraryItems.length || productLibrarySelectionLoading" aria-label="选择当前页数据" @change="togglePagedProducts"/>商品</label><span>SKU</span><span>模版</span><span>标题</span><span>站点</span><span>店铺名称</span><span>产品 ID</span><span>创建人</span><span>创建时间</span><span>出单数</span></div>
             <div v-for="item in productLibraryRankingItems" :key="item.id" class="trow product-library-ranking-grid">
               <strong class="product-library-ranking-rank">#{{item.rank}}</strong>
-              <div class="product-library-product-cell"><input v-if="user?.role==='company_admin'" type="checkbox" :checked="selectedProductLibraryIds.includes(item.id)" :disabled="selectedProductLibraryIds.length >= 100 && !selectedProductLibraryIds.includes(item.id)" :aria-label="`选择产品 ${item.sku}`" @change="toggleProductLibrarySelection(item)"/><span v-else class="product-library-check-spacer"></span><button v-if="item.image_url && !productLibraryBrokenImages.includes(item.id)" class="product-library-image" title="查看大图" :aria-label="`查看 ${item.sku} 商品大图`" @click="openImagePreview(item.image_url, item.title || item.sku)"><img :src="imageUrl(item.image_url)" :alt="item.title || item.sku" @error="productLibraryBrokenImages.push(item.id)"/></button><span v-else class="product-library-image">暂无图片</span></div>
+              <div class="product-library-product-cell"><input type="checkbox" :checked="selectedProductLibraryIds.includes(item.id)" :disabled="productLibrarySelectionLoading || (selectedProductLibraryIds.length >= 100 && !selectedProductLibraryIds.includes(item.id))" :aria-label="`选择 ${item.sku || '素材'}`" @change="toggleProductLibrarySelection(item)"/><button v-if="item.image_url && !productLibraryBrokenImages.includes(item.id)" class="product-library-image" title="查看大图" :aria-label="`查看 ${item.sku} 商品大图`" @click="openImagePreview(item.image_url, item.title || item.sku)"><img :src="imageUrl(item.image_url)" :alt="item.title || item.sku" @error="productLibraryBrokenImages.push(item.id)"/></button><span v-else class="product-library-image">暂无图片</span></div>
               <span class="product-library-code" :title="item.sku">{{item.sku}}</span><span>{{item.template}}</span><span class="product-library-title" :title="item.title">{{item.title || '—'}}</span><span>{{item.site}}</span><span :title="item.shop_name">{{item.shop_name}}</span><span class="product-library-code" :title="item.product_id">{{item.product_id}}</span><span>{{item.material_created_by_name || ''}}</span><span>{{item.material_created_at != null ? new Date(item.material_created_at).toLocaleString() : ''}}</span><strong>{{item.order_count}}</strong>
             </div>
             <div v-if="!productLibraryRankingItems.length && !productLibraryRankingLoading && !productLibraryRankingError" class="empty">{{productLibraryRankingDate ? '该榜单暂无符合条件的产品。' : user?.role==='company_admin' ? '尚未生成榜单，点击“数据统计”开始后台统计。' : '尚未生成榜单，请联系管理员进行数据统计。'}}</div>
@@ -2500,17 +2548,17 @@ onUnmounted(() => {
         <div class="material-draft-preview-heading"><strong>图片预览</strong><span>{{materialDraftAssets.length}} 张</span></div>
         <p v-if="materialDraftAssets.length > 1" class="material-draft-sort-hint">拖动图片调整顺序，首张图片将用于 AI 生成标题。</p>
         <div class="material-draft-preview-images">
-          <div v-for="(asset, index) in materialDraftAssets" :key="asset.id" class="material-draft-sort-item" :class="{dragging: draggedMaterialDraftAssetId === asset.id}" draggable="true" @dragstart="startMaterialDraftDrag($event, asset.id)" @dragover.prevent @drop.prevent="dropMaterialDraftAsset(asset.id)" @dragend="draggedMaterialDraftAssetId=null">
-            <img :src="imageUrl(asset.url)" :alt="asset.name" draggable="false"/>
+          <button type="button" v-for="(asset, index) in materialDraftAssets" :key="asset.id" class="material-draft-sort-item material-batch-sort-item" :class="{dragging: draggedMaterialDraftAssetId === asset.id}" draggable="true" @dragstart="startMaterialDraftDrag($event, asset.id)" @dragover.prevent @drop.prevent="dropMaterialDraftAsset(asset.id)" @dragend="draggedMaterialDraftAssetId=null" :aria-label="`查看 ${asset.name || asset.sku} 大图`" @click="openImagePreview(asset.url, asset.name || asset.sku)">
+            <img :src="imageUrl(asset.url)" :alt="asset.name || asset.sku" draggable="false"/>
             <span :class="{'is-first': index === 0}">{{index === 0 ? '首' : index + 1}}</span>
-          </div>
+          </button>
         </div>
       </section>
       <section v-if="materialDraftTemplate" class="material-draft-details">
-        <label>商品标题<div class="material-draft-title-row"><input v-model="materialDraftTitle" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符，或使用 AI 生成"/><button class="secondary" :disabled="materialDraftTitleGenerating" @click="generateMaterialDraftTitle">{{materialDraftTitleGenerating ? '生成中…' : 'AI 生成标题'}}</button></div><small>将使用此模版的 AI生成标题约束和首张素材图生成标题。</small><div class="material-draft-counter" :class="{invalid: materialDraftTitle.length > 0 && materialDraftTitle.length < 25}"><span>{{ materialDraftTitle.length }} / 255 字符</span></div></label>
+        <label>商品标题<div class="material-draft-title-row"><input v-model="materialDraftTitle" @input="materialDraftTitleEdited=true" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符，或使用 AI 生成"/><button class="secondary" :disabled="materialDraftTitleGenerating" @click="generateMaterialDraftTitle">{{materialDraftTitleGenerating ? '生成中…' : 'AI 生成标题'}}</button></div><small>将使用此模版的 AI生成标题约束和首张素材图生成标题。</small><div class="material-draft-counter" :class="{invalid: materialDraftTitle.length > 0 && materialDraftTitle.length < 25}"><span>{{ materialDraftTitle.length }} / 255 字符</span></div></label>
         <label>产品描述<textarea v-model="materialDraftProductDescription" maxlength="5000" placeholder="默认使用产品模版描述，可按商品修改"></textarea><div class="material-draft-counter"><span>{{ materialDraftProductDescription.length }} / 5000 字符</span></div></label>
       </section>
-      <section v-if="materialDraftTemplate" class="material-draft-sku-summary"><strong>基础 SKU 列表</strong><p>直接使用素材入库时生成的永久 SKU；发布妙手时会拼接模板尺码：{{materialDraftSizes.length ? materialDraftSizes.join('、') : '默认规格'}}。</p><b>共 {{materialDraftSkuCount}} 个基础 SKU</b><small>格式：模板名称 + 用户代码 + 6 位随机字符串</small><div class="material-draft-sku-list"><div v-for="asset in materialDraftAssets" :key="asset.id"><span>图片 SKU</span><code>{{asset.sku}}</code></div></div><label class="material-draft-size-chart">尺码图<small>直接使用产品模版的尺码图；如需更换，请到产品模版中修改。</small><img v-if="materialDraftSizeChartPreview" :src="materialDraftSizeChartPreview" alt="尺码图预览"/><small v-else>该产品模版尚未上传尺码图</small></label></section>
+      <section v-if="materialDraftTemplate" class="material-draft-sku-summary"><strong>基础 SKU 列表</strong><p>{{libraryDraftMode ? '直接使用所选数据的基础 SKU；' : '直接使用素材入库时生成的永久 SKU；'}}发布妙手时会拼接模板尺码：{{materialDraftSizes.length ? materialDraftSizes.join('、') : '默认规格'}}。</p><b>共 {{materialDraftSkuCount}} 个基础 SKU</b><small v-if="!libraryDraftMode">格式：模板名称 + 用户代码 + 6 位随机字符串</small><div class="material-draft-sku-list"><div v-for="asset in materialDraftAssets" :key="asset.id"><span>图片 SKU</span><code>{{asset.sku}}</code></div></div><label class="material-draft-size-chart">尺码图<small>直接使用产品模版的尺码图；如需更换，请到产品模版中修改。</small><img v-if="materialDraftSizeChartPreview" :src="materialDraftSizeChartPreview" alt="尺码图预览"/><small v-else>该产品模版尚未上传尺码图</small></label></section>
       <div class="modal-actions"><button class="ghost" @click="showMaterialDraftDialog=false">取消</button><button class="primary" :disabled="materialDraftSaving" @click="createDraftFromMaterialAssets">{{materialDraftSaving ? '创建中…' : '确认创建'}}</button></div>
     </section>
   </div>
@@ -2518,12 +2566,12 @@ onUnmounted(() => {
     <section class="modal-card material-batch-draft-dialog">
       <button class="modal-close" :disabled="materialBatchSaving" @click="showMaterialBatchDraftDialog=false">×</button>
       <h2>组合创建商品草稿</h2>
-      <p>仅使用未使用素材；每个完整组合会创建一条草稿，产品描述固定采用模板描述。</p>
+      <p>{{libraryDraftMode ? '可复用已使用数据；' : '仅使用未使用素材；'}}每个完整组合会创建一条草稿，产品描述固定采用模板描述。</p>
       <div class="material-batch-options">
         <label>每组图片<select v-model.number="materialBatchGroupSize" @change="rebuildMaterialBatchGroups"><option :value="5">5 张</option><option :value="6">6 张</option><option :value="7">7 张</option><option :value="8">8 张</option></select></label>
         <label>组合方式<select v-model="materialBatchMode" @change="rebuildMaterialBatchGroups"><option value="sequential">按列表顺序</option><option value="random">随机组合</option></select></label>
       </div>
-      <p v-if="selectedMaterialAssets.length % materialBatchGroupSize" class="material-batch-remainder">最后 {{selectedMaterialAssets.length % materialBatchGroupSize}} 张不足一组，将保留为未使用素材。</p>
+      <p v-if="draftSelectionAssets.length % materialBatchGroupSize" class="material-batch-remainder">最后 {{draftSelectionAssets.length % materialBatchGroupSize}} 张不足一组，不参与创建，使用状态保持不变。</p>
       <section class="material-batch-groups">
         <article v-for="(group,index) in materialBatchGroups" :key="index">
           <header><strong>草稿 {{index + 1}}</strong><span>{{group.assets.length}} 张素材</span></header>
@@ -2534,7 +2582,7 @@ onUnmounted(() => {
               <span :class="{'is-first': assetIndex === 0}">{{assetIndex === 0 ? '首' : assetIndex + 1}}</span>
             </button>
           </div>
-          <div class="material-draft-title-row"><input v-model="group.title" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符的商品标题"/><button class="secondary" :disabled="group.generating" @click="generateMaterialBatchTitle(group)">{{group.generating ? '生成中…' : 'AI 生成标题'}}</button></div>
+          <div class="material-draft-title-row"><input v-model="group.title" @input="group.edited=true" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符的商品标题"/><button class="secondary" :disabled="group.generating" @click="generateMaterialBatchTitle(group)">{{group.generating ? '生成中…' : 'AI 生成标题'}}</button></div>
           <small :class="{error:group.title.length>0 && group.title.length<25}">{{group.title.length}} / 255 字符</small>
         </article>
       </section>
@@ -2790,7 +2838,7 @@ onUnmounted(() => {
   <div v-if="showTemplateDialog" class="drawer-backdrop"><section class="template-drawer"><header><div><h2>{{editingTemplate ? '编辑产品模板' : '新增产品模板'}}</h2><p>完善模板信息后可直接用于 AI 创作。</p></div><button class="drawer-close" aria-label="关闭" :disabled="templateSaving" @click="showTemplateDialog=false">×</button></header><nav class="drawer-tabs"><button :class="{active:templateFormTab==='basic'}" @click="templateFormTab='basic'">模版信息</button><button :class="{active:templateFormTab==='product'}" @click="templateFormTab='product'">商品信息</button><button :class="{active:templateFormTab==='sku'}" @click="templateFormTab='sku'">SKU</button><button :class="{active:templateFormTab==='logistics'}" @click="templateFormTab='logistics'">物流信息</button><button :class="{active:templateFormTab==='ai-prompts'}" @click="templateFormTab='ai-prompts'">AI提示词</button></nav><div class="drawer-content"><div v-if="templateFormTab==='basic'" class="drawer-form"><label>模板名称<span>*</span><input v-model="newTemplateName" placeholder="例如：宽松短袖上衣" /></label><label>模板图片<span>*</span><input accept="image/png,image/jpeg,image/webp" type="file" @change="onCoverChange" /><small>{{newTemplateImage ? newTemplateImage.name : editingTemplate?.cover_url ? '保留当前图片' : '支持 JPG、PNG、WebP，最大 3MB'}}</small><div v-if="newTemplateImagePreview" class="template-upload-preview"><img :src="newTemplateImagePreview" alt="模板图片预览" /></div></label><label>模板描述<span>*</span><textarea v-model="newTemplateDescription" maxlength="500" placeholder="描述产品材质、版型和适用的印花区域"></textarea></label><label>模板分类<span>*</span><select v-model="newTemplateGroupId"><option :value="null" disabled>请选择模板分类</option><option v-for="group in templateGroups" :key="group.id" :value="group.id">{{group.name}}</option></select></label></div><div v-else-if="templateFormTab==='product'" class="drawer-form product-info-form"><label>AI生成标题约束<span>*</span><input v-model="newTemplateTitleTemplate" maxlength="500" placeholder="例如：突出材质、款式与适用场景，不包含夸大宣传" /></label><label>产品描述<span>*</span><textarea v-model="newTemplateProductDescription" maxlength="5000" placeholder="填写商品详情页的产品描述"></textarea></label><label>尺码图<span>*</span><input accept="image/png,image/jpeg,image/webp" type="file" @change="onSizeChartChange" /><small>{{newTemplateSizeChart ? newTemplateSizeChart.name : editingTemplate?.size_chart_url ? '保留当前尺码图' : '支持 JPG、PNG、WebP，最多上传 1 张，最大 3MB'}}</small><div v-if="newTemplateSizeChartPreview" class="template-upload-preview"><img :src="newTemplateSizeChartPreview" alt="尺码图预览" /></div></label></div><div v-else-if="templateFormTab==='sku'" class="sku-form"><section><strong><b>*</b> 尺码</strong><div class="sku-size-grid"><div v-for="(_, index) in newSkuSizeOptions" :key="index" class="sku-size-row"><input v-model="newSkuSizeOptions[index]" maxlength="50" placeholder="例如：M"/><small>{{newSkuSizeOptions[index].length}} / 50</small><button title="删除尺码" @click="newSkuSizeOptions.splice(index,1)">×</button></div></div><button class="sku-add-option" @click="addSkuSize">＋ 添加选项</button></section><small class="sku-total">预计生成 {{Math.max(1,newSkuSizeOptions.filter(value=>value.trim()).length)}} 个 SKU</small></div><div v-else-if="templateFormTab==='ai-prompts'" class="drawer-form ai-prompts-form"><div><h3>AI 提示词</h3><p>为印花贴合保存可复用的创作要求；在 AI 创作页选择模板后可一键填充并继续修改。</p></div><section v-for="(prompt, index) in newTemplateAiPrompts" :key="index" class="ai-prompt-editor"><div><b>提示词 {{index + 1}}</b><button type="button" class="danger" @click="removeTemplateAiPrompt(index)">删除</button></div><label>名称<input v-model="prompt.name" maxlength="80" placeholder="例如：自然布料贴合" /></label><label>提示词内容<textarea v-model="prompt.content" maxlength="1000" placeholder="描述印花贴合方式、细节、光影等创作要求"></textarea></label></section><button type="button" class="secondary ai-prompt-add" @click="addTemplateAiPrompt">＋ 新增提示词</button></div><div v-else class="drawer-form logistics-form"><h3>物流信息 <span title="用于运费及配送计算">?</span></h3><label><b>*</b> 包裹重量<div class="unit-input"><input v-model.number="newPackageWeight" type="number" min="0.001" step="0.001" placeholder="请输入重量" /><span>KG</span></div></label><label><b>*</b> 包裹尺寸<div class="dimension-inputs"><label><input v-model.number="newPackageLength" type="number" min="0.1" step="0.1" placeholder="长" /><span>cm</span></label><label><input v-model.number="newPackageWidth" type="number" min="0.1" step="0.1" placeholder="宽" /><span>cm</span></label><label><input v-model.number="newPackageHeight" type="number" min="0.1" step="0.1" placeholder="高" /><span>cm</span></label></div></label></div></div><footer><button class="ghost" :disabled="templateSaving" @click="showTemplateDialog=false">取消</button><button class="primary" :disabled="templateSaving" @click="createTemplate">{{templateSaving ? '上传中…' : (editingTemplate ? '保存修改' : '确认新增')}}</button></footer></section></div>
   <div v-if="previewImageUrl" class="image-preview-backdrop" @click.self="previewImageUrl=''"><section class="image-preview-modal"><button class="modal-close" aria-label="关闭大图" @click="previewImageUrl=''">×</button><img :src="previewImageUrl" :alt="previewImageAlt"/></section></div>
   <div v-if="productLibraryOrderProduct" class="modal-backdrop" @click.self="closeProductLibraryOrders"><section class="modal-card product-library-orders-dialog" role="dialog" aria-modal="true" aria-labelledby="product-library-orders-heading"><button class="modal-close" aria-label="关闭订单详情" @click="closeProductLibraryOrders">×</button><h2 id="product-library-orders-heading">订单详情</h2><p>{{productLibraryOrderProduct.shop_name}} · {{productLibraryOrderProduct.sku}}</p><div class="product-library-orders-table" :aria-busy="productLibraryOrderLoading"><div class="product-library-orders-head"><span>下单时间</span><span>订单编号</span></div><div v-for="order in productLibraryOrders" :key="order.order_number" class="product-library-orders-row"><span>{{new Date(order.ordered_at).toLocaleString()}}</span><span :title="order.order_number">{{order.order_number}}</span></div><div v-if="!productLibraryOrders.length && !productLibraryOrderLoading" class="empty">暂无订单</div><div v-if="productLibraryOrderLoading" class="product-library-orders-loading" role="status">正在加载订单…</div></div><footer class="draft-pagination product-library-orders-pagination"><span>共 {{productLibraryOrderTotal}} 单</span><button :disabled="productLibraryOrderLoading || productLibraryOrderPage===1" @click="changeProductLibraryOrderPage(productLibraryOrderPage-1)">上一页</button><span>第 {{productLibraryOrderPage}} / {{productLibraryOrderPageCount}} 页</span><button :disabled="productLibraryOrderLoading || productLibraryOrderPage===productLibraryOrderPageCount" @click="changeProductLibraryOrderPage(productLibraryOrderPage+1)">下一页</button></footer></section></div>
-  <div v-if="showProductLibraryTemplateDialog" class="modal-backdrop" @click.self="!productLibraryTemplateSaving && (showProductLibraryTemplateDialog=false)"><section class="modal-card product-library-template-dialog"><button class="modal-close" :disabled="productLibraryTemplateSaving" aria-label="关闭批量设置模版" @click="showProductLibraryTemplateDialog=false">×</button><h2>批量设置模版</h2><p>将为 {{selectedProductLibraryIds.length}} 条产品设置同一模版，已匹配产品的原模版将被替换。</p><label>目标模版<select v-model="productLibraryTargetTemplateId" :disabled="productLibraryTemplateSaving"><option :value="null" disabled>请选择模版</option><option v-for="item in templates" :key="item.id" :value="item.id">{{item.name}}</option></select></label><div class="modal-actions"><button class="ghost" :disabled="productLibraryTemplateSaving" @click="showProductLibraryTemplateDialog=false">取消</button><button class="primary" :disabled="productLibraryTemplateSaving || !productLibraryTargetTemplateId" @click="saveProductLibraryTemplate">{{productLibraryTemplateSaving ? '保存中…' : '确认设置'}}</button></div></section></div>
+  <div v-if="showProductLibraryTemplateDialog" class="modal-backdrop" @click.self="!productLibraryTemplateSaving && (showProductLibraryTemplateDialog=false)"><section class="modal-card product-library-template-dialog"><button class="modal-close" :disabled="productLibraryTemplateSaving" aria-label="关闭批量设置模版" @click="showProductLibraryTemplateDialog=false">×</button><h2>批量设置模版</h2><p>将为 {{selectedProductLibraryIds.length}} 条数据设置同一模版，原模版将被替换，SKU 和使用状态保持不变。</p><label>目标模版<select v-model="productLibraryTargetTemplateId" :disabled="productLibraryTemplateSaving"><option :value="null" disabled>请选择模版</option><option v-for="item in templates" :key="item.id" :value="item.id">{{item.name}}</option></select></label><div class="modal-actions"><button class="ghost" :disabled="productLibraryTemplateSaving" @click="showProductLibraryTemplateDialog=false">取消</button><button class="primary" :disabled="productLibraryTemplateSaving || !productLibraryTargetTemplateId" @click="saveProductLibraryTemplate">{{productLibraryTemplateSaving ? '保存中…' : '确认设置'}}</button></div></section></div>
   <div v-if="toast" class="toast" role="alert" style="position:fixed;top:24px;left:50%;z-index:1000;transform:translateX(-50%);padding:12px 18px;border-radius:10px;background:#302954;color:#fff;box-shadow:0 10px 28px #30295440;font-size:14px">{{ toast }}</div>
   <div v-if="showMaterialUploadDialog" class="modal-backdrop" @click.self="showMaterialUploadDialog=false"><section class="modal-card material-template-dialog"><button class="modal-close" @click="showMaterialUploadDialog=false">×</button><h2>上传本地素材</h2><p>已选择 {{pendingMaterialUploadFiles.length}} 张图片，请先选择产品模板。</p><p v-if="materialUploading" style="margin:-10px 0 16px;color:#5545ca">正在上传 {{materialUploadedCount}} / {{materialUploadTotal}}…</p><label>产品模板<select v-model="materialUploadTemplateId" :disabled="materialUploading"><option :value="null" disabled>请选择产品模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><p v-if="materialUploadError" style="margin:14px 0 0;color:#d34b5f">{{materialUploadError}}</p><div class="modal-actions"><button class="ghost" :disabled="materialUploading" @click="showMaterialUploadDialog=false">取消</button><button class="primary" :disabled="materialUploading" @click="uploadMaterialAssets">{{materialUploading ? '上传中…' : '确认上传'}}</button></div></section></div>
   <footer class="site-footer">

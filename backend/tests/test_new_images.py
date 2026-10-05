@@ -62,7 +62,7 @@ class NewImagesTests(unittest.TestCase):
         self.assertEqual([item["sku"] for item in result["items"]], ["USED", None, "BOUNDARY"])
         self.assertEqual(result["total"], 3)
         self.assertEqual(result["items"][0], {
-            "id": used, "image_url": "https://example.com/USED.jpg", "sku": "USED",
+            "id": used, "source_type": "material", "template_id": 1, "title": "", "image_url": "https://example.com/USED.jpg", "sku": "USED",
             "template": "M06L", "created_by_id": 2, "created_by_name": "Member",
             "created_at": main.timestamp_ms(self.end), "usage_status": "used",
         })

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Literal
-from pydantic import BaseModel, EmailStr, Field, field_serializer, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_serializer, field_validator, model_validator
 from .models import Role, TaskStatus
 
 
@@ -252,8 +252,17 @@ class MaterialDownloadInput(BaseModel):
 
 
 class ProductLibraryBatchTemplateInput(BaseModel):
-    product_ids: list[int] = Field(min_length=1, max_length=100)
+    product_ids: list[int] = Field(default_factory=list, max_length=100)
+    material_asset_ids: list[int] = Field(default_factory=list, max_length=100)
     template_id: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_selection(self):
+        if not 1 <= len(self.product_ids) + len(self.material_asset_ids) <= 100:
+            raise ValueError("请选择 1-100 条产品或素材")
+        if any(record_id <= 0 for record_id in self.product_ids + self.material_asset_ids):
+            raise ValueError("产品或素材 ID 必须为正整数")
+        return self
 
 
 class AIProviderSettingUpdate(BaseModel):
@@ -606,3 +615,29 @@ class MiaoshouShopQuery(BaseModel):
 class DraftMiaoshouPublishInput(BaseModel):
     """发布前必须明确选择一个有权限的妙手店铺。"""
     shop_id: int = Field(ge=1)
+
+
+class ProductLibraryDraftSource(BaseModel):
+    source_type: Literal["product", "material"]
+    id: int = Field(gt=0)
+
+
+class ProductLibraryDraftCreate(BaseModel):
+    template_id: int
+    sources: list[ProductLibraryDraftSource] = Field(min_length=1, max_length=100)
+    title: str = Field(min_length=25, max_length=255)
+    product_description: str | None = Field(default=None, max_length=5000)
+
+    _validate_title = field_validator("title")(MaterialDraftCreate.validate_title.__func__)
+
+
+class ProductLibraryDraftGroup(BaseModel):
+    sources: list[ProductLibraryDraftSource] = Field(min_length=5, max_length=8)
+    title: str = Field(min_length=25, max_length=255)
+
+    _validate_title = field_validator("title")(MaterialDraftCreate.validate_title.__func__)
+
+
+class ProductLibraryDraftBatchCreate(BaseModel):
+    template_id: int
+    groups: list[ProductLibraryDraftGroup] = Field(min_length=1, max_length=20)

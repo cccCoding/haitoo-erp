@@ -28,7 +28,7 @@ from .database import SessionLocal, engine, get_db
 from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, OperatorGroup, PodTask, ProductDraft, ProductLibraryDailySnapshot, ProductLibraryDailySnapshotItem, ProductLibraryRankingTask, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
 from .product_library import parse_order_workbook
 from .product_library_rankings import SnapshotAlreadyRunning, company_run_lock, create_daily_snapshot, enqueue_ranking_task, task_payload
-from .schemas import ProductLibraryShopAssignment
+from .schemas import ProductLibraryShopAssignment, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
 from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, OperatorGroupCreate, OperatorGroupUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
@@ -1175,7 +1175,7 @@ def list_stagnant_materials(
         .order_by(MaterialAsset.created_at.asc(), MaterialAsset.id.asc())
         .offset((page - 1) * page_size).limit(page_size)).all()
     return {"total": total, "page": page, "page_size": page_size, "items": [
-        {"id": asset.id, "image_url": asset.url, "sku": asset.sku,
+        {"id": asset.id, "source_type": "material", "template_id": asset.template_id, "title": "", "image_url": asset.url, "sku": asset.sku,
          "template": template_name or ("未设置模板" if asset.template_id is None else "历史模板已删除"),
          "created_by_id": asset.claimed_by, "created_by_name": creator_name or "历史记录缺失",
          "created_at": timestamp_ms(asset.created_at)}
@@ -1217,7 +1217,7 @@ def list_new_images(
         .order_by(MaterialAsset.created_at.desc(), MaterialAsset.id.desc())
         .offset((page - 1) * page_size).limit(page_size)).all()
     return {"total": total, "page": page, "page_size": page_size, "items": [
-        {"id": asset.id, "image_url": asset.url, "sku": asset.sku,
+        {"id": asset.id, "source_type": "material", "template_id": asset.template_id, "title": "", "image_url": asset.url, "sku": asset.sku,
          "template": template_name or ("未设置模板" if asset.template_id is None else "历史模板已删除"),
          "created_by_id": asset.claimed_by, "created_by_name": creator_name or "历史记录缺失",
          "created_at": timestamp_ms(asset.created_at), "usage_status": asset.usage_status}
@@ -1281,7 +1281,7 @@ def list_product_library_rankings(
         "through_date": (snapshot.snapshot_date - timedelta(days=1)).isoformat(),
         "total": total, "page": page, "page_size": page_size,
         "items": [{
-            "id": product.id, "rank": offset + index,
+            "id": product.id, "source_type": "product", "template_id": product.template_id, "rank": offset + index,
             "order_count": int(getattr(entry, count_column.key)),
             "count_7": entry.count_7, "count_15": entry.count_15, "count_30": entry.count_30,
             "sku": product.sku, "template": template_name or "未匹配", "title": product.title,
@@ -1358,7 +1358,7 @@ def list_product_library(
     material_details = product_library_material_details(db, user.company_id, [product.sku for product, _, _, _ in rows])
     return {"total": total, "page": page, "page_size": page_size, "items": [
         {
-            "id": product.id, "sku": product.sku, "template_id": product.template_id if template_name else None,
+            "id": product.id, "source_type": "product", "sku": product.sku, "template_id": product.template_id,
             "template": template_name or "未匹配",
             "title": product.title, "image_url": product.image_url,
             "platform": source.platform, "site": source.site, "shop_name": source.shop_name,
@@ -1416,6 +1416,8 @@ def set_product_library_templates(
 ):
     if len(set(payload.product_ids)) != len(payload.product_ids):
         raise HTTPException(400, "产品不能重复选择")
+    if len(set(payload.material_asset_ids)) != len(payload.material_asset_ids):
+        raise HTTPException(400, "素材不能重复选择")
     template = db.get(ProductTemplate, payload.template_id)
     if not template or not (template.is_platform or template.company_id == user.company_id):
         raise HTTPException(404, "模版不存在或无权使用")
@@ -1425,14 +1427,18 @@ def set_product_library_templates(
     ).with_for_update()).all()
     if len(products) != len(payload.product_ids):
         raise HTTPException(404, "包含不存在或无权设置的产品")
-    assigned_ids = {product.template_id for product in products if product.template_id is not None}
-    live_assigned_ids = set(db.scalars(select(ProductTemplate.id).where(ProductTemplate.id.in_(assigned_ids)))) if assigned_ids else set()
-    if any(product.template_id in live_assigned_ids for product in products):
-        raise HTTPException(400, "仅可批量设置未匹配的产品")
+    assets = db.scalars(select(MaterialAsset).where(
+        MaterialAsset.company_id == user.company_id,
+        MaterialAsset.id.in_(payload.material_asset_ids),
+    ).with_for_update()).all()
+    if len(assets) != len(payload.material_asset_ids):
+        raise HTTPException(404, "包含不存在或无权设置的素材")
     for product in products:
         product.template_id = template.id
+    for asset in assets:
+        asset.template_id = template.id
     db.commit()
-    return {"updated": len(products), "template_id": template.id, "template": template.name}
+    return {"updated": len(products) + len(assets), "template_id": template.id, "template": template.name}
 
 
 @app.post("/product-library/import")
@@ -2785,6 +2791,111 @@ def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Dep
     return {"claimed": claimed_count, "message": "已领取到素材库"}
 
 
+def resolve_product_library_sources(db: Session, user: User, sources: list[ProductLibraryDraftSource], *, lock: bool = False):
+    keys = [(source.source_type, source.id) for source in sources]
+    if len(set(keys)) != len(keys):
+        raise HTTPException(400, "同一来源记录不能重复选择或用于多个组合")
+    resolved = {}
+    for source_type, model in (("product", ProductLibraryProduct), ("material", MaterialAsset)):
+        ids = [source.id for source in sources if source.source_type == source_type]
+        if not ids:
+            continue
+        stmt = select(model).where(model.company_id == user.company_id, model.id.in_(ids))
+        if source_type == "product":
+            stmt = stmt.join(ProductLibrarySource, ProductLibrarySource.id == model.source_id).where(ProductLibrarySource.company_id == user.company_id)
+            scope = product_library_source_scope(user)
+            if scope is not None:
+                stmt = stmt.where(scope)
+        elif is_operator(user):
+            stmt = stmt.where(MaterialAsset.claimed_by.in_(product_library_visible_member_ids(user)))
+        if lock:
+            stmt = stmt.with_for_update()
+        resolved.update({(source_type, record.id): record for record in db.scalars(stmt).all()})
+    if len(resolved) != len(keys):
+        raise HTTPException(400, "包含不存在或无权使用的产品库数据")
+    return [resolved[key] for key in keys]
+
+
+def validate_product_library_draft_records(records, template):
+    if any(record.template_id != template.id for record in records):
+        raise HTTPException(400, "请选择属于同一有效产品模板的数据")
+    if any(not record.sku or not record.sku.strip() or not library_record_image(record).strip() for record in records):
+        raise HTTPException(400, "所选数据缺少图片或 SKU，请修正后再创建")
+    skus = [record.sku.strip() for record in records]
+    if len(set(skus)) != len(skus):
+        raise HTTPException(400, "同一草稿不能包含重复 SKU，请调整选择")
+
+
+def library_record_image(record):
+    return (record.url if isinstance(record, MaterialAsset) else record.image_url) or ""
+
+
+def build_product_library_draft(user, template, records, title, description):
+    return ProductDraft(
+        company_id=user.company_id, shop_id=None, template_id=template.id, workflow_stage="pending",
+        title=title, product_description=description, size_chart_url=template.size_chart_url,
+        image_urls=[library_record_image(record) for record in records[:9]],
+        sku_items=[{"image_url": library_record_image(record), "size": None, "sku": record.sku} for record in records],
+        created_by=user.id, updated_by=user.id,
+    )
+
+
+@app.post("/drafts/from-product-library")
+def create_draft_from_product_library(payload: ProductLibraryDraftCreate,
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db)):
+    template = get_company_template(db, user, payload.template_id)
+    records = resolve_product_library_sources(db, user, payload.sources, lock=True)
+    validate_product_library_draft_records(records, template)
+    draft = build_product_library_draft(user, template, records, payload.title,
+        payload.product_description.strip() if payload.product_description else None)
+    db.add(draft)
+    for record in records:
+        if isinstance(record, MaterialAsset):
+            record.usage_status = "used"
+    db.commit(); db.refresh(draft)
+    return serialize_record(draft)
+
+
+@app.post("/drafts/from-product-library/batch")
+def create_drafts_from_product_library_batch(payload: ProductLibraryDraftBatchCreate,
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db)):
+    sources = [source for group in payload.groups for source in group.sources]
+    if len(sources) > 100:
+        raise HTTPException(400, "一次最多选择 100 条数据")
+    template = get_company_template(db, user, payload.template_id)
+    records = resolve_product_library_sources(db, user, sources, lock=True)
+    drafts, offset = [], 0
+    for group in payload.groups:
+        group_records = records[offset:offset + len(group.sources)]
+        offset += len(group.sources)
+        validate_product_library_draft_records(group_records, template)
+        drafts.append(build_product_library_draft(user, template, group_records, group.title, template.product_description))
+    db.add_all(drafts)
+    for record in records:
+        if isinstance(record, MaterialAsset):
+            record.usage_status = "used"
+    db.commit()
+    for draft in drafts:
+        db.refresh(draft)
+    return {"total": len(drafts), "drafts": [serialize_record(draft) for draft in drafts]}
+
+
+@app.post("/product-library/generate-draft-title")
+async def generate_product_library_draft_title(payload: ProductLibraryDraftSource,
+    user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db)):
+    record = resolve_product_library_sources(db, user, [payload])[0]
+    if record.template_id is None:
+        raise HTTPException(400, "请先匹配有效产品模板")
+    template = get_company_template(db, user, record.template_id)
+    validate_product_library_draft_records([record], template)
+    if not template.title_template:
+        raise HTTPException(400, "该产品模版尚未填写 AI生成标题约束")
+    try:
+        return {"title": await generate_draft_title(template.title_template, library_record_image(record))}
+    except ProviderError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
 @app.post("/drafts/from-material-assets")
 def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """用素材库中选定的一张或多张图片创建商品草稿。"""
@@ -2803,21 +2914,8 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
     template = get_company_template(db, user, payload.template_id)
     if any(asset.template_id != template.id for asset in assets):
         raise HTTPException(400, "创建商品草稿时只能使用属于所选产品模板的素材")
-    image_urls = [asset.url for asset in assets[:9]]
-    sku_items = [{"image_url": asset.url, "size": None, "sku": asset.sku} for asset in assets]
-    draft = ProductDraft(
-        company_id=user.company_id,
-        shop_id=None,
-        template_id=template.id,
-        workflow_stage="pending",
-        title=payload.title,
-        product_description=payload.product_description.strip() if payload.product_description else None,
-        size_chart_url=template.size_chart_url,
-        image_urls=image_urls,
-        sku_items=sku_items,
-        created_by=user.id,
-        updated_by=user.id,
-    )
+    draft = build_product_library_draft(user, template, assets, payload.title,
+        payload.product_description.strip() if payload.product_description else None)
     db.add(draft)
     for asset in assets:
         asset.usage_status = "used"
@@ -2852,13 +2950,7 @@ def create_drafts_from_material_assets_batch(payload: MaterialDraftBatchCreate, 
     drafts = []
     for asset_ids, title in groups:
         assets = [assets_by_id[asset_id] for asset_id in asset_ids]
-        drafts.append(ProductDraft(
-            company_id=user.company_id, shop_id=None, template_id=template.id, workflow_stage="pending",
-            title=title, product_description=template.product_description, size_chart_url=template.size_chart_url,
-            image_urls=[asset.url for asset in assets],
-            sku_items=[{"image_url": asset.url, "size": None, "sku": asset.sku} for asset in assets],
-            created_by=user.id, updated_by=user.id,
-        ))
+        drafts.append(build_product_library_draft(user, template, assets, title, template.product_description))
     db.add_all(drafts)
     for asset in assets_by_id.values():
         asset.usage_status = "used"
