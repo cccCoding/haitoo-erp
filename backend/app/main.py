@@ -1442,13 +1442,13 @@ async def import_product_library(
 ):
     if not (file.filename or "").lower().endswith(".xlsx"):
         raise HTTPException(400, "请上传 .xlsx 格式的订单表格")
-    data = await file.read(10 * 1024 * 1024 + 1)
-    if not data or len(data) > 10 * 1024 * 1024:
-        raise HTTPException(400, "订单表格大小须在 10MB 以内")
+    data = await file.read(30 * 1024 * 1024 + 1)
+    if not data or len(data) > 30 * 1024 * 1024:
+        raise HTTPException(400, "订单表格大小须在 30MB 以内")
     try:
         with zipfile.ZipFile(BytesIO(data)) as archive:
-            if sum(info.file_size for info in archive.infolist()) > 50 * 1024 * 1024:
-                raise ValueError("表格解压后内容超过 50MB")
+            if sum(info.file_size for info in archive.infolist()) > 150 * 1024 * 1024:
+                raise ValueError("表格解压后内容超过 150MB")
         imported = parse_order_workbook(data)
     except (ValueError, zipfile.BadZipFile) as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -1461,6 +1461,7 @@ async def import_product_library(
         (source.platform, source.site, source.shop_name): source
         for source in db.scalars(select(ProductLibrarySource).where(ProductLibrarySource.company_id == user.company_id))
     }
+    created_shops = 0
     try:
         for item in imported:
             source_key = (item.platform, item.site, item.shop_name)
@@ -1468,6 +1469,7 @@ async def import_product_library(
                 source = ProductLibrarySource(company_id=user.company_id, platform=item.platform, site=item.site, shop_name=item.shop_name)
                 db.add(source); db.flush()
                 sources[source_key] = source
+                created_shops += 1
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(409, "数据导入冲突，请重试") from exc
@@ -1553,7 +1555,7 @@ async def import_product_library(
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(409, "数据导入冲突，请重试") from exc
-    return {"created_products": created_products, "updated_products": len(updated_product_ids), "created_orders": created_orders}
+    return {"created_shops": created_shops, "created_products": created_products, "updated_products": len(updated_product_ids), "created_orders": created_orders}
 
 
 @app.post("/templates")

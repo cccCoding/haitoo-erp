@@ -66,6 +66,9 @@ server {
     http2 on;
     server_name ${API_DOMAIN};
 
+    # 允许产品库上传 30MB 文件，并为 multipart 表单头留出余量。
+    client_max_body_size 31m;
+
     location / {
         set $upstream_api api:8000;
         proxy_pass http://$upstream_api;

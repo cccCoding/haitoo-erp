@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 import unittest
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
@@ -17,6 +18,7 @@ from app.database import get_db
 from app.models import Company, MaterialAsset, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, User
 from app.schemas import ProductLibraryBatchTemplateInput
 from app.security import create_access_token
+from app.product_library import ALLOWED_PLATFORMS, ALLOWED_SITES
 
 
 HEADERS = ["店铺名称", "站点", "平台", "订单编号", "下单时间", "标题", "平台SKU", "产品图片链接", "产品ID"]
@@ -35,7 +37,7 @@ def xlsx(rows, headers=HEADERS):
 
 def row(*, sku="M06LFSKA9RPG7B6A-M", product_id="1736307142216353080", order="586284685874856962",
         shop="KK Cantik", ordered_at="2026-09-29 10:00:00", title="First title", image="https://example.com/image.jpg"):
-    return {"店铺名称": shop, "站点": "马来", "平台": "TikTok", "订单编号": order,
+    return {"店铺名称": shop, "站点": "马来西亚", "平台": "TikTok", "订单编号": order,
             "下单时间": ordered_at, "标题": title, "平台SKU": sku,
             "产品图片链接": image, "产品ID": product_id}
 
@@ -83,6 +85,31 @@ class ProductLibraryTests(unittest.TestCase):
         self.assertEqual(self.list_items(sku="  sku_100  ")["items"][0]["sku"], "SKU_100")
         self.assertEqual(self.list_items(sku="missing")["total"], 0)
 
+    def test_import_accepts_files_above_previous_size_limits(self):
+        for megabytes, compression in ((12, ZIP_STORED), (51, ZIP_DEFLATED)):
+            with self.subTest(megabytes=megabytes):
+                output = BytesIO(xlsx([row(order=f"order-{megabytes}")]))
+                with ZipFile(output, "a", compression=compression) as archive:
+                    with archive.open("extra-data.bin", "w") as entry:
+                        for _ in range(megabytes):
+                            entry.write(b"x" * 1024 * 1024)
+                result = self.import_bytes(output.getvalue())
+                self.assertEqual(result["created_orders"], 1)
+
+    def test_import_rejects_files_above_new_size_limits(self):
+        with self.assertRaisesRegex(HTTPException, "30MB"):
+            self.import_bytes(b"x" * (30 * 1024 * 1024 + 1))
+        output = BytesIO(xlsx([row()]))
+        with ZipFile(output, "a", compression=ZIP_DEFLATED) as archive:
+            with archive.open("extra-data.bin", "w") as entry:
+                for _ in range(151):
+                    entry.write(b"x" * 1024 * 1024)
+        with self.assertRaisesRegex(HTTPException, "150MB"):
+            self.import_bytes(output.getvalue())
+        with self.sessions() as db:
+            for model in (ProductLibrarySource, ProductLibraryProduct, ProductLibraryOrder):
+                self.assertEqual(db.scalar(select(func.count()).select_from(model)), 0)
+
     def test_import_groups_sizes_deduplicates_orders_and_filters_by_shop(self):
         first = row()
         continuation = row(sku="M06LFSKA9RPG7B6A-L")
@@ -93,8 +120,8 @@ class ProductLibraryTests(unittest.TestCase):
         other_shop = row(shop="Other Shop")
         data = xlsx([first, continuation, second_sku, second_order, other_shop], headers=list(reversed(HEADERS)))
 
-        self.assertEqual(self.import_bytes(data), {"created_products": 3, "updated_products": 0, "created_orders": 3})
-        self.assertEqual(self.import_bytes(data), {"created_products": 0, "updated_products": 0, "created_orders": 0})
+        self.assertEqual(self.import_bytes(data), {"created_shops": 2, "created_products": 3, "updated_products": 0, "created_orders": 3})
+        self.assertEqual(self.import_bytes(data), {"created_shops": 0, "created_products": 0, "updated_products": 0, "created_orders": 0})
         listing = self.list_items()
         self.assertEqual(listing["total"], 3)
         self.assertEqual({(item["shop_name"], item["sku"]): item["order_count"] for item in listing["items"]}, {
@@ -124,15 +151,15 @@ class ProductLibraryTests(unittest.TestCase):
             db.add(User(id=3, company_id=1, email="operator@example.com", name="Operator",
                         password_hash="x", role=Role.MEMBER))
             db.scalar(select(ProductLibrarySource).where(ProductLibrarySource.company_id == 1,
-                ProductLibrarySource.site == "马来", ProductLibrarySource.shop_name == "Same Shop")).assigned_user_id = 3
+                ProductLibrarySource.site == "马来西亚", ProductLibrarySource.shop_name == "Same Shop")).assigned_user_id = 3
             db.commit()
             user = db.get(User, 1)
             options = main.product_library_filters(user=user, db=db)["shops"]
             self.assertEqual([option["label"] for option in options], [
-                "TikTok-泰国-Same Shop-未分配", "TikTok-马来-Other Shop-未分配", "TikTok-马来-Same Shop-Operator",
+                "TikTok-泰国-Same Shop-未分配", "TikTok-马来西亚-Other Shop-未分配", "TikTok-马来西亚-Same Shop-Operator",
             ])
             ids = {option["label"]: option["id"] for option in options}
-        first_id = ids["TikTok-马来-Same Shop-Operator"]
+        first_id = ids["TikTok-马来西亚-Same Shop-Operator"]
         second_id = ids["TikTok-泰国-Same Shop-未分配"]
         self.assertEqual(self.list_items(source_ids=[first_id])["total"], 1)
         self.assertEqual(self.list_items(source_ids=[first_id, second_id])["total"], 2)
@@ -204,10 +231,61 @@ class ProductLibraryTests(unittest.TestCase):
     def test_reimport_updates_nonempty_product_details(self):
         self.import_bytes(xlsx([row()]))
         revised = row(title="Updated title", image="https://example.com/new.jpg")
-        self.assertEqual(self.import_bytes(xlsx([revised])), {"created_products": 0, "updated_products": 1, "created_orders": 0})
+        self.assertEqual(self.import_bytes(xlsx([revised])), {"created_shops": 0, "created_products": 0, "updated_products": 1, "created_orders": 0})
         item = self.list_items()["items"][0]
         self.assertEqual((item["title"], item["image_url"]), ("Updated title", "https://example.com/new.jpg"))
         self.assertEqual(item["order_count"], 1)
+
+    def test_required_product_details_reject_entire_import(self):
+        for field in ("标题", "产品图片链接"):
+            for value in (None, "", "   "):
+                with self.subTest(field=field, value=value):
+                    invalid = row(order="second-order")
+                    invalid[field] = value
+                    with self.assertRaisesRegex(HTTPException, f"第 3 行缺少「{field}」"):
+                        self.import_bytes(xlsx([row(), invalid]))
+                    with self.sessions() as db:
+                        for model in (ProductLibrarySource, ProductLibraryProduct, ProductLibraryOrder, ProductLibraryOrderProduct):
+                            self.assertEqual(db.scalar(select(func.count()).select_from(model)), 0)
+
+    def test_all_allowed_sites_and_platforms_create_separate_shops(self):
+        rows = []
+        for site in ALLOWED_SITES:
+            for platform in ALLOWED_PLATFORMS:
+                record = row()
+                record.update({"站点": site, "平台": platform})
+                rows.append(record)
+        result = self.import_bytes(xlsx(rows))
+        self.assertEqual(result, {"created_shops": 18, "created_products": 18,
+                                  "updated_products": 0, "created_orders": 18})
+        self.assertEqual(self.import_bytes(xlsx(rows)), {"created_shops": 0, "created_products": 0,
+                                                       "updated_products": 0, "created_orders": 0})
+
+    def test_invalid_site_and_platform_return_allowed_values_to_frontend(self):
+        def override_db():
+            with self.sessions() as db:
+                yield db
+
+        main.app.dependency_overrides[get_db] = override_db
+        try:
+            with self.sessions() as db:
+                token = create_access_token(db.get(User, 1))
+            client = TestClient(main.app)
+            for field, invalid_value, allowed in (("站点", "马来", ALLOWED_SITES),
+                                                  ("平台", "tiktok", ALLOWED_PLATFORMS)):
+                with self.subTest(field=field):
+                    invalid = row(order="second-order")
+                    invalid[field] = invalid_value
+                    response = client.post("/product-library/import",
+                        headers={"Authorization": f"Bearer {token}"},
+                        files={"file": ("orders.xlsx", xlsx([row(), invalid]),
+                                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json()["detail"],
+                        f"第 3 行「{field}」值「{invalid_value}」无效，可填值：{'、'.join(allowed)}")
+                    self.assertEqual(self.list_items()["total"], 0)
+        finally:
+            main.app.dependency_overrides.clear()
 
     def test_shop_sku_order_details_are_deduplicated_sorted_and_paginated(self):
         start = datetime(2026, 9, 1, 10, 0, 0)
@@ -316,6 +394,14 @@ class ProductLibraryTests(unittest.TestCase):
         self.assertTrue(all(sheet[f"{column}2"].number_format == "@" for column in ("D", "G", "I")))
         self.assertEqual(sheet["E2"].number_format, "yyyy-mm-dd hh:mm:ss")
         self.assertEqual(sheet["A2"].value, None)
+        validations = {str(v.sqref): v for v in sheet.data_validations.dataValidation}
+        for column, allowed in (("B", ALLOWED_SITES), ("C", ALLOWED_PLATFORMS)):
+            validation = validations[f"{column}2:{column}20001"]
+            self.assertEqual(validation.formula1, '"' + ','.join(allowed) + '"')
+            self.assertTrue(validation.showErrorMessage)
+            self.assertEqual(validation.errorStyle, "stop")
+        for column in ("F", "H"):
+            self.assertIn("必填", sheet[f"{column}1"].comment.text)
         for index, header in enumerate(HEADERS, start=1):
             sheet.cell(2, index).value = row()[header]
         output = BytesIO(); workbook.save(output)

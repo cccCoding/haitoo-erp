@@ -14,6 +14,8 @@ IMPORT_HEADERS = (
 )
 LOCAL_TIMEZONE = timezone(timedelta(hours=8))
 MAX_IMPORT_ROWS = 20000
+ALLOWED_SITES = ("泰国", "越南", "菲律宾", "马来西亚", "新加坡", "印度尼西亚")
+ALLOWED_PLATFORMS = ("TikTok", "Shopee", "Temu")
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,9 @@ def parse_order_workbook(data: bytes) -> list[ImportedOrderProduct]:
                     inherited[name] = current
                 elif name not in inherited:
                     raise ValueError(f"第 {row_number} 行缺少「{name}」")
+            for name, allowed in (("站点", ALLOWED_SITES), ("平台", ALLOWED_PLATFORMS)):
+                if inherited[name] not in allowed:
+                    raise ValueError(f"第 {row_number} 行「{name}」值「{inherited[name]}」无效，可填值：{'、'.join(allowed)}")
             raw_time = values["下单时间"]
             if raw_time is not None and str(raw_time).strip():
                 inherited_time = _order_time(raw_time, row_number, workbook.epoch)
@@ -115,6 +120,9 @@ def parse_order_workbook(data: bytes) -> list[ImportedOrderProduct]:
                 raise ValueError(f"第 {row_number} 行「平台SKU」去除尺码后为空")
             title = _identifier(values["标题"], row_number, "标题")
             image_url = _identifier(values["产品图片链接"], row_number, "产品图片链接")
+            for name, value in (("标题", title), ("产品图片链接", image_url)):
+                if not value:
+                    raise ValueError(f"第 {row_number} 行缺少「{name}」，请填写该字段")
             image_parts = urlsplit(image_url)
             if image_url and (image_parts.scheme.lower() not in {"http", "https"} or not image_parts.netloc):
                 raise ValueError(f"第 {row_number} 行「产品图片链接」须为 HTTP(S) 地址")
