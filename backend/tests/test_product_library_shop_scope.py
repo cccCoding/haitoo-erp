@@ -59,10 +59,10 @@ class ProductLibraryShopScopeTests(TestCase):
             product_library_rankings.create_daily_snapshot(db, 1, self.snapshot_date)
             product_library_rankings.create_daily_snapshot(db, 2, self.snapshot_date)
 
-    def ranking(self, user_id: int, category="top7", group_id=None, member_id=None):
+    def ranking(self, user_id: int, category="top7", source_ids=None):
         with self.sessions() as db:
             return main.list_product_library_rankings(category=category, page=1, page_size=50,
-                group_id=group_id, member_id=member_id, user=db.get(User, user_id), db=db)
+                source_ids=source_ids, user=db.get(User, user_id), db=db)
 
     def test_top50_reorders_within_selected_members_and_windows(self):
         for product_id, source_id, count in ((1, 1, 2), (2, 2, 1), (3, 3, 4),
@@ -75,20 +75,16 @@ class ProductLibraryShopScopeTests(TestCase):
                 self.assertEqual([item["rank"] for item in result["items"]], list(range(1, result["total"] + 1)))
                 return [item["id"] for item in result["items"]]
             self.assertEqual(ids(1), [5, 3, 4, 1, 2])
-            self.assertEqual(ids(1, group_id=1), [1, 2])
-            self.assertEqual(ids(1, group_id=1, member_id=3), [2])
+            self.assertEqual(ids(1, source_ids=[1, 2]), [1, 2])
+            self.assertEqual(ids(1, source_ids=[2]), [2])
             self.assertEqual(ids(2), [1, 2])
-            self.assertEqual(ids(2, member_id=2), [1])
-            self.assertEqual(ids(2, member_id=3), [2])
+            self.assertEqual(ids(2, source_ids=[1]), [1])
+            self.assertEqual(ids(2, source_ids=[2]), [2])
             self.assertEqual(ids(3), [2])
-        with self.assertRaises(HTTPException):
-            self.ranking(2, group_id=2)
-        with self.assertRaises(HTTPException):
-            self.ranking(3, member_id=2)
-        with self.assertRaises(HTTPException):
-            self.ranking(1, member_id=3)
-        with self.assertRaises(HTTPException):
-            self.ranking(1, group_id=1, member_id=4)
+        self.assertEqual(self.ranking(2, source_ids=[3])["items"], [])
+        self.assertEqual(self.ranking(3, source_ids=[1])["items"], [])
+        self.assertEqual(self.ranking(1, source_ids=[6])["items"], [])
+        self.assertEqual(self.ranking(2, source_ids=[2, 3])["items"][0]["id"], 2)
 
     def test_current_group_and_assignment_drive_visibility(self):
         self.add_product(1, 1, 1)
@@ -153,23 +149,14 @@ class ProductLibraryShopScopeTests(TestCase):
             headers=headers[3]).json()["total"], 0)
         self.assertEqual(client.get("/product-library/filters", headers=headers[3]).json()["shop_names"], ["Shop 2"])
 
-    def test_old_snapshot_rebuilds_before_filtered_top50(self):
-        for index in range(50):
-            self.add_product(index + 1, 3, 2)
-        self.add_product(51, 2, 1)
+    def test_incomplete_snapshot_is_not_published(self):
+        self.add_product(1, 2, 1)
         self.snapshot()
         with self.sessions() as db:
             snapshot = db.scalar(select(ProductLibraryDailySnapshot).where(ProductLibraryDailySnapshot.company_id == 1))
             snapshot.is_complete = False
-            db.execute(delete(ProductLibraryDailySnapshotItem).where(
-                ProductLibraryDailySnapshotItem.snapshot_id == snapshot.id,
-                ProductLibraryDailySnapshotItem.product_id == 51))
             db.commit()
-        result = self.ranking(2, member_id=3)
-        self.assertEqual([item["id"] for item in result["items"]], [51])
-        with self.sessions() as db:
-            snapshot = db.scalar(select(ProductLibraryDailySnapshot).where(ProductLibraryDailySnapshot.company_id == 1))
-            self.assertTrue(snapshot.is_complete)
+        self.assertEqual(self.ranking(2, source_ids=[2])["items"], [])
 
     def test_stagnant_and_new_images_include_current_group_creators(self):
         with self.sessions() as db:

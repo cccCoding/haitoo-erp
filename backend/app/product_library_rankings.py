@@ -7,14 +7,14 @@ from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import case, delete, func, select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
 from .models import (
     Company, ProductLibraryDailySnapshot, ProductLibraryDailySnapshotItem, ProductLibraryRankingTask,
-    ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct,
+    ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductLibrarySnapshotOrderProduct,
 )
 
 
@@ -100,47 +100,22 @@ def create_daily_snapshot(
             if commit:
                 db.commit()
             return False
+        db.execute(delete(ProductLibrarySnapshotOrderProduct).where(ProductLibrarySnapshotOrderProduct.snapshot_id == existing.id))
         db.execute(delete(ProductLibraryDailySnapshotItem).where(ProductLibraryDailySnapshotItem.snapshot_id == existing.id))
         db.execute(delete(ProductLibraryDailySnapshot).where(ProductLibraryDailySnapshot.id == existing.id))
     end = _utc_boundary(snapshot_date)
-    start_7 = _utc_boundary(snapshot_date - timedelta(days=7))
-    start_15 = _utc_boundary(snapshot_date - timedelta(days=15))
     start_30 = _utc_boundary(snapshot_date - timedelta(days=30))
-    rows = db.execute(select(
-        ProductLibraryProduct.id,
-        func.sum(case((ProductLibraryOrder.ordered_at >= start_7, 1), else_=0)),
-        func.sum(case((ProductLibraryOrder.ordered_at >= start_15, 1), else_=0)),
-        func.count(ProductLibraryOrderProduct.id),
-    ).select_from(ProductLibraryOrderProduct)
-     .join(ProductLibraryOrder, ProductLibraryOrder.id == ProductLibraryOrderProduct.order_id)
-     .join(ProductLibraryProduct, ProductLibraryProduct.id == ProductLibraryOrderProduct.product_id)
-     .where(ProductLibraryProduct.company_id == company_id,
-            ProductLibraryOrder.company_id == company_id,
-            ProductLibraryOrder.ordered_at >= start_30,
-            ProductLibraryOrder.ordered_at < end)
-     .group_by(ProductLibraryProduct.id)).all()
-    counts = {product_id: (int(c7), int(c15), int(c30)) for product_id, c7, c15, c30 in rows}
-    ranks: dict[int, dict[int, int]] = {}
-    for window_index in range(3):
-        ordered = sorted(
-            ((product_id, values[window_index]) for product_id, values in counts.items() if values[window_index] > 0),
-            key=lambda entry: (-entry[1], entry[0]),
-        )
-        for rank, (product_id, _) in enumerate(ordered[:50], start=1):
-            ranks.setdefault(product_id, {})[window_index] = rank
-
     snapshot = ProductLibraryDailySnapshot(company_id=company_id, snapshot_date=snapshot_date, is_complete=True)
     db.add(snapshot)
     db.flush()
-    for product_id, (c7, c15, c30) in counts.items():
-        tier = "booming" if c7 > 130 else "hot" if c7 > 70 else "potential" if c7 > 30 else None
-        product_ranks = ranks.get(product_id, {})
-        db.add(ProductLibraryDailySnapshotItem(
-            snapshot_id=snapshot.id, product_id=product_id,
-            count_7=c7, count_15=c15, count_30=c30,
-            rank_7=product_ranks.get(0), rank_15=product_ranks.get(1), rank_30=product_ranks.get(2),
-            tier=tier,
-        ))
+    facts = db.execute(select(ProductLibraryOrderProduct, ProductLibraryOrder)
+        .join(ProductLibraryOrder, ProductLibraryOrder.id == ProductLibraryOrderProduct.order_id)
+        .join(ProductLibraryProduct, ProductLibraryProduct.id == ProductLibraryOrderProduct.product_id)
+        .where(ProductLibraryProduct.company_id == company_id, ProductLibraryOrder.company_id == company_id,
+               ProductLibraryOrder.ordered_at >= start_30, ProductLibraryOrder.ordered_at < end)).all()
+    db.add_all(ProductLibrarySnapshotOrderProduct(snapshot_id=snapshot.id, order_id=order.id,
+        product_id=link.product_id, order_number=order.order_number, ordered_at=order.ordered_at,
+        quantity=link.quantity) for link, order in facts)
     if commit:
         db.commit()
     return True
@@ -285,6 +260,7 @@ def cleanup_old_snapshots(db: Session, company_id: int, target_date: date, *, co
         ProductLibraryDailySnapshot.snapshot_date < cutoff,
     )).all()
     if old_ids:
+        db.execute(delete(ProductLibrarySnapshotOrderProduct).where(ProductLibrarySnapshotOrderProduct.snapshot_id.in_(old_ids)))
         db.execute(delete(ProductLibraryDailySnapshotItem).where(ProductLibraryDailySnapshotItem.snapshot_id.in_(old_ids)))
         db.execute(delete(ProductLibraryDailySnapshot).where(ProductLibraryDailySnapshot.id.in_(old_ids)))
         if commit:

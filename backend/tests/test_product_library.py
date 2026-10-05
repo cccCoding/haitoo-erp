@@ -21,7 +21,7 @@ from app.security import create_access_token
 from app.product_library import ALLOWED_PLATFORMS, ALLOWED_SITES
 
 
-HEADERS = ["店铺名称", "站点", "平台", "订单编号", "下单时间", "标题", "平台SKU", "产品图片链接", "产品ID"]
+HEADERS = ["店铺名称", "站点", "平台", "订单编号", "数量", "下单时间", "标题", "平台SKU", "产品图片链接", "产品ID"]
 
 
 def xlsx(rows, headers=HEADERS):
@@ -36,9 +36,9 @@ def xlsx(rows, headers=HEADERS):
 
 
 def row(*, sku="M06LFSKA9RPG7B6A-M", product_id="1736307142216353080", order="586284685874856962",
-        shop="KK Cantik", ordered_at="2026-09-29 10:00:00", title="First title", image="https://example.com/image.jpg"):
+        shop="KK Cantik", quantity=1, ordered_at="2026-09-29 10:00:00", title="First title", image="https://example.com/image.jpg"):
     return {"店铺名称": shop, "站点": "马来西亚", "平台": "TikTok", "订单编号": order,
-            "下单时间": ordered_at, "标题": title, "平台SKU": sku,
+            "数量": quantity, "下单时间": ordered_at, "标题": title, "平台SKU": sku,
             "产品图片链接": image, "产品ID": product_id}
 
 
@@ -123,11 +123,9 @@ class ProductLibraryTests(unittest.TestCase):
         self.assertEqual(self.import_bytes(data), {"created_shops": 2, "created_products": 3, "updated_products": 0, "created_orders": 3})
         self.assertEqual(self.import_bytes(data), {"created_shops": 0, "created_products": 0, "updated_products": 0, "created_orders": 0})
         listing = self.list_items()
-        self.assertEqual(listing["total"], 3)
-        self.assertEqual({(item["shop_name"], item["sku"]): item["order_count"] for item in listing["items"]}, {
-            ("KK Cantik", "M06LFSKA9RPG7B6A"): 2,
-            ("KK Cantik", "M05LFSPE7Y65"): 1,
-            ("Other Shop", "M06LFSKA9RPG7B6A"): 1,
+        self.assertEqual(listing["total"], 2)
+        self.assertEqual({item["sku"]: (item["order_count"], item["sales_quantity"]) for item in listing["items"]}, {
+            "M06LFSKA9RPG7B6A": (3, 4), "M05LFSPE7Y65": (1, 1),
         })
         self.assertEqual(self.list_items(shop_name="Other Shop")["total"], 1)
         self.assertEqual(self.list_items(platform="Shopee")["total"], 0)
@@ -163,7 +161,7 @@ class ProductLibraryTests(unittest.TestCase):
         second_id = ids["TikTok-泰国-Same Shop-未分配"]
         self.assertEqual(self.list_items(source_ids=[first_id])["total"], 1)
         self.assertEqual(self.list_items(source_ids=[first_id, second_id])["total"], 2)
-        self.assertEqual(self.list_items(source_ids=[second_id])["items"][0]["site"], "泰国")
+        self.assertEqual(self.list_items(source_ids=[second_id])["items"][0]["shop_data"][0]["source_id"], second_id)
         self.assertEqual(self.list_items(source_ids=[999999])["total"], 0)
 
         def override_db():
@@ -203,10 +201,10 @@ class ProductLibraryTests(unittest.TestCase):
                     shop_name=None, sku=None, template_id=None, unmatched=False, user=user, db=db)
             first, second = listing(1), listing(2)
         self.assertEqual(first["total"], 4)
-        self.assertEqual([(item["product_id"], item["order_count"]) for item in first["items"]],
-                         [("p1", 3), ("p3", 2)])
-        self.assertEqual([(item["product_id"], item["order_count"]) for item in second["items"]],
-                         [("p2", 2), ("zero", 0)])
+        self.assertEqual([(item["shop_data"][0]["product_id"], item["order_count"]) for item in first["items"]],
+                         [("p1", 3), ("p2", 2)])
+        self.assertEqual([(item["shop_data"][0]["product_id"], item["order_count"]) for item in second["items"]],
+                         [("p3", 2), ("zero", 0)])
 
     def test_product_list_looks_up_material_creator_with_company_scope(self):
         self.import_bytes(xlsx([
@@ -222,7 +220,7 @@ class ProductLibraryTests(unittest.TestCase):
                               sku="OTHERAA123456", claimed_by=2, created_at=created_at),
             ])
             db.commit()
-        items = {item["product_id"]: item for item in self.list_items()["items"]}
+        items = {item["shop_data"][0]["product_id"]: item for item in self.list_items()["items"]}
         self.assertEqual(items["matched"]["material_created_by_name"], "A")
         self.assertEqual(items["matched"]["material_created_at"], main.timestamp_ms(created_at))
         self.assertIsNone(items["foreign"]["material_created_by_name"])
@@ -295,20 +293,19 @@ class ProductLibraryTests(unittest.TestCase):
                  row(order="another-shop-order", shop="Another Shop"),
                  row(order="another-sku-order", sku="M05LFSPE7Y65-L")]
         self.import_bytes(xlsx(rows))
-        product = next(item for item in self.list_items()["items"]
-                       if item["product_id"] == rows[0]["产品ID"] and item["sku"] == "M06LFSKA9RPG7B6A"
-                       and item["shop_name"] == "KK Cantik")
-        same_sku_product = next(item for item in self.list_items()["items"] if item["product_id"] == "another-product")
+        product = next(item for item in self.list_items()["items"] if item["sku"] == "M06LFSKA9RPG7B6A")
+        self.assertEqual((product["order_count"], product["sales_quantity"]), (26, 27))
         with self.sessions() as db:
             user = db.get(User, 1)
-            first = main.list_product_library_orders(product["id"], page=1, user=user, db=db)
-            second = main.list_product_library_orders(product["id"], page=2, user=user, db=db)
-            self.assertEqual(main.list_product_library_orders(same_sku_product["id"], page=1, user=user, db=db)["total"], 25)
-            self.assertEqual((first["total"], first["page_size"], len(first["items"])), (25, 20, 20))
+            source_id = db.scalar(select(ProductLibrarySource.id).where(ProductLibrarySource.shop_name == "KK Cantik"))
+            first = main.list_product_library_orders(product["id"], page=1, source_ids=[source_id], user=user, db=db)
+            second = main.list_product_library_orders(product["id"], page=2, source_ids=[source_id], user=user, db=db)
+            self.assertEqual((first["total"], first["order_count"], first["page_size"], len(first["items"])), (26, 25, 20, 20))
             self.assertEqual([item["order_number"] for item in first["items"]],
                              [f"order-{index:02d}" for index in range(24, 4, -1)])
             self.assertEqual([item["order_number"] for item in second["items"]],
-                             [f"order-{index:02d}" for index in range(4, -1, -1)])
+                             [f"order-{index:02d}" for index in range(4, -1, -1)] + ["order-00"])
+            self.assertEqual(first["items"][0]["quantity"], 1)
             self.assertEqual(first["items"][0]["ordered_at"], main.timestamp_ms(start + timedelta(hours=24) - timedelta(hours=8)))
             with self.assertRaisesRegex(HTTPException, "无权查看"):
                 main.list_product_library_orders(product["id"], page=1, user=db.get(User, 2), db=db)
@@ -387,8 +384,8 @@ class ProductLibraryTests(unittest.TestCase):
         workbook = load_workbook(BytesIO(response.body))
         sheet = workbook.active
         self.assertEqual([cell.value for cell in sheet[1]], HEADERS)
-        self.assertTrue(all(sheet[f"{column}2"].number_format == "@" for column in ("D", "G", "I")))
-        self.assertEqual(sheet["E2"].number_format, "yyyy-mm-dd hh:mm:ss")
+        self.assertTrue(all(sheet[f"{column}2"].number_format == "@" for column in ("D", "H", "J")))
+        self.assertEqual(sheet["F2"].number_format, "yyyy-mm-dd hh:mm:ss")
         self.assertEqual(sheet["A2"].value, None)
         validations = {str(v.sqref): v for v in sheet.data_validations.dataValidation}
         for column, allowed in (("B", ALLOWED_SITES), ("C", ALLOWED_PLATFORMS)):
@@ -396,7 +393,7 @@ class ProductLibraryTests(unittest.TestCase):
             self.assertEqual(validation.formula1, '"' + ','.join(allowed) + '"')
             self.assertTrue(validation.showErrorMessage)
             self.assertEqual(validation.errorStyle, "stop")
-        for column in ("F", "H"):
+        for column in ("G", "I"):
             self.assertIn("必填", sheet[f"{column}1"].comment.text)
         for index, header in enumerate(HEADERS, start=1):
             sheet.cell(2, index).value = row()[header]

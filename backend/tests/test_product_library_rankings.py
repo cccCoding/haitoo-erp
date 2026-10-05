@@ -13,7 +13,7 @@ from app import main
 from app.database import Base, get_db
 from app.models import (
     Company, MaterialAsset, ProductLibraryDailySnapshot, ProductLibraryDailySnapshotItem, ProductLibraryRankingTask,
-    ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductLibrarySource,
+    ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductLibrarySource, ProductLibrarySnapshotOrderProduct,
     Role, User,
 )
 from app import product_library_rankings as rankings
@@ -104,7 +104,7 @@ class ProductLibraryRankingTests(TestCase):
         self.assertEqual(top["total"], 50)
         self.assertEqual([row["id"] for row in top["items"][:6]],
                          [boundary[count] for count in (131, 130, 71, 70, 31, 30)])
-        self.assertEqual([row["id"] for row in top["items"][6:]], ids[:44])
+        self.assertEqual([row["id"] for row in top["items"][6:]], sorted(ids, key=lambda value: f"SKU-{value}")[:44])
         self.assertEqual([row["rank"] for row in self.listing("top7", page=2, page_size=20)["items"]], list(range(21, 41)))
         self.assertEqual([row["id"] for row in self.listing("potential")["items"]], [boundary[70], boundary[31]])
         self.assertEqual([row["id"] for row in self.listing("hot")["items"]], [boundary[130], boundary[71]])
@@ -131,7 +131,7 @@ class ProductLibraryRankingTests(TestCase):
                 ProductLibraryDailySnapshot.company_id == 1).order_by(ProductLibraryDailySnapshot.snapshot_date)).all()
             self.assertEqual(len(dates), 30)
             self.assertEqual((dates[0], dates[-1]), (first + timedelta(days=2), first + timedelta(days=31)))
-            self.assertEqual(db.scalar(select(func.count()).select_from(ProductLibraryDailySnapshotItem)), 0)
+            self.assertEqual(db.scalar(select(func.count()).select_from(ProductLibrarySnapshotOrderProduct)), 0)
 
     def test_category_is_not_capped(self):
         for _ in range(51):
@@ -256,7 +256,7 @@ class ProductLibraryRankingTests(TestCase):
                 headers={"Authorization": f"Bearer {token_b}"}).json()
             self.assertEqual(first["total"], 0)
             self.assertEqual(second["total"], 1)
-            self.assertEqual(second["items"][0]["shop_name"], "Second Shop")
+            self.assertEqual(second["items"][0]["shop_data"][0]["shop_name"], "Second Shop")
             self.assertEqual(client.post("/product-library/rankings/refresh").status_code, 403)
             busy = client.post("/product-library/rankings/refresh", headers={"Authorization": f"Bearer {token_a}"})
             self.assertEqual(busy.status_code, 202)

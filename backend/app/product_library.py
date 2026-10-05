@@ -10,7 +10,7 @@ from openpyxl.utils.datetime import from_excel
 
 
 IMPORT_HEADERS = (
-    "店铺名称", "站点", "平台", "订单编号", "下单时间", "标题", "平台SKU", "产品图片链接", "产品ID",
+    "店铺名称", "站点", "平台", "订单编号", "数量", "下单时间", "标题", "平台SKU", "产品图片链接", "产品ID",
 )
 LOCAL_TIMEZONE = timezone(timedelta(hours=8))
 MAX_IMPORT_ROWS = 20000
@@ -30,6 +30,8 @@ class ImportedOrderProduct:
     sku: str
     image_url: str
     external_product_id: str
+    platform_sku: str
+    quantity: int
 
 
 def _identifier(value: object, row_number: int, column: str) -> str:
@@ -115,6 +117,21 @@ def parse_order_workbook(data: bytes) -> list[ImportedOrderProduct]:
                 raise ValueError(f"第 {row_number} 行缺少「下单时间」")
             if inherited_time is None:
                 raise ValueError(f"第 {row_number} 行缺少「下单时间」")
+            raw_quantity = values["数量"]
+            try:
+                if isinstance(raw_quantity, bool) or raw_quantity is None:
+                    raise ValueError
+                quantity = int(raw_quantity)
+                if isinstance(raw_quantity, float) and not raw_quantity.is_integer():
+                    raise ValueError
+                if isinstance(raw_quantity, str) and not raw_quantity.strip().isdecimal():
+                    raise ValueError
+                if quantity <= 0 or quantity > 2147483647:
+                    raise ValueError
+            except (ValueError, TypeError, OverflowError) as exc:
+                raise ValueError(f"第 {row_number} 行「数量」须为正整数（不超过 2147483647）") from exc
+            if len(sku_value) > 120:
+                raise ValueError(f"第 {row_number} 行「平台SKU」不能超过 120 个字符")
             sku = sku_value.split("-", 1)[0].strip()
             if not sku:
                 raise ValueError(f"第 {row_number} 行「平台SKU」去除尺码后为空")
@@ -135,6 +152,7 @@ def parse_order_workbook(data: bytes) -> list[ImportedOrderProduct]:
                 row_number=row_number, shop_name=inherited["店铺名称"], site=inherited["站点"],
                 platform=inherited["平台"], order_number=inherited["订单编号"], ordered_at=inherited_time,
                 title=title, sku=sku, image_url=image_url, external_product_id=product_id,
+                platform_sku=sku_value, quantity=quantity,
             ))
         if not items:
             raise ValueError("表格没有可导入的数据行")

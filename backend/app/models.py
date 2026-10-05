@@ -387,6 +387,33 @@ class ProductLibraryOrderProduct(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     order_id: Mapped[int] = mapped_column(index=True)
     product_id: Mapped[int] = mapped_column()
+    quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+
+class ProductLibraryOrderSkuQuantity(Base):
+    """完整平台 SKU 数量；重复导入覆盖对应尺码。"""
+    __tablename__ = "product_library_order_sku_quantities"
+    __table_args__ = (UniqueConstraint("order_product_id", "platform_sku", name="uq_product_library_order_sku_quantity"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_product_id: Mapped[int] = mapped_column(index=True)
+    platform_sku: Mapped[str] = mapped_column(String(120))
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ProductLibrarySnapshotOrderProduct(Base):
+    """冻结统计时的订单商品数量，支持店铺筛选后按 SKU 去重。"""
+    __tablename__ = "product_library_snapshot_order_products"
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "order_id", "product_id", name="uq_product_library_snapshot_order_product"),
+        Index("ix_product_library_snapshot_order_product", "snapshot_id", "product_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    snapshot_id: Mapped[int] = mapped_column(index=True)
+    order_id: Mapped[int] = mapped_column()
+    product_id: Mapped[int] = mapped_column()
+    order_number: Mapped[str] = mapped_column(String(120))
+    ordered_at: Mapped[datetime] = mapped_column(DateTime)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class ProductLibraryDailySnapshot(Base):
@@ -400,6 +427,7 @@ class ProductLibraryDailySnapshot(Base):
 
 
 class ProductLibraryDailySnapshotItem(Base):
+    """旧版产品级汇总表，仅保留升级及清理兼容；新快照使用订单商品明细。"""
     __tablename__ = "product_library_daily_snapshot_items"
     __table_args__ = (
         UniqueConstraint("snapshot_id", "product_id", name="uq_product_library_snapshot_product"),

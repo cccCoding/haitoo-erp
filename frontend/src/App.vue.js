@@ -2,6 +2,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import axios from 'axios';
 import SearchableSelect from './SearchableSelect.vue';
+import ShopDataHeading from './ShopDataHeading.vue';
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' });
 const token = ref(localStorage.getItem('haitoro_token') || '');
 const route = useRoute();
@@ -68,8 +69,6 @@ const productLibraryStatisticsRunning = computed(() => ['queued', 'running'].inc
 const productLibraryRankingItems = ref([]), productLibraryRankingTotal = ref(0), productLibraryRankingPage = ref(1), productLibraryRankingPageSize = ref(20), productLibraryRankingLoading = ref(false);
 const productLibraryRankingDate = ref(null), productLibraryRankingThroughDate = ref(null), productLibraryRankingError = ref('');
 const productLibraryShops = ref([]), productLibraryShopsLoading = ref(false), productLibraryAssigningId = ref(null);
-const rankingScopeGroups = ref([]), rankingScopeMembers = ref([]), rankingGroupId = ref(null), rankingMemberId = ref(null);
-const rankingFilteredMembers = computed(() => rankingScopeMembers.value.filter(member => member.group_id === (user.value?.role === 'team_leader' ? user.value?.group_id : rankingGroupId.value)));
 let productLibraryRankingRequestId = 0;
 const stagnantMaterials = ref([]), stagnantTotal = ref(0), stagnantPage = ref(1), stagnantPageSize = ref(20), stagnantCreatorId = ref(null), stagnantLoading = ref(false), stagnantError = ref('');
 let stagnantRequestId = 0;
@@ -86,9 +85,9 @@ const productLibraryTopTabKeys = new Set(['top7', 'top15', 'top30']);
 const productLibraryCategoryDescriptions = {
     stagnant: '素材创建超过 90 天且历史累计 0 订单',
     new_images: '近 5 天新增的素材',
-    potential: '近7天出单大于30',
-    hot: '近7天出单大于70',
-    booming: '近7天出单大于130',
+    potential: '近7天销量大于30',
+    hot: '近7天销量大于70',
+    booming: '近7天销量大于130',
 };
 const productLibraryFilters = ref({ shops: [] });
 const productLibrarySelectedShopIds = ref([]), productLibraryShopSearch = ref('');
@@ -102,9 +101,10 @@ const productLibraryShopOptions = computed(() => productLibraryFilters.value.sho
 const productLibraryShopSelectionLabel = computed(() => productLibrarySelectedShopIds.value.length === 0 ? '全部店铺' : productLibrarySelectedShopIds.value.length === 1 ? productLibraryFilters.value.shops.find(shop => shop.id === productLibrarySelectedShopIds.value[0])?.label || '已选 1 家店铺' : `已选 ${productLibrarySelectedShopIds.value.length} 家店铺`);
 const productLibraryTemplateFilter = ref(''), productLibrarySku = ref('');
 const appliedProductLibraryFilters = ref({ sourceIds: [], template: '', sku: '' });
+const rankingShopFilters = ref({});
 const selectedProductLibraryIds = ref([]), productLibraryBrokenImages = ref([]);
 const showProductLibraryTemplateDialog = ref(false), productLibraryTargetTemplateId = ref(null), productLibraryTemplateSaving = ref(false);
-const productLibraryOrderProduct = ref(null), productLibraryOrders = ref([]), productLibraryOrderTotal = ref(0), productLibraryOrderPage = ref(1), productLibraryOrderLoading = ref(false);
+const productLibraryOrderProduct = ref(null), productLibraryOrders = ref([]), productLibraryOrderTotal = ref(0), productLibraryOrderCount = ref(0), productLibraryOrderPage = ref(1), productLibraryOrderLoading = ref(false);
 let productLibraryOrderRequestId = 0;
 const productLibraryFileInput = ref(null);
 const collectBoxConfigured = ref(false), collectBoxLastSyncedAt = ref(null), collectBoxInitialSyncedAt = ref(null);
@@ -763,29 +763,16 @@ async function assignProductLibraryShop(shop, event) {
         productLibraryAssigningId.value = null;
     }
 }
-async function loadProductLibraryRankingScopeOptions() {
-    if (user.value?.role === 'member')
-        return;
+async function loadProductLibraryRankingTab() {
     try {
-        const { data } = await api.get('/product-library/ranking-scope-options', { headers: headers.value });
-        rankingScopeGroups.value = data.groups || [];
-        rankingScopeMembers.value = data.members || [];
-        if (rankingGroupId.value != null && !rankingScopeGroups.value.some(group => group.id === rankingGroupId.value))
-            rankingGroupId.value = null;
-        if (rankingMemberId.value != null && !rankingFilteredMembers.value.some(member => member.id === rankingMemberId.value))
-            rankingMemberId.value = null;
+        const { data } = await api.get('/product-library/filters', { headers: headers.value });
+        productLibraryFilters.value = data;
     }
     catch (e) {
-        showProductLibraryErrorToast(e, '加载运营组筛选失败');
+        showProductLibraryErrorToast(e, '加载店铺筛选失败');
     }
-}
-async function loadProductLibraryRankingTab() {
-    if (productLibraryTopTabKeys.has(activeProductLibraryTab.value))
-        await loadProductLibraryRankingScopeOptions();
     await loadProductLibraryRankings();
 }
-function changeRankingGroup() { rankingMemberId.value = null; void loadProductLibraryRankings(); }
-function changeRankingMember() { void loadProductLibraryRankings(); }
 async function loadProductLibrary(withFilters = false) {
     try {
         productLibraryLoading.value = true;
@@ -828,8 +815,7 @@ async function loadProductLibraryRankings() {
         productLibraryRankingLoading.value = true;
         productLibraryRankingError.value = '';
         const { data } = await api.get('/product-library/rankings', { headers: headers.value, params: { category, page: isTop50 ? 1 : productLibraryRankingPage.value, page_size: isTop50 ? 50 : productLibraryRankingPageSize.value,
-                group_id: isTop50 && user.value?.role === 'company_admin' ? rankingGroupId.value : undefined,
-                member_id: isTop50 && user.value?.role !== 'member' ? rankingMemberId.value : undefined } });
+                source_ids: rankingShopFilters.value[category]?.length ? rankingShopFilters.value[category] : undefined }, paramsSerializer: { indexes: null } });
         if (requestId !== productLibraryRankingRequestId)
             return;
         productLibraryRankingItems.value = data.items || [];
@@ -929,8 +915,16 @@ function changeProductLibraryRankingPageSize() {
     void loadProductLibraryRankings();
 }
 function searchProductLibrary() {
-    if (productLibraryLoading.value)
+    if (productLibraryLoading.value || productLibraryRankingLoading.value)
         return;
+    productLibraryShopFilterDetails.value?.removeAttribute('open');
+    if (productLibraryRankingTabKeys.has(activeProductLibraryTab.value)) {
+        rankingShopFilters.value[activeProductLibraryTab.value] = [...productLibrarySelectedShopIds.value];
+        productLibraryRankingPage.value = 1;
+        selectedProductLibraryIds.value = [];
+        void loadProductLibraryRankings();
+        return;
+    }
     appliedProductLibraryFilters.value = {
         sourceIds: [...productLibrarySelectedShopIds.value], template: productLibraryTemplateFilter.value,
         sku: productLibrarySku.value.trim(),
@@ -948,6 +942,9 @@ function changeProductLibraryTab(tab) {
     if (activeProductLibraryTab.value === tab)
         return;
     activeProductLibraryTab.value = tab;
+    productLibrarySelectedShopIds.value = [...(tab === 'products' ? appliedProductLibraryFilters.value.sourceIds : rankingShopFilters.value[tab] || [])];
+    productLibraryShopSearch.value = '';
+    closeProductLibraryOrders();
     selectedProductLibraryIds.value = [];
     productLibraryRankingRequestId++;
     stagnantRequestId++;
@@ -979,10 +976,15 @@ function changeProductLibraryPage(next) {
     void loadProductLibrary();
 }
 function openProductLibraryOrders(item) {
-    productLibraryOrderProduct.value = item;
+    productLibraryOrderProduct.value = { ...item,
+        sourceIds: [...(activeProductLibraryTab.value === 'products' ? appliedProductLibraryFilters.value.sourceIds : rankingShopFilters.value[activeProductLibraryTab.value] || [])],
+        category: productLibraryRankingTabKeys.has(activeProductLibraryTab.value) ? activeProductLibraryTab.value : undefined,
+        snapshotDate: productLibraryRankingTabKeys.has(activeProductLibraryTab.value) ? productLibraryRankingDate.value : undefined,
+    };
     productLibraryOrderPage.value = 1;
     productLibraryOrders.value = [];
     productLibraryOrderTotal.value = 0;
+    productLibraryOrderCount.value = 0;
     void loadProductLibraryOrders();
 }
 function closeProductLibraryOrders() {
@@ -998,11 +1000,14 @@ async function loadProductLibraryOrders() {
     try {
         productLibraryOrderLoading.value = true;
         productLibraryOrders.value = [];
-        const { data } = await api.get(`/product-library/${product.id}/orders`, { headers: headers.value, params: { page: productLibraryOrderPage.value } });
+        const { data } = await api.get(`/product-library/${product.id}/orders`, { headers: headers.value, params: { page: productLibraryOrderPage.value,
+                source_ids: product.sourceIds.length ? product.sourceIds : undefined,
+                category: product.category, snapshot_date: product.snapshotDate }, paramsSerializer: { indexes: null } });
         if (requestId !== productLibraryOrderRequestId)
             return;
         productLibraryOrders.value = data.items || [];
         productLibraryOrderTotal.value = data.total || 0;
+        productLibraryOrderCount.value = data.order_count || 0;
     }
     catch (e) {
         if (requestId === productLibraryOrderRequestId) {
@@ -3441,7 +3446,7 @@ finally {
 let toastTimer;
 function showToast(message) { toast.value = message; if (toastTimer)
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = ''; }, 3000); }
-function logout() { localStorage.removeItem('haitoro_token'); token.value = ''; user.value = null; taskCreatorFilterId.value = null; materialCreatorFilterId.value = null; draftCreatorFilterId.value = null; creatorFiltersInitialized.value = false; productLibraryItems.value = []; productLibraryTotal.value = 0; productLibraryPage.value = 1; productLibraryRankingRequestId++; productLibraryRankingItems.value = []; productLibraryRankingTotal.value = 0; productLibraryRankingDate.value = null; productLibraryRankingThroughDate.value = null; productLibraryShops.value = []; rankingScopeGroups.value = []; rankingScopeMembers.value = []; rankingGroupId.value = null; rankingMemberId.value = null; stagnantRequestId++; stagnantMaterials.value = []; stagnantTotal.value = 0; stagnantPage.value = 1; stagnantCreatorId.value = null; stagnantError.value = ''; stagnantLoading.value = false; newImagesRequestId++; newImages.value = []; newImagesTotal.value = 0; newImagesPage.value = 1; newImagesCreatorId.value = null; newImagesUsageStatus.value = 'all'; newImagesError.value = ''; newImagesLoading.value = false; productLibraryStatisticsTask.value = null; activeProductLibraryTab.value = 'products'; productLibrarySelectedShopIds.value = []; productLibraryShopSearch.value = ''; productLibraryTemplateFilter.value = ''; productLibrarySku.value = ''; appliedProductLibraryFilters.value = { sourceIds: [], template: '', sku: '' }; selectedProductLibraryIds.value = []; productLibraryFilters.value = { shops: [] }; }
+function logout() { localStorage.removeItem('haitoro_token'); token.value = ''; user.value = null; taskCreatorFilterId.value = null; materialCreatorFilterId.value = null; draftCreatorFilterId.value = null; creatorFiltersInitialized.value = false; productLibraryItems.value = []; productLibraryTotal.value = 0; productLibraryPage.value = 1; productLibraryRankingRequestId++; productLibraryRankingItems.value = []; productLibraryRankingTotal.value = 0; productLibraryRankingDate.value = null; productLibraryRankingThroughDate.value = null; productLibraryShops.value = []; rankingShopFilters.value = {}; stagnantRequestId++; stagnantMaterials.value = []; stagnantTotal.value = 0; stagnantPage.value = 1; stagnantCreatorId.value = null; stagnantError.value = ''; stagnantLoading.value = false; newImagesRequestId++; newImages.value = []; newImagesTotal.value = 0; newImagesPage.value = 1; newImagesCreatorId.value = null; newImagesUsageStatus.value = 'all'; newImagesError.value = ''; newImagesLoading.value = false; productLibraryStatisticsTask.value = null; activeProductLibraryTab.value = 'products'; productLibrarySelectedShopIds.value = []; productLibraryShopSearch.value = ''; productLibraryTemplateFilter.value = ''; productLibrarySku.value = ''; appliedProductLibraryFilters.value = { sourceIds: [], template: '', sku: '' }; selectedProductLibraryIds.value = []; productLibraryFilters.value = { shops: [] }; }
 api.interceptors.response.use(response => response, requestError => {
     if (requestError.response?.data?.detail === '登录已失效') {
         logout();
@@ -6037,7 +6042,7 @@ if (__VLS_ctx.token) {
             });
             (__VLS_ctx.productLibraryCategoryDescriptions[__VLS_ctx.activeProductLibraryTab]);
         }
-        if (__VLS_ctx.activeProductLibraryTab === 'products') {
+        if (__VLS_ctx.activeProductLibraryTab === 'products' || __VLS_ctx.productLibraryRankingTabKeys.has(__VLS_ctx.activeProductLibraryTab)) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "product-library-filters" },
             });
@@ -6089,7 +6094,7 @@ if (__VLS_ctx.token) {
                             return;
                         if (!(__VLS_ctx.page === 'product-library'))
                             return;
-                        if (!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                        if (!(__VLS_ctx.activeProductLibraryTab === 'products' || __VLS_ctx.productLibraryRankingTabKeys.has(__VLS_ctx.activeProductLibraryTab)))
                             return;
                         __VLS_ctx.productLibrarySelectedShopIds = [];
                     } },
@@ -6117,36 +6122,40 @@ if (__VLS_ctx.token) {
                     ...{ class: "product-library-shop-filter-empty" },
                 });
             }
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-                value: (__VLS_ctx.productLibraryTemplateFilter),
-                disabled: (__VLS_ctx.productLibraryLoading),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: "",
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: "unmatched",
-            });
-            for (const [item] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                    key: (item.id),
-                    value: (String(item.id)),
+            if (__VLS_ctx.activeProductLibraryTab === 'products') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+                    value: (__VLS_ctx.productLibraryTemplateFilter),
+                    disabled: (__VLS_ctx.productLibraryLoading),
                 });
-                (item.name);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    value: "",
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    value: "unmatched",
+                });
+                for (const [item] of __VLS_getVForSourceType((__VLS_ctx.templates))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                        key: (item.id),
+                        value: (String(item.id)),
+                    });
+                    (item.name);
+                }
             }
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-                type: "search",
-                placeholder: "输入 SKU",
-                disabled: (__VLS_ctx.productLibraryLoading),
-            });
-            (__VLS_ctx.productLibrarySku);
+            if (__VLS_ctx.activeProductLibraryTab === 'products') {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+                    type: "search",
+                    placeholder: "输入 SKU",
+                    disabled: (__VLS_ctx.productLibraryLoading),
+                });
+                (__VLS_ctx.productLibrarySku);
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (__VLS_ctx.searchProductLibrary) },
                 type: "button",
                 ...{ class: "primary product-library-search-button" },
-                disabled: (__VLS_ctx.productLibraryLoading),
+                disabled: (__VLS_ctx.productLibraryLoading || __VLS_ctx.productLibraryRankingLoading),
             });
         }
         if (__VLS_ctx.activeProductLibraryTab !== 'shops' && __VLS_ctx.selectedProductLibraryIds.length) {
@@ -6258,8 +6267,10 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            /** @type {[typeof ShopDataHeading, ]} */ ;
+            // @ts-ignore
+            const __VLS_0 = __VLS_asFunctionalComponent(ShopDataHeading, new ShopDataHeading({}));
+            const __VLS_1 = __VLS_0({}, ...__VLS_functionalComponentArgsRest(__VLS_0));
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -6375,23 +6386,25 @@ if (__VLS_ctx.token) {
                     title: (item.title),
                 });
                 (item.title || '—');
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-                (item.site);
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                    title: (item.shop_name),
+                    ...{ class: "product-library-shop-data" },
                 });
-                (item.shop_name);
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                    ...{ class: "product-library-code" },
-                    title: (item.product_id),
-                });
-                (item.product_id);
+                for (const [shop] of __VLS_getVForSourceType((item.shop_data))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        key: (`${shop.source_id}-${shop.product_id}`),
+                    });
+                    (shop.shop_name);
+                    (shop.product_id);
+                    (shop.sales_quantity);
+                }
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
                 (item.material_created_by_name || '');
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
                 (item.material_created_at != null ? new Date(item.material_created_at).toLocaleString() : '');
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
                 (item.order_count);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+                (item.sales_quantity);
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!(__VLS_ctx.token))
@@ -6417,7 +6430,7 @@ if (__VLS_ctx.token) {
                     ...{ class: "product-library-detail-button" },
                     type: "button",
                     title: "查看详情",
-                    'aria-label': (`查看 ${item.shop_name} ${item.sku} 的订单详情`),
+                    'aria-label': (`查看 ${item.sku} 的订单详情`),
                 });
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.svg, __VLS_intrinsicElements.svg)({
                     viewBox: "0 0 24 24",
@@ -6608,6 +6621,7 @@ if (__VLS_ctx.token) {
                         value: (member.id),
                     });
                     (member.name);
+                    (__VLS_ctx.operatorGroupName(member.group_id));
                     (__VLS_ctx.memberRoleLabel(member));
                 }
             }
@@ -7196,48 +7210,6 @@ if (__VLS_ctx.token) {
                 (__VLS_ctx.productLibraryRankingDate);
                 (__VLS_ctx.productLibraryRankingThroughDate);
             }
-            if (__VLS_ctx.productLibraryTopTabKeys.has(__VLS_ctx.activeProductLibraryTab) && __VLS_ctx.user?.role !== 'member') {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                    ...{ class: "product-library-filters" },
-                });
-                if (__VLS_ctx.user?.role === 'company_admin') {
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-                        ...{ onChange: (__VLS_ctx.changeRankingGroup) },
-                        value: (__VLS_ctx.rankingGroupId),
-                        disabled: (__VLS_ctx.productLibraryRankingLoading),
-                    });
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                        value: (null),
-                    });
-                    for (const [group] of __VLS_getVForSourceType((__VLS_ctx.rankingScopeGroups))) {
-                        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                            key: (group.id),
-                            value: (group.id),
-                        });
-                        (group.name);
-                    }
-                }
-                if (__VLS_ctx.user?.role === 'team_leader' || __VLS_ctx.rankingGroupId !== null) {
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-                        ...{ onChange: (__VLS_ctx.changeRankingMember) },
-                        value: (__VLS_ctx.rankingMemberId),
-                        disabled: (__VLS_ctx.productLibraryRankingLoading),
-                    });
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                        value: (null),
-                    });
-                    for (const [member] of __VLS_getVForSourceType((__VLS_ctx.rankingFilteredMembers))) {
-                        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                            key: (member.id),
-                            value: (member.id),
-                        });
-                        (member.name);
-                        (member.role === 'team_leader' ? ' · 组长' : '');
-                    }
-                }
-            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "draft-table product-library-table" },
                 'aria-busy': (__VLS_ctx.productLibraryRankingLoading),
@@ -7259,7 +7231,10 @@ if (__VLS_ctx.token) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            /** @type {[typeof ShopDataHeading, ]} */ ;
+            // @ts-ignore
+            const __VLS_3 = __VLS_asFunctionalComponent(ShopDataHeading, new ShopDataHeading({}));
+            const __VLS_4 = __VLS_3({}, ...__VLS_functionalComponentArgsRest(__VLS_3));
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -7402,23 +7377,77 @@ if (__VLS_ctx.token) {
                     title: (item.title),
                 });
                 (item.title || '—');
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-                (item.site);
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                    title: (item.shop_name),
+                    ...{ class: "product-library-shop-data" },
                 });
-                (item.shop_name);
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                    ...{ class: "product-library-code" },
-                    title: (item.product_id),
-                });
-                (item.product_id);
+                for (const [shop] of __VLS_getVForSourceType((item.shop_data))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        key: (`${shop.source_id}-${shop.product_id}`),
+                    });
+                    (shop.shop_name);
+                    (shop.product_id);
+                    (shop.sales_quantity);
+                }
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
                 (item.material_created_by_name || '');
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
                 (item.material_created_at != null ? new Date(item.material_created_at).toLocaleString() : '');
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
                 (item.order_count);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+                (item.sales_quantity);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!(__VLS_ctx.token))
+                                return;
+                            if (!!(__VLS_ctx.page === 'dashboard'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'templates'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'pod'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'tasks'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'materials'))
+                                return;
+                            if (!!(__VLS_ctx.page === 'drafts'))
+                                return;
+                            if (!(__VLS_ctx.page === 'product-library'))
+                                return;
+                            if (!!(__VLS_ctx.activeProductLibraryTab === 'products'))
+                                return;
+                            if (!!(__VLS_ctx.activeProductLibraryTab === 'shops' && __VLS_ctx.user?.role === 'company_admin'))
+                                return;
+                            if (!!(__VLS_ctx.activeProductLibraryTab === 'stagnant'))
+                                return;
+                            if (!!(__VLS_ctx.activeProductLibraryTab === 'new_images'))
+                                return;
+                            if (!!(!__VLS_ctx.productLibraryRankingTabKeys.has(__VLS_ctx.activeProductLibraryTab)))
+                                return;
+                            __VLS_ctx.openProductLibraryOrders(item);
+                        } },
+                    ...{ class: "product-library-detail-button" },
+                    type: "button",
+                    title: "查看详情",
+                    'aria-label': (`查看 ${item.sku} 的订单详情`),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.svg, __VLS_intrinsicElements.svg)({
+                    viewBox: "0 0 24 24",
+                    fill: "none",
+                    stroke: "currentColor",
+                    'stroke-width': "1.8",
+                    'stroke-linecap': "round",
+                    'stroke-linejoin': "round",
+                    'aria-hidden': "true",
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.path)({
+                    d: "M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z",
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.circle)({
+                    cx: "12",
+                    cy: "12",
+                    r: "2.8",
+                });
             }
             if (!__VLS_ctx.productLibraryRankingItems.length && !__VLS_ctx.productLibraryRankingLoading && !__VLS_ctx.productLibraryRankingError) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -10511,7 +10540,7 @@ if (__VLS_ctx.showTiktokExportDialog) {
         });
         /** @type {[typeof SearchableSelect, ]} */ ;
         // @ts-ignore
-        const __VLS_0 = __VLS_asFunctionalComponent(SearchableSelect, new SearchableSelect({
+        const __VLS_6 = __VLS_asFunctionalComponent(SearchableSelect, new SearchableSelect({
             ...{ 'onChange': {} },
             modelValue: (__VLS_ctx.tiktokExportCategory),
             options: (__VLS_ctx.tiktokExportOptions?.categories || []),
@@ -10520,7 +10549,7 @@ if (__VLS_ctx.showTiktokExportDialog) {
             placeholder: "请选择商品类目",
             searchPlaceholder: "搜索类目名称，空格分隔多个关键词",
         }));
-        const __VLS_1 = __VLS_0({
+        const __VLS_7 = __VLS_6({
             ...{ 'onChange': {} },
             modelValue: (__VLS_ctx.tiktokExportCategory),
             options: (__VLS_ctx.tiktokExportOptions?.categories || []),
@@ -10528,14 +10557,14 @@ if (__VLS_ctx.showTiktokExportDialog) {
             labelKey: "name",
             placeholder: "请选择商品类目",
             searchPlaceholder: "搜索类目名称，空格分隔多个关键词",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_0));
-        let __VLS_3;
-        let __VLS_4;
-        let __VLS_5;
-        const __VLS_6 = {
+        }, ...__VLS_functionalComponentArgsRest(__VLS_6));
+        let __VLS_9;
+        let __VLS_10;
+        let __VLS_11;
+        const __VLS_12 = {
             onChange: (__VLS_ctx.changeTiktokExportCategory)
         };
-        var __VLS_2;
+        var __VLS_8;
         if (__VLS_ctx.tiktokExportIsLocal) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
@@ -10768,7 +10797,7 @@ if (__VLS_ctx.showShopeeExportDialog) {
         });
         /** @type {[typeof SearchableSelect, ]} */ ;
         // @ts-ignore
-        const __VLS_7 = __VLS_asFunctionalComponent(SearchableSelect, new SearchableSelect({
+        const __VLS_13 = __VLS_asFunctionalComponent(SearchableSelect, new SearchableSelect({
             modelValue: (__VLS_ctx.shopeeExportCategoryId),
             options: (__VLS_ctx.shopeeExportOptions?.categories || []),
             valueKey: "id",
@@ -10776,14 +10805,14 @@ if (__VLS_ctx.showShopeeExportDialog) {
             placeholder: "请选择商品类目",
             searchPlaceholder: "搜索类目名称，空格分隔多个关键词",
         }));
-        const __VLS_8 = __VLS_7({
+        const __VLS_14 = __VLS_13({
             modelValue: (__VLS_ctx.shopeeExportCategoryId),
             options: (__VLS_ctx.shopeeExportOptions?.categories || []),
             valueKey: "id",
             labelKey: "name",
             placeholder: "请选择商品类目",
             searchPlaceholder: "搜索类目名称，空格分隔多个关键词",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_7));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_13));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
             ...{ class: "required" },
@@ -13079,7 +13108,6 @@ if (__VLS_ctx.productLibraryOrderProduct) {
         id: "product-library-orders-heading",
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    (__VLS_ctx.productLibraryOrderProduct.shop_name);
     (__VLS_ctx.productLibraryOrderProduct.sku);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "product-library-orders-table" },
@@ -13090,9 +13118,12 @@ if (__VLS_ctx.productLibraryOrderProduct) {
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-    for (const [order] of __VLS_getVForSourceType((__VLS_ctx.productLibraryOrders))) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    for (const [order, index] of __VLS_getVForSourceType((__VLS_ctx.productLibraryOrders))) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            key: (order.order_number),
+            key: (index),
             ...{ class: "product-library-orders-row" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -13101,6 +13132,16 @@ if (__VLS_ctx.productLibraryOrderProduct) {
             title: (order.order_number),
         });
         (order.order_number);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            title: (order.shop_name),
+        });
+        (order.shop_name);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            title: (order.product_id),
+        });
+        (order.product_id);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+        (order.quantity);
     }
     if (!__VLS_ctx.productLibraryOrders.length && !__VLS_ctx.productLibraryOrderLoading) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -13117,6 +13158,7 @@ if (__VLS_ctx.productLibraryOrderProduct) {
         ...{ class: "draft-pagination product-library-orders-pagination" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    (__VLS_ctx.productLibraryOrderCount);
     (__VLS_ctx.productLibraryOrderTotal);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (...[$event]) => {
@@ -13552,7 +13594,7 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['product-library-image']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-code']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-title']} */ ;
-/** @type {__VLS_StyleScopedClasses['product-library-code']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-shop-data']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-detail-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
@@ -13610,7 +13652,6 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['product-library-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-ranking-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-ranking-date']} */ ;
-/** @type {__VLS_StyleScopedClasses['product-library-filters']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['thead']} */ ;
@@ -13624,7 +13665,8 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['product-library-image']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-code']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-title']} */ ;
-/** @type {__VLS_StyleScopedClasses['product-library-code']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-shop-data']} */ ;
+/** @type {__VLS_StyleScopedClasses['product-library-detail-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['draft-pagination']} */ ;
 /** @type {__VLS_StyleScopedClasses['product-library-ranking-pagination']} */ ;
@@ -14260,6 +14302,7 @@ const __VLS_self = (await import('vue')).defineComponent({
     setup() {
         return {
             SearchableSelect: SearchableSelect,
+            ShopDataHeading: ShopDataHeading,
             token: token,
             page: page,
             email: email,
@@ -14458,10 +14501,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             productLibraryShops: productLibraryShops,
             productLibraryShopsLoading: productLibraryShopsLoading,
             productLibraryAssigningId: productLibraryAssigningId,
-            rankingScopeGroups: rankingScopeGroups,
-            rankingGroupId: rankingGroupId,
-            rankingMemberId: rankingMemberId,
-            rankingFilteredMembers: rankingFilteredMembers,
             stagnantMaterials: stagnantMaterials,
             stagnantTotal: stagnantTotal,
             stagnantPage: stagnantPage,
@@ -14497,6 +14536,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             productLibraryOrderProduct: productLibraryOrderProduct,
             productLibraryOrders: productLibraryOrders,
             productLibraryOrderTotal: productLibraryOrderTotal,
+            productLibraryOrderCount: productLibraryOrderCount,
             productLibraryOrderPage: productLibraryOrderPage,
             productLibraryOrderLoading: productLibraryOrderLoading,
             productLibraryFileInput: productLibraryFileInput,
@@ -14714,8 +14754,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             draftSelectionAssets: draftSelectionAssets,
             allPagedProductsSelected: allPagedProductsSelected,
             assignProductLibraryShop: assignProductLibraryShop,
-            changeRankingGroup: changeRankingGroup,
-            changeRankingMember: changeRankingMember,
             changeStagnantCreator: changeStagnantCreator,
             changeStagnantPageSize: changeStagnantPageSize,
             changeStagnantPage: changeStagnantPage,

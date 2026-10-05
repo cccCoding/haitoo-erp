@@ -6,7 +6,7 @@
 - 产品模板、印花贴合模拟任务、人工选图和商品草稿 API。
 - Vue 3 运营端工作台，覆盖模板库、POD 工作台、任务与草稿。
 
-登录接口 `/auth/login` 共用于运营端和超级管理员后台。同一 IP 自首次尝试起 60 秒内可登录 20 次；同一邮箱自首次密码失败起 15 分钟内可失败 5 次。下一次请求返回 HTTP 429 和 `Retry-After`，到期后自动恢复；成功登录会清除该邮箱的失败计数。计数存于 MySQL，多个 API worker 共用。升级时先运行 `docker compose run --rm migrate`，再重启 API；`20260929_18` 迁移会创建计数表。
+登录接口 `/auth/login` 共用于运营端和超级管理员后台。同一 IP 自首次尝试起 60 秒内可登录 20 次；同一邮箱自首次密码失败起 15 分钟内可失败 5 次。下一次请求返回 HTTP 429 和 `Retry-After`，到期后自动恢复；成功登录会清除该邮箱的失败计数。计数存于 MySQL，多个 API worker 共用。升级时先运行 `./deploy/local.sh run --rm migrate`，再重启 API；`20260929_18` 迁移会创建计数表。
 
 Docker 部署默认从内部代理获取客户端 IP：Cloudflare Tunnel 使用 `CF-Connecting-IP`，腾讯云 Nginx 使用其覆写的 `X-Real-IP`。直接运行后端时默认只使用连接地址。不要将 API 容器端口直接公开到互联网。
 
@@ -16,13 +16,23 @@ Docker 部署默认从内部代理获取客户端 IP：Cloudflare Tunnel 使用 
 
 ## 部署方式
 
-应用容器本身只开放 Docker 内部端口。对外访问时按环境选择公网入口：
-本地可以使用 Cloudflare Tunnel，腾讯云服务器使用 Nginx 和腾讯域名。
-纯本机测试使用下述端口映射。各环境分别维护配置和数据卷。
+本机固定使用隔离测试环境，腾讯云固定使用服务器环境。各环境分别维护配置和数据卷。
+所有 Compose 操作都通过仓库内的固定入口执行，避免遗漏参数创建重复环境：
+
+| 环境 | 固定入口 | 环境文件 | 项目名 | Compose 配置 |
+| --- | --- | --- | --- | --- |
+| 本机测试 | `./deploy/local.sh` | `.env.local` | `haitoo-test` | `docker-compose.yml` + `docker-compose.local.yml` |
+| 腾讯云 | `./deploy/tencent.sh` | `.env` | `haitorok` | `docker-compose.yml` + `docker-compose.tencent.yml` |
+
+例如，本机执行 `./deploy/local.sh ps`，服务器执行 `./deploy/tencent.sh ps`。
+脚本自动定位项目根目录，缺少文件时停止，并拒绝覆盖环境文件、项目名、配置文件及 profile。
+脚本也会清除外部设置的 `COMPOSE_FILE`、`COMPOSE_PROJECT_NAME`、`COMPOSE_PROFILES`、
+`COMPOSE_ENV_FILES`。后续通用运维示例采用本机入口；服务器执行时将入口替换为
+`./deploy/tencent.sh`，其余参数相同。不要直接使用省略环境参数的 Compose 命令。
 
 ### 本机隔离测试环境
 
-本机测试使用独立的 `.env.local`、Compose 项目名和 MySQL 数据卷，不修改腾讯云服务器配置，也不要连接生产数据库。先复制配置模板并生成随机密钥：
+本机测试使用独立的 `.env.local`、Compose 项目名和 MySQL 数据卷，不修改腾讯云服务器配置，也不要连接生产数据库。下面初始化命令仅供首次建立环境；已有 `.env.local` 时保留原文件和密钥，直接使用固定入口升级。首次建立时复制配置模板并生成随机密钥：
 
 ```bash
 cp deploy/env/local.env.example .env.local
@@ -37,40 +47,20 @@ chmod 600 .env.local
 上面的 `sed -i ''` 适用于 macOS。启动和检查：
 
 ```bash
-docker compose --env-file .env.local -p haitoo-test \
-  -f docker-compose.yml -f docker-compose.local.yml up -d --build
-docker compose --env-file .env.local -p haitoo-test \
-  -f docker-compose.yml -f docker-compose.local.yml ps
+./deploy/local.sh up -d --build
+./deploy/local.sh ps
 ```
 
 运营端为 `http://localhost:5173`，管理端为 `http://localhost:5174`，API 文档为 `http://localhost:8001/docs`。首次启动空库后创建本机超级管理员：
 
 ```bash
-docker compose --env-file .env.local -p haitoo-test \
-  -f docker-compose.yml -f docker-compose.local.yml \
-  exec api python -m app.admin_cli create-super-admin \
+./deploy/local.sh exec api python -m app.admin_cli create-super-admin \
   --email test-admin@example.com --name "本机管理员"
 ```
 
 本地端口只绑定 `127.0.0.1`。不要加腾讯云的 `docker-compose.tencent.yml`，也不要启用 `cloudflare` profile。`VITE_API_URL` 是前端构建参数，修改后要重新执行 `up -d --build`。若需要测试图片上传，请在 `.env.local` 中填写**独立测试 R2 Bucket** 的配置，并为本地运营端域名设置 PUT CORS；留空时上传功能不可用。真实 AI、妙手、HubStudio 操作会调用外部服务，应使用测试账号和测试数据。若要导入线上数据，应先脱敏，并清除第三方凭据与待执行任务。
 
-停止本机环境时使用相同的参数执行 `docker compose ... down`；不要加 `-v`，否则会删除测试 MySQL 数据卷。
-
-本地 Cloudflare 环境从示例创建配置：
-
-```bash
-cp deploy/env/cloudflare.env.example .env
-```
-
-首次启动前生成 MySQL 密码和服务密钥，并限制环境文件权限。数据库凭据加密密钥先与现有 `SECRET_KEY` 保持一致：
-
-```bash
-credential_key=$(openssl rand -hex 32)
-printf 'MYSQL_ROOT_PASSWORD=%s\nMYSQL_PASSWORD=%s\nSECRET_KEY=%s\nCREDENTIAL_ENCRYPTION_KEY=%s\n' \
-  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" \
-  "$credential_key" "$credential_key" >> .env
-chmod 600 .env
-```
+停止本机环境时使用相同的参数执行 `./deploy/local.sh down`；不要加 `-v`，否则会删除测试 MySQL 数据卷。
 
 两个密码必须是至少 32 个字符的十六进制随机字符串。MySQL 只监听 Compose
 内部网络的 `3306` 端口，不映射到宿主机；API 和 Worker 使用应用密码连接数据库。
@@ -78,15 +68,9 @@ chmod 600 .env
 确保数据库中已有的第三方凭据仍能解密。未配置新变量时，程序暂时沿用 `SECRET_KEY`；
 以后更换登录用 `SECRET_KEY` 时，需保留原加密密钥。
 
-启动本地 Cloudflare 环境：
-
-```bash
-docker compose --profile cloudflare up -d --build
-```
-
 Compose 会以生产方式构建容器：API 使用两个 Uvicorn worker，两个 Vue 前端先由
 Vite 生成静态文件，再由 Nginx 提供服务。`VITE_API_URL` 是前端构建参数，修改后
-必须重新执行 `docker compose up -d --build`，仅重启容器不会更新浏览器产物。
+必须重新执行 `./deploy/local.sh up -d --build`，仅重启容器不会更新浏览器产物。
 所有容器使用 Docker `json-file` 日志驱动，每个日志文件最多 10MB，并保留最近
 5 个文件，避免长期运行产生的容器日志占满服务器磁盘。
 
@@ -99,13 +83,45 @@ Vite 生成静态文件，再由 Nginx 提供服务。`VITE_API_URL` 是前端�
 复用该任务。任务提交时固定香港本地统计日期；成功后替换当期快照，失败时保留旧快照。
 Worker 重启后会恢复中断任务，并定期清理超过最近 30 个统计日的快照；不会自动生成榜单。
 首次部署此功能需执行
-`docker compose up -d --build`，以创建新的 Worker 服务。
+`./deploy/local.sh up -d --build`，以创建新的 Worker 服务。
+
+### 产品库销量统计升级（20261005_25）
+
+本次迁移会一次性删除**所有公司**的产品库店铺（含负责人分配）、产品、订单及订单明细、
+快照和统计任务。素材、产品模板、商品草稿及其他业务店铺保留。执行前完成数据库备份，
+并停止 API 和产品库统计 Worker，防止旧程序在迁移期间写入数据。
+本机测试环境统一通过 `./deploy/local.sh` 执行以下升级步骤；每一步成功后才执行下一步：
+
+```bash
+./deploy/local.sh build migrate api product-library-rankings-worker web &&
+./deploy/local.sh stop api product-library-rankings-worker &&
+./deploy/local.sh run --rm migrate &&
+./deploy/local.sh up -d api product-library-rankings-worker web
+```
+
+腾讯云在已同步最新代码的项目目录执行：
+
+```bash
+./deploy/tencent.sh build migrate api product-library-rankings-worker web &&
+./deploy/tencent.sh stop api product-library-rankings-worker &&
+./deploy/tencent.sh run --rm migrate &&
+./deploy/tencent.sh up -d api product-library-rankings-worker web edge &&
+./deploy/tencent.sh exec edge nginx -t &&
+./deploy/tencent.sh exec edge nginx -s reload
+```
+
+升级后重新下载产品库导入模板，填写必需的「数量」列，再导入历史订单、分配店铺负责人，
+点击「数据统计」生成新榜单。数量填写每行完整平台 SKU（含尺码）的销售件数；同订单
+不同尺码相加，重导仅覆盖文件内尺码的数量，未出现的尺码保留，重复导入不累加。
+排行榜和榜单按公司、基础 SKU 汇总；订单数去重，销量累计，按销量降序排序。
+店铺多选仅汇总当前账号可见且选中的店铺，未选择表示全部可见店铺；榜单详情使用
+相同店铺范围及对应快照。数据库降级不会恢复已删除的数据。
 
 Compose 会先运行一次 `migrate` 服务，将数据库升级到代码要求的 Alembic 版本；成功后才启动 API。API 和 Worker 自身只检查版本，不会在启动时建表或执行 DDL。生产部署应在迁移前完成数据库备份，也可显式执行并检查迁移结果：
 
 ```bash
-docker compose run --rm migrate
-docker compose run --rm api alembic current
+./deploy/local.sh run --rm migrate
+./deploy/local.sh run --rm api alembic current
 ```
 
 ### 代码更新后的数据库迁移
@@ -114,38 +130,38 @@ docker compose run --rm api alembic current
 
 ```bash
 # 1. 在项目根目录执行版本化迁移（会升级 MySQL 表结构）
-docker compose run --rm migrate
+./deploy/local.sh run --rm migrate
 
 # 2. 确认当前数据库已到代码要求的 head 版本
-docker compose run --rm api alembic current
+./deploy/local.sh run --rm api alembic current
 
 # 3. 重启 API 与两个后台 Worker，使它们加载新代码与新表结构
-docker compose restart api submit-worker result-worker
+./deploy/local.sh restart api submit-worker result-worker
 
 # 4. 查看 API 启动结果；应出现“应用初始化完成”
-docker compose logs --tail=50 api
+./deploy/local.sh logs --tail=50 api
 ```
 
-如果 compose 服务尚未启动，可改用 `docker compose up -d --build`；它会先执行 `migrate`。正常版本升级只运行 `docker compose run --rm migrate`，**不要**附加 `--adopt-legacy`。
+如果 compose 服务尚未启动，可改用 `./deploy/local.sh up -d --build`；它会先执行 `migrate`。正常版本升级只运行 `./deploy/local.sh run --rm migrate`，**不要**附加 `--adopt-legacy`。
 
-全新数据库直接执行普通迁移，首次启动 `docker compose up -d --build` 时也会自动执行同一流程：
+全新数据库直接执行普通迁移，首次启动 `./deploy/local.sh up -d --build` 时也会自动执行同一流程：
 
 ```bash
-docker compose run --rm migrate
+./deploy/local.sh run --rm migrate
 ```
 
 只有从旧版启动期自动建表流程升级，且数据库已有业务表但没有 `alembic_version` 时，迁移服务才会要求显式接管。确认数据库备份可恢复后执行一次：
 
 ```bash
-docker compose run --rm migrate python -m app.db_migrate --adopt-legacy
+./deploy/local.sh run --rm migrate python -m app.db_migrate --adopt-legacy
 ```
 
-成功后再正常执行 `docker compose up -d`。不要对全新数据库或已纳入 Alembic 的数据库使用 `--adopt-legacy`。
+成功后再正常执行 `./deploy/local.sh up -d`。不要对全新数据库或已纳入 Alembic 的数据库使用 `--adopt-legacy`。
 
 以后每次修改 ORM 表结构，都必须创建新的版本文件，禁止继续修改已有基线迁移：
 
 ```bash
-docker compose run --rm api alembic revision --autogenerate -m "变更说明"
+./deploy/local.sh run --rm api alembic revision --autogenerate -m "变更说明"
 ```
 
 API 文档地址为当前环境的 API 域名加 `/docs`。
@@ -159,8 +175,8 @@ API 文档地址为当前环境的 API 域名加 `/docs`。
 升级到该功能前，必须执行迁移至 `20260917_09`：
 
 ```bash
-docker compose run --rm migrate
-docker compose restart api submit-worker result-worker
+./deploy/local.sh run --rm migrate
+./deploy/local.sh restart api submit-worker result-worker
 ```
 
 管理员操作顺序：在“HubStudio管理”配置公司 HubStudio API、新增本土店、绑定对应 HubStudio 环境与已在线的本地执行器；随后在商品草稿的“导出 TikTok 批量上传表格”中选择该本土店并点击“生成并自动上品”。本地执行器会领取任务、启动该环境、下载不可变 XLSX 快照并提交。
@@ -168,7 +184,7 @@ docker compose restart api submit-worker result-worker
 系统启动时不会创建公司、演示账号或默认超级管理员。首次部署后，通过容器内的一次性命令创建平台超级管理员；密码将在终端中安全输入两次，不会进入命令历史或环境变量：
 
 ```bash
-docker compose exec api python -m app.admin_cli create-super-admin \
+./deploy/local.sh exec api python -m app.admin_cli create-super-admin \
   --email owner@example.com \
   --name "平台管理员"
 ```
@@ -179,59 +195,33 @@ docker compose exec api python -m app.admin_cli create-super-admin \
 
 ```bash
 # 查看全部平台超级管理员
-docker compose exec api python -m app.admin_cli list-super-admins
+./deploy/local.sh exec api python -m app.admin_cli list-super-admins
 
 # 重置密码；成功后该账号原有登录令牌立即失效
-docker compose exec api python -m app.admin_cli reset-super-admin-password \
+./deploy/local.sh exec api python -m app.admin_cli reset-super-admin-password \
   --email owner@example.com
 
 # 启用或停用；系统禁止停用最后一个有效的超级管理员
-docker compose exec api python -m app.admin_cli disable-super-admin \
+./deploy/local.sh exec api python -m app.admin_cli disable-super-admin \
   --email owner@example.com
-docker compose exec api python -m app.admin_cli enable-super-admin \
+./deploy/local.sh exec api python -m app.admin_cli enable-super-admin \
   --email owner@example.com
 ```
 
 超级管理员密码至少 12 个字符，并且必须包含字母、数字和特殊字符。已有数据库升级时，应用不会自动删除历史演示账号或公司；应先创建并验证正式超级管理员，再人工停用历史演示账号，确认其没有业务数据后另行清理。
 
-## 通过 Cloudflare Tunnel 暴露 ERP（无需公网 IP）
+## 历史 Cloudflare Tunnel 配置
 
-这适合当前在本机 Docker 中运行、域名已托管在 Cloudflare 的场景。Tunnel 是本机主动连到 Cloudflare 的出站连接，因此不需要开放路由器端口或配置动态 DNS。
-
-1. 在 Cloudflare Dashboard 中选择 `haitoro.com`，进入 **Zero Trust → Networks → Tunnels**，创建一个 **Cloudflared** tunnel。安装方式选择 Docker，复制其 token（`eyJ...`）。
-2. 在 Zero Trust 的该 Tunnel 中创建两个 **Public Hostname**：
-
-   | Public hostname | Service type | URL |
-   | --- | --- | --- |
-   | `erp.haitoro.com` | HTTP | `http://web:80` |
-   | `admin.haitoro.com` | HTTP | `http://admin-web:80` |
-   | `api.haitoro.com` | HTTP | `http://api:8000` |
-
-   不需要在 DNS 页面手动添加记录；保存 Public Hostname 时 Cloudflare 会自动创建指向 Tunnel 的记录。
-3. 从 `deploy/env/cloudflare.env.example` 创建根目录 `.env`，并填入实际 token：
-
-   ```dotenv
-   CLOUDFLARE_TUNNEL_TOKEN=eyJ...
-   VITE_API_URL=https://api.haitoro.com
-   CORS_ORIGINS=https://erp.haitoro.com,https://admin.haitoro.com
-   ```
-
-4. 重新创建前端以让 Vite 读取公网 API 地址，并启动 Tunnel：
-
-   ```bash
-   docker compose --profile cloudflare up -d --build
-   ```
-
-5. 用手机蜂窝网络访问 `https://erp.haitoro.com` 验证；接口文档可访问 `https://api.haitoro.com/docs`。
-
-不要将 `3306`、`6379` 或 `8001` 配成 Cloudflare Public Hostname。它们无需对外公开。此方式未配置 Cloudflare Access；在正式给他人使用前，至少应为 `erp.haitoro.com` 添加 Access 登录策略，并使用随机数据库密码和 `SECRET_KEY`。
+仓库保留 Cloudflare Tunnel 的历史配置。当前本机只使用 `haitoo-test` 隔离测试环境，
+服务器只使用 `haitorok` 腾讯云环境，不在这两套环境启用 `cloudflare` profile。
+Cloudflare R2 图片存储可继续使用，与 Tunnel 无关。
 
 ## 通过腾讯域名部署到腾讯云
 
 腾讯云使用额外的 `docker-compose.tencent.yml` 启动边缘 Nginx。应用容器继续只在
 Docker 内部网络开放端口，只有边缘 Nginx 映射宿主机的 80 和 443。
 
-1. 创建腾讯云环境配置并填写实际域名、随机密钥和 R2 配置：
+1. 首次部署时创建腾讯云环境配置并填写实际域名、随机密钥和 R2 配置；已有部署保留原 `.env` 和密钥，不重复初始化：
 
    ```bash
    cp deploy/env/tencent.env.example .env
@@ -257,23 +247,23 @@ Docker 内部网络开放端口，只有边缘 Nginx 映射宿主机的 80 和 4
 4. 启动腾讯云部署：
 
    ```bash
-   docker compose --env-file .env -p haitorok -f docker-compose.yml -f docker-compose.tencent.yml up -d --build
+   ./deploy/tencent.sh up -d --build
    ```
 
    如果重建 `web`、`admin-web` 或 `api` 后入口返回 502，先查看入口日志，
    再重新加载入口，让现有配置重新解析容器地址以恢复当前访问：
 
    ```bash
-   docker compose --env-file .env -p haitorok -f docker-compose.yml -f docker-compose.tencent.yml logs --tail=80 edge
-   docker compose --env-file .env -p haitorok -f docker-compose.yml -f docker-compose.tencent.yml exec edge nginx -t
-   docker compose --env-file .env -p haitorok -f docker-compose.yml -f docker-compose.tencent.yml exec edge nginx -s reload
+   ./deploy/tencent.sh logs --tail=80 edge
+   ./deploy/tencent.sh exec edge nginx -t
+   ./deploy/tencent.sh exec edge nginx -s reload
    ```
 
    新版入口配置通过 Docker DNS 动态解析上游容器。模板只在容器创建时生成
    Nginx 配置，首次部署此配置时需重建 `edge`：
 
    ```bash
-   docker compose --env-file .env -p haitorok -f docker-compose.yml -f docker-compose.tencent.yml up -d --no-deps --force-recreate edge
+   ./deploy/tencent.sh up -d --no-deps --force-recreate edge
    ```
 
 5. 腾讯云安全组只开放 80、443，以及仅限管理员固定 IP 的 22。不要开放 3306、

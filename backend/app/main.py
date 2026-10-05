@@ -25,7 +25,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import SessionLocal, engine, get_db
-from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, OperatorGroup, PodTask, ProductDraft, ProductLibraryDailySnapshot, ProductLibraryDailySnapshotItem, ProductLibraryRankingTask, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
+from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, OperatorGroup, PodTask, ProductDraft, ProductLibraryDailySnapshot, ProductLibraryRankingTask, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryOrderSkuQuantity, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
+from .product_library_statistics import order_facts, sku_statistics
 from .product_library import parse_order_workbook
 from .product_library_rankings import SnapshotAlreadyRunning, company_run_lock, create_daily_snapshot, enqueue_ranking_task, task_payload
 from .schemas import ProductLibraryShopAssignment, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
@@ -1229,67 +1230,24 @@ def list_new_images(
 def list_product_library_rankings(
     category: Literal["top7", "top15", "top30", "potential", "hot", "booming"],
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
-    group_id: int | None = None, member_id: int | None = None,
+    source_ids: Annotated[list[int] | None, Query()] = None,
     user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db),
 ):
-    if not category.startswith("top") and (group_id is not None or member_id is not None):
-        raise HTTPException(400, "组和成员筛选仅适用于 TOP50")
-    scope = product_library_ranking_scope(user, db, group_id, member_id) if category.startswith("top") else product_library_source_scope(user)
     snapshot = db.scalar(select(ProductLibraryDailySnapshot).where(
         ProductLibraryDailySnapshot.company_id == user.company_id,
+        ProductLibraryDailySnapshot.is_complete.is_(True),
     ).order_by(ProductLibraryDailySnapshot.snapshot_date.desc()).limit(1))
     if snapshot is None:
         return {"snapshot_date": None, "through_date": None, "total": 0,
                 "page": page, "page_size": page_size, "items": []}
-    if not snapshot.is_complete:
-        try:
-            with company_run_lock(db, user.company_id):
-                create_daily_snapshot(db, user.company_id, snapshot.snapshot_date, replace_existing=True)
-        except SnapshotAlreadyRunning as exc:
-            raise HTTPException(503, "榜单正在补算，请稍后重试") from exc
-        snapshot = db.scalar(select(ProductLibraryDailySnapshot).where(
-            ProductLibraryDailySnapshot.company_id == user.company_id,
-        ).order_by(ProductLibraryDailySnapshot.snapshot_date.desc()).limit(1))
-    item = ProductLibraryDailySnapshotItem
-    count_column = {"top7": item.count_7, "top15": item.count_15, "top30": item.count_30}.get(category, item.count_7)
-    if category.startswith("top"):
-        condition = count_column > 0
-        order_columns = (count_column.desc(), item.product_id.asc())
-    else:
-        condition = item.tier == category
-        order_columns = (item.count_7.desc(), item.product_id.asc())
-    conditions = [item.snapshot_id == snapshot.id, condition,
-                  ProductLibraryProduct.company_id == user.company_id,
-                  ProductLibrarySource.company_id == user.company_id]
-    if scope is not None:
-        conditions.append(scope)
-    count = db.scalar(select(func.count(item.id)).join(
-        ProductLibraryProduct, ProductLibraryProduct.id == item.product_id).join(
-        ProductLibrarySource, ProductLibrarySource.id == ProductLibraryProduct.source_id).where(*conditions)) or 0
-    total = min(count, 50) if category.startswith("top") else count
-    offset = (page - 1) * page_size
-    limit = min(page_size, max(0, total - offset))
-    rows = db.execute(select(item, ProductLibraryProduct, ProductLibrarySource, ProductTemplate.name)
-        .join(ProductLibraryProduct, ProductLibraryProduct.id == item.product_id)
-        .join(ProductLibrarySource, ProductLibrarySource.id == ProductLibraryProduct.source_id)
-        .outerjoin(ProductTemplate, ProductTemplate.id == ProductLibraryProduct.template_id)
-        .where(*conditions)
-        .order_by(*order_columns).offset(offset).limit(limit)).all()
-    material_details = product_library_material_details(db, user.company_id, [product.sku for _, product, _, _ in rows])
-    return {
-        "snapshot_date": snapshot.snapshot_date.isoformat(),
-        "through_date": (snapshot.snapshot_date - timedelta(days=1)).isoformat(),
-        "total": total, "page": page, "page_size": page_size,
-        "items": [{
-            "id": product.id, "source_type": "product", "template_id": product.template_id, "rank": offset + index,
-            "order_count": int(getattr(entry, count_column.key)),
-            "count_7": entry.count_7, "count_15": entry.count_15, "count_30": entry.count_30,
-            "sku": product.sku, "template": template_name or "未匹配", "title": product.title,
-            "image_url": product.image_url, "platform": source.platform, "site": source.site,
-            "shop_name": source.shop_name, "product_id": product.external_product_id,
-            **material_details.get(product.sku, {"material_created_by_name": None, "material_created_at": None}),
-        } for index, (entry, product, source, template_name) in enumerate(rows, start=1)],
-    }
+    conditions = product_library_statistics_scope(user, source_ids)
+    result = sku_statistics(db, conditions, order_facts(snapshot, category),
+                            page=page, page_size=page_size, category=category)
+    details = product_library_material_details(db, user.company_id, [item["sku"] for item in result["items"]])
+    for item in result["items"]:
+        item.update(details.get(item["sku"], {"material_created_by_name": None, "material_created_at": None}))
+    return {**result, "snapshot_date": snapshot.snapshot_date.isoformat(),
+            "through_date": (snapshot.snapshot_date - timedelta(days=1)).isoformat()}
 
 
 @app.get("/product-library/rankings/refresh/status")
@@ -1310,6 +1268,17 @@ def refresh_product_library_rankings(
         raise HTTPException(404, str(exc)) from exc
 
 
+def product_library_statistics_scope(user, source_ids=None):
+    conditions = [ProductLibraryProduct.company_id == user.company_id,
+                  ProductLibrarySource.company_id == user.company_id]
+    scope = product_library_source_scope(user)
+    if scope is not None:
+        conditions.append(scope)
+    if isinstance(source_ids, list) and source_ids:
+        conditions.append(ProductLibrarySource.id.in_(source_ids))
+    return conditions
+
+
 @app.get("/product-library")
 def list_product_library(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
@@ -1320,93 +1289,71 @@ def list_product_library(
 ):
     if template_id is not None and unmatched:
         raise HTTPException(400, "模版筛选条件不能同时选择已匹配和未匹配")
-    conditions = [ProductLibraryProduct.company_id == user.company_id, ProductLibrarySource.company_id == user.company_id]
-    scope = product_library_source_scope(user)
-    if scope is not None:
-        conditions.append(scope)
-    if platform:
-        conditions.append(ProductLibrarySource.platform == platform)
-    if site:
-        conditions.append(ProductLibrarySource.site == site)
-    if shop_name:
-        conditions.append(ProductLibrarySource.shop_name == shop_name)
-    if source_ids:
-        conditions.append(ProductLibrarySource.id.in_(source_ids))
+    conditions = product_library_statistics_scope(user, source_ids)
+    for value, column in ((platform, ProductLibrarySource.platform), (site, ProductLibrarySource.site),
+                          (shop_name, ProductLibrarySource.shop_name)):
+        if value:
+            conditions.append(column == value)
     if sku and sku.strip():
         conditions.append(ProductLibraryProduct.sku.icontains(sku.strip(), autoescape=True))
     if template_id is not None:
         conditions.append(ProductLibraryProduct.template_id == template_id)
     elif unmatched:
         conditions.append(ProductTemplate.id.is_(None))
-    total = db.scalar(select(func.count(ProductLibraryProduct.id)).join(
-        ProductLibrarySource, ProductLibraryProduct.source_id == ProductLibrarySource.id,
-    ).outerjoin(ProductTemplate, ProductLibraryProduct.template_id == ProductTemplate.id).where(*conditions)) or 0
-    sales = (select(
-        ProductLibraryOrderProduct.product_id.label("product_id"),
-        func.count(ProductLibraryOrderProduct.order_id).label("order_count"),
-    ).join(ProductLibraryProduct, ProductLibraryProduct.id == ProductLibraryOrderProduct.product_id)
-     .where(ProductLibraryProduct.company_id == user.company_id)
-     .group_by(ProductLibraryOrderProduct.product_id).subquery())
-    order_count = func.coalesce(sales.c.order_count, 0)
-    rows = db.execute(select(
-        ProductLibraryProduct, ProductLibrarySource, ProductTemplate.name, order_count,
-    ).join(ProductLibrarySource, ProductLibraryProduct.source_id == ProductLibrarySource.id)
-     .outerjoin(ProductTemplate, ProductLibraryProduct.template_id == ProductTemplate.id)
-     .outerjoin(sales, sales.c.product_id == ProductLibraryProduct.id)
-     .where(*conditions).order_by(order_count.desc(), ProductLibraryProduct.id.desc())
-     .offset((page - 1) * page_size).limit(page_size)).all()
-    material_details = product_library_material_details(db, user.company_id, [product.sku for product, _, _, _ in rows])
-    return {"total": total, "page": page, "page_size": page_size, "items": [
-        {
-            "id": product.id, "source_type": "product", "sku": product.sku, "template_id": product.template_id,
-            "template": template_name or "未匹配",
-            "title": product.title, "image_url": product.image_url,
-            "platform": source.platform, "site": source.site, "shop_name": source.shop_name,
-            "product_id": product.external_product_id, "order_count": int(count),
-            **material_details.get(product.sku, {"material_created_by_name": None, "material_created_at": None}),
-        }
-        for product, source, template_name, count in rows
-    ]}
+    facts = order_facts()
+    result = sku_statistics(db, conditions, facts, page=page, page_size=page_size)
+    details = product_library_material_details(db, user.company_id, [item["sku"] for item in result["items"]])
+    for item in result["items"]:
+        item.update(details.get(item["sku"], {"material_created_by_name": None, "material_created_at": None}))
+    return result
 
 
 @app.get("/product-library/{product_id}/orders")
 def list_product_library_orders(
     product_id: int, page: int = Query(1, ge=1),
+    source_ids: Annotated[list[int] | None, Query()] = None,
+    category: Literal["top7", "top15", "top30", "potential", "hot", "booming"] | None = None,
+    snapshot_date: str | None = None,
     user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db),
 ):
-    conditions = [ProductLibraryProduct.id == product_id,
-                  ProductLibraryProduct.company_id == user.company_id,
-                  ProductLibrarySource.company_id == user.company_id]
-    scope = product_library_source_scope(user)
-    if scope is not None:
-        conditions.append(scope)
-    product = db.scalar(select(ProductLibraryProduct).join(
-        ProductLibrarySource, ProductLibraryProduct.source_id == ProductLibrarySource.id,
-    ).where(*conditions))
+    conditions = product_library_statistics_scope(user, source_ids)
+    product = db.scalar(select(ProductLibraryProduct).join(ProductLibrarySource,
+        ProductLibrarySource.id == ProductLibraryProduct.source_id).where(*conditions, ProductLibraryProduct.id == product_id))
     if product is None:
         raise HTTPException(404, "产品不存在或无权查看")
-
-    linked_sku = select(ProductLibraryOrderProduct.id).join(
-        ProductLibraryProduct, ProductLibraryOrderProduct.product_id == ProductLibraryProduct.id,
-    ).where(
-        ProductLibraryOrderProduct.order_id == ProductLibraryOrder.id,
-        ProductLibraryProduct.company_id == user.company_id,
-        ProductLibraryProduct.source_id == product.source_id,
-        ProductLibraryProduct.sku == product.sku,
-    ).exists()
-    conditions = (
-        ProductLibraryOrder.company_id == user.company_id,
-        ProductLibraryOrder.source_id == product.source_id,
-        linked_sku,
-    )
-    total = db.scalar(select(func.count(ProductLibraryOrder.id)).where(*conditions)) or 0
-    orders = db.scalars(select(ProductLibraryOrder).where(*conditions)
-        .order_by(ProductLibraryOrder.ordered_at.desc(), ProductLibraryOrder.id.desc())
-        .offset((page - 1) * 20).limit(20)).all()
-    return {"total": total, "page": page, "page_size": 20, "items": [
-        {"ordered_at": timestamp_ms(order.ordered_at), "order_number": order.order_number}
-        for order in orders
-    ]}
+    snapshot = None
+    if category is not None:
+        snapshot_conditions = [ProductLibraryDailySnapshot.company_id == user.company_id,
+                               ProductLibraryDailySnapshot.is_complete.is_(True)]
+        if snapshot_date:
+            try:
+                selected_date = datetime.strptime(snapshot_date, "%Y-%m-%d").date()
+            except ValueError as exc:
+                raise HTTPException(400, "统计日期格式无效") from exc
+            snapshot_conditions.append(ProductLibraryDailySnapshot.snapshot_date == selected_date)
+        snapshot = db.scalar(select(ProductLibraryDailySnapshot).where(*snapshot_conditions)
+            .order_by(ProductLibraryDailySnapshot.snapshot_date.desc()).limit(1))
+        if snapshot is None:
+            raise HTTPException(404, "榜单快照不存在，请刷新榜单")
+    elif snapshot_date:
+        raise HTTPException(400, "统计日期需要指定榜单分类")
+    facts = order_facts(snapshot, category)
+    query = select(facts.c.order_id, facts.c.ordered_at, facts.c.order_number,
+        ProductLibrarySource.shop_name, ProductLibraryProduct.external_product_id.label("product_id"),
+        facts.c.quantity).select_from(facts).join(ProductLibraryProduct,
+        ProductLibraryProduct.id == facts.c.product_id).join(ProductLibrarySource,
+        ProductLibrarySource.id == ProductLibraryProduct.source_id).where(
+        *conditions, ProductLibraryProduct.sku == product.sku)
+    if snapshot is None:
+        query = query.where(facts.c.company_id == user.company_id)
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    order_count = db.scalar(select(func.count(func.distinct(query.subquery().c.order_id)))) or 0
+    orders = db.execute(query.order_by(facts.c.ordered_at.desc(), facts.c.order_id.desc(), facts.c.product_id.asc())
+        .offset((page - 1) * 20).limit(20)).mappings().all()
+    return {"total": total, "order_count": order_count, "page": page, "page_size": 20, "items": [
+        {"ordered_at": timestamp_ms(order["ordered_at"]), "order_number": order["order_number"],
+         "shop_name": order["shop_name"], "product_id": order["product_id"], "quantity": order["quantity"]}
+        for order in orders]}
 
 
 @app.post("/product-library/templates/batch")
@@ -1433,7 +1380,11 @@ def set_product_library_templates(
     ).with_for_update()).all()
     if len(assets) != len(payload.material_asset_ids):
         raise HTTPException(404, "包含不存在或无权设置的素材")
-    for product in products:
+    selected_skus = {product.sku for product in products}
+    all_products = db.scalars(select(ProductLibraryProduct).where(
+        ProductLibraryProduct.company_id == user.company_id,
+        ProductLibraryProduct.sku.in_(selected_skus)).with_for_update()).all()
+    for product in all_products:
         product.template_id = template.id
     for asset in assets:
         asset.template_id = template.id
@@ -1501,7 +1452,15 @@ async def import_product_library(
         orders.update({(order.source_id, order.order_number): order for order in db.scalars(
             select(ProductLibraryOrder).where(tuple_(ProductLibraryOrder.source_id, ProductLibraryOrder.order_number).in_(keys))
         )})
-    links: set[tuple[int, int]] = set()
+    sku_templates = {}
+    imported_skus = list({item.sku for item in imported})
+    for offset in range(0, len(imported_skus), 200):
+        for existing_sku, existing_template in db.execute(select(ProductLibraryProduct.sku, ProductLibraryProduct.template_id)
+            .where(ProductLibraryProduct.company_id == user.company_id,
+                   ProductLibraryProduct.sku.in_(imported_skus[offset:offset + 200]))
+            .order_by(ProductLibraryProduct.id)):
+            sku_templates.setdefault(existing_sku, existing_template)
+    quantities: dict[tuple[int, int, str], int] = {}
     created_products = 0
     created_product_ids: set[int] = set()
     updated_product_ids: set[int] = set()
@@ -1516,7 +1475,7 @@ async def import_product_library(
                 matched_template = next((template for template in templates if item.sku.upper().startswith(template.name.upper()) and len(item.sku) >= len(template.name) + 2), None)
                 product = ProductLibraryProduct(
                     company_id=user.company_id, source_id=source.id, external_product_id=item.external_product_id,
-                    sku=item.sku, template_id=matched_template.id if matched_template else None,
+                    sku=item.sku, template_id=sku_templates.setdefault(item.sku, matched_template.id if matched_template else None),
                     title=item.title, image_url=item.image_url,
                 )
                 db.add(product); db.flush()
@@ -1543,17 +1502,46 @@ async def import_product_library(
                 orders[order_key] = order
             if order.ordered_at != item.ordered_at:
                 raise ValueError(f"第 {item.row_number} 行「下单时间」与同一订单编号的已有记录不一致")
-            links.add((order.id, product.id))
-        existing_links: set[tuple[int, int]] = set()
+            key = (order.id, product.id, item.platform_sku)
+            if key in quantities and quantities[key] != item.quantity:
+                raise ValueError(f"第 {item.row_number} 行同一订单、产品 ID 和平台 SKU 的数量冲突")
+            quantities[key] = item.quantity
+        links = {(order_id, product_id) for order_id, product_id, _ in quantities}
+        existing_links = {}
         link_list = list(links)
         for offset in range(0, len(link_list), 200):
-            existing_links.update(db.execute(select(
-                ProductLibraryOrderProduct.order_id, ProductLibraryOrderProduct.product_id,
-            ).where(tuple_(ProductLibraryOrderProduct.order_id, ProductLibraryOrderProduct.product_id).in_(
-                link_list[offset:offset + 200],
-            ))).all())
-        db.add_all(ProductLibraryOrderProduct(order_id=order_id, product_id=product_id)
-                   for order_id, product_id in links - existing_links)
+            existing_links.update({(link.order_id, link.product_id): link for link in db.scalars(select(
+                ProductLibraryOrderProduct).where(tuple_(ProductLibraryOrderProduct.order_id,
+                ProductLibraryOrderProduct.product_id).in_(link_list[offset:offset + 200])).with_for_update())})
+        for order_id, product_id in links:
+            if (order_id, product_id) not in existing_links:
+                link = ProductLibraryOrderProduct(order_id=order_id, product_id=product_id, quantity=0)
+                db.add(link)
+                existing_links[(order_id, product_id)] = link
+        db.flush()
+        detail_by_key = {}
+        link_ids = [link.id for link in existing_links.values()]
+        for offset in range(0, len(link_ids), 200):
+            detail_by_key.update({(detail.order_product_id, detail.platform_sku): detail
+                for detail in db.scalars(select(ProductLibraryOrderSkuQuantity).where(
+                    ProductLibraryOrderSkuQuantity.order_product_id.in_(link_ids[offset:offset + 200])))})
+        for (order_id, product_id, platform_sku), quantity in quantities.items():
+            link = existing_links[(order_id, product_id)]
+            key = (link.id, platform_sku)
+            detail = detail_by_key.get(key)
+            if detail is None:
+                detail = ProductLibraryOrderSkuQuantity(order_product_id=link.id, platform_sku=platform_sku, quantity=quantity)
+                db.add(detail)
+                detail_by_key[key] = detail
+            else:
+                detail.quantity = quantity
+        totals = {}
+        for detail in detail_by_key.values():
+            totals[detail.order_product_id] = totals.get(detail.order_product_id, 0) + detail.quantity
+        for link in existing_links.values():
+            if totals[link.id] > 2147483647:
+                raise ValueError("同一订单商品的总数量超过支持范围")
+            link.quantity = totals[link.id]
         db.commit()
     except ValueError as exc:
         db.rollback()
