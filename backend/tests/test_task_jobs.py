@@ -233,8 +233,7 @@ class TaskJobTests(unittest.TestCase):
         )
         response = httpx.Response(200, request=httpx.Request("POST", "https://grsai.example/generate"), json={"id": "provider-1"})
         client = AsyncMock(); client.post.return_value = response
-        with patch("app.ai_providers.is_public_r2_url", return_value=True):
-            asyncio.run(GrsaiProvider().submit(request, "test-key", Settings(grsai_base_url="https://grsai.example"), client))
+        asyncio.run(GrsaiProvider().submit(request, "test-key", Settings(grsai_base_url="https://grsai.example"), client))
         payload = client.post.call_args.kwargs["json"]
         self.assertEqual(payload, {
             "model": "gpt-image-2", "prompt": "test",
@@ -540,10 +539,11 @@ class TaskJobTests(unittest.TestCase):
             self.assertEqual(main.list_material_assets(page=1, page_size=20, creator_id=None, template_id=1, usage_status="unused", user=db.get(User, 1), db=db)["total"], 0)
             self.assertEqual(main.list_material_assets(page=1, page_size=20, creator_id=None, template_id=1, usage_status="used", user=db.get(User, 1), db=db)["total"], 10)
 
-            rejected = MaterialDraftBatchCreate(template_id=1, groups=[{"material_asset_ids": [asset.id for asset in assets[:5]], "title": "C" * 25}])
-            with self.assertRaisesRegex(HTTPException, "未使用素材"):
-                main.create_drafts_from_material_assets_batch(rejected, user=db.get(User, 1), db=db)
-            self.assertEqual(db.scalar(select(func.count()).select_from(ProductDraft)), 2)
+            reused = MaterialDraftBatchCreate(template_id=1, groups=[{"material_asset_ids": [asset.id for asset in assets[:5]], "title": "C" * 25}])
+            reuse_result = main.create_drafts_from_material_assets_batch(reused, user=db.get(User, 1), db=db)
+            self.assertEqual(reuse_result["total"], 1)
+            self.assertEqual([item["sku"] for item in reuse_result["drafts"][0]["sku_items"]], [asset.sku for asset in assets[:5]])
+            self.assertEqual(db.scalar(select(func.count()).select_from(ProductDraft)), 3)
 
     def test_pending_drafts_can_be_dispatched_to_each_workflow_stage(self) -> None:
         with self.session_factory() as db:

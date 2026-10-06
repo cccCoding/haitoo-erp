@@ -357,6 +357,7 @@ class MaterialDraftBatchCreate(BaseModel):
 
 class DraftTitleGenerate(BaseModel):
     image_url: str = Field(min_length=1, max_length=500)
+    additional_requirements: str = Field(default="", max_length=1000)
 
 
 class DraftUpdate(BaseModel):
@@ -620,6 +621,10 @@ class DraftMiaoshouPublishInput(BaseModel):
 class ProductLibraryDraftSource(BaseModel):
     source_type: Literal["product", "material"]
     id: int = Field(gt=0)
+
+
+class ProductLibraryTitleGenerate(ProductLibraryDraftSource):
+    additional_requirements: str = Field(default="", max_length=1000)
 
 
 class ProductLibraryDraftCreate(BaseModel):

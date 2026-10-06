@@ -17,10 +17,8 @@ class Settings(BaseSettings):
     login_client_ip_source: Literal["peer", "auto"] = "peer"
     # Grsai 异步图像生成接口，用于印花贴合。
     grsai_base_url: str = "https://grsaiapi.com"
-    # DeepSeek 图像理解采用 OpenAI 兼容接口，用于根据模板约束和商品首图生成标题。
-    deepseek_api_key: str | None = None
+    # DeepSeek 英文标题采用 OpenAI 兼容接口，密钥按当前用户从数据库读取。
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_title_model: str = "deepseek-v4-flash-vision-exp"
     # 新图片统一上传 Cloudflare R2；数据库保存 r2_public_base_url 下的完整 URL。
     r2_account_id: str | None = None
     r2_access_key_id: str | None = None

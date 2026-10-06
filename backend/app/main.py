@@ -29,7 +29,7 @@ from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUp
 from .product_library_statistics import order_facts, sku_statistics
 from .product_library import parse_order_workbook
 from .product_library_rankings import SnapshotAlreadyRunning, company_run_lock, create_daily_snapshot, enqueue_ranking_task, task_payload
-from .schemas import ProductLibraryShopAssignment, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
+from .schemas import ProductLibraryShopAssignment, ProductLibraryTitleGenerate, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
 from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, OperatorGroupCreate, OperatorGroupUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
@@ -732,12 +732,12 @@ def list_members(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Se
             "ai_provider_credentials": {
                 provider.provider: (member.id, provider.credential_provider) in configured
                 for provider in enabled_providers
-            },
+            } | {"deepseek": (member.id, "deepseek") in configured},
             "ai_provider_credential_previews": {
                 provider.provider: credential_previews.get((member.id, provider.credential_provider))
                 for provider in enabled_providers
                 if (member.id, provider.credential_provider) in configured
-            }
+            } | ({"deepseek": credential_previews[(member.id, "deepseek")]} if (member.id, "deepseek") in configured else {})
         }
         for member in members
     ]
@@ -835,12 +835,13 @@ def update_member_ai_provider_credential(
     """公司管理员为本公司成员保存独立模型密钥；接口永不返回密钥内容。"""
     member = get_company_credential_user(db, user, member_id)
     setting = db.get(AIProviderSetting, provider)
-    if not setting or not setting.enabled:
+    if provider != "deepseek" and (not setting or not setting.enabled):
         raise HTTPException(400, "模型平台不存在或未启用")
     if not provider_supports_user_credentials(provider):
         raise HTTPException(400, "该模型平台不支持独立密钥")
-    credential_provider = setting.credential_provider
+    credential_provider = "deepseek" if provider == "deepseek" else setting.credential_provider
     credential = db.scalar(select(UserAIProviderCredential).where(
+        UserAIProviderCredential.company_id == user.company_id,
         UserAIProviderCredential.user_id == member.id,
         UserAIProviderCredential.provider == credential_provider,
     ))
@@ -869,6 +870,7 @@ def delete_member_ai_provider_credential(
     member = get_company_credential_user(db, user, member_id)
     setting = db.get(AIProviderSetting, provider)
     credential = db.scalar(select(UserAIProviderCredential).where(
+        UserAIProviderCredential.company_id == user.company_id,
         UserAIProviderCredential.user_id == member.id,
         UserAIProviderCredential.provider == (setting.credential_provider if setting else provider),
     ))
@@ -2868,18 +2870,28 @@ def create_drafts_from_product_library_batch(payload: ProductLibraryDraftBatchCr
     return {"total": len(drafts), "drafts": [serialize_record(draft) for draft in drafts]}
 
 
+def get_title_generation_api_key(db: Session, user: User) -> str:
+    credential = db.scalar(select(UserAIProviderCredential).where(
+        UserAIProviderCredential.company_id == user.company_id,
+        UserAIProviderCredential.user_id == user.id,
+        UserAIProviderCredential.provider == "deepseek",
+    ))
+    if not credential:
+        raise HTTPException(400, "尚未配置个人 DeepSeek 密钥，请联系公司管理员在成员管理中配置")
+    return decrypt_secret(credential.secret_encrypted)
+
+
 @app.post("/product-library/generate-draft-title")
-async def generate_product_library_draft_title(payload: ProductLibraryDraftSource,
+async def generate_product_library_draft_title(payload: ProductLibraryTitleGenerate,
     user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db)):
     record = resolve_product_library_sources(db, user, [payload])[0]
     if record.template_id is None:
         raise HTTPException(400, "请先匹配有效产品模板")
     template = get_company_template(db, user, record.template_id)
     validate_product_library_draft_records([record], template)
-    if not template.title_template:
-        raise HTTPException(400, "该产品模版尚未填写 AI生成标题约束")
+    api_key = get_title_generation_api_key(db, user)
     try:
-        return {"title": await generate_draft_title(template.title_template, library_record_image(record))}
+        return {"title": await generate_draft_title(template.title_template or "", library_record_image(record), api_key, additional_requirements=payload.additional_requirements)}
     except ProviderError as exc:
         raise HTTPException(502, str(exc)) from exc
 
@@ -2913,7 +2925,7 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
 
 @app.post("/drafts/from-material-assets/batch")
 def create_drafts_from_material_assets_batch(payload: MaterialDraftBatchCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """将未使用素材按已预览的分组原子创建多个商品草稿。"""
+    """将素材按已预览的分组原子创建多个商品草稿，支持复用已使用素材。"""
     template = get_company_template(db, user, payload.template_id)
     groups = [(list(dict.fromkeys(group.material_asset_ids)), group.title) for group in payload.groups]
     if any(len(asset_ids) != len(group.material_asset_ids) for (asset_ids, _title), group in zip(groups, payload.groups)):
@@ -2929,12 +2941,10 @@ def create_drafts_from_material_assets_batch(payload: MaterialDraftBatchCreate, 
     assets_by_id = {asset.id: asset for asset in db.scalars(stmt).all()}
     if len(assets_by_id) != len(all_ids):
         raise HTTPException(400, "包含不存在或无权使用的素材")
-    if any(asset.usage_status != "unused" for asset in assets_by_id.values()):
-        raise HTTPException(400, "组合创建只能使用未使用素材，请刷新列表后重试")
     if any(not asset.sku for asset in assets_by_id.values()):
         raise HTTPException(400, "包含无 SKU 的历史素材，请重新上传或领取后再创建商品草稿")
     if any(asset.template_id != template.id for asset in assets_by_id.values()):
-        raise HTTPException(400, "组合创建时只能使用属于所选产品模板的未使用素材")
+        raise HTTPException(400, "组合创建时只能使用属于所选产品模板的素材")
     drafts = []
     for asset_ids, title in groups:
         assets = [assets_by_id[asset_id] for asset_id in asset_ids]
@@ -2951,16 +2961,15 @@ def create_drafts_from_material_assets_batch(payload: MaterialDraftBatchCreate, 
 @app.post("/templates/{template_id}/generate-draft-title")
 async def generate_material_draft_title(template_id: int, payload: DraftTitleGenerate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     template = get_company_template(db, user, template_id)
-    if not template.title_template:
-        raise HTTPException(400, "该产品模版尚未填写 AI生成标题约束")
     asset_filters = [MaterialAsset.company_id == user.company_id, MaterialAsset.url == payload.image_url]
     if is_operator(user):
         asset_filters.append(MaterialAsset.claimed_by == user.id)
     asset = db.scalar(select(MaterialAsset).where(*asset_filters))
     if not asset:
         raise HTTPException(400, "请使用当前公司素材库中的首图生成标题")
+    api_key = get_title_generation_api_key(db, user)
     try:
-        return {"title": await generate_draft_title(template.title_template, payload.image_url)}
+        return {"title": await generate_draft_title(template.title_template or "", payload.image_url, api_key, additional_requirements=payload.additional_requirements)}
     except ProviderError as exc:
         raise HTTPException(502, str(exc)) from exc
 

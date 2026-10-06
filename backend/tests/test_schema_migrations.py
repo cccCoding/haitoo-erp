@@ -41,6 +41,22 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertIn("pending", str(draft_columns["workflow_stage"]["default"]))
         assert_schema_current(self.engine)
 
+    def test_title_requirements_use_revision_25_without_confirmed_info(self) -> None:
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, "20261005_25")
+            connection.execute(text("INSERT INTO companies (id, name, is_active, created_at) VALUES (900, 'Existing Company', 1, CURRENT_TIMESTAMP)"))
+            connection.execute(text("INSERT INTO product_templates (id, company_id, name, title_template, is_platform, status, color_count, sku_count) VALUES (900, 900, 'TEST', 'Existing title rules', 0, 'published', 1, 1)"))
+            command.upgrade(config, "head")
+            current, expected = schema_heads(connection)
+            self.assertEqual(current, expected)
+            self.assertEqual(current, {"20261005_25"})
+            columns = {column['name'] for column in inspect(connection).get_columns('product_templates')}
+            self.assertNotIn('confirmed_product_info', columns)
+            self.assertEqual(connection.execute(text("SELECT title_template FROM product_templates WHERE id=900")).scalar_one(), 'Existing title rules')
+            self.assertEqual(connection.execute(text("SELECT name FROM companies WHERE id=900")).scalar_one(), 'Existing Company')
+        assert_schema_current(self.engine)
+
     def test_running_upgrade_again_is_a_no_op(self) -> None:
         with self.engine.connect() as connection:
             config = alembic_config(connection)

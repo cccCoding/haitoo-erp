@@ -70,9 +70,7 @@ services:
       LOGIN_CLIENT_IP_SOURCE: ${LOGIN_CLIENT_IP_SOURCE:-auto}
       # 模型平台密钥由公司管理员在成员管理中按员工配置。
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-      DEEPSEEK_TITLE_MODEL: ${DEEPSEEK_TITLE_MODEL:-deepseek-v4-flash-vision-exp}
       # Cloudflare R2 S3 API 凭据仅通过部署环境注入，切勿提交到仓库。
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}

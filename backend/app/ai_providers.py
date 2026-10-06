@@ -4,13 +4,13 @@
 Grsai 的模型差异集中在本模块，任务与选图流程只处理统一的异步任务协议。
 """
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from .config import Settings, get_settings
-from .storage import is_public_r2_url
 
 
 logger = logging.getLogger(__name__)
@@ -49,9 +49,10 @@ def build_prompt(parameters: dict, template_name: str) -> str:
 
 
 def _public_url(url: str) -> str:
-    if is_public_r2_url(url):
-        return url
-    raise ProviderError("图片未上传至当前 Cloudflare R2 公网域名，无法提交给模型服务")
+    """向模型传递已有图片地址，不限制存储域名。"""
+    if not url or not url.strip():
+        raise ProviderError("缺少图片地址，无法提交给模型服务")
+    return url.strip()
 
 
 class GrsaiProvider:
@@ -129,7 +130,7 @@ PROVIDERS: dict[str, GrsaiProvider] = {key: GrsaiProvider() for key in GRSAI_PRO
 
 
 def provider_supports_user_credentials(provider: str) -> bool:
-    return provider in PROVIDERS
+    return provider in PROVIDERS or provider == "deepseek"
 
 
 async def submit_async_generation(provider: str, request: GenerationRequest, api_key: str) -> tuple[dict[str, Any], str, dict[str, str]]:
@@ -149,39 +150,68 @@ async def poll_async_generation(provider: str, provider_task_id: str, api_key: s
         return await adapter.poll_once(provider_task_id, api_key, get_settings(), client)
 
 
-async def generate_draft_title(title_constraint: str, image_url: str) -> str:
-    """使用 DeepSeek 视觉模型根据模板标题约束和商品首图生成标题。"""
-    settings = get_settings()
-    if not settings.deepseek_api_key:
-        raise ProviderError("未配置 DEEPSEEK_API_KEY")
-    image_reference = _public_url(image_url)
-    prompt = (
-        "你是跨境电商商品标题助手。请识别商品首图中的商品、款式、颜色、材质、图案和可见细节，"
-        "并严格遵守以下标题约束生成一个中文商品标题。"
-        "只输出标题本身，不要解释、不要引号、不要 Markdown；标题长度必须为 25-255 个字符。\n"
-        f"标题约束：{title_constraint}"
-    )
-    async with httpx.AsyncClient(timeout=45) as client:
-        response = await client.post(
-            f"{settings.deepseek_base_url.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
-            json={
-                "model": settings.deepseek_title_model,
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": image_reference}, "detail": "high"},
-                    ],
-                }],
-                "temperature": 0.4,
-                "max_tokens": 240,
-            },
-        )
-    _raise_for_provider_error("deepseek", response)
-    title = str(response.json().get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+TITLE_SYSTEM_PROMPT = (
+    "You generate cross-border ecommerce product titles from the first product image. "
+    "Return exactly one English title, 25-255 characters, on a single line. "
+    "Return only the title, without explanations, quotes, or Markdown. "
+    "Product title requirements are the user's default instructions for this product. "
+    "Additional requirements for this generation are the user's instructions for this request; "
+    "when wording or emphasis conflicts, follow the additional requirements subject to these system rules. "
+    "Use a product category explicitly supplied in these requirements; otherwise use the category clearly visible in the image. "
+    "Mention functional features only when explicitly described in these requirements. "
+    "Use the image for visible color, pattern, silhouette, and details; do not infer hidden functions. "
+    "If product facts conflict or are unclear, omit the uncertain attribute rather than guess. "
+    "Mention materials, fabrics, textile names, or composition only when explicitly requested "
+    "and specified in the requirements; never infer them from the image. Do not invent product attributes. "
+)
+
+
+def validate_generated_title(title: str) -> str:
     if not title:
         raise ProviderError("DeepSeek 未返回标题")
-    if len(title) < 25:
-        raise ProviderError("DeepSeek 返回的标题少于 25 个字符，请重试或手动填写")
-    return title[:255]
+    if not 25 <= len(title) <= 255:
+        raise ProviderError("DeepSeek 返回的标题长度必须为 25-255 个字符，请重试或手动填写")
+    return title
+
+
+async def generate_draft_title(title_constraint: str, image_url: str, api_key: str, *,
+                               additional_requirements: str = "") -> str:
+    """使用当前用户的 DeepSeek 密钥按模板与补充要求生成英文标题。"""
+    settings = get_settings()
+    image_reference = _public_url(image_url)
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            response = await client.post(
+                f"{settings.deepseek_base_url.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": "deepseek-flash",
+                    "thinking": {"type": "disabled"},
+                    "messages": [
+                        {"role": "system", "content": TITLE_SYSTEM_PROMPT},
+                        {"role": "user", "content": [
+                            {"type": "text", "text": f"Product title requirements:\n{title_constraint.strip()}\n\n"
+                                     f"Additional requirements for this generation:\n{additional_requirements.strip() or 'None'}"},
+                            {"type": "image_url", "image_url": {"url": image_reference, "detail": "high"}},
+                        ]},
+                    ],
+                    "temperature": 0.4,
+                    "max_tokens": 512,
+                },
+            )
+    except httpx.HTTPError as exc:
+        raise ProviderError("DeepSeek 请求失败，请稍后重试") from exc
+    # 不向前端透传上游响应内容，避免第三方错误响应泄露凭据。
+    if response.is_error:
+        raise ProviderError(f"DeepSeek 调用失败：HTTP {response.status_code}，请检查个人密钥或稍后重试")
+    try:
+        choice = response.json()["choices"][0]
+        finish_reason = choice["finish_reason"]
+        content = choice["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise ProviderError("DeepSeek 返回数据格式异常，请重试") from exc
+    if finish_reason != "stop":
+        raise ProviderError("DeepSeek 未完整生成标题，请重试或手动填写")
+    if not isinstance(content, str):
+        raise ProviderError("DeepSeek 未返回标题")
+    return validate_generated_title(content.strip())
