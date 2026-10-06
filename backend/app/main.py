@@ -2220,6 +2220,7 @@ def list_tasks(
     created_from: datetime | None = None,
     created_to: datetime | None = None,
     sku_query: str | None = Query(default=None, max_length=10000),
+    template_id: Annotated[int | None, Query(ge=1)] = None,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -2235,6 +2236,8 @@ def list_tasks(
     if is_operator(user):
         scope_filters.append(PodTask.created_by == user.id)
     filters = list(scope_filters)
+    if template_id is not None:
+        filters.append(PodTask.template_id == template_id)
     if not is_operator(user) and creator_id is not None:
         filters.append(PodTask.created_by == creator_id)
     if status is not None:

@@ -440,6 +440,45 @@ class TaskJobTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in result["items"]], [matching_task_id])
         self.assertEqual(result["total"], 1)
 
+    def test_task_template_filter_combines_with_skus_and_preserves_access_scope(self) -> None:
+        matching_id = self.add_task(status=TaskStatus.COMPLETED)
+        other_template_id = self.add_task(status=TaskStatus.COMPLETED)
+        other_creator_id = self.add_task(status=TaskStatus.COMPLETED)
+        other_company_id = self.add_task(status=TaskStatus.COMPLETED)
+        queued_id = self.add_task()
+        with self.session_factory() as db:
+            db.add(ProductTemplate(id=2, company_id=1, name="Y1"))
+            db.add(Company(id=2, name="Other Company"))
+            db.get(PodTask, other_template_id).template_id = 2
+            db.get(PodTask, other_creator_id).created_by = 3
+            db.get(PodTask, other_company_id).company_id = 2
+            db.add_all([
+                MaterialAsset(company_id=1, source_task_id=matching_id, template_id=1, url="https://img.example/matching.png", name="matching", sku="MATCHING-SKU", claimed_by=1),
+                MaterialAsset(company_id=1, source_task_id=other_template_id, template_id=2, url="https://img.example/other.png", name="other", sku="OTHER-SKU", claimed_by=1),
+            ])
+            db.commit()
+
+            member = db.get(User, 1)
+            filtered = main.list_tasks(page=1, page_size=1, creator_id=None, template_id=1, user=member, db=db)
+            self.assertEqual(filtered["total"], 2)
+            self.assertEqual([item["id"] for item in filtered["items"]], [queued_id])
+            self.assertEqual(filtered["status_counts"], {"completed": 1, "queued": 1})
+            self.assertEqual(filtered["active_count"], 1)
+            second_page = main.list_tasks(page=2, page_size=1, creator_id=None, template_id=1, user=member, db=db)
+            self.assertEqual([item["id"] for item in second_page["items"]], [matching_id])
+
+            combined = main.list_tasks(
+                page=1, page_size=20, creator_id=None, template_id=1, status=TaskStatus.COMPLETED,
+                sku_query="MATCHING-SKU\nOTHER-SKU", user=member, db=db,
+            )
+            self.assertEqual([item["id"] for item in combined["items"]], [matching_id])
+            unfiltered = main.list_tasks(page=1, page_size=20, creator_id=None, template_id=None, user=member, db=db)
+            self.assertEqual(unfiltered["total"], 3)
+            admin = main.list_tasks(page=1, page_size=20, creator_id=3, template_id=1, user=db.get(User, 2), db=db)
+            self.assertEqual([item["id"] for item in admin["items"]], [other_creator_id])
+            missing = main.list_tasks(page=1, page_size=20, creator_id=None, template_id=999, user=member, db=db)
+            self.assertEqual(missing["total"], 0)
+
     def test_members_only_see_their_materials_and_template_update_route_is_removed(self) -> None:
         with self.session_factory() as db:
             own = MaterialAsset(company_id=1, template_id=1, url="https://img.example/own.png", name="own", claimed_by=1)
