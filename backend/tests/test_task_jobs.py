@@ -28,7 +28,7 @@ class TaskJobTests(unittest.TestCase):
         with self.session_factory() as db:
             db.add_all([
                 Company(id=1, name="Test Company", miaoshou_app_id="app-id", miaoshou_secret_encrypted="encrypted-secret"),
-                TaskQueueSetting(id=1, submit_interval_seconds=1, result_interval_seconds=5),
+                TaskQueueSetting(id=1, submit_interval_ms=1000, result_interval_ms=5000),
                 AIProviderSetting(provider="grsai", display_name="Grsai · Nano Banana Fast", model="nano", credential_provider="grsai", enabled=True, is_default=True, images_per_task=2),
                 AIProviderSetting(provider="grsai-gpt-image-2", display_name="Grsai · GPT Image 2", model="gpt-image-2", credential_provider="grsai", enabled=True, is_default=False, images_per_task=1),
                 ProductTemplate(id=1, company_id=1, name="M05L", cover_url="https://img.example/template.png"),
@@ -51,6 +51,44 @@ class TaskJobTests(unittest.TestCase):
             yield db
         finally:
             db.close()
+
+    def test_millisecond_settings_control_cycles_and_submission_retries(self) -> None:
+        from app.schemas import TaskQueueSettingUpdate
+
+        with self.session_factory() as db:
+            payload = TaskQueueSettingUpdate(submit_interval_ms=250, result_interval_ms=75)
+            saved = main.update_task_queue_settings(payload, user=db.get(User, 2), db=db)
+            self.assertEqual(saved["submit_interval_ms"], 250)
+            self.assertEqual(saved["result_interval_ms"], 75)
+
+        with patch.object(task_jobs, "get_db", self.fake_get_db):
+            self.assertEqual(task_jobs.queue_interval("submit"), 0.25)
+            self.assertEqual(task_jobs.queue_interval("result"), 0.075)
+            sleep = AsyncMock()
+            with patch.object(task_jobs, "submit_task_once", new=AsyncMock(side_effect=["retry", "done"])):
+                asyncio.run(task_jobs.process_submission_task(1, sleep=sleep))
+            sleep.assert_awaited_once_with(0.25)
+
+            for kind, processor, delay in (("submit", "process_submission_task", 0.25),
+                                           ("result", "process_result_task", 0.075)):
+                sleep = AsyncMock()
+                with patch.object(task_jobs, "task_snapshot", return_value=[1]), \
+                        patch.object(task_jobs, processor, new=AsyncMock()):
+                    asyncio.run(task_jobs.run_cycle(kind, sleep=sleep))
+                sleep.assert_awaited_once_with(delay)
+
+    def test_queue_millisecond_bounds_and_defaults(self) -> None:
+        from app.schemas import TaskQueueSettingUpdate
+        from pydantic import ValidationError
+
+        payload = TaskQueueSettingUpdate()
+        self.assertEqual((payload.submit_interval_ms, payload.result_interval_ms), (1000, 5000))
+        for field in ("submit_interval_ms", "result_interval_ms"):
+            for value in (1, 3600000):
+                self.assertEqual(getattr(TaskQueueSettingUpdate(**{field: value}), field), value)
+            for value in (0, 3600001, 1.5):
+                with self.assertRaises(ValidationError):
+                    TaskQueueSettingUpdate(**{field: value})
 
     def add_task(self, *, status=TaskStatus.QUEUED, provider_task_id=None) -> int:
         with self.session_factory() as db:

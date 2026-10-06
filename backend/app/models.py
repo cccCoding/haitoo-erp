@@ -506,5 +506,5 @@ class TaskQueueSetting(Base):
     """平台级串行任务节奏配置；固定使用主键 1。"""
     __tablename__ = "task_queue_settings"
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
-    submit_interval_seconds: Mapped[int] = mapped_column(Integer, default=1)
-    result_interval_seconds: Mapped[int] = mapped_column(Integer, default=5)
+    submit_interval_ms: Mapped[int] = mapped_column(Integer, default=1000)
+    result_interval_ms: Mapped[int] = mapped_column(Integer, default=5000)

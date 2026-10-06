@@ -50,7 +50,7 @@ class SchemaMigrationTests(unittest.TestCase):
             command.upgrade(config, "head")
             current, expected = schema_heads(connection)
             self.assertEqual(current, expected)
-            self.assertEqual(current, {"20261005_25"})
+            self.assertEqual(current, {"20261006_26"})
             columns = {column['name'] for column in inspect(connection).get_columns('product_templates')}
             self.assertNotIn('confirmed_product_info', columns)
             self.assertEqual(connection.execute(text("SELECT title_template FROM product_templates WHERE id=900")).scalar_one(), 'Existing title rules')
@@ -69,6 +69,22 @@ class SchemaMigrationTests(unittest.TestCase):
         with self.engine.connect() as connection:
             current, expected = schema_heads(connection)
             self.assertEqual(current, expected)
+
+    def test_queue_intervals_migrate_seconds_to_milliseconds_once(self) -> None:
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, "20261005_25")
+            connection.execute(text("INSERT INTO task_queue_settings "
+                                    "(id, submit_interval_seconds, result_interval_seconds) VALUES (1, 2, 7)"))
+            command.upgrade(config, "head")
+            command.upgrade(config, "head")
+            self.assertEqual(tuple(connection.execute(text(
+                "SELECT submit_interval_ms, result_interval_ms FROM task_queue_settings WHERE id=1"
+            )).one()), (2000, 7000))
+            command.downgrade(config, "20261005_25")
+            self.assertEqual(tuple(connection.execute(text(
+                "SELECT submit_interval_seconds, result_interval_seconds FROM task_queue_settings WHERE id=1"
+            )).one()), (2, 7))
 
     def test_shop_identity_constraint_and_hub_upload_task_indexes_are_migrated(self) -> None:
         with self.engine.begin() as connection:

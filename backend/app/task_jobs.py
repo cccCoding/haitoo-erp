@@ -25,13 +25,14 @@ SleepCallable = Callable[[float], Awaitable[None]]
 MAX_SUBMIT_ATTEMPTS = 3
 
 
-def queue_interval(kind: str) -> int:
+def queue_interval(kind: str) -> float:
+    """读取毫秒配置，转换为 asyncio.sleep 所需的秒数。"""
     db = next(get_db())
     try:
         setting = db.get(TaskQueueSetting, 1)
         if not setting:
             return 1 if kind == "submit" else 5
-        return max(1, setting.submit_interval_seconds if kind == "submit" else setting.result_interval_seconds)
+        return max(1, setting.submit_interval_ms if kind == "submit" else setting.result_interval_ms) / 1000
     finally:
         db.close()
 

@@ -4,7 +4,7 @@ const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://loca
 const token = ref(localStorage.getItem('haitoro_admin_token') || '');
 const email = ref(''), password = ref('');
 const user = ref(null), overview = ref(null), providers = ref([]), companies = ref([]);
-const queueSettings = ref({ submit_interval_seconds: 1, result_interval_seconds: 5 });
+const queueSettings = ref({ submit_interval_ms: 1000, result_interval_ms: 5000 });
 const loading = ref(false), saving = ref(''), error = ref('');
 const toast = ref('');
 const activePage = ref('overview');
@@ -418,16 +418,18 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
             type: "number",
             min: "1",
-            max: "3600",
+            max: "3600000",
+                step: "1",
         });
-        (__VLS_ctx.queueSettings.submit_interval_seconds);
+        (__VLS_ctx.queueSettings.submit_interval_ms);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
             type: "number",
             min: "1",
-            max: "3600",
+            max: "3600000",
+                step: "1",
         });
-        (__VLS_ctx.queueSettings.result_interval_seconds);
+        (__VLS_ctx.queueSettings.result_interval_ms);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.saveQueueSettings) },
             ...{ class: "secondary" },

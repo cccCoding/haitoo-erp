@@ -273,8 +273,8 @@ class AIProviderSettingUpdate(BaseModel):
 
 
 class TaskQueueSettingUpdate(BaseModel):
-    submit_interval_seconds: int = Field(default=1, ge=1, le=3600)
-    result_interval_seconds: int = Field(default=5, ge=1, le=3600)
+    submit_interval_ms: int = Field(default=1000, ge=1, le=3600000)
+    result_interval_ms: int = Field(default=5000, ge=1, le=3600000)
 
 
 class AdminCompanyCreate(BaseModel):

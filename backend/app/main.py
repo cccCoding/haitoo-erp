@@ -68,7 +68,7 @@ def initialize_system_defaults(db: Session) -> None:
     if not db.get(AIProviderSetting, "grsai-gpt-image-2"):
         db.add(AIProviderSetting(provider="grsai-gpt-image-2", display_name="Grsai · GPT Image 2", model="gpt-image-2", credential_provider="grsai", enabled=True, is_default=False))
     if not db.get(TaskQueueSetting, 1):
-        db.add(TaskQueueSetting(id=1, submit_interval_seconds=1, result_interval_seconds=5))
+        db.add(TaskQueueSetting(id=1, submit_interval_ms=1000, result_interval_ms=5000))
     # 类目库全部由公司管理员上传创建；清理早期版本自动生成的全局默认类目库。
     db.execute(delete(TiktokCategoryCatalog).where(TiktokCategoryCatalog.company_id.is_(None)))
     # 启动时只补齐必要的系统配置，绝不创建业务账号或公司。
@@ -2561,7 +2561,7 @@ def update_ai_provider(provider: str, payload: AIProviderSettingUpdate, user: Us
 def get_task_queue_settings(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
     setting = db.get(TaskQueueSetting, 1)
     if not setting:
-        setting = TaskQueueSetting(id=1, submit_interval_seconds=1, result_interval_seconds=5)
+        setting = TaskQueueSetting(id=1, submit_interval_ms=1000, result_interval_ms=5000)
         db.add(setting); db.commit(); db.refresh(setting)
     return serialize_record(setting)
 
@@ -2569,8 +2569,8 @@ def get_task_queue_settings(user: User = Depends(require_roles(Role.SUPER_ADMIN)
 @app.put("/admin/task-queue-settings")
 def update_task_queue_settings(payload: TaskQueueSettingUpdate, user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
     setting = db.get(TaskQueueSetting, 1) or TaskQueueSetting(id=1)
-    setting.submit_interval_seconds = payload.submit_interval_seconds
-    setting.result_interval_seconds = payload.result_interval_seconds
+    setting.submit_interval_ms = payload.submit_interval_ms
+    setting.result_interval_ms = payload.result_interval_ms
     db.add(setting); db.commit(); db.refresh(setting)
     return serialize_record(setting)
 
