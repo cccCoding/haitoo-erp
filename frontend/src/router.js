@@ -14,7 +14,7 @@ export const workspaceRoutes = [
     { path: '/product-library', name: 'product-library', component: RouteOutlet },
     { path: '/miaoshou-collect-box', name: 'miaoshou-collect-box', component: RouteOutlet },
     { path: '/settings/members', name: 'members', component: RouteOutlet, meta: { requiresCompanyAdmin: true } },
-    { path: '/settings/shops', name: 'shops', component: RouteOutlet, meta: { requiresCompanyAdmin: true } },
+    { path: '/settings/shops', name: 'shops', component: RouteOutlet },
     { path: '/settings/tiktok-catalogs', name: 'tiktok-catalogs', component: RouteOutlet, meta: { requiresCompanyAdmin: true } },
     { path: '/:pathMatch(.*)*', redirect: { name: 'dashboard' } },
 ];

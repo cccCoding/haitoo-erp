@@ -4212,8 +4212,10 @@ def create_hubstudio_upload_task(payload: HubUploadTaskCreate, user: User = Depe
 
 
 @app.get("/hub-upload-tasks")
-def list_hub_upload_tasks(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), status: str | None = None, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    return hub.list_tasks(db, user.id, user.company_id, page, page_size, status)
+def list_hub_upload_tasks(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), status: str | None = None, scope: Literal["own", "company"] = "own", creator_id: int | None = Query(None, ge=1), user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if user.role != Role.COMPANY_ADMIN and (scope == "company" or creator_id is not None and creator_id != user.id):
+        raise HTTPException(403, "无权查看其他成员的上品记录")
+    return hub.list_tasks(db, user.id, user.company_id, page, page_size, status, company_scope=scope == "company", creator_id=creator_id)
 
 
 @app.get("/hub-upload-tasks/{task_id}")

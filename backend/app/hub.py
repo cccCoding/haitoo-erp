@@ -4,7 +4,7 @@ import secrets
 from fastapi import HTTPException
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
-from .models import Company, HubAgent, HubRuntimeLock, HubUploadAttempt, HubUploadTask, ProductDraft
+from .models import Company, HubAgent, HubRuntimeLock, HubUploadAttempt, HubUploadTask, ProductDraft, User
 from .schemas import HubTaskClaimInput, HubTaskAction
 
 PROTOCOL = "3"
@@ -114,14 +114,21 @@ def sweep_expired(db):
     db.commit()
 
 
-def list_tasks(db, user_id, company_id, page=1, page_size=25, status=None):
+def list_tasks(db, user_id, company_id, page=1, page_size=25, status=None, *, company_scope=False, creator_id=None):
     sweep_expired(db)
-    condition = [HubUploadTask.created_by == user_id, HubUploadTask.company_id == company_id]
+    condition = [HubUploadTask.company_id == company_id]
+    if not company_scope:
+        condition.append(HubUploadTask.created_by == user_id)
+    if creator_id is not None:
+        condition.append(HubUploadTask.created_by == creator_id)
     if status:
         condition.append(HubUploadTask.status == status)
     total = db.scalar(select(func.count()).select_from(HubUploadTask).where(*condition))
     tasks = db.scalars(select(HubUploadTask).where(*condition).order_by(HubUploadTask.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
-    return {"items": [task_view(db, t) for t in tasks], "total": total, "page": page, "page_size": page_size}
+    creator_ids = {task.created_by for task in tasks}
+    creators = dict(db.execute(select(User.id, User.name).where(User.company_id == company_id, User.id.in_(creator_ids))).all()) if creator_ids else {}
+    items = [task_view(db, task) | {"created_by_name": creators.get(task.created_by), "product_count": len(task.draft_ids or [])} for task in tasks]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 def own_task(db, task_id, user_id, company_id):

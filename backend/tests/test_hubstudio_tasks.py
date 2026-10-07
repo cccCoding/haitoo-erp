@@ -64,6 +64,57 @@ class HubstudioTaskTests(unittest.TestCase):
         main.app.dependency_overrides.clear()
         self.engine.dispose()
 
+    def test_record_list_scope_permissions_and_agent_compatibility(self):
+        def database():
+            with self.Session() as db:
+                yield db
+        main.app.dependency_overrides[get_db] = database
+        client = TestClient(main.app)
+        with self.Session() as db:
+            db.add_all([
+                Company(id=2, name="Other company"),
+                User(id=3, company_id=1, email="leader@example.com", name="Leader", password_hash="x", role=Role.TEAM_LEADER),
+                User(id=4, company_id=2, email="other@example.com", name="Other", password_hash="x", role=Role.COMPANY_ADMIN),
+                HubUploadTask(id=10, company_id=1, created_by=1, draft_ids=[1, 2], export_filename="admin.xlsx"),
+                HubUploadTask(id=11, company_id=1, created_by=2, draft_ids=[3], export_filename="member.xlsx", environment_name="TikTok", container_code="env-1", status="completed"),
+                HubUploadTask(id=12, company_id=1, created_by=3, draft_ids=[], export_filename="leader.xlsx"),
+                HubUploadTask(id=13, company_id=2, created_by=4, draft_ids=[4], export_filename="other.xlsx"),
+                HubUploadTask(id=14, company_id=1, created_by=999, draft_ids=[], export_filename="historical.xlsx"),
+            ])
+            db.commit()
+            users = {i: db.get(User, i) for i in (1, 2, 3)}
+        main.app.dependency_overrides[main.current_user] = lambda: users[1]
+        result = client.get("/hub-upload-tasks?scope=company&page_size=2").json()
+        self.assertEqual(result["total"], 4)
+        self.assertEqual([item["id"] for item in result["items"]], [14, 12])
+        self.assertIsNone(result["items"][0]["created_by_name"])
+        second = client.get("/hub-upload-tasks?scope=company&page_size=2&page=2").json()["items"]
+        self.assertEqual([item["id"] for item in second], [11, 10])
+        self.assertEqual(second[0]["created_by_name"], "Member")
+        self.assertEqual(second[0]["environment_name"], "TikTok")
+        self.assertEqual(second[0]["status"], "completed")
+        self.assertEqual(second[1]["product_count"], 2)
+        self.assertIsNone(second[1]["environment_name"])
+        self.assertNotIn("claim_token", second[0])
+        self.assertNotIn("export_blob", second[0])
+        self.assertEqual(client.get("/hub-upload-tasks").json()["total"], 1)
+        filtered = client.get("/hub-upload-tasks?scope=company&creator_id=2").json()
+        self.assertEqual([item["id"] for item in filtered["items"]], [11])
+        self.assertEqual(client.get("/hub-upload-tasks?scope=company&creator_id=4").json()["total"], 0)
+        self.assertEqual(client.get("/hub-upload-tasks?scope=invalid").status_code, 422)
+        self.assertEqual(client.get("/hub-upload-tasks?creator_id=0").status_code, 422)
+        for user_id, task_id in ((2, 11), (3, 12)):
+            main.app.dependency_overrides[main.current_user] = lambda user_id=user_id: users[user_id]
+            self.assertEqual([item["id"] for item in client.get("/hub-upload-tasks").json()["items"]], [task_id])
+            self.assertEqual(client.get(f"/hub-upload-tasks?creator_id={user_id}").json()["total"], 1)
+            self.assertEqual(client.get("/hub-upload-tasks?scope=company").status_code, 403)
+            self.assertEqual(client.get("/hub-upload-tasks?creator_id=1").status_code, 403)
+            self.assertEqual(client.put("/hubstudio/account", json={"app_id":"id", "app_secret":"secret", "group_code":"group"}).status_code, 403)
+        agent_headers = {"X-Hub-Agent-Token": "a" * 48, "X-Hub-Protocol": "3"}
+        agent_result = client.get("/hub-agent/tasks?scope=company&creator_id=2", headers=agent_headers)
+        self.assertEqual(agent_result.status_code, 200)
+        self.assertEqual([item["id"] for item in agent_result.json()["items"]], [10])
+
     def test_snapshot_does_not_publish_until_explicit_submission(self):
         with self.Session() as db:
             result = self.create(db)
