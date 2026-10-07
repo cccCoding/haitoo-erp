@@ -210,6 +210,28 @@ API 文档地址为当前环境的 API 域名加 `/docs`。
 
 超级管理员密码至少 12 个字符，并且必须包含字母、数字和特殊字符。已有数据库升级时，应用不会自动删除历史演示账号或公司；应先创建并验证正式超级管理员，再人工停用历史演示账号，确认其没有业务数据后另行清理。
 
+## 清理产品库数据
+
+`backend/scripts/clear_product_library.py` 无需参数，运行即清空所有公司的产品库相关 9 张表（产品、来源店铺、订单及关联、SKU 数量、快照及明细、统计任务），同一事务提交，失败回滚。保留其他业务表、表结构与自增序列。清理期间暂停 API 和产品库统计 worker，避免并发写入。
+
+本机测试环境（`haitoo-test`）：
+
+```bash
+./deploy/local.sh build api
+./deploy/local.sh stop api product-library-rankings-worker
+./deploy/local.sh run --rm --no-deps api python scripts/clear_product_library.py
+./deploy/local.sh start api product-library-rankings-worker
+```
+
+腾讯云环境（`haitorok`，在服务器项目目录执行）：
+
+```bash
+./deploy/tencent.sh build api
+./deploy/tencent.sh stop api product-library-rankings-worker
+./deploy/tencent.sh run --rm --no-deps api python scripts/clear_product_library.py
+./deploy/tencent.sh start api product-library-rankings-worker
+```
+
 ## 历史 Cloudflare Tunnel 配置
 
 仓库保留 Cloudflare Tunnel 的历史配置。当前本机只使用 `haitoo-test` 隔离测试环境，
