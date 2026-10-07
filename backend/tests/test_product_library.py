@@ -75,14 +75,22 @@ class ProductLibraryTests(unittest.TestCase):
                 user=db.get(User, user_id), db=db,
             )
 
-    def test_sku_search_matches_part_of_sku_and_treats_wildcards_as_text(self):
+    def test_sku_search_matches_case_sensitive_prefix_and_treats_wildcards_as_text(self):
         self.import_bytes(xlsx([
             row(sku="SKU_100-S", product_id="product-1", order="order-1"),
             row(sku="SKUX100-S", product_id="product-2", order="order-2"),
+            row(sku="SKU%200-S", product_id="product-3", order="order-3"),
+            row(sku="sku_300-S", product_id="product-4", order="order-4"),
         ]))
 
-        self.assertEqual(self.list_items(sku="_100")["total"], 1)
-        self.assertEqual(self.list_items(sku="  sku_100  ")["items"][0]["sku"], "SKU_100")
+        self.assertEqual(self.list_items(sku="SKU")["total"], 3)
+        self.assertEqual(self.list_items(sku="sku")["items"][0]["sku"], "sku_300")
+        self.assertEqual(self.list_items(sku="_100")["total"], 0)
+        self.assertEqual(self.list_items(sku="100")["total"], 0)
+        self.assertEqual(self.list_items(sku="sku_100")["total"], 0)
+        self.assertEqual(self.list_items(sku="SKU_")["items"][0]["sku"], "SKU_100")
+        self.assertEqual(self.list_items(sku="SKU%")["items"][0]["sku"], "SKU%200")
+        self.assertEqual(self.list_items(sku="  SKU_100  ")["items"][0]["sku"], "SKU_100")
         self.assertEqual(self.list_items(sku="missing")["total"], 0)
 
     def test_import_accepts_files_above_previous_size_limits(self):
@@ -177,6 +185,17 @@ class ProductLibraryTests(unittest.TestCase):
             ], headers={"Authorization": f"Bearer {token}"})
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["total"], 2)
+            for page_size in (500, 1000, 2000):
+                with self.subTest(page_size=page_size):
+                    response = TestClient(main.app).get("/product-library", params=[
+                        ("source_ids", first_id), ("source_ids", second_id), ("page_size", page_size),
+                    ], headers={"Authorization": f"Bearer {token}"})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["page_size"], page_size)
+                    self.assertEqual(len(response.json()["items"]), 2)
+            response = TestClient(main.app).get("/product-library", params={"page_size": 2001},
+                headers={"Authorization": f"Bearer {token}"})
+            self.assertEqual(response.status_code, 422, response.text)
         finally:
             main.app.dependency_overrides.clear()
 
@@ -431,8 +450,9 @@ class ProductLibraryTests(unittest.TestCase):
             self.assertEqual(result.status_code, 200, result.text)
             unmatched_list = client.get("/product-library?unmatched=true", headers={"Authorization": f"Bearer {token_a}"}).json()
             self.assertEqual(unmatched_list["total"], 1)
-            sku_list = client.get("/product-library", params={"sku": "unknownaa"}, headers={"Authorization": f"Bearer {token_a}"}).json()
+            sku_list = client.get("/product-library", params={"sku": "UNKNOWNAA"}, headers={"Authorization": f"Bearer {token_a}"}).json()
             self.assertEqual(sku_list["total"], 1)
+            self.assertEqual(client.get("/product-library", params={"sku": "unknownaa"}, headers={"Authorization": f"Bearer {token_a}"}).json()["total"], 0)
             self.assertEqual(client.get("/product-library", params={"sku": "missing"}, headers={"Authorization": f"Bearer {token_a}"}).json()["total"], 0)
             product_id = unmatched_list["items"][0]["id"]
             self.assertEqual(client.get(f"/product-library/{product_id}/orders", headers=member_headers).status_code, 404)

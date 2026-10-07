@@ -1331,7 +1331,7 @@ def product_library_statistics_scope(user, source_ids=None):
 
 @app.get("/product-library")
 def list_product_library(
-    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=2000),
     platform: str | None = None, site: str | None = None, shop_name: str | None = None, sku: str | None = None,
     template_id: int | None = Query(None, ge=1), unmatched: bool = False,
     source_ids: Annotated[list[int] | None, Query()] = None,
@@ -1345,7 +1345,12 @@ def list_product_library(
         if value:
             conditions.append(column == value)
     if sku and sku.strip():
-        conditions.append(ProductLibraryProduct.sku.icontains(sku.strip(), autoescape=True))
+        prefix = sku.strip()
+        sku_prefix = func.substr(ProductLibraryProduct.sku, 1, len(prefix))
+        # MySQL 默认排序规则可能忽略大小写；截取前缀后按二进制规则比较。
+        if db.get_bind().dialect.name in {"mysql", "mariadb"}:
+            sku_prefix = sku_prefix.collate("utf8mb4_bin")
+        conditions.append(sku_prefix == prefix)
     if template_id is not None:
         conditions.append(ProductLibraryProduct.template_id == template_id)
     elif unmatched:
