@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Literal
-from pydantic import BaseModel, EmailStr, Field, field_serializer, field_validator, model_validator
+from pydantic import ConfigDict, BaseModel, EmailStr, Field, field_serializer, field_validator, model_validator
 from .models import Role, TaskStatus
 
 
@@ -55,7 +55,7 @@ class ProductLibraryShopAssignment(BaseModel):
 
 
 class LocalShopCreate(BaseModel):
-    """本土店不从妙手同步，专用于 HubStudio 指纹环境上品。"""
+    """旧创建参数，仅用于给旧客户端返回停用提示。"""
     name: str = Field(min_length=1, max_length=120)
     region: str = Field(default="MY", min_length=1, max_length=20)
     nickname: str | None = Field(default=None, max_length=120)
@@ -492,7 +492,33 @@ class ShopeeDraftExportInput(BaseModel):
 
 
 class HubUploadTaskCreate(TiktokDraftExportInput):
-    shop_id: int = Field(ge=1)
+    model_config = ConfigDict(extra="forbid")
+
+
+class HubTaskClaimInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    container_code: str = Field(min_length=1, max_length=120)
+    environment_name: str = Field(min_length=1, max_length=255)
+    confirmed_local: bool = False
+
+
+class HubEnvironmentInput(BaseModel):
+    container_code: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=255)
+    metadata_fields: dict[str, str | int | list[str] | None] = Field(default_factory=dict)
+
+
+class HubEnvironmentSync(BaseModel):
+    environments: list[HubEnvironmentInput] = Field(max_length=20000)
+
+
+class HubEnvironmentToggle(BaseModel):
+    enabled: bool
+    confirmed_local: bool = False
+
+
+class HubTaskAction(BaseModel):
+    confirmed_platform_checked: bool = False
 
 
 class HubUploadTaskReport(BaseModel):

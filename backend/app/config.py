@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     r2_access_key_id: str | None = None
     r2_secret_access_key: str | None = None
     r2_bucket: str | None = None
+    r2_hub_export_bucket: str | None = None
     r2_endpoint: str | None = None
     r2_public_base_url: str | None = None
     # true 时将模型的临时结果复制到 R2，避免任务结果依赖第三方 URL 的有效期。

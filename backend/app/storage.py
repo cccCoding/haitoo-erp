@@ -176,3 +176,69 @@ def create_image_upload_url(mime_type: str, content_length: int, company_id: int
 async def upload_image_bytes_async(content: bytes, mime_type: str, company_id: int | None, category: str) -> str:
     """在异步请求/任务中避免阻塞事件循环。"""
     return await asyncio.to_thread(upload_image_bytes, content, mime_type, company_id, category)
+
+
+class ExportMissingError(StorageError):
+    """任务文件已被删除。"""
+
+
+def _export_configuration():
+    settings = get_settings()
+    endpoint = settings.r2_endpoint or (f"https://{settings.r2_account_id}.r2.cloudflarestorage.com" if settings.r2_account_id else None)
+    values = (endpoint, settings.r2_access_key_id, settings.r2_secret_access_key, settings.r2_hub_export_bucket)
+    for value, name in zip(values, ("R2_ENDPOINT 或 R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_HUB_EXPORT_BUCKET")):
+        if not value:
+            raise StorageError(f"未配置 {name}，无法保存自动上品 Excel")
+    return endpoint.rstrip("/"), values[1], values[2], values[3]
+
+
+def _export_location(url, company_id):
+    endpoint, access, secret, bucket = _export_configuration()
+    prefix = f"{endpoint}/{quote(bucket, safe='')}/"
+    if not url.startswith(prefix):
+        raise StorageError("任务文件链接与当前私有 R2 桶不匹配")
+    key = unquote(url[len(prefix):])
+    if not key.startswith(f"hub-exports/company/{company_id}/") or any(p in {"", ".", ".."} for p in key.split("/")) or "?" in key or "#" in key:
+        raise StorageError("任务文件链接不合法")
+    return _r2_client(endpoint, access, secret), bucket, key
+
+
+def upload_hub_export(content, company_id):
+    endpoint, access, secret, bucket = _export_configuration()
+    key = f"hub-exports/company/{company_id}/{uuid4().hex}.xlsx"
+    try:
+        _r2_client(endpoint, access, secret).put_object(Bucket=bucket, Key=key, Body=content,
+            ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", CacheControl="private, no-store")
+    except Exception as exc:
+        logger.error("R2 上品 Excel 上传失败：%s", type(exc).__name__)
+        raise StorageError("上传 Excel 到 R2 失败，请检查桶权限和连接") from exc
+    return f"{endpoint}/{quote(bucket, safe='')}/{key}"
+
+
+def read_hub_export(url, company_id, size, checksum):
+    import hashlib
+    client, bucket, key = _export_location(url, company_id)
+    try:
+        response = client.get_object(Bucket=bucket, Key=key)
+        body = response["Body"]
+        try:
+            content = body.read(size + 1)
+        finally:
+            body.close()
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in {"NoSuchKey", "NotFound", "404"}:
+            raise ExportMissingError("Excel 已删除或过期，请重新生成任务") from exc
+        raise StorageError("读取 R2 Excel 失败，请稍后重试") from exc
+    except Exception as exc:
+        raise StorageError("读取 R2 Excel 失败，请稍后重试") from exc
+    if len(content) != size or hashlib.sha256(content).hexdigest() != checksum:
+        raise StorageError("Excel 文件校验失败，禁止提交，请重新生成任务")
+    return content
+
+
+def delete_hub_export(url, company_id):
+    client, bucket, key = _export_location(url, company_id)
+    try:
+        client.delete_object(Bucket=bucket, Key=key)
+    except Exception as exc:
+        raise StorageError("清理 R2 Excel 失败") from exc

@@ -9,6 +9,10 @@ import asyncio
 import json
 import logging
 import os
+import re
+import secrets
+import time
+from contextlib import suppress
 import platform
 import socket
 import sys
@@ -16,10 +20,13 @@ import tempfile
 import threading
 import webbrowser
 from pathlib import Path
-from typing import Callable
 
 import httpx
 import keyring
+from hubstudio import HubstudioClient
+from workbench import LocalStatusServer, ERPRequestError
+from runtime_settings import validate_erp_url, debug_scope
+from local_auth import authorize_computer
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 SERVICE_NAME = "haitoo-hub-agent"
@@ -30,14 +37,24 @@ if platform.system() == "Darwin":
 else:
     APP_SUPPORT_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "HaitooHubAgent"
     LOG_DIRECTORY = APP_SUPPORT_PATH
+if os.environ.get("HAITOO_AGENT_DATA_DIR"):
+    APP_SUPPORT_PATH = LOG_DIRECTORY = Path(os.environ["HAITOO_AGENT_DATA_DIR"])
 CONFIG_PATH = APP_SUPPORT_PATH / "config.json"
 LOG_PATH = LOG_DIRECTORY / "agent.log"
 POLL_SECONDS = 5
 # API 仅用于执行器与服务器通信；PORTAL_URL 仅用于员工在浏览器登录 ERP。
-API_URL = os.environ.get("HAITOO_API_URL", "https://api.haitoro.com").strip().rstrip("/")
-PORTAL_URL = os.environ.get("HAITOO_PORTAL_URL", "https://erp.haitoro.com").strip().rstrip("/")
-if not API_URL.startswith("https://") or not PORTAL_URL.startswith("https://"):
-    raise RuntimeError("HAITOO_API_URL 和 HAITOO_PORTAL_URL 必须使用 https:// 地址")
+LOCAL_DEBUG = os.environ.get("HAITOO_LOCAL_DEBUG") == "1"
+API_URL = validate_erp_url(os.environ.get("HAITOO_API_URL", "https://api.haitorok.com"), local_debug=LOCAL_DEBUG)
+PORTAL_URL = validate_erp_url(os.environ.get("HAITOO_PORTAL_URL", "https://erp.haitorok.com"), local_debug=LOCAL_DEBUG)
+if LOCAL_DEBUG:
+    # 测试库的授权不能覆盖正式库的钥匙串凭证或配置。
+    scope = debug_scope(API_URL)
+    SERVICE_NAME += "-" + scope
+    if not os.environ.get("HAITOO_AGENT_DATA_DIR"):
+        APP_SUPPORT_PATH = APP_SUPPORT_PATH / scope
+        LOG_DIRECTORY = LOG_DIRECTORY / scope
+        CONFIG_PATH = APP_SUPPORT_PATH / "config.json"
+        LOG_PATH = LOG_DIRECTORY / "agent.log"
 STATUS_HOST = "127.0.0.1"
 STATUS_PORT = 45679
 
@@ -45,6 +62,9 @@ APP_SUPPORT_PATH.mkdir(parents=True, exist_ok=True)
 LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(filename=LOG_PATH, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+# HTTP 默认信息日志会包含领取凭证查询串，禁止写入本机可见日志。
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def enable_console_logging() -> None:
@@ -59,57 +79,6 @@ def enable_console_logging() -> None:
     root_logger.setLevel(logging.INFO)
 
 
-class LocalStatusServer:
-    """仅供本机查看的最小状态页，不提供控制接口，也不监听局域网。"""
-
-    def __init__(self, state: dict):
-        self.state = state
-        self.server: asyncio.AbstractServer | None = None
-
-    async def start(self) -> None:
-        self.server = await asyncio.start_server(self._handle, STATUS_HOST, STATUS_PORT)
-        logger.info("本机状态页已启动：http://%s:%s", STATUS_HOST, STATUS_PORT)
-
-    async def close(self) -> None:
-        if self.server:
-            self.server.close()
-            await self.server.wait_closed()
-
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            request = (await reader.readuntil(b"\r\n\r\n")).decode("latin-1", "replace")
-            path = request.split(" ", 2)[1] if request else "/"
-            payload = {
-                "status": self.state.get("status", "正在启动"),
-                "paused": bool(self.state.get("paused")),
-                "erp_url": self.state.get("erp_url", API_URL),
-                "portal_url": self.state.get("portal_url", PORTAL_URL),
-                "hubstudio_url": self.state.get("hubstudio_url", "http://127.0.0.1:6873"),
-                "log_path": str(LOG_PATH),
-            }
-            if path == "/health":
-                body, content_type = json.dumps(payload, ensure_ascii=False).encode(), "application/json; charset=utf-8"
-            else:
-                body = ("<!doctype html><meta charset=utf-8><title>Haitoo Hub 执行器</title>"
-                        "<style>body{font:16px -apple-system,sans-serif;max-width:680px;margin:48px auto;color:#202124}"
-                        "code{background:#f4f4f5;padding:3px 6px;border-radius:4px}</style>"
-                        "<h1>Haitoo Hub 执行器</h1>"
-                        f"<p>状态：<strong>{payload['status']}</strong></p>"
-                        f"<p>ERP 登录页：<code>{payload['portal_url']}</code></p>"
-                        f"<p>ERP API：<code>{payload['erp_url']}</code></p>"
-                        f"<p>HubStudio：<code>{payload['hubstudio_url']}</code></p>"
-                        f"<p>日志：<code>{payload['log_path']}</code></p>"
-                        "<p>此页面仅监听本机，不能从局域网访问。</p>").encode()
-                content_type = "text/html; charset=utf-8"
-            writer.write(f"HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
-            await writer.drain()
-        except (asyncio.IncompleteReadError, IndexError):
-            pass
-        finally:
-            writer.close()
-            await writer.wait_closed()
-
-
 def load_config() -> dict:
     config = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
     # 部署环境显式指定 API 时覆盖旧配置，便于同一执行器包连接腾讯云域名。
@@ -119,6 +88,8 @@ def load_config() -> dict:
     if config.get("erp_url") == PORTAL_URL:
         config["erp_url"] = API_URL
         save_config(config)
+    if config.get("erp_url"):
+        config["erp_url"] = validate_erp_url(config["erp_url"], local_debug=LOCAL_DEBUG)
     return config
 
 
@@ -128,129 +99,303 @@ def save_config(config: dict) -> None:
 
 class ERPClient:
     def __init__(self, base_url: str, token: str):
-        self.base_url, self.headers = base_url.rstrip("/"), {"X-Hub-Agent-Token": token}
+        self.base_url = validate_erp_url(base_url, local_debug=LOCAL_DEBUG)
+        self.headers = {"X-Hub-Agent-Token": token, "X-Hub-Protocol": "3"}
 
-    async def post(self, path: str, **kwargs):
+    async def request(self, method, path, **kwargs):
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(self.base_url + path, headers=self.headers, **kwargs)
-            response.raise_for_status()
+            response = await client.request(method, self.base_url + path, headers=self.headers, **kwargs)
+            if response.is_error:
+                try:
+                    message = response.json().get("detail")
+                except ValueError:
+                    message = None
+                raise ERPRequestError(response.status_code, message if isinstance(message, str) else "ERP 请求失败，请检查连接和版本")
             return response.json()
 
-    async def claim(self) -> dict | None:
-        return await self.post("/hub-agent/claim")
+    async def post(self, path, **kwargs):
+        return await self.request("POST", path, **kwargs)
 
-    async def download(self, task_id: int, claim_token: str, destination: Path) -> None:
+    async def download(self, task_id, claim_token, destination):
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.get(f"{self.base_url}/hub-agent/tasks/{task_id}/file", headers=self.headers, params={"claim_token": claim_token})
-            response.raise_for_status(); destination.write_bytes(response.content)
+            if response.is_error:
+                raise ERPRequestError(response.status_code, "任务文件下载失败或领取已失效")
+            destination.write_bytes(response.content)
 
-    async def report(self, task_id: int, claim_token: str, status: str, stage: str, message: str | None = None) -> None:
-        await self.post(f"/hub-agent/tasks/{task_id}/report", params={"claim_token": claim_token}, json={"status": status, "stage": stage, "message": message})
-
-
-class HubstudioClient:
-    def __init__(self, endpoint: str, credentials: dict):
-        self.endpoint, self.credentials = endpoint.rstrip("/"), credentials
-
-    async def start(self) -> int:
-        # 兼容 HubStudio 本地 API 的常见鉴权字段；生产验证时以当前 Hub 文档的字段为准。
-        body = {"containerCode": self.credentials["container_code"], "groupCode": self.credentials["group_code"],
-                "appId": self.credentials["app_id"], "appSecret": self.credentials["app_secret"], "shouldCloseTabsOnOpen": "true"}
-        headers = {"App-Id": self.credentials["app_id"], "App-Secret": self.credentials["app_secret"]}
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(self.endpoint + "/api/v1/browser/start", json=body, headers=headers)
-            response.raise_for_status(); payload = response.json()
-        data = payload.get("data") or {}
-        port = data.get("debuggingPort")
-        if payload.get("code") not in (0, "0") or not port:
-            raise RuntimeError(payload.get("msg") or data.get("err") or "HubStudio 未返回 debuggingPort")
-        return int(port)
+    async def report(self, task_id, claim_token, status, stage, message=None):
+        return await self.post(f"/hub-agent/tasks/{task_id}/report", params={"claim_token": claim_token}, json={"status": status, "stage": stage, "message": message})
 
 
-async def upload_and_submit(debug_port: int, xlsx_path: Path) -> None:
-    """只在明确识别到批量上传与提交控件后才提交，未知页面交由人工处理。"""
+async def upload_and_submit(debug_port: int, xlsx_path: Path, before_submit=None) -> None:
+    """明确控件与提交成功提示；未知页面或结果交由人工核对。"""
     async with async_playwright() as playwright:
         browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
-        context = browser.contexts[0]
-        page = context.pages[0] if context.pages else await context.new_page()
-        await page.goto("https://seller.tiktokglobalshop.com/products/bulk-upload", wait_until="domcontentloaded")
-        await page.wait_for_timeout(1500)
-        if "login" in page.url.lower() or await page.get_by_text("Log in", exact=False).count():
-            raise RuntimeError("TikTok 登录已失效，请在已打开的 HubStudio 环境中重新登录")
-        file_input = page.locator("input[type=file]")
-        if await file_input.count() == 0:
-            raise RuntimeError("未识别到 TikTok 批量上传文件控件，请人工检查页面")
-        await file_input.first.set_input_files(str(xlsx_path))
-        # TikTok 页面文案可能随站点语言变化；未找到确定的提交动作绝不猜测点击。
-        submit = page.get_by_role("button", name=r"(?i)submit|提交|publish|发布")
         try:
-            await submit.first.wait_for(state="visible", timeout=45_000)
+            if not browser.contexts:
+                raise RuntimeError("HubStudio 浏览器没有可用上下文")
+            context = browser.contexts[0]
+            page = await context.new_page()
+            await page.goto("https://seller.tiktokglobalshop.com/products/bulk-upload", wait_until="domcontentloaded")
+            if "login" in page.url.lower() or await page.get_by_text(re.compile(r"^Log in$", re.I)).count():
+                raise RuntimeError("TikTok 登录已失效，请在 HubStudio 环境中重新登录")
+            file_input = page.locator("input[type=file]")
+            await file_input.wait_for(state="attached", timeout=30_000)
+            if await file_input.count() != 1 or not await file_input.is_enabled():
+                raise RuntimeError("无法唯一识别可用的 TikTok 批量上传控件")
+            await file_input.set_input_files(str(xlsx_path))
+            submit = page.get_by_role("button", name=re.compile(r"^(submit|提交|publish|发布)$", re.I))
+            await submit.wait_for(state="visible", timeout=45_000)
+            if await submit.count() != 1 or not await submit.is_enabled():
+                raise RuntimeError("提交按钮不唯一或尚不可用，请核对文件校验结果")
+            # 先持久化将要点击提交的阶段，网络失败时不执行点击。
+            if before_submit:
+                await before_submit()
+            success = page.get_by_text(re.compile(r"^(submitted successfully|successfully submitted|upload successful|uploaded successfully|提交成功|上传成功)[.!。！]?$", re.I))
+            if await success.count():
+                raise RuntimeError("页面已有成功提示，无法确认它属于本次提交")
+            await submit.click()
+            await success.wait_for(state="visible", timeout=60_000)
+            errors = page.get_by_role("alert").filter(has_text=re.compile(r"error|failed|invalid|失败|错误", re.I))
+            if await errors.count() and await errors.first.is_visible():
+                raise RuntimeError("平台同时返回错误，请人工核对本次提交结果")
         except PlaywrightTimeoutError as exc:
-            raise RuntimeError("文件已上传，但未检测到可提交按钮，请人工核对校验结果") from exc
-        await submit.first.click()
-        await page.wait_for_timeout(2000)
-        if await page.get_by_text(r"(?i)error|失败|invalid", exact=False).count():
-            raise RuntimeError("TikTok 返回上传或提交错误，请在浏览器中核对")
-        await browser.close()
+            raise RuntimeError("未识别到明确的控件或本次提交成功结果，请核对 TikTok 页面") from exc
+        finally:
+            # CDP 关闭连接，不调用 HubStudio 的关闭环境接口，保留页面供人工核对。
+            await browser.close()
 
 
-async def run_once(client: ERPClient, hubstudio_url: str, on_status: Callable[[str], None] | None = None) -> bool:
-    def set_status(message: str) -> None:
-        if on_status:
-            on_status(message)
+class AgentRuntime:
+    def __init__(self, config):
+        self.config = config
+        self.state = {"status": "正在启动", "paused": False, "stop": False, "environments": [],
+                      "user": None, "erp_connected": False, "hub_connected": False, "sync_at": None, "sync_error": None, "login_required": True}
+        self.client = None
+        self.current_claim = None
+        self.execution = None
+        self.last_heartbeat = time.monotonic()
+        self.sync_lock = asyncio.Lock()
+        self.auth_lock = asyncio.Lock()
+        self.selection_lock = asyncio.Lock()
+        self.synced_monotonic = None
+        self.last_sync_attempt = 0
+        self.workbench = LocalStatusServer(self.state, lambda: self.client, self.sync, LOG_PATH, login_callback=self.login, toggle_callback=self.toggle_environment)
 
-    set_status("正在检查 ERP 任务")
-    await client.post("/hub-agent/heartbeat")
-    # 领取只能调用一次：避免第一个任务已被置为 running 后又领取第二个任务。
-    async with httpx.AsyncClient(timeout=30) as http:
-        response = await http.post(client.base_url + "/hub-agent/claim", headers=client.headers); response.raise_for_status(); claim = response.json()
-    if not claim.get("task"):
-        set_status("在线，等待任务")
-        return False
-    task, claim_token = claim["task"], claim["claim_token"]
-    task_id = task["id"]
-    try:
-        set_status(f"任务 #{task_id}：正在启动 HubStudio 环境")
-        await client.report(task_id, claim_token, "running", "starting_environment", "正在启动 HubStudio 环境")
-        port = await HubstudioClient(hubstudio_url, claim["hubstudio"]).start()
-        with tempfile.TemporaryDirectory(prefix="haitoo-hub-") as directory:
-            file_path = Path(directory) / task["export_filename"]
-            await client.download(task_id, claim_token, file_path)
-            set_status(f"任务 #{task_id}：正在上传 TikTok XLSX")
-            await client.report(task_id, claim_token, "running", "uploading", "正在上传 TikTok XLSX")
-            await upload_and_submit(port, file_path)
-        await client.report(task_id, claim_token, "completed", "submitted", "TikTok 批量上传已提交")
-        set_status(f"任务 #{task_id}：已提交，等待下一项任务")
-    except Exception as exc:
-        logger.exception("Hub 上品任务失败: %s", task_id)
-        await client.report(task_id, claim_token, "awaiting_attention", "manual_attention", str(exc)[:500])
-        set_status(f"任务 #{task_id}：需要人工处理")
-    return True
+    async def toggle_environment(self, code, enabled, confirmed_local):
+        async with self.selection_lock:
+            if self.current_claim or (self.execution and not self.execution.done()):
+                raise ERPRequestError(409, "任务执行中，不能更改自动上品环境")
+            if self.synced_monotonic is None or time.monotonic() - self.synced_monotonic >= 300:
+                raise ERPRequestError(409, "环境同步已过期，请先同步环境")
+            environment = next((e for e in self.state["environments"] if e["container_code"] == code), None)
+            if not environment:
+                raise ERPRequestError(404, "本机当前不可访问此环境")
+            if enabled and not confirmed_local:
+                raise ERPRequestError(400, "请确认此环境属于 TikTok 店铺")
+            selected = code if enabled else self.config.get("auto_upload_container_code")
+            if not enabled and selected == code:
+                selected = None
+            updated = self.config | {"auto_upload_container_code": selected}
+            save_config(updated)
+            self.config = updated
+            for env in self.state["environments"]:
+                env["auto_upload_enabled"] = env["container_code"] == selected
+            return dict(environment)
 
+    async def login(self, email, password):
+        async with self.auth_lock:
+            if self.client or self.current_claim:
+                raise ERPRequestError(409, "当前电脑已授权，请先退出执行器后再处理账号授权")
+            token = await authorize_computer(API_URL, email, password)
+            client = ERPClient(API_URL, token)
+            config = await client.request("GET", "/hub-agent/config")
+            keyring.set_password(SERVICE_NAME, TOKEN_KEY, token)
+            self.config["erp_url"] = API_URL
+            save_config(self.config)
+            self.state.update(user=config["user"], login_required=False, erp_connected=True, status="已登录，准备同步环境")
+            self.client = client
+            logger.info("本机工作页已完成电脑授权")
 
-async def run_forever(config: dict) -> None:
-    token = keyring.get_password(SERVICE_NAME, TOKEN_KEY)
-    if not token:
-        raise RuntimeError("尚未注册终端，请先运行 register")
-    client = ERPClient(config["erp_url"], token)
-    while True:
+    def require_login(self):
+        self.client = None
+        self.synced_monotonic = None
+        self.state.update(user=None, login_required=True, erp_connected=False, hub_connected=False,
+                          environments=[], sync_at=None, sync_error=None, status="请在本地工作页登录 ERP 账号")
+
+    async def sync(self):
+        async with self.sync_lock:
+            self.last_sync_attempt = time.monotonic()
+            try:
+                config = await self.client.request("GET", "/hub-agent/config")
+                self.state["user"] = config["user"]
+                self.state["erp_connected"] = True
+                if config.get("configured") is False:
+                    raise RuntimeError("请联系管理员配置 HubStudio API")
+                # Local API 使用当前客户端登录态，不通过公司凭据切换用户/团队。
+                items = await HubstudioClient(self.config.get("hubstudio_url", "http://127.0.0.1:6873")).environments()
+                self.state["hub_connected"] = True
+                selected = self.config.get("auto_upload_container_code")
+                self.state["environments"] = [e | {"id": e["container_code"], "auto_upload_enabled": e["container_code"] == selected} for e in items]
+                self.state["sync_at"], self.state["sync_error"] = int(time.time() * 1000), None
+                self.synced_monotonic = time.monotonic()
+            except Exception as exc:
+                self.state["sync_error"] = str(exc) if isinstance(exc, (ERPRequestError, RuntimeError)) else "同步失败，请检查 ERP 和 HubStudio Local API 连接"
+                self.state["hub_connected"] = False
+                logger.error("环境同步失败（保留上次完整快照）")
+
+    async def execute(self, claim):
+        task, token = claim["task"], claim["claim_token"]
+        task_id = task["id"]
         try:
-            await run_once(client, config.get("hubstudio_url", "http://127.0.0.1:6873"))
-        except Exception:
-            logger.exception("轮询失败")
-        await asyncio.sleep(POLL_SECONDS)
+            self.state["status"] = f"任务 #{task_id}：正在启动环境"
+            await self.client.report(task_id, token, "running", "starting_environment", "正在启动 HubStudio 环境")
+            hub = HubstudioClient(self.config.get("hubstudio_url", "http://127.0.0.1:6873"))
+            port = await hub.start(claim["hubstudio"]["container_code"])
+            with tempfile.TemporaryDirectory(prefix="haitoo-hub-") as directory:
+                file_path = Path(directory) / Path(task["export_filename"]).name
+                await self.client.download(task_id, token, file_path)
+                self.state["status"] = f"任务 #{task_id}：正在上传 XLSX"
+                await self.client.report(task_id, token, "running", "uploading", "正在上传 TikTok XLSX")
+                async def before_submit():
+                    self.state["status"] = f"任务 #{task_id}：正在提交"
+                    await self.client.report(task_id, token, "running", "submitting", "准备点击提交；之后结果不明确时必须人工核对")
+                await upload_and_submit(port, file_path, before_submit)
+            await self.client.report(task_id, token, "completed", "submitted", "TikTok 已明确接受批量提交；不代表商品已上架")
+            self.state["status"] = f"任务 #{task_id}：已提交"
+        except asyncio.CancelledError:
+            self.state["status"] = f"任务 #{task_id}：连接或领取失效，请人工核对"
+            raise
+        except Exception as exc:
+            message = str(exc)[:500] if isinstance(exc, (RuntimeError, ERPRequestError)) else "执行失败，提交结果未知，请核对 TikTok 页面"
+            logger.error("任务 #%s 需要人工处理：%s", task_id, message)
+            try:
+                await self.client.report(task_id, token, "awaiting_attention", "manual_attention", message)
+            except Exception:
+                logger.error("任务 #%s 异常报告未送达；等待租约超时后人工核对", task_id)
+            self.state["status"] = f"任务 #{task_id}：需要人工处理"
+
+    async def heartbeat_loop(self):
+        while not self.state["stop"]:
+            if not self.client:
+                await asyncio.sleep(1)
+                continue
+            try:
+                params = {}
+                claim = self.current_claim
+                if claim and self.execution and not self.execution.done():
+                    params = {"task_id": claim["task"]["id"], "claim_token": claim["claim_token"]}
+                await self.client.post("/hub-agent/heartbeat", params=params)
+                self.last_heartbeat = time.monotonic()
+                self.state["erp_connected"] = True
+            except Exception as exc:
+                self.state["erp_connected"] = False
+                revoked = isinstance(exc, ERPRequestError) and exc.status in {401, 409, 426}
+                if self.execution and not self.execution.done() and (revoked or time.monotonic() - self.last_heartbeat >= 60):
+                    self.execution.cancel()
+                if isinstance(exc, ERPRequestError) and exc.status == 401:
+                    self.state["login_required"] = True
+                logger.error("ERP 心跳失败，正在重试")
+            await asyncio.sleep(15)
+
+    async def sync_loop(self):
+        while not self.state["stop"]:
+            if self.client and not self.state["login_required"] and time.monotonic() - self.last_sync_attempt >= 60:
+                await self.sync()
+            await asyncio.sleep(5)
+
+    async def run(self):
+        await self.workbench.start()
+        webbrowser.open(f"http://{STATUS_HOST}:{STATUS_PORT}")
+        background = []
+        try:
+            async with self.auth_lock:
+                token = keyring.get_password(SERVICE_NAME, TOKEN_KEY)
+                if token:
+                    client = ERPClient(self.config.get("erp_url", API_URL), token)
+                    try:
+                        config = await client.request("GET", "/hub-agent/config")
+                    except ERPRequestError as exc:
+                        if exc.status != 401:
+                            self.client = client
+                            self.state.update(login_required=False, status="等待 ERP 连接恢复")
+                    except Exception:
+                        self.client = client
+                        self.state.update(login_required=False, status="等待 ERP 连接恢复")
+                    else:
+                        self.client = client
+                        self.state.update(user=config["user"], login_required=False, erp_connected=True)
+                if not self.client:
+                    self.require_login()
+            background = [asyncio.create_task(self.heartbeat_loop()), asyncio.create_task(self.sync_loop())]
+            while not self.state["stop"]:
+                if self.state["login_required"]:
+                    if self.client:
+                        self.require_login()
+                    await asyncio.sleep(1)
+                    continue
+                fresh = self.synced_monotonic is not None and time.monotonic() - self.synced_monotonic < 300
+                if self.state["paused"]:
+                    self.state["status"] = "已暂停领取"
+                elif fresh:
+                    try:
+                        async with self.selection_lock:
+                            selected = next((e for e in self.state["environments"] if e["auto_upload_enabled"]), None)
+                            claim = await self.client.post("/hub-agent/claim", json={"container_code": selected["container_code"], "environment_name": selected["name"], "confirmed_local": True}) if selected else {"task": None}
+                            if claim.get("task"):
+                                self.current_claim = claim
+                        if claim.get("task"):
+                            self.last_heartbeat = time.monotonic()
+                            self.execution = asyncio.create_task(self.execute(claim))
+                            try:
+                                await self.execution
+                            except asyncio.CancelledError:
+                                if asyncio.current_task().cancelling():
+                                    raise
+                                if self.state["stop"]:
+                                    break
+                            finally:
+                                self.current_claim, self.execution = None, None
+                        else:
+                            self.state["status"] = "在线，等待任务" if selected else "请选择一个本机环境开启自动上品"
+                    except Exception as exc:
+                        self.state["status"] = "连接失败，正在重试"
+                        self.state["erp_connected"] = False
+                        if isinstance(exc, ERPRequestError) and exc.status == 401:
+                            self.state["login_required"] = True
+                        logger.error("任务领取失败，正在重试")
+                else:
+                    self.state["status"] = "等待成功同步环境"
+                await asyncio.sleep(POLL_SECONDS)
+        except Exception as exc:
+            self.state["status"] = str(exc) if isinstance(exc, RuntimeError) else "启动失败，请检查连接并重新启动"
+            logger.error("本地执行器启动失败")
+            # 保留工作页和错误状态，便于查看，不因暂时连接错误关闭窗口。
+            while not self.state["stop"]:
+                await asyncio.sleep(1)
+        finally:
+            for task in background:
+                task.cancel()
+            for task in background:
+                with suppress(asyncio.CancelledError):
+                    await task
+            await self.workbench.close()
+
+
+async def run_forever(config):
+    await AgentRuntime(config).run()
 
 
 async def pair_with_erp() -> None:
     """通过 ERP 网页的现有账号完成终端授权，无需人工复制 Token。"""
     platform_name = "macos" if platform.system() == "Darwin" else "windows"
-    name = socket.gethostname()[:120]
+    name = f"{socket.gethostname()[:100]} · {secrets.token_hex(6)}"
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(API_URL + "/hub-agent/pairings", json={"name": name, "platform": platform_name})
         if response.status_code == 404:
             raise RuntimeError(
                 "ERP 服务器尚未部署 Hub 执行器配对接口（/hub-agent/pairings）。"
-                "请先发布 ERP 后端并执行数据库迁移到 20260917_08；这不是账号授权失败。"
+                "请先发布 ERP 后端并执行数据库迁移到 20261007_30；这不是账号授权失败。"
             )
         response.raise_for_status(); code = response.json()["code"]
     webbrowser.open(f"{PORTAL_URL}/?hub_agent_pair={code}")
@@ -267,81 +412,47 @@ async def pair_with_erp() -> None:
             logger.info("终端已通过 ERP 网页授权 | name=%s", name)
             return
 
+    raise RuntimeError("配对超时，请重新启动执行器")
 
-def run_tray(config: dict) -> None:
-    """当前用户会话的最小托盘界面；Windows Service 不会调用此入口。"""
+
+def run_tray(config):
     import pystray
     from PIL import Image, ImageDraw
-
-    state = {"status": "正在启动", "paused": False, "stop": False,
-             "erp_url": config.get("erp_url", API_URL), "portal_url": PORTAL_URL,
-             "hubstudio_url": config.get("hubstudio_url", "http://127.0.0.1:6873")}
-
-    async def worker() -> None:
-        token = keyring.get_password(SERVICE_NAME, TOKEN_KEY)
-        if not token:
-            state["status"] = "请在打开的 ERP 页面登录"
-            try:
-                await pair_with_erp()
-                token = keyring.get_password(SERVICE_NAME, TOKEN_KEY)
-                state["status"] = "已授权，正在连接"
-            except Exception as exc:
-                logger.exception("ERP 配对失败"); state["status"] = f"配对失败：{exc}"; return
-        client = ERPClient(config["erp_url"], token)
-        while not state["stop"]:
-            if state["paused"]:
-                state["status"] = "已暂停"; await asyncio.sleep(1); continue
-            try:
-                state["status"] = "在线，等待任务"
-                if await run_once(client, config.get("hubstudio_url", "http://127.0.0.1:6873"), lambda message: state.__setitem__("status", message)):
-                    state["status"] = "已完成一项任务"
-            except Exception:
-                logger.exception("托盘执行器轮询失败"); state["status"] = "连接失败，正在重试"
-            await asyncio.sleep(POLL_SECONDS)
-
-    def thread_main() -> None: asyncio.run(worker())
-    image = Image.new("RGB", (64, 64), "#4d46a5"); ImageDraw.Draw(image).ellipse((18, 18, 46, 46), fill="white")
-    def toggle(icon, _): state["paused"] = not state["paused"]
-    def quit_app(icon, _): state["stop"] = True; icon.stop()
-    menu = pystray.Menu(lambda: pystray.MenuItem(lambda _: state["status"], None, enabled=False),
-                        pystray.MenuItem("暂停 / 继续", toggle), pystray.MenuItem("退出", quit_app))
-    threading.Thread(target=thread_main, daemon=True).start()
+    runtime = AgentRuntime(config)
+    loop = asyncio.new_event_loop()
+    def worker():
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(runtime.run())
+        except OSError:
+            logger.error("本机工作页端口被占用，请打开已有工作页")
+    def toggle(icon, _):
+        loop.call_soon_threadsafe(lambda: runtime.state.__setitem__("paused", not runtime.state["paused"]))
+    def quit_app(icon, _):
+        def stop():
+            runtime.state["stop"] = True
+            if runtime.execution:
+                runtime.execution.cancel()
+        loop.call_soon_threadsafe(stop)
+        icon.stop()
+    image = Image.new("RGB", (64, 64), "#4d46a5")
+    ImageDraw.Draw(image).ellipse((18, 18, 46, 46), fill="white")
+    menu = pystray.Menu(pystray.MenuItem(lambda _: runtime.state["status"], None, enabled=False),
+        pystray.MenuItem("打开工作页", lambda *_: webbrowser.open(f"http://{STATUS_HOST}:{STATUS_PORT}")),
+        pystray.MenuItem("暂停 / 继续", toggle), pystray.MenuItem("退出", quit_app))
+    threading.Thread(target=worker, daemon=True).start()
     pystray.Icon("HaitooHubAgent", image, "Haitoo Hub 执行器", menu).run()
 
 
-async def run_console(config: dict) -> None:
-    """给未签名 Mac 包的可见终端入口；保留窗口便于员工截图排错。"""
+async def run_console(config):
     enable_console_logging()
-    state = {"status": "正在启动", "paused": False, "stop": False,
-             "erp_url": config.get("erp_url", API_URL), "portal_url": PORTAL_URL,
-             "hubstudio_url": config.get("hubstudio_url", "http://127.0.0.1:6873")}
-    status_server = LocalStatusServer(state)
+    print(f"Haitoo Hub 工作页：http://{STATUS_HOST}:{STATUS_PORT}")
+    print("关闭此终端窗口 = 停止执行器。")
     try:
-        await status_server.start()
+        await AgentRuntime(config).run()
     except OSError as exc:
-        raise RuntimeError(f"本机状态页端口 {STATUS_PORT} 无法启动，可能已有执行器正在运行：{exc}") from exc
-    print("\nHaitoo Hub 执行器已启动")
-    print(f"本机状态页：http://{STATUS_HOST}:{STATUS_PORT}")
-    print("关闭此终端窗口 = 停止执行器。\n")
-    try:
-        token = keyring.get_password(SERVICE_NAME, TOKEN_KEY)
-        if not token:
-            state["status"] = "请在打开的 ERP 页面登录并授权"
-            await pair_with_erp()
-            token = keyring.get_password(SERVICE_NAME, TOKEN_KEY)
-        state["status"] = "在线，等待任务"
-        client = ERPClient(config.get("erp_url", API_URL), token)
-        while True:
-            if await run_once(client, config.get("hubstudio_url", "http://127.0.0.1:6873"), lambda message: state.__setitem__("status", message)):
-                state["status"] = "已完成一项任务，等待下一项"
-            await asyncio.sleep(POLL_SECONDS)
-    except Exception as exc:
-        state["status"] = f"启动或连接失败：{exc}"
-        logger.error("控制台执行器失败：%s", exc)
-        print(f"执行器出错：{exc}")
-        raise
-    finally:
-        await status_server.close()
+        logger.error("本机工作页端口 %s 无法启动，请检查是否已有执行器运行", STATUS_PORT)
+        raise RuntimeError("本机工作页启动失败") from exc
 
 
 async def register(args) -> None:

@@ -23,19 +23,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, inspect, or_, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from . import hub
 from .config import get_settings
 from .database import SessionLocal, engine, get_db
 from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, OperatorGroup, PodTask, ProductDraft, ProductLibraryDailySnapshot, ProductLibraryRankingTask, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryOrderSkuQuantity, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
 from .product_library_statistics import order_facts, sku_statistics
 from .product_library import parse_order_workbook
 from .product_library_rankings import SnapshotAlreadyRunning, company_run_lock, create_daily_snapshot, enqueue_ranking_task, task_payload
-from .schemas import ProductLibraryShopAssignment, ProductLibraryTitleGenerate, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
+from .schemas import HubEnvironmentSync, HubEnvironmentToggle, HubTaskClaimInput, HubTaskAction, ProductLibraryShopAssignment, ProductLibraryTitleGenerate, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
 from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, OperatorGroupCreate, OperatorGroupUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
-from .storage import StorageError, create_image_upload_url, is_company_r2_url, is_public_r2_url, upload_image_bytes_async
+from .storage import ExportMissingError, upload_hub_export, read_hub_export, delete_hub_export, StorageError, create_image_upload_url, is_company_r2_url, is_public_r2_url, upload_image_bytes_async
 from .logging_config import configure_logging
 from .tiktok_export import build_workbook as build_tiktok_workbook, category_base_requirements, parse_listing_options, validate_attributes
 from .shopee_export import build_workbook as build_shopee_workbook, parse_listing_options as parse_shopee_listing_options
@@ -270,6 +271,44 @@ async def _cleanup_login_counters_loop() -> None:
             logger.exception("清理过期登录限流计数失败")
 
 
+def _expire_hub_leases():
+    with SessionLocal() as db:
+        hub.sweep_expired(db)
+
+
+async def _cleanup_hub_leases_loop():
+    while True:
+        try:
+            await asyncio.to_thread(_expire_hub_leases)
+        except Exception:
+            logger.exception("Hub 运行租约检查失败")
+        await asyncio.sleep(15)
+
+
+def _delete_expired_hub_exports():
+    with SessionLocal() as db:
+        files = db.execute(select(HubUploadTask.id, HubUploadTask.export_url, HubUploadTask.company_id).where(
+            HubUploadTask.export_url.is_not(None), HubUploadTask.export_deleted_at.is_(None),
+            HubUploadTask.export_expires_at <= datetime.utcnow()).limit(100)).all()
+    for task_id, url, company_id in files:
+        try:
+            delete_hub_export(url, company_id)
+            with SessionLocal() as db:
+                db.execute(update(HubUploadTask).where(HubUploadTask.id == task_id).values(export_deleted_at=datetime.utcnow()))
+                db.commit()
+        except StorageError:
+            logger.error("清理过期 Hub Excel 失败，任务 #%s 将稍后重试", task_id)
+
+
+async def _cleanup_hub_exports_loop():
+    while True:
+        try:
+            await asyncio.to_thread(_delete_expired_hub_exports)
+        except Exception:
+            logger.exception("Hub Excel 过期清理失败")
+        await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("应用初始化开始")
@@ -278,12 +317,20 @@ async def lifespan(_: FastAPI):
     assert_schema_current(engine)
     logger.info("应用初始化完成")
     cleanup_task = asyncio.create_task(_cleanup_login_counters_loop())
+    hub_cleanup_task = asyncio.create_task(_cleanup_hub_leases_loop())
+    export_cleanup_task = asyncio.create_task(_cleanup_hub_exports_loop())
     try:
         yield
     finally:
+        export_cleanup_task.cancel()
         cleanup_task.cancel()
+        hub_cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
+        with suppress(asyncio.CancelledError):
+            await hub_cleanup_task
+        with suppress(asyncio.CancelledError):
+            await export_cleanup_task
         logger.info("应用关闭")
 
 
@@ -390,6 +437,10 @@ def hub_agent_from_request(request: Request, db: Session) -> HubAgent:
     agent = db.scalar(select(HubAgent).where(HubAgent.token_hash == hashlib.sha256(token.encode()).hexdigest()))
     if not agent or not agent.is_active:
         raise HTTPException(401, "Hub 执行器已停用或身份无效")
+    owner = db.get(User, agent.user_id)
+    company = db.get(Company, agent.company_id)
+    if not owner or not owner.is_active or owner.company_id != agent.company_id or not company or not company.is_active:
+        raise HTTPException(401, "执行器所属账号或公司已停用")
     agent.last_seen_at = datetime.utcnow()
     db.commit()
     return agent
@@ -398,9 +449,22 @@ def hub_agent_from_request(request: Request, db: Session) -> HubAgent:
 def hub_task_view(task: HubUploadTask, *, include_logs: bool = True) -> dict:
     result = serialize_record(task)
     result.pop("export_blob", None)
+    result.pop("claim_token", None)
     if not include_logs:
         result.pop("logs", None)
     return result
+
+
+def hub_agent_view(agent: HubAgent) -> dict:
+    result = serialize_record(agent)
+    result.pop("token_hash", None)
+    return result
+
+
+def hub_protocol_agent(request: Request, db: Session) -> HubAgent:
+    if request.headers.get("X-Hub-Protocol") != hub.PROTOCOL:
+        raise HTTPException(426, "请升级本地执行器后继续")
+    return hub_agent_from_request(request, db)
 
 
 def user_code_in_use(db: Session, company_id: int | None, user_code: str, excluding_user_id: int | None = None) -> bool:
@@ -501,14 +565,7 @@ def list_managed_shops(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), 
 
 @app.post("/shops/local")
 def create_local_shop(payload: LocalShopCreate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
-    """创建本土 TikTok 店铺；HubStudio 环境和执行器随后单独绑定。"""
-    shop = Shop(
-        company_id=user.company_id, name=payload.name.strip(), region=payload.region.strip().upper(),
-        nickname=payload.nickname.strip() if payload.nickname and payload.nickname.strip() else None,
-        platform="tiktok", auth_status="local", shop_type="local",
-    )
-    db.add(shop); db.commit(); db.refresh(shop)
-    return serialize_record(shop)
+    raise HTTPException(410, "本土店改为从 HubStudio 同步环境，请升级本地执行器")
 
 
 @app.put("/shops/{shop_id}/managers")
@@ -543,11 +600,13 @@ def update_hubstudio_account(payload: HubstudioAccountUpdate, user: User = Depen
 
 @app.get("/hub-agents")
 def list_hub_agents(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
-    return [serialize_record(agent) | {"online": bool(agent.last_seen_at and agent.last_seen_at >= datetime.utcnow() - timedelta(seconds=45))}
+    return [hub_agent_view(agent) | {"online": bool(agent.last_seen_at and agent.last_seen_at >= datetime.utcnow() - timedelta(seconds=45))}
             for agent in db.scalars(select(HubAgent).where(HubAgent.company_id == user.company_id).order_by(HubAgent.name)).all()]
 
 
 def create_hub_agent(payload: HubAgentRegisterInput, user: User, db: Session) -> tuple[HubAgent, str]:
+    if not user.company_id:
+        raise HTTPException(400, "请使用所属公司的 ERP 账号授权执行器")
     name = payload.name.strip()
     existing = db.scalar(select(HubAgent).where(HubAgent.company_id == user.company_id, HubAgent.name == name))
     if existing and existing.is_active:
@@ -569,7 +628,7 @@ def create_hub_agent(payload: HubAgentRegisterInput, user: User, db: Session) ->
 def register_hub_agent(payload: HubAgentRegisterInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
     agent, raw_token = create_hub_agent(payload, user, db)
     # 仅在首次注册响应中返回，调用方必须写入系统凭据库。
-    return {"agent": serialize_record(agent), "agent_token": raw_token}
+    return {"agent": hub_agent_view(agent), "agent_token": raw_token}
 
 
 @app.post("/hub-agent/pairings")
@@ -622,18 +681,7 @@ def revoke_hub_agent(agent_id: int, user: User = Depends(require_roles(Role.COMP
 
 @app.put("/shops/{shop_id}/hubstudio-binding")
 def update_hubstudio_shop_binding(shop_id: int, payload: HubShopBindingUpdate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
-    shop = db.get(Shop, shop_id)
-    agent = db.get(HubAgent, payload.hub_agent_id)
-    if not shop or shop.company_id != user.company_id:
-        raise HTTPException(404, "店铺不存在")
-    if shop.shop_type != "local":
-        raise HTTPException(400, "只有本土店可以绑定 HubStudio 环境")
-    if not agent or agent.company_id != user.company_id or not agent.is_active:
-        raise HTTPException(400, "请选择本公司可用的 Hub 执行器")
-    shop.hubstudio_container_code = payload.hubstudio_container_code.strip()
-    shop.hub_agent_id = agent.id
-    db.commit()
-    return serialize_record(shop)
+    raise HTTPException(410, "不再手工绑定店铺，请在本地执行器同步环境")
 
 
 def mask_api_key(api_key: str) -> str:
@@ -3875,6 +3923,10 @@ def get_tiktok_export_options(
 
 @app.post("/drafts/export-tiktok")
 def export_drafts_to_tiktok(payload: TiktokDraftExportInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return build_tiktok_export_response(payload, user, db, publish=True)
+
+
+def build_tiktok_export_response(payload: TiktokDraftExportInput, user: User, db: Session, *, publish: bool):
     """将同一产品模板下的商品草稿导出为 TikTok Seller Center 批量上传表格。"""
     if len(set(payload.draft_ids)) != len(payload.draft_ids):
         raise HTTPException(400, "商品草稿不能重复选择")
@@ -3983,12 +4035,12 @@ def export_drafts_to_tiktok(payload: TiktokDraftExportInput, user: User = Depend
         .where(ProductDraft.id.in_(payload.draft_ids))
         .values(
             export_count=ProductDraft.export_count + 1,
-            status="published",
-            workflow_stage="published",
+            **({"status": "published", "workflow_stage": "published"} if publish else {}),
             updated_by=user.id,
         )
     )
-    db.commit()
+    if publish:
+        db.commit()
     filename = f"TikTok批量上传_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
     return Response(
         content=workbook_bytes,
@@ -4110,107 +4162,143 @@ def export_drafts_to_shopee(payload: ShopeeDraftExportInput, user: User = Depend
     )
 
 
+@app.get("/hub-environments")
+def list_hub_environments(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    raise HTTPException(410, "环境仅在本地工作页同步和选择，不再保存到 ERP")
+
+
+@app.put("/hub-environments/{environment_id}/auto-upload")
+def toggle_hub_environment(environment_id: int, payload: HubEnvironmentToggle, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    raise HTTPException(410, "请在本地工作页设置唯一自动上品环境")
+
+
 @app.post("/drafts/submit-to-hubstudio")
 def create_hubstudio_upload_task(payload: HubUploadTaskCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """生成一次不可变表格快照，并交给指定电脑上的 Hub Agent 自动提交。"""
-    shop = ensure_shop(db, user, payload.shop_id)
-    if shop.shop_type != "local":
-        raise HTTPException(400, "自动上品仅支持已绑定 HubStudio 的本土店")
-    if not shop.hubstudio_container_code or not shop.hub_agent_id:
-        raise HTTPException(400, "该店铺尚未绑定 HubStudio 环境和执行器")
-    agent = db.get(HubAgent, shop.hub_agent_id)
-    if not agent or not agent.is_active or agent.company_id != user.company_id:
-        raise HTTPException(400, "店铺绑定的 Hub 执行器不可用")
     company = db.get(Company, user.company_id)
     if not company or not (company.hubstudio_app_id and company.hubstudio_secret_encrypted and company.hubstudio_group_code):
         raise HTTPException(400, "尚未配置 HubStudio API 凭据")
-    active = db.scalar(select(HubUploadTask.id).where(
-        HubUploadTask.shop_id == shop.id, HubUploadTask.status.in_(["queued", "running", "awaiting_attention"])
-    ).limit(1))
-    if active:
-        raise HTTPException(400, "该店铺已有进行中或待人工处理的自动上品任务")
     catalog = visible_tiktok_catalog(db, user, payload.category_catalog_id)
     if not catalog or catalog.template_type != "tiktok_local":
         raise HTTPException(400, "自动上品仅支持 tk本土店类目库")
-    # 复用既有模板校验与生成逻辑，响应体即任务唯一使用的 XLSX 快照。
-    export_payload = TiktokDraftExportInput(**payload.model_dump(exclude={"shop_id"}))
-    response = export_drafts_to_tiktok(export_payload, user=user, db=db)
-    filename = f"TikTok批量上传_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-    task = HubUploadTask(
-        company_id=user.company_id, shop_id=shop.id, agent_id=agent.id, created_by=user.id,
-        draft_ids=payload.draft_ids, export_filename=filename, export_blob=response.body,
-        parameters=payload.model_dump(exclude={"shop_id", "draft_ids"}), status="queued", stage="queued", logs=[],
-    )
-    db.add(task); db.commit(); db.refresh(task)
-    return hub_task_view(task)
+    export_url = None
+    committed = False
+    try:
+        export_payload = TiktokDraftExportInput(**payload.model_dump())
+        response = build_tiktok_export_response(export_payload, user, db, publish=False)
+        if len(response.body) > hub.MAX_XLSX_BYTES:
+            raise HTTPException(413, "上品表格超过 64 MB 单次上传上限，请减少本次草稿数量后重试")
+        export_url = upload_hub_export(response.body, user.company_id)
+        task = HubUploadTask(company_id=user.company_id,
+            created_by=user.id, draft_ids=payload.draft_ids, export_filename=f"TikTok批量上传_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            export_blob=None, export_url=export_url, export_size=len(response.body),
+            export_sha256=hashlib.sha256(response.body).hexdigest(), export_expires_at=datetime.utcnow() + timedelta(days=7), parameters=payload.model_dump(exclude={"draft_ids"}), status="queued", stage="queued", logs=[])
+        db.add(task); db.commit(); committed = True; db.refresh(task)
+    except Exception as exc:
+        db.rollback()
+        if export_url and not committed:
+            try:
+                delete_hub_export(export_url, user.company_id)
+            except StorageError:
+                logger.error("回滚任务后清理 R2 Excel 失败，将由过期清理处理")
+        if isinstance(exc, StorageError):
+            raise HTTPException(503, str(exc)) from exc
+        raise
+    return hub.task_view(db, task)
 
 
 @app.get("/hub-upload-tasks")
-def list_hub_upload_tasks(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    statement = select(HubUploadTask).order_by(HubUploadTask.id.desc())
-    if user.role != Role.SUPER_ADMIN:
-        statement = statement.where(HubUploadTask.company_id == user.company_id)
-    if is_operator(user):
-        statement = statement.where(HubUploadTask.created_by == user.id)
-    return [hub_task_view(task) for task in db.scalars(statement).all()]
+def list_hub_upload_tasks(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), status: str | None = None, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return hub.list_tasks(db, user.id, user.company_id, page, page_size, status)
+
+
+@app.get("/hub-upload-tasks/{task_id}")
+def get_hub_upload_task(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return hub.detail(db, task_id, user.id, user.company_id)
+
+
+@app.post("/hub-upload-tasks/{task_id}/{action}")
+def act_hub_upload_task(task_id: int, action: str, payload: HubTaskAction, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return hub.task_action(db, task_id, user.id, user.company_id, action, payload)
+
+
+@app.get("/hub-agent/config")
+def hub_agent_config(request: Request, db: Session = Depends(get_db)):
+    agent = hub_protocol_agent(request, db)
+    company, owner = db.get(Company, agent.company_id), db.get(User, agent.user_id)
+    configured = bool(company.hubstudio_app_id and company.hubstudio_secret_encrypted and company.hubstudio_group_code)
+    credentials = {"app_id": company.hubstudio_app_id, "app_secret": decrypt_secret(company.hubstudio_secret_encrypted), "group_code": company.hubstudio_group_code} if configured else None
+    return {"user": {"id": owner.id, "name": owner.name}, "configured": configured, "hubstudio": credentials}
+
+
+@app.post("/hub-agent/environments/sync")
+def sync_hub_agent_environments(payload: HubEnvironmentSync, request: Request, db: Session = Depends(get_db)):
+    hub_protocol_agent(request, db)
+    raise HTTPException(410, "环境同步仅在本机完成，不再上传到 ERP")
+
+
+@app.get("/hub-agent/environments")
+def get_hub_agent_environments(request: Request, db: Session = Depends(get_db)):
+    agent = hub_protocol_agent(request, db)
+    raise HTTPException(410, "请在本地工作页查看环境")
+
+
+@app.put("/hub-agent/environments/{environment_id}/auto-upload")
+def toggle_hub_agent_environment(environment_id: int, payload: HubEnvironmentToggle, request: Request, db: Session = Depends(get_db)):
+    agent = hub_protocol_agent(request, db)
+    raise HTTPException(410, "请在本地工作页设置唯一自动上品环境")
+
+
+@app.get("/hub-agent/tasks")
+def get_hub_agent_tasks(request: Request, page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), status: str | None = None, db: Session = Depends(get_db)):
+    agent = hub_protocol_agent(request, db)
+    return hub.list_tasks(db, agent.user_id, agent.company_id, page, page_size, status)
+
+
+@app.get("/hub-agent/tasks/{task_id}")
+def get_hub_agent_task(task_id: int, request: Request, db: Session = Depends(get_db)):
+    agent = hub_protocol_agent(request, db)
+    return hub.detail(db, task_id, agent.user_id, agent.company_id)
+
+
+@app.post("/hub-agent/tasks/{task_id}/actions/{action}")
+def act_hub_agent_task(task_id: int, action: str, payload: HubTaskAction, request: Request, db: Session = Depends(get_db)):
+    agent = hub_protocol_agent(request, db)
+    return hub.task_action(db, task_id, agent.user_id, agent.company_id, action, payload)
 
 
 @app.post("/hub-agent/heartbeat")
-def hub_agent_heartbeat(request: Request, db: Session = Depends(get_db)):
-    agent = hub_agent_from_request(request, db)
-    return {"id": agent.id, "status": "online"}
+def hub_agent_heartbeat(request: Request, task_id: int | None = None, claim_token: str | None = None, db: Session = Depends(get_db)):
+    return hub.heartbeat(db, hub_protocol_agent(request, db), task_id, claim_token)
 
 
 @app.post("/hub-agent/claim")
-def claim_hub_upload_task(request: Request, db: Session = Depends(get_db)):
-    agent = hub_agent_from_request(request, db)
-    task = db.scalar(select(HubUploadTask).where(
-        HubUploadTask.agent_id == agent.id, HubUploadTask.status == "queued"
-    ).order_by(HubUploadTask.created_at, HubUploadTask.id).limit(1))
-    if not task:
-        return {"task": None}
-    company, shop = db.get(Company, task.company_id), db.get(Shop, task.shop_id)
-    if not company or not shop or not (company.hubstudio_app_id and company.hubstudio_secret_encrypted and company.hubstudio_group_code):
-        task.status, task.stage, task.failure_reason, task.completed_at = "failed", "configuration_error", "HubStudio 配置或店铺不存在", datetime.utcnow()
-        db.commit()
-        return {"task": None}
-    task.status, task.stage, task.claim_token, task.claimed_at = "running", "claimed", secrets.token_urlsafe(32), datetime.utcnow()
-    task.logs = list(task.logs or []) + [{"at": timestamp_ms(datetime.utcnow()), "stage": "claimed", "message": "本地执行器已领取任务"}]
-    db.commit(); db.refresh(task)
-    return {"task": hub_task_view(task), "claim_token": task.claim_token, "hubstudio": {
-        "app_id": company.hubstudio_app_id, "app_secret": decrypt_secret(company.hubstudio_secret_encrypted),
-        "group_code": company.hubstudio_group_code, "container_code": shop.hubstudio_container_code,
-    }}
-
-
-def agent_claimed_task(task_id: int, claim_token: str, agent: HubAgent, db: Session) -> HubUploadTask:
-    task = db.get(HubUploadTask, task_id)
-    if not task or task.agent_id != agent.id or task.claim_token != claim_token or task.status not in {"running", "awaiting_attention"}:
-        raise HTTPException(404, "上品任务不存在、未领取或无权操作")
-    return task
+def claim_hub_upload_task(request: Request, payload: HubTaskClaimInput | None = None, db: Session = Depends(get_db)):
+    agent = hub_protocol_agent(request, db)
+    if payload is None:
+        raise HTTPException(400, "请在本地工作页选择自动上品环境")
+    return hub.claim(db, agent, payload)
 
 
 @app.get("/hub-agent/tasks/{task_id}/file")
 def download_hub_upload_file(task_id: int, request: Request, claim_token: str = Query(min_length=20), db: Session = Depends(get_db)):
-    agent = hub_agent_from_request(request, db)
-    task = agent_claimed_task(task_id, claim_token, agent, db)
-    return Response(content=task.export_blob, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(task.export_filename)}"})
+    task, _ = hub.claimed_task(db, hub_protocol_agent(request, db), task_id, claim_token)
+    hub.require_file(task)
+    content, filename = task.export_blob, task.export_filename
+    url, company_id, size, checksum = task.export_url, task.company_id, task.export_size, task.export_sha256
+    db.commit()
+    if url:
+        try:
+            content = read_hub_export(url, company_id, size, checksum)
+        except ExportMissingError as exc:
+            raise HTTPException(410, str(exc)) from exc
+        except StorageError as exc:
+            raise HTTPException(502, str(exc)) from exc
+    return Response(content=content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"})
 
 
 @app.post("/hub-agent/tasks/{task_id}/report")
 def report_hub_upload_task(task_id: int, payload: HubUploadTaskReport, request: Request, claim_token: str = Query(min_length=20), db: Session = Depends(get_db)):
-    agent = hub_agent_from_request(request, db)
-    task = agent_claimed_task(task_id, claim_token, agent, db)
-    task.status, task.stage = payload.status, payload.stage
-    task.failure_reason = payload.message if payload.status in {"awaiting_attention", "failed"} else None
-    task.logs = (list(task.logs or []) + [{"at": timestamp_ms(datetime.utcnow()), "stage": payload.stage, "message": payload.message or ""}])[-100:]
-    if payload.status == "completed":
-        task.submitted_at = task.submitted_at or datetime.utcnow(); task.completed_at = datetime.utcnow()
-    elif payload.status == "failed":
-        task.completed_at = datetime.utcnow()
-    db.commit()
-    return hub_task_view(task)
+    return hub.report(db, hub_protocol_agent(request, db), task_id, claim_token, payload)
 
 
 @app.post("/drafts/{draft_id}/publish-to-miaoshou")

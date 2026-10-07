@@ -90,7 +90,7 @@ class Shop(Base):
     platform: Mapped[str | None] = mapped_column(String(40), nullable=True)
     auth_status: Mapped[str] = mapped_column(String(30), default="not_connected")
     auth_expires_at: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    # 跨境店由妙手同步；本土店由管理员创建，并单独绑定 HubStudio。
+    # 妙手店铺使用此表；旧手工本土店仅为保留历史记录。HubStudio 使用独立环境表。
     shop_type: Mapped[str] = mapped_column(String(20), default="cross_border", index=True)
     hubstudio_container_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     hub_agent_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
@@ -124,21 +124,79 @@ class HubAgentPairing(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class HubEnvironment(Base):
+    """旧版同步环境的历史表；新版不再写入，与妙手店铺无关。"""
+    __tablename__ = "hub_environments"
+    __table_args__ = (UniqueConstraint("company_id", "container_code", name="uq_hub_environment_identity"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    container_code: Mapped[str] = mapped_column(String(120))
+    name: Mapped[str] = mapped_column(String(255))
+    metadata_fields: Mapped[dict] = mapped_column(JSON, default=dict)
+    auto_upload_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class HubEnvironmentAccess(Base):
+    __tablename__ = "hub_environment_access"
+    __table_args__ = (UniqueConstraint("agent_id", "environment_id", name="uq_hub_environment_access"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    user_id: Mapped[int] = mapped_column(index=True)
+    agent_id: Mapped[int] = mapped_column(index=True)
+    environment_id: Mapped[int] = mapped_column(index=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class HubEnvironmentLock(Base):
+    __tablename__ = "hub_environment_locks"
+    environment_id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    task_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class HubUploadAttempt(Base):
+    __tablename__ = "hub_upload_attempts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(index=True)
+    agent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    container_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    environment_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(30), default="running")
+    logs: Mapped[list] = mapped_column(JSON, default=list)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class HubUploadTask(Base):
-    """不可变的 TikTok 表格上品任务，由本地 Hub Agent 串行执行。"""
+    """账号拥有的固定 XLSX 上品任务，电脑在领取时确定。"""
     __tablename__ = "hub_upload_tasks"
     __table_args__ = (
         Index("ix_hub_upload_tasks_agent_status", "agent_id", "status", "created_at"),
         Index("ix_hub_upload_tasks_shop_status", "shop_id", "status"),
+        Index("ix_hub_upload_tasks_owner_queue", "company_id", "created_by", "status", "environment_id"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
-    shop_id: Mapped[int] = mapped_column(index=True)
-    agent_id: Mapped[int] = mapped_column(index=True)
+    shop_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
+    agent_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
     created_by: Mapped[int] = mapped_column(index=True)
+    environment_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
+    environment_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    container_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    attempt_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    resolved_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     draft_ids: Mapped[list] = mapped_column(JSON, default=list)
     export_filename: Mapped[str] = mapped_column(String(255))
-    export_blob: Mapped[bytes] = mapped_column(LargeBinary().with_variant(MEDIUMBLOB(), "mysql").with_variant(MEDIUMBLOB(), "mariadb"))
+    export_blob: Mapped[bytes | None] = mapped_column(LargeBinary().with_variant(MEDIUMBLOB(), "mysql").with_variant(MEDIUMBLOB(), "mariadb"), nullable=True)
+    export_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    export_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    export_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    export_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    export_deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     parameters: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     stage: Mapped[str] = mapped_column(String(80), default="queued")
@@ -149,6 +207,16 @@ class HubUploadTask(Base):
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class HubRuntimeLock(Base):
+    """只保存任务运行协调键，不保存同步环境目录或访问关系。"""
+    __tablename__ = "hub_runtime_locks"
+    __table_args__ = (UniqueConstraint("company_id", "container_code", name="uq_hub_runtime_identity"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    container_code: Mapped[str] = mapped_column(String(120))
+    task_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class UserShop(Base):

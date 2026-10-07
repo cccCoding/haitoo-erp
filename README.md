@@ -166,20 +166,33 @@ Compose 会先运行一次 `migrate` 服务，将数据库升级到代码要求�
 
 API 文档地址为当前环境的 API 域名加 `/docs`。
 
-## HubStudio 本土店自动上品
+## HubStudio 环境自动上品
 
-跨境店管理已移至“妙手管理 → 店铺管理”，可配置妙手 API Key、同步店铺并分配管理人员。“妙手管理 → 公共采集箱”展示妙手公共采集箱商品。
+HubStudio 环境可包含本土店和跨境店，当前自动上品只支持用户确认的 TikTok 本土店。环境与妙手同步店铺分开管理，不再新增本土店、分配人员、手工填写环境 ID 或绑定电脑。“HubStudio管理”只保存公司 App ID、App Secret、Group Code。
 
-独立的“HubStudio管理”页面管理本土店。公司管理员可手工新增本土店、绑定 HubStudio `containerCode` 与本地执行器，并在导出 TikTok 表格时将其作为“自动上品”目标店铺。
+员工启动新版执行器，在本机工作页 `http://127.0.0.1:45679` 输入 ERP 邮箱和密码授权。环境每 60 秒从当前 HubStudio 客户端完整同步，仅保存在本机内存，不上传到 ERP、不写数据库；本机配置只保存唯一自动上品环境的 ID。超过 5 分钟的本机快照禁止领取任务，重新同步成功后恢复。环境列表按分组折叠，展示序号及其下方 ID、环境名称、分组、标签和自动上品开关。
 
-升级到该功能前，必须执行迁移至 `20260917_09`：
+本机只能启用一个确认属于 TikTok 本土店的环境，启用新环境会自动关闭原环境，任务执行中不能切换。ERP 草稿页直接生成账号任务及固定 XLSX，无需选择目标环境，也无需等待环境同步。执行器领取任务时使用本机已启用的环境；未启用或当前无法访问时，任务留在队列中。
+
+数据库只保存任务、执行尝试、实际执行目标及运行锁，不再保存新的环境目录或访问关系。同环境全公司串行运行、多电脑原子领取。独立心跳每 15 秒续租，90 秒失联后转人工处理，不自动重新提交。重试复用原 XLSX，使用领取电脑当前启用的环境，保留之前每次执行的目标和日志；请先核对原环境的平台结果。只有平台明确接受或人工确认后才标记草稿已发布，“已提交”不代表已上架。
+
+本功能要求数据库版本 `20261007_30`，并同时更新 ERP 前端和协议 3 的本地执行器。升级保留历史店铺、环境表、任务和 XLSX；历史环境表不再被同步写入。旧排队及运行任务转为待人工核对，旧领取凭证失效，原执行环境继续阻止新任务，直到人工处理。旧执行器收到 HTTP 426 升级提示后无法继续领取或报告。
+
+本机测试升级：
 
 ```bash
 ./deploy/local.sh run --rm migrate
-./deploy/local.sh restart api submit-worker result-worker
+./deploy/local.sh up -d --build api web submit-worker result-worker
 ```
 
-管理员操作顺序：在“HubStudio管理”配置公司 HubStudio API、新增本土店、绑定对应 HubStudio 环境与已在线的本地执行器；随后在商品草稿的“导出 TikTok 批量上传表格”中选择该本土店并点击“生成并自动上品”。本地执行器会领取任务、启动该环境、下载不可变 XLSX 快照并提交。
+腾讯云升级：
+
+```bash
+./deploy/tencent.sh run --rm migrate
+./deploy/tencent.sh up -d --build api web submit-worker result-worker
+```
+
+执行器构建、员工安装和测试说明见 [hub_agent/README.md](hub_agent/README.md)。
 
 系统启动时不会创建公司、演示账号或默认超级管理员。首次部署后，通过容器内的一次性命令创建平台超级管理员；密码将在终端中安全输入两次，不会进入命令历史或环境变量：
 
@@ -384,3 +397,5 @@ python -m app.db_migrate
 R2 不会自动删除对象。可在 Bucket 的 **Settings → Object Lifecycle Rules** 创建生命周期规则：使用前缀 `generated/` 可只清理 AI 生成图，例如设置“创建 90 天后删除”；模板、素材和尺码图使用其他前缀，不受该规则影响。`AI_GENERATED_IMAGE_UPLOAD_TO_R2=false` 时，结果直接保存 Grsai 临时 URL，这些 URL 可能过期。
 
 > Docker Compose 中的密码仅用于本地开发。生产环境必须通过密钥管理服务配置数据库密码、JWT 密钥和妙手凭据加密密钥。
+
+HubStudio 自动上品 XLSX 已改为独立私有 R2 桶，数据库仅保存链接、校验信息和 7 天有效期。需要配置 `R2_HUB_EXPORT_BUCKET` 并迁移至 `20261007_30`，详见 [执行器部署说明](hub_agent/README.md#自动上品-excel-的-r2-存储)。

@@ -5,8 +5,8 @@ cd "$(dirname "$0")"
 python3 -m venv .build-venv
 .build-venv/bin/python -m pip install --upgrade pip
 .build-venv/bin/python -m pip install -r requirements.txt
-.build-venv/bin/python -m PyInstaller --noconfirm --clean --windowed --name HaitooHubAgent haitoo_hub_agent.py
-.build-venv/bin/python -m PyInstaller --noconfirm --clean --console --name HaitooHubAgentConsole haitoo_hub_agent.py
+.build-venv/bin/python -m PyInstaller --noconfirm --clean --windowed --add-data "static:static" --name HaitooHubAgent haitoo_hub_agent.py
+.build-venv/bin/python -m PyInstaller --noconfirm --clean --console --add-data "static:static" --name HaitooHubAgentConsole haitoo_hub_agent.py
 cp start_and_pair_macos.command dist/启动并配对.command
 chmod +x dist/启动并配对.command
 

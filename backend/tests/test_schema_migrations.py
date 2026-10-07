@@ -1,5 +1,8 @@
 import json
+from io import StringIO
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from alembic import command
 from sqlalchemy import create_engine, inspect, text
@@ -19,6 +22,26 @@ class SchemaMigrationTests(unittest.TestCase):
     def test_unmigrated_database_is_rejected_by_application_check(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "请先执行 python -m app.db_migrate"):
             assert_schema_current(self.engine)
+
+    def test_mysql_hub_xlsx_migration_emits_mediumblob_not_blob(self):
+        for dialect in ("mysql", "mariadb"):
+            output = StringIO()
+            config = alembic_config()
+            config.output_buffer = output
+            with patch("app.config.get_settings", return_value=SimpleNamespace(database_url=f"{dialect}+pymysql://test@localhost/test")):
+                command.upgrade(config, "20261007_28:20261007_29", sql=True)
+            self.assertIn("ALTER TABLE hub_upload_tasks MODIFY export_blob MEDIUMBLOB NOT NULL", output.getvalue())
+
+    def test_mysql_r2_migration_retains_nullable_legacy_blob(self):
+        for dialect in ("mysql", "mariadb"):
+            output = StringIO()
+            config = alembic_config(); config.output_buffer = output
+            with patch("app.config.get_settings", return_value=SimpleNamespace(database_url=f"{dialect}+pymysql://test@localhost/test")):
+                command.upgrade(config, "20261007_29:20261007_30", sql=True)
+            sql = output.getvalue()
+            self.assertIn("MODIFY export_blob MEDIUMBLOB NULL", sql)
+            self.assertIn("ADD COLUMN export_url VARCHAR(1024)", sql)
+            self.assertIn("export_expires_at", sql)
 
     def test_baseline_migration_creates_schema_and_records_current_head(self) -> None:
         with self.engine.begin() as connection:
@@ -50,12 +73,36 @@ class SchemaMigrationTests(unittest.TestCase):
             command.upgrade(config, "head")
             current, expected = schema_heads(connection)
             self.assertEqual(current, expected)
-            self.assertEqual(current, {"20261006_26"})
+            self.assertEqual(current, {"20261007_30"})
             columns = {column['name'] for column in inspect(connection).get_columns('product_templates')}
             self.assertNotIn('confirmed_product_info', columns)
             self.assertEqual(connection.execute(text("SELECT title_template FROM product_templates WHERE id=900")).scalar_one(), 'Existing title rules')
             self.assertEqual(connection.execute(text("SELECT name FROM companies WHERE id=900")).scalar_one(), 'Existing Company')
         assert_schema_current(self.engine)
+
+    def test_hub_upgrade_preserves_history_without_granting_access(self):
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, "20261006_26")
+            connection.execute(text("INSERT INTO companies (id, name, is_active, created_at) VALUES (1, 'Legacy', 1, CURRENT_TIMESTAMP)"))
+            connection.execute(text("INSERT INTO shops (id, company_id, name, region, auth_status, shop_type, hubstudio_container_code, hub_agent_id) VALUES (1, 1, 'Legacy Local', 'MY', 'local', 'local', 'env-1', 1)"))
+            for identity, status in ((1, 'queued'), (2, 'running'), (3, 'completed')):
+                connection.execute(text("INSERT INTO hub_upload_tasks (id, company_id, shop_id, agent_id, created_by, draft_ids, export_filename, export_blob, parameters, status, stage, logs, claim_token, created_at) VALUES (:id, 1, 1, 1, 1, '[1]', 'snapshot.xlsx', :blob, '{}', :status, :status, '[]', 'old-token', CURRENT_TIMESTAMP)"), {"id": identity, "status": status, "blob": b'PKsnapshot'})
+            command.upgrade(config, "head")
+            env = connection.execute(text("SELECT id, auto_upload_enabled, synced_at FROM hub_environments")).one()
+            self.assertFalse(env.auto_upload_enabled)
+            self.assertIsNone(env.synced_at)
+            self.assertEqual(connection.scalar(text("SELECT COUNT(*) FROM hub_environment_access")), 0)
+            records = connection.execute(text("SELECT status, claim_token, environment_id, export_blob, lease_expires_at FROM hub_upload_tasks ORDER BY id")).all()
+            self.assertEqual([r.status for r in records], ['awaiting_attention', 'awaiting_attention', 'completed'])
+            self.assertIsNone(records[0].claim_token)
+            self.assertIsNone(records[1].claim_token)
+            self.assertIsNone(records[1].lease_expires_at)
+            self.assertTrue(all(r.environment_id == env.id and r.export_blob == b'PKsnapshot' for r in records))
+            self.assertEqual(connection.scalar(text("SELECT task_id FROM hub_environment_locks")), 1)
+            self.assertEqual(connection.scalar(text("SELECT COUNT(*) FROM shops")), 1)
+            self.assertEqual(connection.scalar(text("SELECT task_id FROM hub_runtime_locks")), 1)
+            self.assertEqual(connection.scalar(text("SELECT container_code FROM hub_upload_tasks WHERE id=2")), "env-1")
 
     def test_running_upgrade_again_is_a_no_op(self) -> None:
         with self.engine.connect() as connection:
