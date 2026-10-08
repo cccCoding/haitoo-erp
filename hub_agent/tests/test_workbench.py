@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -83,6 +84,27 @@ class HubstudioClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chinese_logs_support_utf8_legacy_windows_and_mixed_files(self):
+        old = "2026-10-08 INFO 正在启动环境"
+        new = "2026-10-08 INFO [imported] 商品导入成功"
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "agent.log"
+            self.workbench.log_path = log
+            for encodings in (("utf-8", "utf-8"), ("gbk", "gbk"), ("gbk", "utf-8")):
+                with self.subTest(encodings=encodings):
+                    log.write_bytes(old.encode(encodings[0]) + b"\r\n" + new.encode(encodings[1]) + b"\r\n")
+                    response = await self.client.get("/api/logs")
+                    self.assertEqual((await response.json())["lines"], [old, new])
+
+    async def test_log_tail_discards_partial_multibyte_line_and_limits_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "agent.log"
+            self.workbench.log_path = log
+            expected = [f"中文日志 {i}" for i in range(120)]
+            log.write_bytes(("中" * 30000 + "\n" + "\n".join(expected) + "\n").encode("utf-8"))
+            response = await self.client.get("/api/logs")
+            self.assertEqual((await response.json())["lines"], expected[-100:])
+
     async def test_clear_logs_requires_csrf_and_preserves_new_appends(self):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "agent.log"
@@ -168,6 +190,19 @@ class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
 
 
 class UploadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_log_writer_uses_utf8_with_windows_default_encoding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, "-c", "import locale; locale.getencoding = lambda: 'cp936'; "
+                 "import haitoo_hub_agent as agent; agent.logger.info('商品导入成功'); "
+                 "import logging; logging.shutdown()"],
+                cwd=Path(__file__).resolve().parents[1],
+                env={**os.environ, "HAITOO_AGENT_DATA_DIR": directory},
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("商品导入成功", (Path(directory) / "agent.log").read_text(encoding="utf-8"))
+
     async def test_abort_stops_execution_reports_attention_and_pauses_queue(self):
         for submitting in (False, True):
             with self.subTest(submitting=submitting):

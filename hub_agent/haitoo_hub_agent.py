@@ -61,7 +61,7 @@ STATUS_PORT = 45679
 
 APP_SUPPORT_PATH.mkdir(parents=True, exist_ok=True)
 LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(filename=LOG_PATH, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(filename=LOG_PATH, encoding="utf-8", level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 # HTTP 默认信息日志会包含领取凭证查询串，禁止写入本机可见日志。
 logging.getLogger("httpx").setLevel(logging.WARNING)
