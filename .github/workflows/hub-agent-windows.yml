@@ -1,0 +1,36 @@
+name: 构建 Windows 本地执行器
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: 获取源码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.12
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+
+      - name: 运行测试并打包
+        shell: pwsh
+        env:
+          BUILD_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: ./hub_agent/build_windows.ps1 -PythonExecutable $env:BUILD_PYTHON -RunTests
+
+      - name: 上传完整 Windows 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: HaitooHubAgent-Windows-x64-${{ github.run_number }}
+          path: hub_agent/dist/
+          if-no-files-found: error
+          retention-days: 14

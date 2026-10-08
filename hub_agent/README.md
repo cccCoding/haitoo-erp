@@ -87,7 +87,11 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\build_windows.ps1
 ```
 
-`dist\` 会包含 `HaitooHubAgent.exe`、`HaitooHubAgentConsole\` 和 `启动并配对.cmd`。首次安装时请保留它们的相对位置。正式发布前，对 EXE 和安装包进行代码签名，并使用 Inno Setup 或 WiX 制作安装程序。
+`dist\` 会包含 `HaitooHubAgent\HaitooHubAgent.exe`、`HaitooHubAgentConsole\HaitooHubAgentConsole.exe` 和 `启动并配对.cmd`。首次安装时请保留两个完整程序目录及启动脚本的相对位置，不能只复制 EXE。正式发布前，对 EXE 和安装包进行代码签名，并使用 Inno Setup 或 WiX 制作安装程序。
+
+没有 Windows 电脑时，可使用仓库中的 `.github/workflows/hub-agent-windows.yml`：将代码提交并推送到 GitHub 默认分支，在仓库 Actions 中选择“构建 Windows 本地执行器”，点击 Run workflow，并选择要构建的分支。工作流使用 Windows x64 runner 和 Python 3.12，先运行执行器单元测试，再生成两个程序目录并检查工作页静态资源，最后上传完整安装包。失败的测试或打包步骤会中止构建。
+
+运行成功后，在该次运行页面的 Artifacts 下载 `HaitooHubAgent-Windows-x64-运行编号`，完整解压后双击 `启动并配对.cmd`。无需配置 GitHub Secrets，也不会打入本机登录令牌。产物保留 14 天；云端构建只验证测试和打包，HubStudio 启动、邮箱登录及实际导入仍需在员工 Windows 电脑上验收。
 
 安装完成后，以员工当前账号执行：
 
