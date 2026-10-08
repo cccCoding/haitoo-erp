@@ -4191,7 +4191,7 @@ def create_hubstudio_upload_task(payload: HubUploadTaskCreate, user: User = Depe
         export_payload = TiktokDraftExportInput(**payload.model_dump())
         response = build_tiktok_export_response(export_payload, user, db, publish=False)
         if len(response.body) > hub.MAX_XLSX_BYTES:
-            raise HTTPException(413, "上品表格超过 64 MB 单次上传上限，请减少本次草稿数量后重试")
+            raise HTTPException(413, "上品表格超过 20 MB 单次上传上限，请减少本次草稿数量后重试")
         export_url = upload_hub_export(response.body, user.company_id)
         task = HubUploadTask(company_id=user.company_id,
             created_by=user.id, draft_ids=payload.draft_ids, export_filename=f"TikTok批量上传_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",

@@ -11,7 +11,7 @@ class ERPRequestError(RuntimeError):
 
 
 class LocalStatusServer:
-    def __init__(self, state, client_getter=None, sync_callback=None, log_path=None, host="127.0.0.1", port=45679, login_callback=None, toggle_callback=None):
+    def __init__(self, state, client_getter=None, sync_callback=None, log_path=None, host="127.0.0.1", port=45679, login_callback=None, toggle_callback=None, abort_callback=None):
         self.state, self.client_getter, self.sync_callback = state, client_getter, sync_callback
         self.log_path, self.host, self.port = log_path, host, port
         self.origin = f"http://{host}:{port}"
@@ -20,6 +20,7 @@ class LocalStatusServer:
         self.runner = None
         self.login_callback = login_callback
         self.toggle_callback = toggle_callback
+        self.abort_callback = abort_callback
         self.static = Path(__file__).resolve().parent / "static"
 
     def app(self):
@@ -62,6 +63,7 @@ class LocalStatusServer:
         app.router.add_get("/api/tasks/{id}", self.task)
         app.router.add_post("/api/tasks/{id}/{action}", self.action)
         app.router.add_get("/api/logs", self.logs)
+        app.router.add_post("/api/logs/clear", self.clear_logs)
         return app
 
     async def start(self):
@@ -98,7 +100,7 @@ class LocalStatusServer:
         return web.json_response({"status": "ready"})
 
     async def status(self, request):
-        safe = {k: self.state.get(k) for k in ("status", "paused", "user", "sync_at", "sync_error", "erp_connected", "hub_connected", "login_required")}
+        safe = {k: self.state.get(k) for k in ("status", "paused", "user", "sync_at", "sync_error", "erp_connected", "hub_connected", "login_required", "active_task_id", "abort_requested")}
         return web.json_response(safe | {"csrf": self.csrf})
 
     async def login(self, request):
@@ -158,6 +160,10 @@ class LocalStatusServer:
 
     async def action(self, request):
         action = request.match_info["action"]
+        if action == "abort":
+            if not self.abort_callback:
+                raise web.HTTPServiceUnavailable(text="请升级执行器")
+            return web.json_response(await self.abort_callback(int(request.match_info["id"])))
         if action not in {"retry", "cancel", "confirm-submitted"}:
             raise web.HTTPNotFound()
         return await self.proxy("POST", f"/hub-agent/tasks/{int(request.match_info['id'])}/actions/{action}", json=await request.json())
@@ -170,3 +176,10 @@ class LocalStatusServer:
                 log.seek(0, 2); size = log.tell(); log.seek(max(0, size - 65536))
                 lines = log.read().decode("utf-8", "replace").splitlines()[-100:]
         return web.json_response({"lines": lines})
+
+    async def clear_logs(self, request):
+        if self.log_path and self.log_path.exists():
+            # 保留文件及打开的日志句柄，后续追加日志可继续写入。
+            with self.log_path.open("w", encoding="utf-8"):
+                pass
+        return web.json_response({"ok": True})

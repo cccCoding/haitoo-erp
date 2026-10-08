@@ -9,7 +9,7 @@ from .schemas import HubTaskClaimInput, HubTaskAction
 
 PROTOCOL = "3"
 LEASE_SECONDS = 90
-MAX_XLSX_BYTES = 64 * 1024 * 1024
+MAX_XLSX_BYTES = 20 * 1024 * 1024
 
 def file_expired(task):
     return bool(task.export_deleted_at or (task.export_expires_at and task.export_expires_at <= datetime.utcnow()))
@@ -154,6 +154,8 @@ def task_action(db, task_id, user_id, company_id, action, payload: HubTaskAction
     expire_locked_task(db, task)
     if task.status == "running":
         raise HTTPException(409, "任务仍在运行，请等待执行结束")
+    if action == "retry" and task.stage == "import_data_error":
+        raise HTTPException(409, "商品数据错误的任务不可重试，请人工查看平台错误并修正数据后创建新任务")
     finish_attempt(db, task, task.status)
     if action == "cancel":
         if task.status not in {"queued", "awaiting_attention", "failed"}:

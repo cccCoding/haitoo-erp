@@ -20,14 +20,15 @@ import tempfile
 import threading
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 import keyring
-from hubstudio import HubstudioClient
+from hubstudio import HubstudioClient, seller_url
 from workbench import LocalStatusServer, ERPRequestError
 from runtime_settings import validate_erp_url, debug_scope
 from local_auth import authorize_computer
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
 SERVICE_NAME = "haitoo-hub-agent"
 TOKEN_KEY = "agent-token"
@@ -127,40 +128,445 @@ class ERPClient:
         return await self.post(f"/hub-agent/tasks/{task_id}/report", params={"claim_token": claim_token}, json={"status": status, "stage": stage, "message": message})
 
 
-async def upload_and_submit(debug_port: int, xlsx_path: Path, before_submit=None) -> None:
-    """明确控件与提交成功提示；未知页面或结果交由人工核对。"""
+BULK_UPLOAD_URL = "https://seller-my.tiktok.com/product/batch/publish?entry-from=hub&shop_region=MY&step=2"
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+LOGIN_WAIT_SECONDS = 600
+
+
+class DuplicateUploadError(RuntimeError):
+    pass
+
+
+class ImportDataError(RuntimeError):
+    pass
+
+
+async def check_import_data_error(page):
+    """检查当前页弹窗、可见 iframe 和由当前页打开的独立弹窗。"""
+    pages = [page]
+    for popup in list(page.context.pages):
+        if popup is not page and not popup.is_closed() and await popup.opener() is page:
+            pages.append(popup)
+    pattern = re.compile(r"出错\s*(?:的\s*)?商品")
+    for candidate_page in pages:
+        scopes = [candidate_page]
+        for frame in candidate_page.frames:
+            if frame is candidate_page.main_frame or frame.is_detached():
+                continue
+            ancestor = frame
+            visible = True
+            try:
+                while ancestor.parent_frame is not None:
+                    element = await ancestor.frame_element()
+                    try:
+                        if not await element.is_visible():
+                            visible = False
+                            break
+                    finally:
+                        await element.dispose()
+                    ancestor = ancestor.parent_frame
+            except PlaywrightError:
+                # iframe 在解析或弹窗切换期间可能被移除，下轮重新检查。
+                continue
+            if visible:
+                scopes.append(frame)
+        for scope in scopes:
+            try:
+                error = scope.get_by_text(pattern)
+                count = await error.count()
+                for index in range(count):
+                    control = error if count == 1 else error.nth(index)
+                    if await control.is_visible():
+                        raise ImportDataError("上传成功，添加商品失败（数据错误）；请人工查看 TikTok 在线编辑器中的出错商品并处理")
+            except PlaywrightError:
+                if scope is candidate_page:
+                    raise
+                # iframe 跳转时只跳过本轮，不阻塞主页面检测。
+                continue
+
+
+async def wait_import_result(page, success):
+    """同时等待导入成功或明确的数据错误；结束时清理监控协程。"""
+    async def watch_errors():
+        while True:
+            await check_import_data_error(page)
+            await asyncio.sleep(0.5)
+
+    await check_import_data_error(page)
+    success_wait = asyncio.create_task(success.wait_for(state="visible", timeout=60_000))
+    error_wait = asyncio.create_task(watch_errors())
+    try:
+        done, _ = await asyncio.wait((success_wait, error_wait), return_when=asyncio.FIRST_COMPLETED)
+        if error_wait in done:
+            await error_wait
+        await success_wait
+        # 同时出现部分成功和错误时，整项任务按数据错误处理。
+        await check_import_data_error(page)
+    finally:
+        for task in (success_wait, error_wait):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(success_wait, error_wait, return_exceptions=True)
+
+
+async def check_duplicate_upload(page):
+    duplicate = page.get_by_text(re.compile(r"此文件已存在|文件已存在|(?:this\s+)?file\s+already\s+exists", re.I))
+    for index in range(await duplicate.count()):
+        if await duplicate.nth(index).is_visible():
+            raise DuplicateUploadError("此文件已存在。请上传其他文件或查看上传记录核对已有结果；本次已停止。")
+
+
+async def wait_upload_control(page, control, timeout):
+    """上传后持续检测重复文件及数据错误，覆盖文件名、就绪提示与导入按钮等待。"""
+    deadline = time.monotonic() + timeout / 1000
+    while True:
+        await check_import_data_error(page)
+        await check_duplicate_upload(page)
+        try:
+            await control.wait_for(state="visible", timeout=min(1000, max(1, int((deadline - time.monotonic()) * 1000))))
+            await check_import_data_error(page)
+            await check_duplicate_upload(page)
+            return
+        except PlaywrightTimeoutError:
+            if time.monotonic() >= deadline:
+                await check_import_data_error(page)
+                await check_duplicate_upload(page)
+                raise
+
+
+async def open_bulk_upload(page, upload_url=BULK_UPLOAD_URL):
+    try:
+        await page.goto(upload_url, wait_until="domcontentloaded")
+    except PlaywrightError:
+        # 登录重定向可能中断 goto；只有明确进入登录地址才交给登录等待。
+        if "login" not in page.url.lower():
+            raise
+
+
+async def unique_visible(control):
+    """返回唯一可见的匹配项，忽略隐藏的菜单和表单副本。"""
+    count = await control.count()
+    visible = []
+    for index in range(count):
+        candidate = control if count == 1 else control.nth(index)
+        if await candidate.is_visible():
+            visible.append(candidate)
+    return visible[0] if len(visible) == 1 else None
+
+
+async def login_page_language(page):
+    """登录页只识别语言，不切换语言。"""
+    language = page.get_by_text(re.compile(r"^\s*(简体中文|US English|UK English)\s*$", re.I))
+    await language.wait_for(state="visible", timeout=30_000)
+    control = await unique_visible(language)
+    if control is None:
+        raise RuntimeError("无法唯一识别登录页语言，请人工核对；尚未上传")
+    text = (await control.inner_text()).strip()
+    return "zh" if text == "简体中文" else "en"
+
+
+async def toggle_account_menu(page):
+    """根据顶部右侧账号控件的布局定位，支持不同店铺名称。"""
+    handle = await page.evaluate_handle("""() => {
+        const candidates = [...document.querySelectorAll('button, [role="button"], a, div, span')]
+          .filter(el => {
+            const r = el.getBoundingClientRect(), style = getComputedStyle(el);
+            const text = (el.innerText || '').trim();
+            return r.top >= 0 && r.top < 100 && r.bottom <= 130
+              && r.right >= innerWidth - 80 && r.width >= 80 && r.width <= 360
+              && r.height >= 24 && r.height <= 96 && text.length > 0 && text.length <= 100
+              && style.visibility !== 'hidden' && style.cursor === 'pointer';
+          }).sort((a,b) => b.getBoundingClientRect().right-a.getBoundingClientRect().right
+                           || a.getBoundingClientRect().width-b.getBoundingClientRect().width);
+        return candidates[0] || null;
+    }""")
+    try:
+        control = handle.as_element()
+        if control is None:
+            raise RuntimeError("未识别到右上角账号菜单入口，请人工打开账号菜单；尚未上传")
+        await control.click(timeout=10_000)
+    finally:
+        await handle.dispose()
+
+
+LANGUAGE_PATTERN = re.compile(
+    r"^\s*(?:简体中文|(?:US |UK )?English(?:\s*\([^)]*\))?|繁體中文|繁体中文|Bahasa Malaysia|Bahasa Melayu|Bahasa Indonesia|ไทย|Tiếng Việt|日本語|한국어|Español|Português|Français|Deutsch)\s*$", re.I)
+
+
+async def progress(on_progress, stage, message):
+    logger.info("[%s] %s", stage, message)
+    if on_progress:
+        await on_progress(stage, message)
+
+
+async def account_menu_visible(page):
+    # 退出登录行可能同时包含邮箱和主账号说明，不能要求整行完全匹配。
+    for marker in (page.get_by_text(LANGUAGE_PATTERN),
+                   page.get_by_text(re.compile(r"退出登录|log\s*out|sign\s*out", re.I))):
+        count = await marker.count()
+        for index in range(count):
+            candidate = marker if count == 1 else marker.nth(index)
+            if await candidate.is_visible():
+                return True
+    return False
+
+
+async def wait_account_menu_hidden(page, timeout):
+    deadline = time.monotonic() + timeout
+    while await account_menu_visible(page):
+        if time.monotonic() >= deadline:
+            raise PlaywrightTimeoutError("账号菜单仍然可见")
+        await asyncio.sleep(0.2)
+
+
+async def close_account_menu(page):
+    if not await account_menu_visible(page):
+        return
+    await page.keyboard.press("Escape")
+    try:
+        await wait_account_menu_hidden(page, 2)
+    except PlaywrightTimeoutError:
+        # Escape 不受支持时点击账号控件关闭，确认关闭后再继续。
+        await toggle_account_menu(page)
+        await wait_account_menu_hidden(page, 10)
+
+
+async def confirm_chinese_after_switch(page, on_progress=None, timeout=30):
+    """切换语言后页面可能刷新，菜单丢失时重新打开；总等待时间有上限。"""
+    chinese = page.get_by_text(re.compile(r"^\s*简体中文\s*$"))
+    attempts = 0
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                try:
+                    if await unique_visible(chinese):
+                        return
+                    if not await account_menu_visible(page):
+                        attempts += 1
+                        await progress(on_progress, "verifying_language", f"切换后账号菜单未展开，正在重新打开核对（第 {attempts} 次）")
+                        await toggle_account_menu(page)
+                    if await unique_visible(chinese):
+                        return
+                except PlaywrightError:
+                    # 刷新期间旧 DOM 或元素句柄可能失效，下轮重新获取。
+                    logger.info("[verifying_language] 页面刷新或账号控件暂不可用，继续核对简体中文")
+                await asyncio.sleep(1)
+    except TimeoutError as exc:
+        raise PlaywrightTimeoutError("切换后 30 秒内未能确认账号菜单中的简体中文") from exc
+
+
+async def ensure_simplified_chinese(page, on_progress=None):
+    """上传页通过账号菜单切换语言，核对并关闭菜单后才允许上传。"""
+    if not seller_url(page.url):
+        raise RuntimeError("当前页面不是 TikTok 卖家网站，无法切换语言；尚未上传")
+    step = "打开右上角账号菜单"
+    try:
+        await progress(on_progress, "checking_language", "正在打开右上角账号菜单，检查上传页语言；尚未上传")
+        if not await account_menu_visible(page):
+            await toggle_account_menu(page)
+        step = "读取账号菜单当前语言"
+        language = page.get_by_text(LANGUAGE_PATTERN)
+        await language.wait_for(state="visible", timeout=10_000)
+        current = await unique_visible(language)
+        if current is None:
+            raise RuntimeError("账号菜单语言无法唯一识别")
+        current_language = (await current.inner_text()).strip()
+        await progress(on_progress, "checking_language", f"账号菜单当前语言：{current_language}")
+        if current_language != "简体中文":
+            step = "展开语言选项并选择简体中文"
+            await progress(on_progress, "switching_language", "正在切换为简体中文；尚未上传")
+            await current.click()
+            option = page.get_by_text(re.compile(r"^\s*(?:简体中文|中文[（(]简体[）)]|Chinese\s*[（(]Simplified[）)]|Simplified Chinese)\s*$", re.I))
+            await option.wait_for(state="visible", timeout=10_000)
+            choice = await unique_visible(option)
+            if choice is None:
+                raise RuntimeError("无法唯一识别简体中文选项")
+            await choice.click()
+            step = "关闭语言选择菜单"
+            await close_account_menu(page)
+            # 等待语言切换后的上传页就绪，避免刷新中点击账号控件导致菜单再次关闭。
+            step = "等待语言切换后的上传页"
+            await page.locator("input[type=file]").wait_for(state="attached", timeout=30_000)
+            step = "重新打开账号菜单核对简体中文"
+            await progress(on_progress, "verifying_language", "正在核对切换后的语言，最多等待 30 秒；刷新后会重新打开账号菜单")
+            await confirm_chinese_after_switch(page, on_progress)
+            await progress(on_progress, "language_ready", "语言切换成功，账号菜单已确认简体中文")
+        else:
+            await progress(on_progress, "language_ready", "上传页语言已是简体中文，无需切换")
+        step = "关闭账号菜单"
+        await progress(on_progress, "closing_account_menu", "正在关闭账号菜单；尚未上传")
+        await close_account_menu(page)
+        await progress(on_progress, "account_menu_closed", "账号菜单已关闭，语言检查完成，准备上传")
+    except (PlaywrightError, RuntimeError) as exc:
+        reason = "超时" if isinstance(exc, PlaywrightTimeoutError) else "失败"
+        message = f"语言检查{reason}：{step}；尚未上传，请核对账号菜单和页面"
+        await progress(on_progress, "language_failed", message)
+        raise RuntimeError(message) from exc
+
+
+async def attempt_account_login(page, account):
+    """仅在明确的卖家登录表单中使用当前环境凭据；失败日志只记录步骤。"""
+    def failed(reason):
+        logger.warning("TikTok 自动登录未完成：%s；请在当前环境手动登录", reason)
+        return False
+
+    if not account.password:
+        return failed("环境绑定账号没有可用密码")
+    if not seller_url(page.url):
+        return failed("当前页面不是 TikTok 卖家网站")
+    if "@" not in account.account_name:
+        return failed("环境绑定账号不是邮箱")
+    step = "识别邮箱登录表单"
+    try:
+        step = "检查登录页语言"
+        language = await login_page_language(page)
+        # 登录方式切换时可能保留隐藏表单，只定位可见输入框。
+        email = page.locator('input[type="email"]:visible, input[placeholder*="email" i]:visible, input[placeholder*="邮箱"]:visible')
+        if await unique_visible(email) is None:
+            step = "切换使用邮箱登录"
+            email_switch = page.get_by_text(re.compile(r"^\s*(?:使用邮箱登录|邮箱登录)\s*$" if language == "zh" else r"^\s*Log in with email\s*$", re.I))
+            switch = await unique_visible(email_switch)
+            if switch is None:
+                return failed("邮箱输入框与使用邮箱登录入口无法唯一识别")
+            await switch.click()
+            logger.info("TikTok 已点击使用邮箱登录，等待邮箱表单")
+        step = "等待可见邮箱输入框"
+        await email.wait_for(state="visible", timeout=30_000)
+        step = "等待可见密码输入框"
+        password = page.locator('input[type="password"]:visible, input[placeholder*="密码"]:visible, input[autocomplete="current-password"]:visible')
+        await password.wait_for(state="visible", timeout=30_000)
+        step = "识别登录按钮"
+        login_candidates = page.get_by_role("button", name=re.compile(r"^\s*(log\s*in|sign\s*in|登\s*录)\s*$", re.I))
+        login = await unique_visible(login_candidates)
+        for name, control in (("邮箱输入框", email), ("密码输入框", password)):
+            count = await control.count()
+            if count != 1:
+                return failed(f"可见{name}匹配数量为 {count}，需要唯一控件")
+        if login is None:
+            return failed("可见登录按钮无法唯一识别")
+        step = "填充邮箱"
+        await email.fill(account.account_name)
+        step = "填充密码"
+        await password.fill(account.password)
+        step = "点击登录按钮"
+        # click 自动等待按钮启用，避免输入后状态更新尚未完成就放弃。
+        await login.click(timeout=30_000)
+        logger.info("已使用当前环境绑定账号提交 TikTok 登录表单，等待平台确认或人工验证")
+        return True
+    except PlaywrightError as exc:
+        # fill 的错误可能包含凭据，仅记录固定步骤及异常类型。
+        return failed(f"{step}失败（{type(exc).__name__}）")
+
+
+async def wait_for_upload_page(page, on_login_required=None, account=None, upload_url=BULK_UPLOAD_URL):
+    """等待人工登录；在明确出现上传控件前不上传或提交。"""
+    login_deadline = None
+    return_to_upload = False
+    page_deadline = time.monotonic() + 30
+    login_attempted = False
+    while True:
+        if login_deadline is not None and time.monotonic() >= login_deadline:
+            raise RuntimeError("等待 TikTok 登录超时（10 分钟），尚未上传或提交；请登录后核对并重试")
+        try:
+            is_login = "login" in page.url.lower() or bool(await page.get_by_role(
+                "button", name=re.compile(r"^(log\s*in|sign\s*in|登录)$", re.I)
+            ).count())
+            if is_login:
+                return_to_upload = True
+                if login_deadline is None:
+                    login_deadline = time.monotonic() + LOGIN_WAIT_SECONDS
+                    await page.bring_to_front()
+                    if on_login_required:
+                        await on_login_required()
+                if account and not login_attempted:
+                    login_attempted = True
+                    await attempt_account_login(page, account)
+                await asyncio.sleep(1)
+                continue
+            if return_to_upload:
+                # 登录后可能落在首页，重新进入批量上传；仍未上传文件。
+                await open_bulk_upload(page, upload_url)
+                return_to_upload = False
+                page_deadline = time.monotonic() + 30
+                continue
+            await page.locator("input[type=file]").wait_for(state="attached", timeout=1_000)
+            return
+        except PlaywrightTimeoutError:
+            if time.monotonic() >= page_deadline:
+                raise RuntimeError("未找到 TikTok 批量上传控件，尚未上传或提交；请核对页面和登录状态")
+        except PlaywrightError as exc:
+            # 登录或客户端路由跳转时 DOM 上下文会短暂失效。
+            if "Execution context was destroyed" not in str(exc):
+                raise
+            if time.monotonic() >= (login_deadline or page_deadline):
+                raise RuntimeError("TikTok 页面持续跳转，尚未上传或提交；请核对登录状态") from exc
+        await asyncio.sleep(1)
+
+
+async def upload_and_import(debug_port: int, xlsx_path: Path, before_import=None, on_login_required=None, on_upload_ready=None, account=None, on_progress=None) -> None:
+    """上传后点击一次导入，明确导入成功才完成；未知结果交由人工核对。"""
+    if xlsx_path.suffix.lower() != ".xlsx":
+        raise RuntimeError("TikTok 批量上传仅支持 .xlsx 文件，尚未上传")
+    if xlsx_path.stat().st_size > MAX_UPLOAD_BYTES:
+        raise RuntimeError("TikTok 上传页面文件上限为 20 MB，请减少商品数量重新生成任务；尚未上传")
     async with async_playwright() as playwright:
         browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
+        operation = "检查 TikTok 登录"
+        import_started = False
         try:
             if not browser.contexts:
                 raise RuntimeError("HubStudio 浏览器没有可用上下文")
             context = browser.contexts[0]
             page = await context.new_page()
-            await page.goto("https://seller.tiktokglobalshop.com/products/bulk-upload", wait_until="domcontentloaded")
-            if "login" in page.url.lower() or await page.get_by_text(re.compile(r"^Log in$", re.I)).count():
-                raise RuntimeError("TikTok 登录已失效，请在 HubStudio 环境中重新登录")
+            upload_url = BULK_UPLOAD_URL
+            if account and urlsplit(account.login_url).hostname != "seller-my.tiktok.com":
+                origin = urlsplit(account.login_url)
+                upload_url = f"{origin.scheme}://{origin.netloc}/products/bulk-upload"
+            await open_bulk_upload(page, upload_url)
+            await wait_for_upload_page(page, on_login_required, account, upload_url)
+            await progress(on_progress, "logged_in", "TikTok 已登录，批量上传页已就绪；尚未上传")
+            operation = "通过账号菜单检查上传页语言"
+            await ensure_simplified_chinese(page, on_progress)
+            await page.locator("input[type=file]").wait_for(state="attached", timeout=30_000)
+            if on_upload_ready:
+                await on_upload_ready()
+            operation = "上传 XLSX"
             file_input = page.locator("input[type=file]")
             await file_input.wait_for(state="attached", timeout=30_000)
             if await file_input.count() != 1 or not await file_input.is_enabled():
                 raise RuntimeError("无法唯一识别可用的 TikTok 批量上传控件")
             await file_input.set_input_files(str(xlsx_path))
-            submit = page.get_by_role("button", name=re.compile(r"^(submit|提交|publish|发布)$", re.I))
-            await submit.wait_for(state="visible", timeout=45_000)
-            if await submit.count() != 1 or not await submit.is_enabled():
-                raise RuntimeError("提交按钮不唯一或尚不可用，请核对文件校验结果")
-            # 先持久化将要点击提交的阶段，网络失败时不执行点击。
-            if before_submit:
-                await before_submit()
-            success = page.get_by_text(re.compile(r"^(submitted successfully|successfully submitted|upload successful|uploaded successfully|提交成功|上传成功)[.!。！]?$", re.I))
-            if await success.count():
-                raise RuntimeError("页面已有成功提示，无法确认它属于本次提交")
-            await submit.click()
-            await success.wait_for(state="visible", timeout=60_000)
+            await progress(on_progress, "upload_parsing", "XLSX 已交给页面，正在等待文件上传解析和商品准备就绪")
+            operation = "等待表格上传解析和商品准备就绪"
+            await wait_upload_control(page, page.get_by_text(xlsx_path.name, exact=True), 120_000)
+            ready = page.get_by_text(re.compile(r"^\s*[1-9]\d*\s*款商品准备就绪\s*$"))
+            await wait_upload_control(page, ready, 120_000)
+            import_button = page.get_by_role("button", name=re.compile(r"^(导入|import)$", re.I))
+            await wait_upload_control(page, import_button, 30_000)
+            if await import_button.count() != 1 or not await import_button.is_enabled():
+                raise RuntimeError("导入按钮不唯一或尚不可用，尚未导入；请核对文件解析结果")
+            success = page.get_by_text(re.compile("导入成功"))
+            for index in range(await success.count()):
+                if await success.nth(index).is_visible():
+                    raise RuntimeError("页面已有导入成功提示，无法确认它属于本次导入；尚未点击导入")
+            await check_duplicate_upload(page)
+            # 先持久化导入阶段，报告失败时不执行点击。
+            if before_import:
+                await before_import()
+            operation = "点击导入并等待导入成功"
+            import_started = True
+            await import_button.click()
+            await wait_import_result(page, success)
             errors = page.get_by_role("alert").filter(has_text=re.compile(r"error|failed|invalid|失败|错误", re.I))
             if await errors.count() and await errors.first.is_visible():
-                raise RuntimeError("平台同时返回错误，请人工核对本次提交结果")
+                raise RuntimeError("平台同时返回错误，请人工核对本次导入结果")
         except PlaywrightTimeoutError as exc:
-            raise RuntimeError("未识别到明确的控件或本次提交成功结果，请核对 TikTok 页面") from exc
+            result = "导入结果未知，请核对 TikTok 页面" if import_started else "尚未点击导入，请核对 TikTok 页面"
+            raise RuntimeError(f"{operation}超时：未识别到明确的控件或本次导入成功结果；{result}") from exc
+        except PlaywrightError as exc:
+            logger.exception("TikTok 自动上品在%s发生 Playwright 异常（仅本机日志）", operation)
+            result = "导入结果未知，请核对 TikTok 页面" if import_started else "尚未点击导入，请核对登录状态和页面"
+            raise RuntimeError(f"{operation}失败（{type(exc).__name__}）；{result}，详细原因见本机日志") from exc
         finally:
             # CDP 关闭连接，不调用 HubStudio 的关闭环境接口，保留页面供人工核对。
             await browser.close()
@@ -170,7 +576,8 @@ class AgentRuntime:
     def __init__(self, config):
         self.config = config
         self.state = {"status": "正在启动", "paused": False, "stop": False, "environments": [],
-                      "user": None, "erp_connected": False, "hub_connected": False, "sync_at": None, "sync_error": None, "login_required": True}
+                      "user": None, "erp_connected": False, "hub_connected": False, "sync_at": None, "sync_error": None, "login_required": True,
+                      "active_task_id": None, "abort_requested": False}
         self.client = None
         self.current_claim = None
         self.execution = None
@@ -180,7 +587,18 @@ class AgentRuntime:
         self.selection_lock = asyncio.Lock()
         self.synced_monotonic = None
         self.last_sync_attempt = 0
-        self.workbench = LocalStatusServer(self.state, lambda: self.client, self.sync, LOG_PATH, login_callback=self.login, toggle_callback=self.toggle_environment)
+        self.import_possible = False
+        self.workbench = LocalStatusServer(self.state, lambda: self.client, self.sync, LOG_PATH, login_callback=self.login, toggle_callback=self.toggle_environment, abort_callback=self.abort_task)
+
+    async def abort_task(self, task_id):
+        if not self.current_claim or self.current_claim["task"]["id"] != task_id or not self.execution or self.execution.done():
+            raise ERPRequestError(409, "此任务未在本机执行或已经结束，请刷新任务")
+        self.state["paused"] = True
+        if not self.state["abort_requested"]:
+            self.state["abort_requested"] = True
+            self.state["status"] = f"任务 #{task_id}：正在中止，请等待结果并核对平台"
+            self.execution.cancel()
+        return {"ok": True, "task_id": task_id, "message": "已请求中止本机执行，并暂停领取新任务"}
 
     async def toggle_environment(self, code, enabled, confirmed_local):
         async with self.selection_lock:
@@ -247,33 +665,76 @@ class AgentRuntime:
     async def execute(self, claim):
         task, token = claim["task"], claim["claim_token"]
         task_id = task["id"]
+        self.import_possible = False
         try:
+            self.state["status"] = f"任务 #{task_id}：正在读取环境绑定账号"
+            hub = HubstudioClient(self.config.get("hubstudio_url", "http://127.0.0.1:6873"))
+            account = None
+            await self.client.report(task_id, token, "running", "reading_account", "正在读取当前任务环境绑定的平台账号和凭据")
+            try:
+                account = await hub.bound_account(claim["hubstudio"]["container_code"])
+                available = int(bool(account.password))
+                message = f"已成功读取 HubStudio 当前环境绑定账号（本次 {available}/1 个账号有密码；本机可用 {available}）；2FA 密钥{'可用' if account.otp_secret else '为空'}"
+            except Exception as exc:
+                message = str(exc) if isinstance(exc, RuntimeError) else "HubStudio 绑定账号读取失败，请检查 Local API 连接和权限"
+                message += "；未使用凭据，将等待人工登录"
+            logger.info("任务 #%s：%s", task_id, message)
+            await self.client.report(task_id, token, "running", "reading_account", message)
             self.state["status"] = f"任务 #{task_id}：正在启动环境"
             await self.client.report(task_id, token, "running", "starting_environment", "正在启动 HubStudio 环境")
-            hub = HubstudioClient(self.config.get("hubstudio_url", "http://127.0.0.1:6873"))
             port = await hub.start(claim["hubstudio"]["container_code"])
             with tempfile.TemporaryDirectory(prefix="haitoo-hub-") as directory:
                 file_path = Path(directory) / Path(task["export_filename"]).name
                 await self.client.download(task_id, token, file_path)
-                self.state["status"] = f"任务 #{task_id}：正在上传 XLSX"
-                await self.client.report(task_id, token, "running", "uploading", "正在上传 TikTok XLSX")
-                async def before_submit():
-                    self.state["status"] = f"任务 #{task_id}：正在提交"
-                    await self.client.report(task_id, token, "running", "submitting", "准备点击提交；之后结果不明确时必须人工核对")
-                await upload_and_submit(port, file_path, before_submit)
-            await self.client.report(task_id, token, "completed", "submitted", "TikTok 已明确接受批量提交；不代表商品已上架")
-            self.state["status"] = f"任务 #{task_id}：已提交"
+                self.state["status"] = f"任务 #{task_id}：正在检查 TikTok 登录"
+                await self.client.report(task_id, token, "running", "checking_login", "正在打开 TikTok 批量上传页并检查登录状态，尚未上传")
+                async def on_login_required():
+                    self.state["status"] = f"任务 #{task_id}：请在 HubStudio 中登录 TikTok（等待最多 10 分钟）"
+                    await self.client.report(task_id, token, "running", "waiting_login", "TikTok 未登录，请在打开的 HubStudio 页面完成登录及验证；最多等待 10 分钟，登录后自动继续")
+                async def on_upload_ready():
+                    self.state["status"] = f"任务 #{task_id}：正在上传 XLSX"
+                    await self.client.report(task_id, token, "running", "uploading", "TikTok 上传页已就绪，正在上传 XLSX")
+                async def before_import():
+                    self.state["status"] = f"任务 #{task_id}：商品准备就绪，正在导入"
+                    await self.client.report(task_id, token, "running", "importing", "表格已上传解析，商品准备就绪，准备点击导入并等待导入成功")
+                    self.import_possible = True
+                async def on_progress(stage, message):
+                    self.state["status"] = f"任务 #{task_id}：{message}"
+                    await self.client.report(task_id, token, "running", stage, message)
+                await upload_and_import(port, file_path, before_import, on_login_required, on_upload_ready, account, on_progress)
+            await self.client.report(task_id, token, "completed", "imported", "TikTok 已明确显示本次商品导入成功")
+            self.state["status"] = f"任务 #{task_id}：导入成功"
         except asyncio.CancelledError:
+            if self.state["abort_requested"]:
+                result = "可能已点击导入，结果未知，请核对 TikTok 平台" if self.import_possible else "尚未进入导入阶段；已上传的文件仍可能留在平台，请核对页面"
+                message = f"人工中止本机执行；{result}。已暂停领取新任务"
+                logger.info("任务 #%s：%s", task_id, message)
+                try:
+                    await self.client.report(task_id, token, "awaiting_attention", "manually_aborted", message)
+                except Exception:
+                    logger.error("任务 #%s 中止报告未送达；等待租约超时后人工核对", task_id)
+                self.state["status"] = f"任务 #{task_id}：已中止，等待人工核对"
+                raise
             self.state["status"] = f"任务 #{task_id}：连接或领取失效，请人工核对"
             raise
         except Exception as exc:
-            message = str(exc)[:500] if isinstance(exc, (RuntimeError, ERPRequestError)) else "执行失败，提交结果未知，请核对 TikTok 页面"
-            logger.error("任务 #%s 需要人工处理：%s", task_id, message)
+            message = str(exc)[:500] if isinstance(exc, (RuntimeError, ERPRequestError)) else "执行失败，导入结果未知，请核对 TikTok 页面"
+            logger.error("任务 #%s 需要人工处理：%s（异常类型：%s）", task_id, message, type(exc).__name__)
+            # Playwright 原始错误可能含页面或请求敏感信息，不把完整内容发到 ERP。
+            if isinstance(exc, PlaywrightError):
+                logger.exception("任务 #%s Playwright 原始异常（仅本机日志）", task_id)
             try:
-                await self.client.report(task_id, token, "awaiting_attention", "manual_attention", message)
+                duplicate = isinstance(exc, DuplicateUploadError)
+                data_error = isinstance(exc, ImportDataError)
+                if duplicate:
+                    self.state["paused"] = True
+                await self.client.report(task_id, token, "failed" if duplicate or data_error else "awaiting_attention", "duplicate_file" if duplicate else "import_data_error" if data_error else "manual_attention", message)
             except Exception:
                 logger.error("任务 #%s 异常报告未送达；等待租约超时后人工核对", task_id)
-            self.state["status"] = f"任务 #{task_id}：需要人工处理"
+            if isinstance(exc, ImportDataError):
+                self.state["status"] = f"任务 #{task_id}：失败：上传成功，添加商品失败（数据错误），请人工查看处理"
+            else:
+                self.state["status"] = f"任务 #{task_id}：文件已存在，已失败并暂停领取" if isinstance(exc, DuplicateUploadError) else f"任务 #{task_id}：需要人工处理"
 
     async def heartbeat_loop(self):
         while not self.state["stop"]:
@@ -291,7 +752,7 @@ class AgentRuntime:
             except Exception as exc:
                 self.state["erp_connected"] = False
                 revoked = isinstance(exc, ERPRequestError) and exc.status in {401, 409, 426}
-                if self.execution and not self.execution.done() and (revoked or time.monotonic() - self.last_heartbeat >= 60):
+                if self.execution and not self.execution.done() and not self.state["abort_requested"] and (revoked or time.monotonic() - self.last_heartbeat >= 60):
                     self.execution.cancel()
                 if isinstance(exc, ERPRequestError) and exc.status == 401:
                     self.state["login_required"] = True
@@ -346,6 +807,7 @@ class AgentRuntime:
                                 self.current_claim = claim
                         if claim.get("task"):
                             self.last_heartbeat = time.monotonic()
+                            self.state.update(active_task_id=claim["task"]["id"], abort_requested=False)
                             self.execution = asyncio.create_task(self.execute(claim))
                             try:
                                 await self.execution
@@ -356,6 +818,7 @@ class AgentRuntime:
                                     break
                             finally:
                                 self.current_claim, self.execution = None, None
+                                self.state.update(active_task_id=None, abort_requested=False)
                         else:
                             self.state["status"] = "在线，等待任务" if selected else "请选择一个本机环境开启自动上品"
                     except Exception as exc:

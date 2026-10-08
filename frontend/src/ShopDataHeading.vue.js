@@ -86,7 +86,6 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)(
 });
 __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
 __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-__VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
 var __VLS_3;
 /** @type {__VLS_StyleScopedClasses['shop-data-heading']} */ ;
 /** @type {__VLS_StyleScopedClasses['shop-data-info']} */ ;

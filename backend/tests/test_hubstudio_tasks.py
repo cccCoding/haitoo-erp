@@ -163,6 +163,21 @@ class HubstudioTaskTests(unittest.TestCase):
             self.assertIsNone(db.scalar(select(HubUploadTask)))
             self.assertEqual(self.files, {})
 
+    def test_data_error_tasks_cannot_be_retried(self):
+        with self.Session() as db:
+            result = self.create(db)
+            task = db.get(HubUploadTask, result["id"])
+            task.status, task.stage = "failed", "import_data_error"
+            task.failure_reason = "上传成功，添加商品失败（数据错误）"
+            db.commit()
+            with self.assertRaises(HTTPException) as error:
+                hub.task_action(db, task.id, 1, 1, "retry", HubTaskAction(confirmed_platform_checked=True))
+            self.assertEqual(error.exception.status_code, 409)
+            self.assertIn("不可重试", error.exception.detail)
+            db.refresh(task)
+            self.assertEqual((task.status, task.stage), ("failed", "import_data_error"))
+            self.assertEqual(task.failure_reason, "上传成功，添加商品失败（数据错误）")
+
     def test_expired_files_cannot_be_claimed_or_retried(self):
         with self.Session() as db:
             result = self.create(db)
