@@ -22,6 +22,11 @@ async function renderEnvironments(){
   const count=$('environment-count');
   if(count)count.textContent=`共 ${items.length} 个环境`;
   environmentItems=items;
+  if($('policy-dialog').open&&policyEnvironmentVersion!==JSON.stringify([environmentItems,activeTaskId])){
+    const available=new Set(items.map(e=>e.container_code));
+    policyUnavailableCodes=[...new Set([...policyUnavailableCodes,...policyCodes.filter(code=>!available.has(code))])];
+    renderPolicyGroups();renderPolicyEnvironments();
+  }
   table(el,['序号','环境名称','账号','分组'],[]);
   if(!items.length)return;
   el.querySelector('tbody').remove();
@@ -94,6 +99,66 @@ async function renderTasks(){
 async function renderDetail(){if(!detailId)return;const id=detailId;const t=await api('tasks/'+id);if(detailId!==id)return;if(!$('detail').open)$('detail').showModal();$('detail-title').textContent=`任务 #${t.id} · ${t.stage==='imported'?'导入成功':(labels[t.status]||t.status)}`;const content=$('detail-content');content.replaceChildren(node('p',`${t.template_name||'模版未知'} · ${t.environment_name||'等待策略分配'} · ${t.export_filename}`));function logs(entries){return node('pre',(entries||[]).map(l=>`${time(l.at)} [${stage(l.stage)}] ${l.message}`).join('\n')||'暂无日志');}if(t.policy_wait_reason)content.append(node('p',t.policy_wait_reason),button('配置策略',()=>{$('detail').close();detailId=null;openPolicy(t.template_id);}));if(t.export_expires_at)content.append(node('p',`Excel 有效期至 ${time(t.export_expires_at)}${t.file_expired?'（已过期，请重新生成）':''}`));content.append(node('h3','任务日志'),logs(t.logs));for(const a of t.attempts||[]){content.append(node('h3',`第 ${a.number} 次执行 · ${a.environment_name||'历史环境'} · ${a.agent_name||'未知电脑'} · ${a.stage==='imported'?'导入成功':(labels[a.status]||a.status)}`),logs(a.logs));}if(t.resolved_at)content.append(node('p',`人工处理：账号 #${t.resolved_by} · ${time(t.resolved_at)}`));}
 
 let policyData={templates:[],policies:[]}, environmentItems=[], policyCodes=[], editingPolicyId=null;
+let policyGroup='', policyUnavailableCodes=[], policyEnvironmentVersion='';
+function policyEnvironmentItems(){
+  const items=environmentItems.map(e=>({...e,group:String(e.metadata_fields?.group??'').trim()||'未分组',available:true}));
+  const available=new Set(items.map(e=>e.container_code));
+  for(const code of policyUnavailableCodes){
+    if(!available.has(code))items.push({container_code:code,name:code+'（不可用）',group:'不可用环境',available:false});
+  }
+  return items;
+}
+function policyGroupKey(e){return e.available?'group:'+e.group:'unavailable';}
+function visiblePolicyEnvironments(){
+  const query=$('policy-search').value.trim().toLocaleLowerCase();
+  const selected=new Set(policyCodes);
+  return policyEnvironmentItems().filter(e=>(!policyGroup||policyGroupKey(e)===policyGroup)&&
+    (!$('policy-selected-only').checked||selected.has(e.container_code))&&
+    [e.name,e.container_code,e.metadata_fields?.serial_number,...(e.account_names||[])].some(value=>String(value??'').toLocaleLowerCase().includes(query)));
+}
+function renderPolicyGroups(){
+  const groups=new Map([['',{name:'全部分组',count:0}]]);
+  for(const e of policyEnvironmentItems()){
+    const key=policyGroupKey(e);
+    if(!groups.has(key))groups.set(key,{name:e.group,count:0});
+    groups.get(key).count++;groups.get('').count++;
+  }
+  const selected=groups.get(policyGroup);
+  $('policy-group-label').textContent=selected?`${selected.name}（${selected.count}）`:'所选分组（0）';
+  const query=$('policy-group-search').value.trim().toLocaleLowerCase();
+  const list=$('policy-group-options');list.replaceChildren();
+  for(const [key,group] of groups){
+    if(key&&!group.name.toLocaleLowerCase().includes(query))continue;
+    const choice=node('button',`${group.name}（${group.count}）`);choice.type='button';
+    choice.setAttribute('aria-pressed',String(policyGroup===key));
+    choice.onclick=()=>{policyGroup=key;$('policy-group-picker').open=false;$('policy-environments').scrollTop=0;renderPolicyGroups();renderPolicyEnvironments();$('policy-group-label').focus();};
+    list.append(choice);
+  }
+  if(list.children.length===1&&query)list.append(node('p','没有匹配的分组'));
+}
+function renderPolicyEnvironments(){
+  policyEnvironmentVersion=JSON.stringify([environmentItems,activeTaskId]);
+  const environments=$('policy-environments'),items=visiblePolicyEnvironments(),selected=new Set(policyCodes);
+  const focused=environments.contains(document.activeElement)?document.activeElement.value:null;
+  const scroll=environments.scrollTop;environments.replaceChildren();
+  for(const e of items){
+    const option=node('label');option.className='policy-environment-option';
+    const checkbox=node('input');checkbox.type='checkbox';checkbox.value=e.container_code;checkbox.checked=selected.has(e.container_code);
+    const description=node('span');description.append(node('span',e.name));
+    const metadata=[e.available&&e.metadata_fields?.serial_number!=null?`序号 ${e.metadata_fields.serial_number}`:null,e.group,...(e.account_names||[])].filter(Boolean);
+    description.append(node('small',metadata.join(' · ')));
+    option.append(checkbox,description);environments.append(option);
+  }
+  if(!items.length)environments.append(node('p',policyEnvironmentItems().length?'没有匹配的环境，请调整筛选条件。':'暂无可用环境，请先刷新环境。'));
+  environments.scrollTop=scroll;
+  $('policy-selected-count').textContent=`已选 ${policyCodes.length} 个 · 当前结果 ${items.length} 个`;
+  for(const checkbox of environments.querySelectorAll('input'))checkbox.disabled=!!activeTaskId;
+  if(focused!==null){
+    const target=[...environments.querySelectorAll('input')].find(input=>input.value===focused);
+    (target||$('policy-selected-only')).focus({preventScroll:true});
+  }
+  updatePolicyOrder();
+}
 async function renderPolicies(){
   policyData=await api('policies');
   const names=new Map(environmentItems.map(e=>[e.container_code,e.name]));
@@ -113,19 +178,21 @@ function openPolicy(templateId=null){
   if(templateId!==null)select.value=String(templateId);
   select.disabled=!!existing;
   $('policy-mode').value=existing?.mode||'round_robin';
-  policyCodes=[...(existing?.container_codes||[])];
-  const environments=$('policy-environments');environments.replaceChildren();
-  const names=new Map(environmentItems.map(e=>[e.container_code,e.name]));
-  for(const code of [...new Set([...policyCodes,...names.keys()])]){
-    const option=node('label');option.className='policy-environment-option';
-    const checkbox=node('input');checkbox.type='checkbox';checkbox.value=code;checkbox.checked=policyCodes.includes(code);
-    option.append(checkbox,node('span',names.get(code)||code+'（不可用）'));environments.append(option);
-  }
-  if(!environments.children.length)environments.append(node('p','暂无可用环境，请先刷新环境。'));
-  updatePolicyOrder();$('policy-error').textContent='';$('policy-dialog').showModal();
+  policyCodes=[...new Set(existing?.container_codes||[])];
+  policyUnavailableCodes=policyCodes.filter(code=>!environmentItems.some(e=>e.container_code===code));
+  policyGroup='';$('policy-search').value='';$('policy-group-search').value='';
+  $('policy-selected-only').checked=false;$('policy-group-picker').open=false;
+  $('policy-environments').scrollTop=0;
+  renderPolicyGroups();renderPolicyEnvironments();$('policy-error').textContent='';$('policy-dialog').showModal();
 }
 function updatePolicyOrder(){const names=new Map(environmentItems.map(e=>[e.container_code,e.name]));$('policy-order').textContent='轮流顺序：'+policyCodes.map(c=>names.get(c)||c).join(' → ');}
-$('policy-environments').onchange=event=>{const checkbox=event.target;if(checkbox.type!=='checkbox')return;if(checkbox.checked){if(!policyCodes.includes(checkbox.value))policyCodes.push(checkbox.value);}else{policyCodes=policyCodes.filter(code=>code!==checkbox.value);}updatePolicyOrder();};
+$('policy-environments').onchange=event=>{const checkbox=event.target;if(checkbox.type!=='checkbox'||activeTaskId)return;if(checkbox.checked){if(!policyCodes.includes(checkbox.value))policyCodes.push(checkbox.value);}else{policyCodes=policyCodes.filter(code=>code!==checkbox.value);}renderPolicyEnvironments();};
+$('policy-search').oninput=()=>{$('policy-environments').scrollTop=0;renderPolicyEnvironments();};
+$('policy-group-search').oninput=renderPolicyGroups;
+for(const id of ['policy-search','policy-group-search'])$(id).addEventListener('keydown',event=>{if(event.key==='Enter')event.preventDefault();});
+$('policy-group-picker').addEventListener('toggle',()=>{if($('policy-group-picker').open)$('policy-group-search').focus();});
+$('policy-group-picker').addEventListener('keydown',event=>{if(event.key==='Escape'&&$('policy-group-picker').open){event.preventDefault();event.stopPropagation();$('policy-group-picker').open=false;$('policy-group-label').focus();}});
+$('policy-selected-only').onchange=()=>{$('policy-environments').scrollTop=0;renderPolicyEnvironments();};
 $('add-policy').onclick=()=>run(()=>openPolicy());
 $('close-policy').onclick=()=>$('policy-dialog').close();
 $('policy-form').onsubmit=async event=>{event.preventDefault();const save=$('save-policy');save.disabled=true;try{const templateId=Number($('policy-template').value);if(!policyCodes.length)throw Error('请至少勾选一个允许环境');if(editingPolicyId===null&&policyData.policies.some(p=>p.template_id===templateId))throw Error('该模版已有策略，请使用编辑操作');await api('policies/'+templateId,'PUT',{template_id:templateId,mode:$('policy-mode').value,container_codes:policyCodes});$('policy-dialog').close();await renderPolicies();await renderTasks();}catch(e){$('policy-error').textContent=e.message;}finally{save.disabled=!!activeTaskId;}};
