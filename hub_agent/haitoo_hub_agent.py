@@ -28,6 +28,7 @@ from hubstudio import HubstudioClient, seller_url
 from workbench import LocalStatusServer, ERPRequestError
 from runtime_settings import validate_erp_url, debug_scope
 from local_auth import authorize_computer
+from policies import validate_policy, candidates
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
 SERVICE_NAME = "haitoo-hub-agent"
@@ -95,13 +96,15 @@ def load_config() -> dict:
 
 
 def save_config(config: dict) -> None:
-    CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2))
+    temporary = CONFIG_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(CONFIG_PATH)
 
 
 class ERPClient:
     def __init__(self, base_url: str, token: str):
         self.base_url = validate_erp_url(base_url, local_debug=LOCAL_DEBUG)
-        self.headers = {"X-Hub-Agent-Token": token, "X-Hub-Protocol": "3"}
+        self.headers = {"X-Hub-Agent-Token": token, "X-Hub-Protocol": "4"}
 
     async def request(self, method, path, **kwargs):
         async with httpx.AsyncClient(timeout=30) as client:
@@ -588,7 +591,7 @@ class AgentRuntime:
         self.synced_monotonic = None
         self.last_sync_attempt = 0
         self.import_possible = False
-        self.workbench = LocalStatusServer(self.state, lambda: self.client, self.sync, LOG_PATH, login_callback=self.login, toggle_callback=self.toggle_environment, abort_callback=self.abort_task)
+        self.workbench = LocalStatusServer(self.state, lambda: self.client, self.sync, LOG_PATH, login_callback=self.login, policy_callback=self.update_policy, policy_getter=self.policy_data, task_decorator=self.decorate_task, abort_callback=self.abort_task)
 
     async def abort_task(self, task_id):
         if not self.current_claim or self.current_claim["task"]["id"] != task_id or not self.execution or self.execution.done():
@@ -600,26 +603,63 @@ class AgentRuntime:
             self.execution.cancel()
         return {"ok": True, "task_id": task_id, "message": "已请求中止本机执行，并暂停领取新任务"}
 
-    async def toggle_environment(self, code, enabled, confirmed_local):
+    def decorate_task(self, task):
+        if task["status"] == "queued":
+            _, task["policy_wait_reason"] = candidates(task, self.config.get("upload_policies", {}), self.state["environments"], self.state.get("blocked_container_codes", []))
+
+    async def policy_data(self):
+        templates = await self.client.request("GET", "/hub-agent/templates")
+        return {"templates": templates, "policies": list(self.config.get("upload_policies", {}).values())}
+
+    async def update_policy(self, template_id, payload):
         async with self.selection_lock:
             if self.current_claim or (self.execution and not self.execution.done()):
-                raise ERPRequestError(409, "任务执行中，不能更改自动上品环境")
-            if self.synced_monotonic is None or time.monotonic() - self.synced_monotonic >= 300:
-                raise ERPRequestError(409, "环境同步已过期，请先同步环境")
-            environment = next((e for e in self.state["environments"] if e["container_code"] == code), None)
-            if not environment:
-                raise ERPRequestError(404, "本机当前不可访问此环境")
-            if enabled and not confirmed_local:
-                raise ERPRequestError(400, "请确认此环境属于 TikTok 店铺")
-            selected = code if enabled else self.config.get("auto_upload_container_code")
-            if not enabled and selected == code:
-                selected = None
-            updated = self.config | {"auto_upload_container_code": selected}
+                raise ERPRequestError(409, "任务执行中，请结束后再修改策略")
+            policies = dict(self.config.get("upload_policies", {}))
+            key = str(template_id)
+            if payload is None:
+                policies.pop(key, None)
+            else:
+                if self.synced_monotonic is None or time.monotonic() - self.synced_monotonic >= 300:
+                    raise ERPRequestError(409, "环境同步已过期，请先刷新环境")
+                if payload.get("template_id") != template_id:
+                    raise ERPRequestError(400, "模版参数不一致")
+                data = await self.policy_data()
+                policies[key] = validate_policy(payload, data["templates"], self.state["environments"], policies.get(key))
+            updated = self.config | {"upload_policies": policies}
+            updated.pop("auto_upload_container_code", None)
             save_config(updated)
             self.config = updated
-            for env in self.state["environments"]:
-                env["auto_upload_enabled"] = env["container_code"] == selected
-            return dict(environment)
+            return {"ok": True}
+
+    async def claim_next(self):
+        after_id = 0
+        while not self.state["paused"] and not self.state["stop"]:
+            if self.synced_monotonic is None or time.monotonic() - self.synced_monotonic >= 300:
+                break
+            result = await self.client.request("GET", "/hub-agent/queue", params={"after_id": after_id})
+            self.state["blocked_container_codes"] = result["blocked_container_codes"]
+            policies = self.config.get("upload_policies", {})
+            for task in result["items"]:
+                choices, _ = candidates(task, policies, self.state["environments"], result["blocked_container_codes"])
+                for environment in choices:
+                    claim = await self.client.post("/hub-agent/claim", json={"task_id": task["id"], "container_code": environment["container_code"], "environment_name": environment["name"], "confirmed_local": True})
+                    if claim.get("task"):
+                        # 先保存运行引用，配置写入失败也不能丢失已领取任务。
+                        self.current_claim = claim
+                        policy = dict(policies[str(task["template_id"])])
+                        policy["last_container_code"] = environment["container_code"]
+                        updated = self.config | {"upload_policies": policies | {str(task["template_id"]): policy}}
+                        self.config = updated
+                        try:
+                            save_config(updated)
+                        except OSError:
+                            logger.error("轮流进度保存失败，本次任务继续执行")
+                        return claim
+            after_id = result["next_after_id"]
+            if after_id is None:
+                return {"task": None}
+        return {"task": None}
 
     async def login(self, email, password):
         async with self.auth_lock:
@@ -653,8 +693,7 @@ class AgentRuntime:
                 # Local API 使用当前客户端登录态，不通过公司凭据切换用户/团队。
                 items = await HubstudioClient(self.config.get("hubstudio_url", "http://127.0.0.1:6873")).environments()
                 self.state["hub_connected"] = True
-                selected = self.config.get("auto_upload_container_code")
-                self.state["environments"] = [e | {"id": e["container_code"], "auto_upload_enabled": e["container_code"] == selected} for e in items]
+                self.state["environments"] = [e | {"id": e["container_code"]} for e in items]
                 self.state["sync_at"], self.state["sync_error"] = int(time.time() * 1000), None
                 self.synced_monotonic = time.monotonic()
             except Exception as exc:
@@ -801,10 +840,7 @@ class AgentRuntime:
                 elif fresh:
                     try:
                         async with self.selection_lock:
-                            selected = next((e for e in self.state["environments"] if e["auto_upload_enabled"]), None)
-                            claim = await self.client.post("/hub-agent/claim", json={"container_code": selected["container_code"], "environment_name": selected["name"], "confirmed_local": True}) if selected else {"task": None}
-                            if claim.get("task"):
-                                self.current_claim = claim
+                            claim = await self.claim_next()
                         if claim.get("task"):
                             self.last_heartbeat = time.monotonic()
                             self.state.update(active_task_id=claim["task"]["id"], abort_requested=False)
@@ -820,7 +856,7 @@ class AgentRuntime:
                                 self.current_claim, self.execution = None, None
                                 self.state.update(active_task_id=None, abort_requested=False)
                         else:
-                            self.state["status"] = "在线，等待任务" if selected else "请选择一个本机环境开启自动上品"
+                            self.state["status"] = "在线，等待匹配上品策略的任务"
                     except Exception as exc:
                         self.state["status"] = "连接失败，正在重试"
                         self.state["erp_connected"] = False
@@ -858,7 +894,7 @@ async def pair_with_erp() -> None:
         if response.status_code == 404:
             raise RuntimeError(
                 "ERP 服务器尚未部署 Hub 执行器配对接口（/hub-agent/pairings）。"
-                "请先发布 ERP 后端并执行数据库迁移到 20261007_30；这不是账号授权失败。"
+                "请先发布 ERP 后端并执行数据库迁移到 20261008_31；这不是账号授权失败。"
             )
         response.raise_for_status(); code = response.json()["code"]
     webbrowser.open(f"{PORTAL_URL}/?hub_agent_pair={code}")

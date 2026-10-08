@@ -55,7 +55,11 @@ class HubstudioTaskTests(unittest.TestCase):
             main.update_hubstudio_account(HubstudioAccountUpdate(app_id="id", app_secret="secret", group_code="group"), db.get(User, 1), db)
 
     def claim(self, db, agent_id, code="env-1"):
-        return hub.claim(db, db.get(HubAgent, agent_id), HubTaskClaimInput(container_code=code, environment_name="Environment " + code, confirmed_local=True))
+        agent = db.get(HubAgent, agent_id)
+        task_id = db.scalar(select(HubUploadTask.id).where(HubUploadTask.created_by == agent.user_id, HubUploadTask.status == "queued").order_by(HubUploadTask.id))
+        if task_id is None:
+            return {"task": None}
+        return hub.claim(db, agent, HubTaskClaimInput(task_id=task_id, container_code=code, environment_name="Environment " + code, confirmed_local=True))
 
     def create(self, db):
         return main.create_hubstudio_upload_task(HubUploadTaskCreate(draft_ids=[1], category_catalog_id=1, category="女士上装/女士衬衫", default_price=10, default_quantity=3, attributes={"product_property/100198": "花朵"}), db.get(User, 1), db)
@@ -63,6 +67,58 @@ class HubstudioTaskTests(unittest.TestCase):
     def tearDown(self):
         main.app.dependency_overrides.clear()
         self.engine.dispose()
+
+    def test_template_snapshot_filter_and_fixed_retry_target(self):
+        with self.Session() as db:
+            task = self.create(db)
+            self.assertEqual((task["template_id"], task["template_name"]), (1, "Y1"))
+            db.get(ProductTemplate, 1).name = "Renamed"
+            db.commit()
+            result = hub.list_tasks(db, 1, 1, template_id=1)
+            self.assertEqual(result["items"][0]["template_name"], "Y1")
+            self.assertEqual(result["templates"], [{"id": 1, "name": "Y1"}])
+            self.assertEqual(hub.list_tasks(db, 1, 1, template_id=999)["total"], 0)
+            self.assertEqual(hub.list_tasks(db, 2, 1)["templates"], [])
+            claim = self.claim(db, 1)
+            hub.report(db, db.get(HubAgent, 1), task["id"], claim["claim_token"], HubUploadTaskReport(status="failed", stage="failure"))
+            hub.task_action(db, task["id"], 1, 1, "retry", HubTaskAction(confirmed_platform_checked=True))
+            with self.assertRaisesRegex(HTTPException, "原环境"):
+                self.claim(db, 1, "env-2")
+            self.assertEqual(self.claim(db, 1)["task"]["container_code"], "env-1")
+
+    def test_targeted_claim_skips_unknown_and_rejects_foreign_task(self):
+        with self.Session() as db:
+            first, second = self.create(db), self.create(db)
+            db.get(HubUploadTask, first["id"]).template_id = None
+            db.commit()
+            with self.assertRaisesRegex(HTTPException, "模版未知"):
+                self.claim(db, 1)
+            payload = HubTaskClaimInput(task_id=second["id"], container_code="env-2", environment_name="Two", confirmed_local=True)
+            with self.assertRaises(HTTPException) as error:
+                hub.claim(db, db.get(HubAgent, 3), payload)
+            self.assertEqual(error.exception.status_code, 404)
+            result = hub.claim(db, db.get(HubAgent, 1), payload)
+            self.assertEqual(result["task"]["id"], second["id"])
+            self.assertEqual(db.get(HubUploadTask, first["id"]).status, "queued")
+
+    def test_agent_queue_pagination_and_protocol_upgrade(self):
+        def database():
+            with self.Session() as db: yield db
+        main.app.dependency_overrides[get_db] = database
+        client = TestClient(main.app)
+        headers = {"X-Hub-Agent-Token": "a" * 48, "X-Hub-Protocol": hub.PROTOCOL}
+        with self.Session() as db:
+            first, second = self.create(db), self.create(db)
+            db.add(HubUploadTask(company_id=1, created_by=2, export_filename="foreign.xlsx"))
+            db.commit()
+        result = client.get("/hub-agent/queue?page_size=1", headers=headers).json()
+        self.assertEqual([t["id"] for t in result["items"]], [first["id"]])
+        result = client.get(f"/hub-agent/queue?after_id={result['next_after_id']}", headers=headers).json()
+        self.assertEqual([t["id"] for t in result["items"]], [second["id"]])
+        self.assertIsNone(result["next_after_id"])
+        self.assertEqual(client.get("/hub-agent/templates", headers=headers).json(), [{"id": 1, "name": "Y1"}])
+        self.assertEqual(client.get("/hub-agent/config", headers=headers | {"X-Hub-Protocol": "3"}).status_code, 426)
+        self.assertEqual(client.post("/hub-agent/claim", headers=headers, json={"container_code": "env-1", "environment_name": "One", "confirmed_local": True}).status_code, 422)
 
     def test_record_list_scope_permissions_and_agent_compatibility(self):
         def database():
@@ -110,7 +166,7 @@ class HubstudioTaskTests(unittest.TestCase):
             self.assertEqual(client.get("/hub-upload-tasks?scope=company").status_code, 403)
             self.assertEqual(client.get("/hub-upload-tasks?creator_id=1").status_code, 403)
             self.assertEqual(client.put("/hubstudio/account", json={"app_id":"id", "app_secret":"secret", "group_code":"group"}).status_code, 403)
-        agent_headers = {"X-Hub-Agent-Token": "a" * 48, "X-Hub-Protocol": "3"}
+        agent_headers = {"X-Hub-Agent-Token": "a" * 48, "X-Hub-Protocol": hub.PROTOCOL}
         agent_result = client.get("/hub-agent/tasks?scope=company&creator_id=2", headers=agent_headers)
         self.assertEqual(agent_result.status_code, 200)
         self.assertEqual([item["id"] for item in agent_result.json()["items"]], [10])
@@ -206,7 +262,7 @@ class HubstudioTaskTests(unittest.TestCase):
             with self.Session() as db: yield db
         main.app.dependency_overrides[get_db] = database
         client = TestClient(main.app)
-        headers = {"X-Hub-Agent-Token": "a" * 48, "X-Hub-Protocol": "3"}
+        headers = {"X-Hub-Agent-Token": "a" * 48, "X-Hub-Protocol": hub.PROTOCOL}
         with self.Session() as db:
             task = self.create(db)
             claim = self.claim(db, 1)
@@ -252,7 +308,7 @@ class HubstudioTaskTests(unittest.TestCase):
             with self.Session() as db: yield db
         main.app.dependency_overrides[get_db] = database
         client = TestClient(main.app)
-        headers = {"X-Hub-Agent-Token": "a" * 48, "X-Hub-Protocol": "3"}
+        headers = {"X-Hub-Agent-Token": "a" * 48, "X-Hub-Protocol": hub.PROTOCOL}
         self.assertEqual(client.post("/hub-agent/environments/sync", headers=headers,
             json={"environments": [{"container_code": "env-1", "name": "Environment"}]}).status_code, 410)
         with self.Session() as db:
@@ -263,7 +319,7 @@ class HubstudioTaskTests(unittest.TestCase):
         with self.Session() as db:
             self.create(db)
             with self.assertRaises(HTTPException):
-                hub.claim(db, db.get(HubAgent, 1), HubTaskClaimInput(container_code="env-1", environment_name="E"))
+                hub.claim(db, db.get(HubAgent, 1), HubTaskClaimInput(task_id=1, container_code="env-1", environment_name="E"))
             result = self.claim(db, 1, "local-choice")
             self.assertEqual(result["task"]["container_code"], "local-choice")
             self.assertEqual(result["hubstudio"]["container_code"], "local-choice")
@@ -307,13 +363,13 @@ class HubstudioTaskTests(unittest.TestCase):
                 hub.report(db, db.get(HubAgent, 1), record.id, claim["claim_token"], HubUploadTaskReport(status="completed", stage="submitted"))
             with self.assertRaises(HTTPException): hub.task_action(db, record.id, 1, 1, "retry", HubTaskAction())
             hub.task_action(db, record.id, 1, 1, "retry", HubTaskAction(confirmed_platform_checked=True))
-            second = self.claim(db, 1, "env-2")
+            second = self.claim(db, 1, "env-1")
             self.assertNotEqual(second["claim_token"], claim["claim_token"])
             attempts = db.scalars(select(HubUploadAttempt).order_by(HubUploadAttempt.number)).all()
             self.assertEqual([a.number for a in attempts], [1, 2])
             self.assertEqual(attempts[0].status, "awaiting_attention")
             self.assertTrue(attempts[0].logs)
-            self.assertEqual([a.container_code for a in attempts], ["env-1", "env-2"])
+            self.assertEqual([a.container_code for a in attempts], ["env-1", "env-1"])
 
     def test_running_cancel_rejected_and_manual_confirm_publishes(self):
         with self.Session() as db:
@@ -346,13 +402,13 @@ class HubstudioTaskTests(unittest.TestCase):
         client = TestClient(main.app)
         token = {"X-Hub-Agent-Token": "a" * 48}
         self.assertEqual(client.post("/hub-agent/claim", headers=token).status_code, 426)
-        headers = token | {"X-Hub-Protocol": "3"}
+        headers = token | {"X-Hub-Protocol": hub.PROTOCOL}
         self.assertEqual(client.get("/hub-agent/config", headers=headers).status_code, 200)
         with self.Session() as db: self.create(db)
         result = client.get("/hub-agent/tasks", headers=headers).json()
         self.assertEqual(result["total"], 1)
         self.assertNotIn("claim_token", result["items"][0])
-        claim = client.post("/hub-agent/claim", headers=headers, json={"container_code": "local-env", "environment_name": "本机启用环境", "confirmed_local": True})
+        claim = client.post("/hub-agent/claim", headers=headers, json={"task_id": 1, "container_code": "local-env", "environment_name": "本机启用环境", "confirmed_local": True})
         self.assertEqual(claim.status_code, 200)
         self.assertEqual(claim.json()["task"]["container_code"], "local-env")
         with self.Session() as db:

@@ -11,7 +11,7 @@ class ERPRequestError(RuntimeError):
 
 
 class LocalStatusServer:
-    def __init__(self, state, client_getter=None, sync_callback=None, log_path=None, host="127.0.0.1", port=45679, login_callback=None, toggle_callback=None, abort_callback=None):
+    def __init__(self, state, client_getter=None, sync_callback=None, log_path=None, host="127.0.0.1", port=45679, login_callback=None, abort_callback=None, policy_callback=None, policy_getter=None, task_decorator=None):
         self.state, self.client_getter, self.sync_callback = state, client_getter, sync_callback
         self.log_path, self.host, self.port = log_path, host, port
         self.origin = f"http://{host}:{port}"
@@ -19,7 +19,9 @@ class LocalStatusServer:
         self.sessions = set()
         self.runner = None
         self.login_callback = login_callback
-        self.toggle_callback = toggle_callback
+        self.policy_callback = policy_callback
+        self.policy_getter = policy_getter
+        self.task_decorator = task_decorator
         self.abort_callback = abort_callback
         self.static = Path(__file__).resolve().parent / "static"
 
@@ -58,7 +60,9 @@ class LocalStatusServer:
         app.router.add_get("/api/environments", self.environments)
         app.router.add_post("/api/sync", self.sync)
         app.router.add_post("/api/pause", self.pause)
-        app.router.add_put("/api/environments/{id}/auto-upload", self.toggle)
+        app.router.add_get("/api/policies", self.policies)
+        app.router.add_put("/api/policies/{id}", self.save_policy)
+        app.router.add_delete("/api/policies/{id}", self.delete_policy)
         app.router.add_get("/api/tasks", self.tasks)
         app.router.add_get("/api/tasks/{id}", self.task)
         app.router.add_post("/api/tasks/{id}/{action}", self.action)
@@ -141,22 +145,35 @@ class LocalStatusServer:
         self.state["paused"] = payload["paused"]
         return web.json_response({"paused": self.state["paused"]})
 
-    async def toggle(self, request):
+    async def policies(self, request):
+        self.client()
+        data = await self.policy_getter()
+        return web.json_response(data)
+
+    async def save_policy(self, request):
         self.client()
         payload = await request.json()
-        if not isinstance(payload, dict) or not isinstance(payload.get("enabled"), bool) or not isinstance(payload.get("confirmed_local", False), bool):
-            raise web.HTTPBadRequest(text="环境开关参数无效")
-        if not self.toggle_callback:
-            raise web.HTTPServiceUnavailable(text="请升级执行器")
-        result = await self.toggle_callback(request.match_info['id'], payload["enabled"], payload.get("confirmed_local", False))
-        return web.json_response(result)
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="策略参数无效")
+        return web.json_response(await self.policy_callback(int(request.match_info["id"]), payload))
+
+    async def delete_policy(self, request):
+        self.client()
+        return web.json_response(await self.policy_callback(int(request.match_info["id"]), None))
 
     async def tasks(self, request):
         params = {k: request.query[k] for k in ("page", "page_size", "status") if k in request.query}
-        return await self.proxy("GET", "/hub-agent/tasks", params=params)
+        result = await self.client().request("GET", "/hub-agent/tasks", params=params)
+        if self.task_decorator:
+            for task in result["items"]:
+                self.task_decorator(task)
+        return web.json_response(result)
 
     async def task(self, request):
-        return await self.proxy("GET", f"/hub-agent/tasks/{int(request.match_info['id'])}")
+        result = await self.client().request("GET", f"/hub-agent/tasks/{int(request.match_info['id'])}")
+        if self.task_decorator:
+            self.task_decorator(result)
+        return web.json_response(result)
 
     async def action(self, request):
         action = request.match_info["action"]

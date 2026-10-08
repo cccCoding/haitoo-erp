@@ -497,6 +497,7 @@ class HubUploadTaskCreate(TiktokDraftExportInput):
 
 class HubTaskClaimInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    task_id: int = Field(ge=1)
     container_code: str = Field(min_length=1, max_length=120)
     environment_name: str = Field(min_length=1, max_length=255)
     confirmed_local: bool = False

@@ -189,6 +189,8 @@ class HubUploadTask(Base):
     attempt_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     resolved_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    template_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
+    template_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     draft_ids: Mapped[list] = mapped_column(JSON, default=list)
     export_filename: Mapped[str] = mapped_column(String(255))
     export_blob: Mapped[bytes | None] = mapped_column(LargeBinary().with_variant(MEDIUMBLOB(), "mysql").with_variant(MEDIUMBLOB(), "mariadb"), nullable=True)

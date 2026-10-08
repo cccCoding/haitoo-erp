@@ -23,3 +23,7 @@ header,main,footer{max-width:1920px}header{padding-top:24px;padding-bottom:16px}
 #active-environment{margin:16px 0 12px;padding:14px 16px;border:1px solid #e1e6ef;border-radius:10px;background:#f7f9fc;color:#667287;overflow-wrap:anywhere}#active-environment.is-enabled{border-color:#9ad4b3;border-left:5px solid #168451;background:#eef9f2;color:#145e3a}#active-environment>span{display:block;font-size:12px;font-weight:600;margin-bottom:5px}#active-environment strong{display:block;font-size:22px;line-height:1.35;margin:4px 0}#active-environment small{color:inherit;opacity:.8;margin:5px 0}#active-environment>div{font-size:13px}#environments tr.environment-active td{background:#eef9f2}#environments tr.environment-active td:first-child{box-shadow:inset 4px 0 #168451}#environments tr.environment-active td:nth-child(2){font-weight:700;color:#145e3a}
 
 @media(min-width:1101px){.workbench-sidebar{display:grid;grid-template-rows:560px 350px;min-height:0}#task-panel{height:560px;min-height:0}#log-panel{height:350px;min-height:0}}
+
+#policy-panel{margin-bottom:20px}#policy-form{display:grid;gap:16px}#policy-form label{display:grid;gap:8px}#policy-form select{width:100%}#policy-dialog{width:min(640px,90vw)}#policy-error{color:#b91c1c}#policy-order{overflow-wrap:anywhere}
+
+.environment-tools{flex-shrink:0}#sync{white-space:nowrap}#policy-dialog::backdrop{background:#17203380}#policy-dialog{border:1px solid #e1e6ef;border-radius:14px;padding:24px;color:#243047}#policy-dialog .heading{margin-bottom:20px}

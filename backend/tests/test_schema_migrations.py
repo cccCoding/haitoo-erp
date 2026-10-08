@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.pool import StaticPool
 
 from app.db_migrate import upgrade_database
+from app.models import ProductDraft
 from app.schema_version import alembic_config, assert_schema_current, schema_heads
 
 
@@ -64,6 +65,20 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertIn("pending", str(draft_columns["workflow_stage"]["default"]))
         assert_schema_current(self.engine)
 
+    def test_hub_template_backfill_requires_complete_company_consistent_drafts(self):
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, "20261007_30")
+            connection.execute(text("INSERT INTO companies (id, name, is_active, created_at) VALUES (1, 'Company', 1, CURRENT_TIMESTAMP)"))
+            connection.execute(text("INSERT INTO product_templates (id, company_id, name, is_platform, status, color_count, sku_count) VALUES (1, 1, 'M05L', 0, 'published', 1, 1), (2, 1, 'M06L', 0, 'published', 1, 1)"))
+            for identity, company, template in ((1, 1, 1), (2, 1, 2), (3, 2, 1)):
+                connection.execute(ProductDraft.__table__.insert().values(id=identity, company_id=company, template_id=template, title="Draft", image_urls=[], sku_items=[], status="draft", created_by=1, updated_by=1))
+            for identity, ids in ((1, "[1]"), (2, "[1,999]"), (3, "[1,2]"), (4, "[3]"), (5, "[]")):
+                connection.execute(text("INSERT INTO hub_upload_tasks (id, company_id, created_by, draft_ids, export_filename, parameters, status, stage, logs, created_at) VALUES (:id, 1, 1, :ids, 'test.xlsx', '{}', 'queued', 'queued', '[]', CURRENT_TIMESTAMP)"), {"id": identity, "ids": ids})
+            command.upgrade(config, "head")
+            rows = connection.execute(text("SELECT template_id, template_name FROM hub_upload_tasks ORDER BY id")).all()
+            self.assertEqual(rows, [(1, "M05L"), (None, None), (None, None), (None, None), (None, None)])
+
     def test_title_requirements_use_revision_25_without_confirmed_info(self) -> None:
         with self.engine.begin() as connection:
             config = alembic_config(connection)
@@ -73,7 +88,7 @@ class SchemaMigrationTests(unittest.TestCase):
             command.upgrade(config, "head")
             current, expected = schema_heads(connection)
             self.assertEqual(current, expected)
-            self.assertEqual(current, {"20261007_30"})
+            self.assertEqual(current, {"20261008_31"})
             columns = {column['name'] for column in inspect(connection).get_columns('product_templates')}
             self.assertNotIn('confirmed_product_info', columns)
             self.assertEqual(connection.execute(text("SELECT title_template FROM product_templates WHERE id=900")).scalar_one(), 'Existing title rules')

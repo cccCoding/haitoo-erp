@@ -1,4 +1,4 @@
-"""任务按 ERP 账号排队，领取时由本机指定唯一环境；不保存同步环境列表。"""
+"""任务按 ERP 账号排队，领取指定任务时由本机模版策略选择环境；不保存同步环境列表。"""
 from datetime import datetime, timedelta, timezone
 import secrets
 from fastapi import HTTPException
@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from .models import Company, HubAgent, HubRuntimeLock, HubUploadAttempt, HubUploadTask, ProductDraft, User
 from .schemas import HubTaskClaimInput, HubTaskAction
 
-PROTOCOL = "3"
+PROTOCOL = "4"
 LEASE_SECONDS = 90
 MAX_XLSX_BYTES = 20 * 1024 * 1024
 
@@ -114,7 +114,7 @@ def sweep_expired(db):
     db.commit()
 
 
-def list_tasks(db, user_id, company_id, page=1, page_size=25, status=None, *, company_scope=False, creator_id=None):
+def list_tasks(db, user_id, company_id, page=1, page_size=25, status=None, *, company_scope=False, creator_id=None, template_id=None):
     sweep_expired(db)
     condition = [HubUploadTask.company_id == company_id]
     if not company_scope:
@@ -123,12 +123,18 @@ def list_tasks(db, user_id, company_id, page=1, page_size=25, status=None, *, co
         condition.append(HubUploadTask.created_by == creator_id)
     if status:
         condition.append(HubUploadTask.status == status)
+    template_rows = db.execute(select(HubUploadTask.template_id, HubUploadTask.template_name).where(*condition, HubUploadTask.template_id.is_not(None)).order_by(HubUploadTask.id.desc())).all()
+    templates = {}
+    for identity, name in template_rows:
+        templates.setdefault(identity, {"id": identity, "name": name or str(identity)})
+    if template_id is not None:
+        condition.append(HubUploadTask.template_id == template_id)
     total = db.scalar(select(func.count()).select_from(HubUploadTask).where(*condition))
     tasks = db.scalars(select(HubUploadTask).where(*condition).order_by(HubUploadTask.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     creator_ids = {task.created_by for task in tasks}
     creators = dict(db.execute(select(User.id, User.name).where(User.company_id == company_id, User.id.in_(creator_ids))).all()) if creator_ids else {}
     items = [task_view(db, task) | {"created_by_name": creators.get(task.created_by), "product_count": len(task.draft_ids or [])} for task in tasks]
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
+    return {"items": items, "total": total, "page": page, "page_size": page_size, "templates": list(templates.values())}
 
 
 def own_task(db, task_id, user_id, company_id):
@@ -170,7 +176,6 @@ def task_action(db, task_id, user_id, company_id, action, payload: HubTaskAction
             require_file(task)
             task.status, task.stage, task.failure_reason, task.agent_id = "queued", "queued", None, None
             task.claimed_at, task.completed_at = None, None
-            task.environment_id, task.environment_name, task.container_code = None, None, None
         else:
             task.status, task.stage = "completed", "manually_confirmed"
             task.submitted_at = task.submitted_at or datetime.utcnow()
@@ -198,11 +203,16 @@ def claim(db, agent, payload: HubTaskClaimInput):
     lock_row(db, HubAgent, agent.id)
     if db.scalar(select(HubUploadTask.id).where(HubUploadTask.agent_id == agent.id, HubUploadTask.status == "running")):
         db.commit(); return {"task": None}
-    task_id = db.scalar(select(HubUploadTask.id).where(HubUploadTask.company_id == agent.company_id,
-        HubUploadTask.created_by == agent.user_id, HubUploadTask.status == "queued",
-        HubUploadTask.environment_id.is_(None)).order_by(HubUploadTask.id).limit(1))
-    if task_id is None:
+    task_id = payload.task_id
+    candidate = db.get(HubUploadTask, task_id)
+    if not candidate or candidate.company_id != agent.company_id or candidate.created_by != agent.user_id:
+        raise HTTPException(404, "上品任务不存在或无权操作")
+    if candidate.status != "queued":
         db.commit(); return {"task": None}
+    if candidate.template_id is None:
+        raise HTTPException(409, "任务模版未知，请重新生成任务")
+    if candidate.container_code and candidate.container_code != code:
+        raise HTTPException(409, "重试必须使用原环境")
     guard = runtime_guard(db, agent.company_id, code, create=True)
     if guard.task_id:
         db.commit(); return {"task": None}

@@ -4174,7 +4174,7 @@ def list_hub_environments(user: User = Depends(current_user), db: Session = Depe
 
 @app.put("/hub-environments/{environment_id}/auto-upload")
 def toggle_hub_environment(environment_id: int, payload: HubEnvironmentToggle, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    raise HTTPException(410, "请在本地工作页设置唯一自动上品环境")
+    raise HTTPException(410, "请升级执行器并在本地工作页配置上品策略")
 
 
 @app.post("/drafts/submit-to-hubstudio")
@@ -4193,7 +4193,9 @@ def create_hubstudio_upload_task(payload: HubUploadTaskCreate, user: User = Depe
         if len(response.body) > hub.MAX_XLSX_BYTES:
             raise HTTPException(413, "上品表格超过 20 MB 单次上传上限，请减少本次草稿数量后重试")
         export_url = upload_hub_export(response.body, user.company_id)
-        task = HubUploadTask(company_id=user.company_id,
+        draft = db.get(ProductDraft, payload.draft_ids[0])
+        template = db.get(ProductTemplate, draft.template_id)
+        task = HubUploadTask(template_id=template.id, template_name=template.name, company_id=user.company_id,
             created_by=user.id, draft_ids=payload.draft_ids, export_filename=f"TikTok批量上传_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
             export_blob=None, export_url=export_url, export_size=len(response.body),
             export_sha256=hashlib.sha256(response.body).hexdigest(), export_expires_at=datetime.utcnow() + timedelta(days=7), parameters=payload.model_dump(exclude={"draft_ids"}), status="queued", stage="queued", logs=[])
@@ -4212,10 +4214,10 @@ def create_hubstudio_upload_task(payload: HubUploadTaskCreate, user: User = Depe
 
 
 @app.get("/hub-upload-tasks")
-def list_hub_upload_tasks(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), status: str | None = None, scope: Literal["own", "company"] = "own", creator_id: int | None = Query(None, ge=1), user: User = Depends(current_user), db: Session = Depends(get_db)):
+def list_hub_upload_tasks(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), status: str | None = None, template_id: int | None = Query(None, ge=1), scope: Literal["own", "company"] = "own", creator_id: int | None = Query(None, ge=1), user: User = Depends(current_user), db: Session = Depends(get_db)):
     if user.role != Role.COMPANY_ADMIN and (scope == "company" or creator_id is not None and creator_id != user.id):
         raise HTTPException(403, "无权查看其他成员的上品记录")
-    return hub.list_tasks(db, user.id, user.company_id, page, page_size, status, company_scope=scope == "company", creator_id=creator_id)
+    return hub.list_tasks(db, user.id, user.company_id, page, page_size, status, company_scope=scope == "company", creator_id=creator_id, template_id=template_id)
 
 
 @app.get("/hub-upload-tasks/{task_id}")
@@ -4252,7 +4254,23 @@ def get_hub_agent_environments(request: Request, db: Session = Depends(get_db)):
 @app.put("/hub-agent/environments/{environment_id}/auto-upload")
 def toggle_hub_agent_environment(environment_id: int, payload: HubEnvironmentToggle, request: Request, db: Session = Depends(get_db)):
     agent = hub_protocol_agent(request, db)
-    raise HTTPException(410, "请在本地工作页设置唯一自动上品环境")
+    raise HTTPException(410, "请升级执行器并在本地工作页配置上品策略")
+
+
+@app.get("/hub-agent/templates")
+def hub_agent_templates(request: Request, db: Session = Depends(get_db)):
+    agent = hub_protocol_agent(request, db)
+    rows = db.scalars(select(ProductTemplate).where(or_(ProductTemplate.is_platform.is_(True), ProductTemplate.company_id == agent.company_id)).order_by(ProductTemplate.id)).all()
+    return [{"id": row.id, "name": row.name} for row in rows]
+
+
+@app.get("/hub-agent/queue")
+def hub_agent_queue(request: Request, after_id: int = Query(0, ge=0), page_size: int = Query(100, ge=1, le=100), db: Session = Depends(get_db)):
+    agent = hub_protocol_agent(request, db)
+    hub.sweep_expired(db)
+    rows = db.scalars(select(HubUploadTask).where(HubUploadTask.company_id == agent.company_id, HubUploadTask.created_by == agent.user_id, HubUploadTask.status == "queued", HubUploadTask.id > after_id).order_by(HubUploadTask.id).limit(page_size)).all()
+    blocked = db.scalars(select(HubUploadTask.container_code).where(HubUploadTask.company_id == agent.company_id, HubUploadTask.status.in_(["running", "awaiting_attention"]), HubUploadTask.container_code.is_not(None))).all()
+    return {"items": [hub.task_view(db, row) for row in rows], "next_after_id": rows[-1].id if len(rows) == page_size else None, "blocked_container_codes": sorted(set(blocked))}
 
 
 @app.get("/hub-agent/tasks")
@@ -4282,7 +4300,7 @@ def hub_agent_heartbeat(request: Request, task_id: int | None = None, claim_toke
 def claim_hub_upload_task(request: Request, payload: HubTaskClaimInput | None = None, db: Session = Depends(get_db)):
     agent = hub_protocol_agent(request, db)
     if payload is None:
-        raise HTTPException(400, "请在本地工作页选择自动上品环境")
+        raise HTTPException(400, "请升级执行器并按上品策略领取指定任务")
     return hub.claim(db, agent, payload)
 
 

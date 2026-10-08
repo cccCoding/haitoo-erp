@@ -177,16 +177,19 @@ class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await response.json(), {"ok": True})
         self.workbench.login_callback.assert_awaited_once_with("a@b.com", "secret")
 
-    async def test_environment_list_and_selection_never_call_erp(self):
+    async def test_environment_list_and_local_policy_never_upload_directory(self):
         self.state["environments"] = [{"container_code": "env-1", "name": "Local", "auto_upload_enabled": False}]
         response = await self.client.get("/api/environments")
         self.assertEqual((await response.json())[0]["name"], "Local")
-        self.workbench.toggle_callback = AsyncMock(return_value={"auto_upload_enabled": True})
-        response = await self.client.put("/api/environments/env-1/auto-upload", json={"enabled": True, "confirmed_local": True},
+        self.workbench.policy_callback = AsyncMock(return_value={"ok": True})
+        response = await self.client.put("/api/policies/1", json={"template_id": 1, "container_codes": ["env-1"], "mode": "round_robin"},
             headers={"Origin": self.workbench.origin, "X-CSRF-Token": self.workbench.csrf})
         self.assertEqual(response.status, 200)
-        self.workbench.toggle_callback.assert_awaited_once_with("env-1", True, True)
+        self.workbench.policy_callback.assert_awaited_once_with(1, {"template_id": 1, "container_codes": ["env-1"], "mode": "round_robin"})
+        response = await self.client.delete("/api/policies/1")
+        self.assertEqual(response.status, 403)
         self.backend.request.assert_not_awaited()
+
 
 
 class UploadTests(unittest.IsolatedAsyncioTestCase):
@@ -874,39 +877,63 @@ class UploadTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.agent.HubstudioClient, "environments", AsyncMock(return_value=items)), patch.object(self.agent, "save_config") as save:
             await runtime.sync()
         runtime.client.post.assert_not_awaited(); save.assert_not_called()
-        self.assertEqual([e["auto_upload_enabled"] for e in runtime.state["environments"]], [False, True])
+        self.assertTrue(all("auto_upload_enabled" not in e for e in runtime.state["environments"]))
         self.assertIsNotNone(runtime.synced_monotonic)
 
-    async def test_only_one_selected_environment_and_running_or_stale_blocks_switch(self):
-        runtime = self.agent.AgentRuntime({})
-        runtime.state["environments"] = [{"container_code": "env-1", "name": "One", "auto_upload_enabled": False}, {"container_code": "env-2", "name": "Two", "auto_upload_enabled": False}]
+    async def test_policy_save_persists_multiple_environments_and_blocks_running_or_stale(self):
+        runtime = self.agent.AgentRuntime({"auto_upload_container_code": "env-1"})
+        runtime.client = MagicMock(); runtime.client.request = AsyncMock(return_value=[{"id": 1, "name": "M05L"}])
+        runtime.state["environments"] = [{"container_code": "env-1", "name": "One"}, {"container_code": "env-2", "name": "Two"}]
         runtime.synced_monotonic = self.agent.time.monotonic()
+        payload = {"template_id": 1, "container_codes": ["env-1", "env-2"], "mode": "random"}
         with patch.object(self.agent, "save_config") as save:
-            await runtime.toggle_environment("env-1", True, True)
-            await runtime.toggle_environment("env-2", True, True)
-            self.assertEqual([e["auto_upload_enabled"] for e in runtime.state["environments"]], [False, True])
-            self.assertEqual(save.call_args.args[0], {"auto_upload_container_code": "env-2"})
+            await runtime.update_policy(1, payload)
+            self.assertNotIn("auto_upload_container_code", save.call_args.args[0])
+            self.assertEqual(runtime.config["upload_policies"]["1"]["container_codes"], ["env-1", "env-2"])
             runtime.current_claim = {"task": {"id": 1}}
-            with self.assertRaises(self.agent.ERPRequestError): await runtime.toggle_environment("env-1", True, True)
+            with self.assertRaises(self.agent.ERPRequestError): await runtime.update_policy(1, payload)
+            with self.assertRaises(self.agent.ERPRequestError): await runtime.update_policy(1, None)
             runtime.current_claim = None
             runtime.synced_monotonic -= 301
-            with self.assertRaises(self.agent.ERPRequestError): await runtime.toggle_environment("env-1", True, True)
+            with self.assertRaises(self.agent.ERPRequestError): await runtime.update_policy(1, payload)
+            await runtime.update_policy(1, None)
+            self.assertEqual(runtime.config["upload_policies"], {})
 
-    async def test_runtime_claim_uses_local_selection(self):
+    async def test_claim_skips_unmatched_pages_and_busy_environment_then_persists_rotation(self):
+        policy = {"template_id": 1, "container_codes": ["env-1", "env-2"], "mode": "round_robin"}
+        runtime = self.agent.AgentRuntime({"upload_policies": {"1": policy}})
+        runtime.synced_monotonic = self.agent.time.monotonic()
+        runtime.state["environments"] = [{"container_code": "env-1", "name": "One"}, {"container_code": "env-2", "name": "Two"}]
+        runtime.client = MagicMock()
+        runtime.client.request = AsyncMock(side_effect=[
+            {"items": [{"id": 1, "template_id": 2}], "next_after_id": 1, "blocked_container_codes": []},
+            {"items": [{"id": 2, "template_id": 1}], "next_after_id": None, "blocked_container_codes": []}])
+        runtime.client.post = AsyncMock(side_effect=[{"task": None}, {"task": {"id": 2}, "claim_token": "token"}])
+        with patch.object(self.agent, "save_config") as save:
+            result = await runtime.claim_next()
+        self.assertEqual(result["task"]["id"], 2)
+        self.assertEqual(runtime.client.post.await_args_list[1].kwargs["json"], {"task_id": 2, "container_code": "env-2", "environment_name": "Two", "confirmed_local": True})
+        self.assertEqual(save.call_args.args[0]["upload_policies"]["1"]["last_container_code"], "env-2")
+        runtime.current_claim = None
+        runtime.client.request = AsyncMock(return_value={"items": [{"id": 1, "template_id": 2}], "next_after_id": None, "blocked_container_codes": []})
+        runtime.client.post.reset_mock()
+        result = await runtime.claim_next()
+        self.assertIsNone(result["task"])
+        runtime.client.post.assert_not_awaited()
+
+    async def test_runtime_claim_uses_policy_and_stops_cleanly(self):
         runtime = self.agent.AgentRuntime({})
-        runtime.state["environments"] = [{"container_code": "chosen", "name": "Chosen environment", "auto_upload_enabled": True}]
         runtime.synced_monotonic = self.agent.time.monotonic()
         client = MagicMock(); client.request = AsyncMock(return_value={"user": {"id": 1, "name": "User"}})
-        async def claim(path, **kwargs):
+        async def claim_next():
             runtime.state["stop"] = True
             return {"task": None}
-        client.post = AsyncMock(side_effect=claim)
+        runtime.claim_next = AsyncMock(side_effect=claim_next)
         runtime.workbench.start = AsyncMock(); runtime.workbench.close = AsyncMock()
         runtime.heartbeat_loop = AsyncMock(); runtime.sync_loop = AsyncMock()
-        with patch.object(self.agent.keyring, "get_password", return_value="token"), patch.object(self.agent, "ERPClient", return_value=client), \
-             patch.object(self.agent.webbrowser, "open"), patch.object(self.agent, "POLL_SECONDS", 0):
+        with patch.object(self.agent.keyring, "get_password", return_value="token"), patch.object(self.agent, "ERPClient", return_value=client), patch.object(self.agent.webbrowser, "open"), patch.object(self.agent, "POLL_SECONDS", 0):
             await runtime.run()
-        client.post.assert_awaited_once_with("/hub-agent/claim", json={"container_code": "chosen", "environment_name": "Chosen environment", "confirmed_local": True})
+        runtime.claim_next.assert_awaited_once()
 
 
 if __name__ == "__main__": unittest.main()

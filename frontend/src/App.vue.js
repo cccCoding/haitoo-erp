@@ -30,6 +30,7 @@ const activeMiaoshouTab = ref('shops');
 const showMiaoshouDialog = ref(false), miaoshouForm = ref({ app_id: '', app_secret: '' }), miaoshouSaving = ref(false);
 const showHubstudioDialog = ref(false), hubstudioSaving = ref(false), hubstudioForm = ref({ app_id: '', app_secret: '', group_code: '' });
 const hubUploadTasks = ref([]), hubUploadTotal = ref(0), hubUploadPage = ref(1), hubUploadCreatorId = ref(null), hubUploadLoading = ref(false), hubUploadError = ref('');
+const hubUploadTemplateId = ref(null), hubUploadTemplates = ref([]);
 const hubUploadPageCount = computed(() => Math.max(1, Math.ceil(hubUploadTotal.value / 25)));
 const hubUploadStatusLabels = { queued: '排队中', running: '执行中', completed: '已提交', awaiting_attention: '待人工处理', failed: '失败', cancelled: '已取消', expired: '已过期' };
 let hubUploadRequestId = 0;
@@ -40,9 +41,10 @@ async function loadHubUploadTasks() {
     hubUploadLoading.value = true;
     hubUploadError.value = '';
     try {
-        const { data } = await api.get('/hub-upload-tasks', { headers: headers.value, params: { page: hubUploadPage.value, page_size: 25, scope: user.value.role === 'company_admin' ? 'company' : 'own', creator_id: user.value.role === 'company_admin' ? hubUploadCreatorId.value ?? undefined : undefined } });
+        const { data } = await api.get('/hub-upload-tasks', { headers: headers.value, params: { page: hubUploadPage.value, page_size: 25, template_id: hubUploadTemplateId.value ?? undefined, scope: user.value.role === 'company_admin' ? 'company' : 'own', creator_id: user.value.role === 'company_admin' ? hubUploadCreatorId.value ?? undefined : undefined } });
         if (requestId !== hubUploadRequestId)
             return;
+        hubUploadTemplates.value = data.templates || [];
         hubUploadTasks.value = data.items;
         hubUploadTotal.value = data.total;
         if (hubUploadPage.value > hubUploadPageCount.value) {
@@ -2815,7 +2817,7 @@ async function submitSelectedDraftsToHubstudio() {
         showTiktokExportDialog.value = false;
         selectedDraftIds.value = [];
         await refreshDraftList();
-        showToast(`自动上品任务 #${data.id} 已进入队列，将使用执行器本机启用的环境`);
+        showToast(`自动上品任务 #${data.id} 已进入队列，将按执行器本机的模版策略分配环境`);
     }
     catch (e) {
         tiktokExportError.value = e.response?.data?.detail || '创建 HubStudio 自动上品任务失败';
@@ -3447,7 +3449,7 @@ finally {
 let toastTimer;
 function showToast(message) { toast.value = message; if (toastTimer)
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = ''; }, 3000); }
-function logout() { hubUploadRequestId++; hubUploadTasks.value = []; hubUploadTotal.value = 0; hubUploadPage.value = 1; hubUploadCreatorId.value = null; hubUploadLoading.value = false; hubUploadError.value = ''; showHubstudioDialog.value = false; localStorage.removeItem('haitoro_token'); token.value = ''; user.value = null; taskCreatorFilterId.value = null; materialCreatorFilterId.value = null; draftCreatorFilterId.value = null; creatorFiltersInitialized.value = false; productLibraryItems.value = []; productLibraryTotal.value = 0; productLibraryPage.value = 1; productLibraryRankingRequestId++; productLibraryRankingItems.value = []; productLibraryRankingTotal.value = 0; productLibraryRankingDate.value = null; productLibraryRankingThroughDate.value = null; productLibraryShops.value = []; rankingShopFilters.value = {}; stagnantRequestId++; stagnantMaterials.value = []; stagnantTotal.value = 0; stagnantPage.value = 1; stagnantCreatorId.value = null; stagnantError.value = ''; stagnantLoading.value = false; newImagesRequestId++; newImages.value = []; newImagesTotal.value = 0; newImagesPage.value = 1; newImagesCreatorId.value = null; newImagesUsageStatus.value = 'all'; newImagesError.value = ''; newImagesLoading.value = false; productLibraryStatisticsTask.value = null; activeProductLibraryTab.value = 'products'; productLibrarySelectedShopIds.value = []; productLibraryShopSearch.value = ''; productLibraryTemplateFilter.value = ''; productLibrarySku.value = ''; appliedProductLibraryFilters.value = { sourceIds: [], template: '', sku: '' }; selectedProductLibraryIds.value = []; productLibraryFilters.value = { shops: [] }; }
+function logout() { hubUploadTemplateId.value = null; hubUploadTemplates.value = []; hubUploadRequestId++; hubUploadTasks.value = []; hubUploadTotal.value = 0; hubUploadPage.value = 1; hubUploadCreatorId.value = null; hubUploadLoading.value = false; hubUploadError.value = ''; showHubstudioDialog.value = false; localStorage.removeItem('haitoro_token'); token.value = ''; user.value = null; taskCreatorFilterId.value = null; materialCreatorFilterId.value = null; draftCreatorFilterId.value = null; creatorFiltersInitialized.value = false; productLibraryItems.value = []; productLibraryTotal.value = 0; productLibraryPage.value = 1; productLibraryRankingRequestId++; productLibraryRankingItems.value = []; productLibraryRankingTotal.value = 0; productLibraryRankingDate.value = null; productLibraryRankingThroughDate.value = null; productLibraryShops.value = []; rankingShopFilters.value = {}; stagnantRequestId++; stagnantMaterials.value = []; stagnantTotal.value = 0; stagnantPage.value = 1; stagnantCreatorId.value = null; stagnantError.value = ''; stagnantLoading.value = false; newImagesRequestId++; newImages.value = []; newImagesTotal.value = 0; newImagesPage.value = 1; newImagesCreatorId.value = null; newImagesUsageStatus.value = 'all'; newImagesError.value = ''; newImagesLoading.value = false; productLibraryStatisticsTask.value = null; activeProductLibraryTab.value = 'products'; productLibrarySelectedShopIds.value = []; productLibraryShopSearch.value = ''; productLibraryTemplateFilter.value = ''; productLibrarySku.value = ''; appliedProductLibraryFilters.value = { sourceIds: [], template: '', sku: '' }; selectedProductLibraryIds.value = []; productLibraryFilters.value = { shops: [] }; }
 api.interceptors.response.use(response => response, requestError => {
     if (requestError.response?.data?.detail === '登录已失效') {
         logout();
@@ -3496,6 +3498,8 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['workspace-params']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-settings-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace-create-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['hub-upload-filters']} */ ;
+/** @type {__VLS_StyleScopedClasses['hub-upload-filters']} */ ;
 /** @type {__VLS_StyleScopedClasses['hub-upload-filters']} */ ;
 /** @type {__VLS_StyleScopedClasses['hub-upload-filters']} */ ;
 /** @type {__VLS_StyleScopedClasses['hub-upload-grid']} */ ;
@@ -8311,10 +8315,26 @@ if (__VLS_ctx.token) {
             disabled: (__VLS_ctx.hubUploadLoading),
         });
         (__VLS_ctx.hubUploadLoading ? '刷新中…' : '↻ 刷新');
-        if (__VLS_ctx.user?.role === 'company_admin') {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "hub-upload-filters" },
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "hub-upload-filters" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (__VLS_ctx.changeHubUploadCreator) },
+            value: (__VLS_ctx.hubUploadTemplateId),
+            disabled: (__VLS_ctx.hubUploadLoading),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: (null),
+        });
+        for (const [template] of __VLS_getVForSourceType((__VLS_ctx.hubUploadTemplates))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (template.id),
+                value: (template.id),
             });
+            (template.name);
+        }
+        if (__VLS_ctx.user?.role === 'company_admin') {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
             __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
                 ...{ onChange: (__VLS_ctx.changeHubUploadCreator) },
@@ -8352,6 +8372,7 @@ if (__VLS_ctx.token) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         for (const [task] of __VLS_getVForSourceType((__VLS_ctx.hubUploadTasks))) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 key: (task.id),
@@ -8359,6 +8380,8 @@ if (__VLS_ctx.token) {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (task.id);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (task.template_name || '模版未知');
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (task.product_count);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -14423,6 +14446,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             hubUploadCreatorId: hubUploadCreatorId,
             hubUploadLoading: hubUploadLoading,
             hubUploadError: hubUploadError,
+            hubUploadTemplateId: hubUploadTemplateId,
+            hubUploadTemplates: hubUploadTemplates,
             hubUploadPageCount: hubUploadPageCount,
             hubUploadStatusLabels: hubUploadStatusLabels,
             loadHubUploadTasks: loadHubUploadTasks,
