@@ -1,7 +1,7 @@
 'use strict';
 let csrf='', paused=false, page=1, total=0, detailId=null, busy=false, logsVersion=0;
-let loggingIn=false, syncing=false, loginRequired=true, activeTaskId=null, abortRequested=false;
-function updateSyncButton(){const button=$('sync');button.disabled=syncing||loginRequired;button.textContent=syncing?'同步中…':'同步环境';button.classList.toggle('is-loading',syncing);button.setAttribute('aria-busy',String(syncing));}
+let loggingIn=false, syncing=false, environmentsLoading=true, loginRequired=true, activeTaskId=null, abortRequested=false;
+function updateSyncButton(){const loading=syncing||environmentsLoading;const button=$('sync');button.disabled=loading||loginRequired;button.textContent=loading?'刷新中…':'刷新环境';button.classList.toggle('is-loading',loading);button.setAttribute('aria-busy',String(loading));$('environment-refreshing').hidden=!loading;$('environments').hidden=loading;$('environment-count').hidden=loading;$('active-environment').hidden=loading;if(loading)$('environments').replaceChildren();$('environments').setAttribute('aria-busy',String(loading));}
 const collapsedEnvironmentGroups=new Set();
 const labels={queued:'排队中',running:'执行中',awaiting_attention:'待人工处理',completed:'已完成',failed:'失败',cancelled:'已取消',expired:'文件已过期'};
 const stages={queued:'等待领取',claimed:'已领取',reading_account:'读取环境绑定账号',starting_environment:'启动环境',opening_account:'打开 HubStudio 绑定账号',checking_login:'检查 TikTok 登录',logged_in:'登录成功',checking_language:'检查页面语言',switching_language:'切换简体中文',verifying_language:'核对切换后的语言',language_ready:'语言已就绪',language_failed:'语言检查失败',closing_account_menu:'关闭账号菜单',account_menu_closed:'账号菜单已关闭',upload_parsing:'等待表格解析',waiting_login:'等待 TikTok 登录',uploading:'上传表格',importing:'导入商品',imported:'导入成功',submitting:'正在提交',submitted:'已提交',manually_aborted:'人工中止',duplicate_file:'文件已存在，已中止',import_data_error:'添加商品失败（数据错误）',manual_attention:'等待人工处理',connection_lost:'连接中断',upgrade_review:'升级后待核对',manually_confirmed:'人工确认已提交',cancelled:'已取消',expired:'文件已过期'};
@@ -13,10 +13,30 @@ async function api(path,method='GET',body){const headers={};if(method!=='GET'){h
 function table(el,columns,rows){el.replaceChildren();const head=node('tr');columns.forEach(c=>head.append(node('th',c)));const thead=node('thead');thead.append(head);el.append(thead);const body=node('tbody');rows.forEach(cells=>{const row=node('tr');cells.forEach(value=>{const cell=node('td');cell.append(value instanceof Node?value:node('span',value));row.append(cell);});body.append(row);});if(!rows.length){const row=node('tr'),cell=node('td','暂无记录');cell.colSpan=columns.length;row.append(cell);body.append(row);}el.append(body);}
 function button(text,action){const b=node('button',text);b.addEventListener('click',()=>run(action));return b;}
 async function run(action){$('error').textContent='';try{await action();}catch(e){$('error').textContent=e.message;}}
+function renderActiveEnvironment(items){
+  const summary=$('active-environment');
+  summary.replaceChildren();
+  const enabled=items.filter(e=>e.auto_upload_enabled);
+  summary.classList.toggle('is-enabled',enabled.length>0);
+  summary.append(node('span',enabled.length?'当前自动上品环境':'未开启自动上品'));
+  for(const e of enabled){
+    summary.append(node('strong',e.name||e.container_code));
+    const serial=e.metadata_fields?.serial_number;
+    summary.append(node('small',`${serial!=null?'序号：'+serial+' · ':''}环境 ID：${e.container_code}`));
+    summary.append(node('div','账号：'+((e.account_names||[]).join('、')||'-')));
+  }
+  if(!enabled.length)summary.append(node('div','请在列表中开启一个环境后自动上品。'));
+  summary.hidden=syncing||environmentsLoading;
+}
 async function renderEnvironments(){
-  const items=await api('environments'),el=$('environments');
+  if(syncing)return;
+  let items;
+  try{items=await api('environments');}finally{environmentsLoading=false;updateSyncButton();}
+  const el=$('environments');
+  if(syncing)return;
   const count=$('environment-count');
   if(count)count.textContent=`共 ${items.length} 个环境`;
+  renderActiveEnvironment(items);
   table(el,['序号','环境名称','账号','分组','自动上品'],[]);
   if(!items.length)return;
   el.querySelector('tbody').remove();
@@ -53,6 +73,7 @@ async function renderEnvironments(){
       b.className=e.auto_upload_enabled?'environment-enable':'environment-disable';
       b.title=e.auto_upload_enabled?'当前已开启，点击关闭':'当前已关闭，点击开启';
       const row=node('tr');
+      if(e.auto_upload_enabled)row.className='environment-active';
       for(const value of [identity,e.name,(e.account_names||[]).join('、')||'-',group,b]){const cell=node('td');cell.append(value instanceof Node?value:node('span',value));row.append(cell);}
       body.append(row);
     }
@@ -97,7 +118,7 @@ async function renderDetail(){if(!detailId)return;const id=detailId;const t=awai
 
 async function refresh(){if(busy)return;busy=true;try{const s=await api('status');csrf=s.csrf;paused=s.paused;activeTaskId=s.active_task_id;abortRequested=!!s.abort_requested;$('login-section').hidden=!s.login_required;$('login-button').disabled=loggingIn;$('pause').disabled=!!s.login_required;loginRequired=!!s.login_required;updateSyncButton();$('filter').disabled=!!s.login_required;$('status').textContent=`${s.user?.name||'等待 ERP 登录'} · ${s.status||'正在启动'} · ERP ${s.erp_connected?'已连接':'未连接'} · HubStudio ${s.hub_connected?'已连接':'未连接'}`;$('pause').textContent=paused?'继续领取':'暂停领取';$('sync-status').textContent=s.sync_error||`最近完整同步：${time(s.sync_at)}`;await renderEnvironments();if(s.user&&!s.login_required){await renderTasks();await renderDetail();}else{detailId=null;$('detail').close();$('tasks').replaceChildren();$('page').textContent='登录后查看任务';$('previous').disabled=true;$('next').disabled=true;}await renderLogs();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{busy=false;}}
 $('login-form').onsubmit=async event=>{event.preventDefault();if(loggingIn||!csrf)return;loggingIn=true;$('login-button').disabled=true;$('login-button').textContent='正在登录…';$('login-error').textContent='';const password=$('password').value;$('password').value='';try{await api('login','POST',{email:$('email').value,password});await refresh();}catch(e){$('login-error').textContent=e.message;}finally{loggingIn=false;$('login-button').disabled=false;$('login-button').textContent='登录并授权';}};
-$('sync').onclick=()=>run(async()=>{if(syncing||loginRequired)return;syncing=true;updateSyncButton();try{const r=await api('sync','POST',{});if(!r.ok)throw Error(r.detail||'环境刷新失败');await refresh();}finally{syncing=false;updateSyncButton();}});$('pause').onclick=()=>run(async()=>{await api('pause','POST',{paused:!paused});await refresh();});$('filter').onchange=()=>run(async()=>{page=1;await renderTasks();});$('previous').onclick=()=>run(async()=>{page--;await renderTasks();});$('next').onclick=()=>run(async()=>{page++;await renderTasks();});$('close-detail').onclick=()=>{detailId=null;$('detail').close();};$('detail').addEventListener('close',()=>{detailId=null;});$('detail').addEventListener('click',event=>{if(event.target===$('detail')){const box=$('detail').getBoundingClientRect();if(event.clientX<box.left||event.clientX>box.right||event.clientY<box.top||event.clientY>box.bottom){detailId=null;$('detail').close();}}});refresh();setInterval(refresh,5000);
+$('sync').onclick=()=>run(async()=>{if(syncing||loginRequired)return;syncing=true;updateSyncButton();try{const r=await api('sync','POST',{});if(!r.ok)throw Error(r.detail||'环境刷新失败');await refresh();}finally{syncing=false;updateSyncButton();await renderEnvironments();}});$('pause').onclick=()=>run(async()=>{await api('pause','POST',{paused:!paused});await refresh();});$('filter').onchange=()=>run(async()=>{page=1;await renderTasks();});$('previous').onclick=()=>run(async()=>{page--;await renderTasks();});$('next').onclick=()=>run(async()=>{page++;await renderTasks();});$('close-detail').onclick=()=>{detailId=null;$('detail').close();};$('detail').addEventListener('close',()=>{detailId=null;});$('detail').addEventListener('click',event=>{if(event.target===$('detail')){const box=$('detail').getBoundingClientRect();if(event.clientX<box.left||event.clientX>box.right||event.clientY<box.top||event.clientY>box.bottom){detailId=null;$('detail').close();}}});refresh();setInterval(refresh,5000);
 
 $('copy-logs').onclick=()=>run(async()=>{await navigator.clipboard.writeText($('logs').textContent);$('log-feedback').textContent='运行日志已复制';});
 $('clear-logs').onclick=()=>run(async()=>{const button=$('clear-logs');button.disabled=true;try{logsVersion++;await api('logs/clear','POST',{});await renderLogs();$('log-feedback').textContent='本机运行日志已清除';}finally{button.disabled=false;}});
