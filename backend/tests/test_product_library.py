@@ -304,6 +304,51 @@ class ProductLibraryTests(unittest.TestCase):
         finally:
             main.app.dependency_overrides.clear()
 
+    def test_erp_large_page_sizes_and_order_detail_pagination(self):
+        self.import_bytes(xlsx([row(order=f"order-{index:04d}") for index in range(1001)]))
+        product_id = self.list_items()["items"][0]["id"]
+
+        def override_db():
+            with self.sessions() as db:
+                yield db
+
+        main.app.dependency_overrides[get_db] = override_db
+        try:
+            with self.sessions() as db:
+                token = create_access_token(db.get(User, 1))
+            client = TestClient(main.app)
+            headers = {"Authorization": f"Bearer {token}"}
+            endpoints = [
+                ("/tasks", {}), ("/material-assets", {}),
+                ("/product-library/stagnant", {}), ("/product-library/new-images", {}),
+                ("/product-library/rankings", {"category": "potential"}),
+                ("/hub-upload-tasks", {}), (f"/product-library/{product_id}/orders", {}),
+            ]
+            for endpoint, params in endpoints:
+                for page_size in (500, 1000):
+                    with self.subTest(endpoint=endpoint, page_size=page_size):
+                        response = client.get(endpoint, params={**params, "page_size": page_size}, headers=headers)
+                        self.assertEqual(response.status_code, 200, response.text)
+                        self.assertEqual(response.json()["page_size"], page_size)
+                for invalid_size in (0, 1001):
+                    with self.subTest(endpoint=endpoint, invalid_size=invalid_size):
+                        response = client.get(endpoint, params={**params, "page_size": invalid_size}, headers=headers)
+                        self.assertEqual(response.status_code, 422, response.text)
+
+            for page_size in (500, 1000):
+                with self.subTest(order_page_size=page_size):
+                    first = client.get(f"/product-library/{product_id}/orders",
+                                       params={"page_size": page_size}, headers=headers).json()
+                    second = client.get(f"/product-library/{product_id}/orders",
+                                        params={"page_size": page_size, "page": 2}, headers=headers).json()
+                    self.assertEqual(first["total"], 1001)
+                    self.assertEqual(len(first["items"]), page_size)
+                    self.assertEqual(len(second["items"]), min(page_size, 1001 - page_size))
+                    self.assertTrue({item["order_number"] for item in first["items"]}.isdisjoint(
+                        item["order_number"] for item in second["items"]))
+        finally:
+            main.app.dependency_overrides.clear()
+
     def test_shop_sku_order_details_are_deduplicated_sorted_and_paginated(self):
         start = datetime(2026, 9, 1, 10, 0, 0)
         rows = [row(order=f"order-{index:02d}", ordered_at=(start + timedelta(hours=index)).strftime("%Y-%m-%d %H:%M:%S"))

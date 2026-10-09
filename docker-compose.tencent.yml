@@ -6,7 +6,7 @@ x-logging: &default-logging
 
 services:
   edge:
-    image: nginx:1.27-alpine
+    image: ${DOCKER_REGISTRY:-docker.io}/library/nginx:1.27-alpine
     logging: *default-logging
     environment:
       ERP_DOMAIN: ${ERP_DOMAIN:?请在 .env 中配置 ERP_DOMAIN}

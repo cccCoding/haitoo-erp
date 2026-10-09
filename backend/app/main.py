@@ -1194,7 +1194,7 @@ def stagnant_material_cutoff() -> datetime:
 
 @app.get("/product-library/stagnant")
 def list_stagnant_materials(
-    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=1000),
     creator_id: int | None = Query(None, ge=1),
     user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db),
 ):
@@ -1242,7 +1242,7 @@ def new_images_window() -> tuple[datetime, datetime]:
 
 @app.get("/product-library/new-images")
 def list_new_images(
-    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=1000),
     creator_id: int | None = Query(None, ge=1),
     usage_status: Literal["all", "unused", "used"] = "all",
     user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db),
@@ -1279,7 +1279,7 @@ def list_new_images(
 @app.get("/product-library/rankings")
 def list_product_library_rankings(
     category: Literal["top7", "top15", "top30", "potential", "hot", "booming"],
-    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=1000),
     source_ids: Annotated[list[int] | None, Query()] = None,
     user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db),
 ):
@@ -1367,6 +1367,7 @@ def list_product_library(
 def list_product_library_orders(
     product_id: int, page: int = Query(1, ge=1),
     source_ids: Annotated[list[int] | None, Query()] = None,
+    page_size: Annotated[int, Query(ge=1, le=1000)] = 20,
     category: Literal["top7", "top15", "top30", "potential", "hot", "booming"] | None = None,
     snapshot_date: str | None = None,
     user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db),
@@ -1404,8 +1405,8 @@ def list_product_library_orders(
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     order_count = db.scalar(select(func.count(func.distinct(query.subquery().c.order_id)))) or 0
     orders = db.execute(query.order_by(facts.c.ordered_at.desc(), facts.c.order_id.desc(), facts.c.product_id.asc())
-        .offset((page - 1) * 20).limit(20)).mappings().all()
-    return {"total": total, "order_count": order_count, "page": page, "page_size": 20, "items": [
+        .offset((page - 1) * page_size).limit(page_size)).mappings().all()
+    return {"total": total, "order_count": order_count, "page": page, "page_size": page_size, "items": [
         {"ordered_at": timestamp_ms(order["ordered_at"]), "order_number": order["order_number"],
          "shop_name": order["shop_name"], "product_id": order["product_id"], "quantity": order["quantity"]}
         for order in orders]}
@@ -2266,7 +2267,7 @@ def serialize_task_view(task: PodTask, creator_name: str, template_name: str, vi
 @app.get("/tasks")
 def list_tasks(
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page_size: int = Query(default=20, ge=1, le=1000),
     task_type: str = "sku_image",
     creator_id: int | None = Query(default=None, ge=1),
     status: TaskStatus | None = None,
@@ -2361,7 +2362,7 @@ def get_task_detail(task_id: int, user: User = Depends(current_user), db: Sessio
 @app.get("/material-assets")
 def list_material_assets(
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page_size: int = Query(default=20, ge=1, le=1000),
     creator_id: int | None = Query(default=None, ge=1),
     template_id: int | None = None,
     usage_status: str = "unused",
@@ -4214,7 +4215,7 @@ def create_hubstudio_upload_task(payload: HubUploadTaskCreate, user: User = Depe
 
 
 @app.get("/hub-upload-tasks")
-def list_hub_upload_tasks(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), status: str | None = None, template_id: int | None = Query(None, ge=1), scope: Literal["own", "company"] = "own", creator_id: int | None = Query(None, ge=1), user: User = Depends(current_user), db: Session = Depends(get_db)):
+def list_hub_upload_tasks(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=1000), status: str | None = None, template_id: int | None = Query(None, ge=1), scope: Literal["own", "company"] = "own", creator_id: int | None = Query(None, ge=1), user: User = Depends(current_user), db: Session = Depends(get_db)):
     if user.role != Role.COMPANY_ADMIN and (scope == "company" or creator_id is not None and creator_id != user.id):
         raise HTTPException(403, "无权查看其他成员的上品记录")
     return hub.list_tasks(db, user.id, user.company_id, page, page_size, status, company_scope=scope == "company", creator_id=creator_id, template_id=template_id)

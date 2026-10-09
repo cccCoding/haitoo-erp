@@ -113,8 +113,8 @@ class StagnantMaterialTests(unittest.TestCase):
 
         workbook = Workbook()
         sheet = workbook.active
-        sheet.append(["店铺名称", "站点", "平台", "订单编号", "下单时间", "标题", "平台SKU", "产品图片链接", "产品ID"])
-        sheet.append(["Shop A", "马来西亚", "TikTok", "imported-1", "2026-01-01 12:00:00",
+        sheet.append(["店铺名称", "站点", "平台", "订单编号", "数量", "下单时间", "标题", "平台SKU", "产品图片链接", "产品ID"])
+        sheet.append(["Shop A", "马来西亚", "TikTok", "imported-1", 1, "2026-01-01 12:00:00",
                       "Product", "M06LZERO123-M", "https://example.com/product.jpg", "external-1"])
         output = BytesIO()
         workbook.save(output)
@@ -147,7 +147,7 @@ class StagnantMaterialTests(unittest.TestCase):
             member = client.get("/product-library/stagnant", params={"creator_id": 3},
                                 headers={"Authorization": f"Bearer {member_token}"})
             self.assertEqual((member.status_code, member.json()["items"][0]["sku"]), (200, "OWNER_A"))
-            invalid = client.get("/product-library/stagnant", params={"page_size": 101},
+            invalid = client.get("/product-library/stagnant", params={"page_size": 1001},
                                  headers={"Authorization": f"Bearer {admin_token}"})
             self.assertEqual(invalid.status_code, 422)
 

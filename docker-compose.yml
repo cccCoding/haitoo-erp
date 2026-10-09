@@ -6,7 +6,7 @@ x-logging: &default-logging
 
 services:
   mysql:
-    image: mysql:8.4
+    image: ${DOCKER_REGISTRY:-docker.io}/library/mysql:8.4
     logging: *default-logging
     restart: unless-stopped
     environment:
@@ -27,7 +27,7 @@ services:
   # 旧数据卷不会重新执行 MYSQL_USER/MYSQL_PASSWORD 初始化。此服务在每次
   # `docker compose up` 时幂等地校正本地应用账号，避免 API 因 1045 无法重启。
   db-init:
-    image: mysql:8.4
+    image: ${DOCKER_REGISTRY:-docker.io}/library/mysql:8.4
     logging: *default-logging
     environment:
       MYSQL_PWD: ${MYSQL_ROOT_PASSWORD:?请在 .env 中配置 MYSQL_ROOT_PASSWORD}
@@ -55,7 +55,10 @@ services:
         condition: service_healthy
 
   api:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
     logging: *default-logging
     environment:
       DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
@@ -90,7 +93,10 @@ services:
 
   # 独立、串行的版本化数据库迁移；API 和 Worker 不在启动时修改表结构。
   migrate:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
     logging: *default-logging
     command: python -m app.db_migrate
     environment:
@@ -105,7 +111,10 @@ services:
     restart: "no"
 
   submit-worker:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
     logging: *default-logging
     command: python -m app.task_worker submit
     environment:
@@ -129,7 +138,10 @@ services:
     restart: unless-stopped
 
   result-worker:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
     logging: *default-logging
     command: python -m app.task_worker result
     environment:
@@ -154,7 +166,10 @@ services:
 
   # 公司级妙手公共采集箱同步；每 5 分钟运行一次，仅缓存外部采集商品。
   miaoshou-collect-box-worker:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
     logging: *default-logging
     command: python -m app.task_worker miaoshou-collect-box
     environment:
@@ -170,7 +185,10 @@ services:
 
   # 轮询手动提交的产品库统计任务，并清理过期快照。
   product-library-rankings-worker:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
     logging: *default-logging
     command: python -m app.task_worker product-library-rankings
     environment:
@@ -188,6 +206,7 @@ services:
     build:
       context: ./frontend
       args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
         # Vite 在镜像构建阶段写入 API 地址，修改后需重新执行 --build。
         VITE_API_URL: ${VITE_API_URL:?请在 .env 中配置 VITE_API_URL}
     logging: *default-logging
@@ -201,6 +220,7 @@ services:
     build:
       context: ./frontend-admin
       args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
         VITE_API_URL: ${VITE_API_URL:?请在 .env 中配置 VITE_API_URL}
     logging: *default-logging
     expose:

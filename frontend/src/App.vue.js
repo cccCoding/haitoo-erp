@@ -3,6 +3,9 @@ import { useRoute, useRouter } from 'vue-router';
 import axios from 'axios';
 import SearchableSelect from './SearchableSelect.vue';
 import ShopDataHeading from './ShopDataHeading.vue';
+const pageSizeOptions = [20, 50, 100, 500, 1000];
+const productLibraryPageSizeOptions = [...pageSizeOptions, 2000];
+const hubUploadPageSizeOptions = [25, 50, 100, 500, 1000];
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' });
 const token = ref(localStorage.getItem('haitoro_token') || '');
 const route = useRoute();
@@ -29,9 +32,9 @@ const managedShops = ref([]), shopLoading = ref(false), shopError = ref('');
 const activeMiaoshouTab = ref('shops');
 const showMiaoshouDialog = ref(false), miaoshouForm = ref({ app_id: '', app_secret: '' }), miaoshouSaving = ref(false);
 const showHubstudioDialog = ref(false), hubstudioSaving = ref(false), hubstudioForm = ref({ app_id: '', app_secret: '', group_code: '' });
-const hubUploadTasks = ref([]), hubUploadTotal = ref(0), hubUploadPage = ref(1), hubUploadCreatorId = ref(null), hubUploadLoading = ref(false), hubUploadError = ref('');
+const hubUploadTasks = ref([]), hubUploadTotal = ref(0), hubUploadPage = ref(1), hubUploadPageSize = ref(25), hubUploadCreatorId = ref(null), hubUploadLoading = ref(false), hubUploadError = ref('');
 const hubUploadTemplateId = ref(null), hubUploadTemplates = ref([]);
-const hubUploadPageCount = computed(() => Math.max(1, Math.ceil(hubUploadTotal.value / 25)));
+const hubUploadPageCount = computed(() => Math.max(1, Math.ceil(hubUploadTotal.value / hubUploadPageSize.value)));
 const hubUploadStatusLabels = { queued: '排队中', running: '执行中', completed: '已提交', awaiting_attention: '待人工处理', failed: '失败', cancelled: '已取消', expired: '已过期' };
 let hubUploadRequestId = 0;
 async function loadHubUploadTasks() {
@@ -41,7 +44,7 @@ async function loadHubUploadTasks() {
     hubUploadLoading.value = true;
     hubUploadError.value = '';
     try {
-        const { data } = await api.get('/hub-upload-tasks', { headers: headers.value, params: { page: hubUploadPage.value, page_size: 25, template_id: hubUploadTemplateId.value ?? undefined, scope: user.value.role === 'company_admin' ? 'company' : 'own', creator_id: user.value.role === 'company_admin' ? hubUploadCreatorId.value ?? undefined : undefined } });
+        const { data } = await api.get('/hub-upload-tasks', { headers: headers.value, params: { page: hubUploadPage.value, page_size: hubUploadPageSize.value, template_id: hubUploadTemplateId.value ?? undefined, scope: user.value.role === 'company_admin' ? 'company' : 'own', creator_id: user.value.role === 'company_admin' ? hubUploadCreatorId.value ?? undefined : undefined } });
         if (requestId !== hubUploadRequestId)
             return;
         hubUploadTemplates.value = data.templates || [];
@@ -64,6 +67,7 @@ async function loadHubUploadTasks() {
             hubUploadLoading.value = false;
     }
 }
+function changeHubUploadPageSize() { hubUploadPage.value = 1; void loadHubUploadTasks(); }
 function changeHubUploadCreator() { hubUploadPage.value = 1; void loadHubUploadTasks(); }
 function changeHubUploadPage(target) { hubUploadPage.value = Math.min(Math.max(1, target), hubUploadPageCount.value); void loadHubUploadTasks(); }
 function hubUploadEnvironment(task) { return task.environment_name || task.container_code || (task.environment_id ? String(task.environment_id) : '等待领取'); }
@@ -147,7 +151,7 @@ const appliedProductLibraryFilters = ref({ sourceIds: [], template: '', sku: '' 
 const rankingShopFilters = ref({});
 const selectedProductLibraryIds = ref([]), productLibraryBrokenImages = ref([]);
 const showProductLibraryTemplateDialog = ref(false), productLibraryTargetTemplateId = ref(null), productLibraryTemplateSaving = ref(false);
-const productLibraryOrderProduct = ref(null), productLibraryOrders = ref([]), productLibraryOrderTotal = ref(0), productLibraryOrderCount = ref(0), productLibraryOrderPage = ref(1), productLibraryOrderLoading = ref(false);
+const productLibraryOrderProduct = ref(null), productLibraryOrders = ref([]), productLibraryOrderTotal = ref(0), productLibraryOrderCount = ref(0), productLibraryOrderPage = ref(1), productLibraryOrderPageSize = ref(20), productLibraryOrderLoading = ref(false);
 let productLibraryOrderRequestId = 0;
 const productLibraryFileInput = ref(null);
 const collectBoxConfigured = ref(false), collectBoxLastSyncedAt = ref(null), collectBoxInitialSyncedAt = ref(null);
@@ -169,7 +173,7 @@ const initialTaskFrom = initialTaskParams.get('task_from') || '';
 const initialTaskTo = initialTaskParams.get('task_to') || '';
 const initialTaskSkuQuery = initialTaskParams.get('task_skus') || '';
 const initialTaskTemplateId = Number(initialTaskParams.get('task_template')) || null;
-const taskPageSize = ref([20, 50, 100].includes(initialTaskPageSize) ? initialTaskPageSize : 20), currentTaskPage = ref(initialTaskPage > 0 ? initialTaskPage : 1), taskTotal = ref(0), taskActiveCount = ref(0), taskStatusCounts = ref({}), taskCreatorFilterId = ref(initialTaskCreator && initialTaskCreator !== 'all' ? Number(initialTaskCreator) || null : null);
+const taskPageSize = ref(pageSizeOptions.includes(initialTaskPageSize) ? initialTaskPageSize : 20), currentTaskPage = ref(initialTaskPage > 0 ? initialTaskPage : 1), taskTotal = ref(0), taskActiveCount = ref(0), taskStatusCounts = ref({}), taskCreatorFilterId = ref(initialTaskCreator && initialTaskCreator !== 'all' ? Number(initialTaskCreator) || null : null);
 const taskTypeTotals = ref({ sku_image: 0, carousel: 0, main_image: 0 });
 const taskTypeFilteredTotals = ref({ sku_image: null, carousel: null, main_image: null });
 const taskTabStates = ref({ sku_image: null, carousel: null, main_image: null });
@@ -770,7 +774,7 @@ const productLibraryPageCount = computed(() => Math.max(1, Math.ceil(productLibr
 const productLibraryRankingPageCount = computed(() => Math.max(1, Math.ceil(productLibraryRankingTotal.value / productLibraryRankingPageSize.value)));
 const stagnantPageCount = computed(() => Math.max(1, Math.ceil(stagnantTotal.value / stagnantPageSize.value)));
 const newImagesPageCount = computed(() => Math.max(1, Math.ceil(newImagesTotal.value / newImagesPageSize.value)));
-const productLibraryOrderPageCount = computed(() => Math.max(1, Math.ceil(productLibraryOrderTotal.value / 20)));
+const productLibraryOrderPageCount = computed(() => Math.max(1, Math.ceil(productLibraryOrderTotal.value / productLibraryOrderPageSize.value)));
 const selectableProductLibraryItems = computed(() => activeProductLibraryTab.value === 'products' ? productLibraryItems.value : activeProductLibraryTab.value === 'stagnant' ? stagnantMaterials.value : activeProductLibraryTab.value === 'new_images' ? newImages.value : productLibraryRankingItems.value);
 const productLibrarySelectionLoading = computed(() => productLibraryLoading.value || productLibraryRankingLoading.value || stagnantLoading.value || newImagesLoading.value);
 const draftSelectionAssets = computed(() => libraryDraftMode.value ? libraryDraftSelection.value : selectedMaterialAssets.value);
@@ -1047,7 +1051,7 @@ async function loadProductLibraryOrders() {
     try {
         productLibraryOrderLoading.value = true;
         productLibraryOrders.value = [];
-        const { data } = await api.get(`/product-library/${product.id}/orders`, { headers: headers.value, params: { page: productLibraryOrderPage.value,
+        const { data } = await api.get(`/product-library/${product.id}/orders`, { headers: headers.value, params: { page: productLibraryOrderPage.value, page_size: productLibraryOrderPageSize.value,
                 source_ids: product.sourceIds.length ? product.sourceIds : undefined,
                 category: product.category, snapshot_date: product.snapshotDate }, paramsSerializer: { indexes: null } });
         if (requestId !== productLibraryOrderRequestId)
@@ -1067,6 +1071,7 @@ async function loadProductLibraryOrders() {
             productLibraryOrderLoading.value = false;
     }
 }
+function changeProductLibraryOrderPageSize() { productLibraryOrderPage.value = 1; void loadProductLibraryOrders(); }
 function changeProductLibraryOrderPage(next) {
     if (productLibraryOrderLoading.value || next < 1 || next > productLibraryOrderPageCount.value)
         return;
@@ -4821,15 +4826,13 @@ if (__VLS_ctx.token) {
                 value: (__VLS_ctx.taskPageSize),
                 disabled: (__VLS_ctx.taskListRefreshing),
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (20),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (50),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (100),
-            });
+            for (const [size] of __VLS_getVForSourceType((__VLS_ctx.pageSizeOptions))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    key: (size),
+                    value: (size),
+                });
+                (size);
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!(__VLS_ctx.token))
@@ -5138,15 +5141,13 @@ if (__VLS_ctx.token) {
                 value: (__VLS_ctx.materialPageSize),
                 disabled: (__VLS_ctx.materialListRefreshing),
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (20),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (50),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (100),
-            });
+            for (const [size] of __VLS_getVForSourceType((__VLS_ctx.pageSizeOptions))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    key: (size),
+                    value: (size),
+                });
+                (size);
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!(__VLS_ctx.token))
@@ -5870,21 +5871,13 @@ if (__VLS_ctx.token) {
                 value: (__VLS_ctx.draftPageSize),
                 disabled: (__VLS_ctx.draftListRefreshing),
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (20),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (50),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (100),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (500),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (1000),
-            });
+            for (const [size] of __VLS_getVForSourceType((__VLS_ctx.pageSizeOptions))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    key: (size),
+                    value: (size),
+                });
+                (size);
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!(__VLS_ctx.token))
@@ -6495,24 +6488,13 @@ if (__VLS_ctx.token) {
                     value: (__VLS_ctx.productLibraryPageSize),
                     disabled: (__VLS_ctx.productLibraryLoading),
                 });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                    value: (20),
-                });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                    value: (50),
-                });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                    value: (100),
-                });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                    value: (500),
-                });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                    value: (1000),
-                });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                    value: (2000),
-                });
+                for (const [size] of __VLS_getVForSourceType((__VLS_ctx.productLibraryPageSizeOptions))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                        key: (size),
+                        value: (size),
+                    });
+                    (size);
+                }
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!(__VLS_ctx.token))
@@ -6853,15 +6835,13 @@ if (__VLS_ctx.token) {
                 value: (__VLS_ctx.stagnantPageSize),
                 disabled: (__VLS_ctx.stagnantLoading),
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (20),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (50),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (100),
-            });
+            for (const [size] of __VLS_getVForSourceType((__VLS_ctx.pageSizeOptions))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    key: (size),
+                    value: (size),
+                });
+                (size);
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!(__VLS_ctx.token))
@@ -7137,15 +7117,13 @@ if (__VLS_ctx.token) {
                 value: (__VLS_ctx.newImagesPageSize),
                 disabled: (__VLS_ctx.newImagesLoading),
             });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (20),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (50),
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                value: (100),
-            });
+            for (const [size] of __VLS_getVForSourceType((__VLS_ctx.pageSizeOptions))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                    key: (size),
+                    value: (size),
+                });
+                (size);
+            }
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!(__VLS_ctx.token))
@@ -7499,15 +7477,13 @@ if (__VLS_ctx.token) {
                         value: (__VLS_ctx.productLibraryRankingPageSize),
                         disabled: (__VLS_ctx.productLibraryRankingLoading),
                     });
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                        value: (20),
-                    });
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                        value: (50),
-                    });
-                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                        value: (100),
-                    });
+                    for (const [size] of __VLS_getVForSourceType((__VLS_ctx.pageSizeOptions))) {
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                            key: (size),
+                            value: (size),
+                        });
+                        (size);
+                    }
                     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                         ...{ onClick: (...[$event]) => {
                                 if (!(__VLS_ctx.token))
@@ -7885,15 +7861,13 @@ if (__VLS_ctx.token) {
                     value: (__VLS_ctx.collectBoxPageSize),
                     disabled: (__VLS_ctx.collectBoxLoading),
                 });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                    value: (20),
-                });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                    value: (50),
-                });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
-                    value: (100),
-                });
+                for (const [size] of __VLS_getVForSourceType((__VLS_ctx.pageSizeOptions))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                        key: (size),
+                        value: (size),
+                    });
+                    (size);
+                }
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!(__VLS_ctx.token))
@@ -8408,6 +8382,19 @@ if (__VLS_ctx.token) {
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         (__VLS_ctx.hubUploadTotal);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (__VLS_ctx.changeHubUploadPageSize) },
+            value: (__VLS_ctx.hubUploadPageSize),
+            disabled: (__VLS_ctx.hubUploadLoading),
+        });
+        for (const [size] of __VLS_getVForSourceType((__VLS_ctx.hubUploadPageSizeOptions))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+                key: (size),
+                value: (size),
+            });
+            (size);
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
                     if (!(__VLS_ctx.token))
@@ -13221,6 +13208,19 @@ if (__VLS_ctx.productLibraryOrderProduct) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     (__VLS_ctx.productLibraryOrderCount);
     (__VLS_ctx.productLibraryOrderTotal);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (__VLS_ctx.changeProductLibraryOrderPageSize) },
+        value: (__VLS_ctx.productLibraryOrderPageSize),
+        disabled: (__VLS_ctx.productLibraryOrderLoading),
+    });
+    for (const [size] of __VLS_getVForSourceType((__VLS_ctx.pageSizeOptions))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (size),
+            value: (size),
+        });
+        (size);
+    }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (...[$event]) => {
                 if (!(__VLS_ctx.productLibraryOrderProduct))
@@ -14373,6 +14373,9 @@ const __VLS_self = (await import('vue')).defineComponent({
         return {
             SearchableSelect: SearchableSelect,
             ShopDataHeading: ShopDataHeading,
+            pageSizeOptions: pageSizeOptions,
+            productLibraryPageSizeOptions: productLibraryPageSizeOptions,
+            hubUploadPageSizeOptions: hubUploadPageSizeOptions,
             token: token,
             page: page,
             email: email,
@@ -14443,6 +14446,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             hubUploadTasks: hubUploadTasks,
             hubUploadTotal: hubUploadTotal,
             hubUploadPage: hubUploadPage,
+            hubUploadPageSize: hubUploadPageSize,
             hubUploadCreatorId: hubUploadCreatorId,
             hubUploadLoading: hubUploadLoading,
             hubUploadError: hubUploadError,
@@ -14451,6 +14455,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             hubUploadPageCount: hubUploadPageCount,
             hubUploadStatusLabels: hubUploadStatusLabels,
             loadHubUploadTasks: loadHubUploadTasks,
+            changeHubUploadPageSize: changeHubUploadPageSize,
             changeHubUploadCreator: changeHubUploadCreator,
             changeHubUploadPage: changeHubUploadPage,
             hubUploadEnvironment: hubUploadEnvironment,
@@ -14615,6 +14620,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             productLibraryOrderTotal: productLibraryOrderTotal,
             productLibraryOrderCount: productLibraryOrderCount,
             productLibraryOrderPage: productLibraryOrderPage,
+            productLibraryOrderPageSize: productLibraryOrderPageSize,
             productLibraryOrderLoading: productLibraryOrderLoading,
             productLibraryFileInput: productLibraryFileInput,
             collectBoxConfigured: collectBoxConfigured,
@@ -14845,6 +14851,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             changeProductLibraryPage: changeProductLibraryPage,
             openProductLibraryOrders: openProductLibraryOrders,
             closeProductLibraryOrders: closeProductLibraryOrders,
+            changeProductLibraryOrderPageSize: changeProductLibraryOrderPageSize,
             changeProductLibraryOrderPage: changeProductLibraryOrderPage,
             toggleProductLibrarySelection: toggleProductLibrarySelection,
             togglePagedProducts: togglePagedProducts,
