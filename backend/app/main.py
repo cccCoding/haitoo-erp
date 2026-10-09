@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Literal
+from types import SimpleNamespace
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, inspect, or_, select, text, tuple_, update
@@ -2569,6 +2570,84 @@ def list_admin_companies(user: User = Depends(require_roles(Role.SUPER_ADMIN)), 
             "admin_users": [UserOut.model_validate(item) for item in db.scalars(select(User).where(User.company_id == company.id, User.role == Role.COMPANY_ADMIN).order_by(User.id)).all()],
         })
     return result
+
+
+def admin_company_read_scope(db: Session, company_id: int):
+    """仅为共享查询提供公司范围，不修改当前账号，也不创建登录会话。"""
+    if db.get(Company, company_id) is None:
+        raise HTTPException(404, "公司不存在")
+    return SimpleNamespace(company_id=company_id, role=Role.COMPANY_ADMIN)
+
+
+@app.get("/admin/data/filters")
+def admin_data_filters(
+    company_id: int = Query(ge=1),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db),
+):
+    scope = admin_company_read_scope(db, company_id)
+    templates = db.scalars(select(ProductTemplate).where(ProductTemplate.company_id == company_id)
+                           .order_by(ProductTemplate.id)).all()
+    members = db.scalars(select(User).where(User.company_id == company_id).order_by(User.id)).all()
+    return {
+        "templates": [{"id": item.id, "name": item.name} for item in templates],
+        "members": [{"id": item.id, "name": item.name} for item in members],
+        "shops": product_library_filters(user=scope, db=db)["shops"],
+    }
+
+
+@app.get("/admin/data/materials")
+def admin_data_materials(
+    company_id: int = Query(ge=1), page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=1000),
+    creator_id: int | None = Query(None, ge=1), template_id: int | None = Query(None, ge=1),
+    usage_status: Literal["unused", "used"] = "unused",
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db),
+):
+    return list_material_assets(page=page, page_size=page_size, creator_id=creator_id,
+        template_id=template_id, usage_status=usage_status,
+        user=admin_company_read_scope(db, company_id), db=db)
+
+
+@app.get("/admin/data/shops")
+def admin_data_shops(
+    company_id: int = Query(ge=1),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db),
+):
+    return list_product_library_shops(user=admin_company_read_scope(db, company_id), db=db)
+
+
+@app.get("/admin/data/products")
+def admin_data_products(
+    company_id: int = Query(ge=1), page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=1000),
+    category: Literal["products", "top7", "top15", "top30", "potential", "hot", "booming", "stagnant", "new_images"] = "products",
+    source_ids: Annotated[list[int] | None, Query()] = None, sku: str | None = None,
+    template_id: int | None = Query(None, ge=1), unmatched: bool = False,
+    creator_id: int | None = Query(None, ge=1), usage_status: Literal["all", "unused", "used"] = "all",
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db),
+):
+    scope = admin_company_read_scope(db, company_id)
+    if category == "stagnant":
+        return list_stagnant_materials(page=page, page_size=page_size, creator_id=creator_id, user=scope, db=db)
+    if category == "new_images":
+        return list_new_images(page=page, page_size=page_size, creator_id=creator_id,
+                               usage_status=usage_status, user=scope, db=db)
+    if category != "products":
+        return list_product_library_rankings(category=category, page=page, page_size=page_size,
+                                             source_ids=source_ids, user=scope, db=db)
+    return list_product_library(page=page, page_size=page_size, platform=None, site=None, shop_name=None,
+        sku=sku, template_id=template_id, unmatched=unmatched, source_ids=source_ids, user=scope, db=db)
+
+
+@app.get("/admin/data/products/{product_id}/orders")
+def admin_data_product_orders(
+    product_id: int, company_id: int = Query(ge=1), page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=1000), source_ids: Annotated[list[int] | None, Query()] = None,
+    category: Literal["top7", "top15", "top30", "potential", "hot", "booming"] | None = None,
+    snapshot_date: str | None = None,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db),
+):
+    return list_product_library_orders(product_id=product_id, page=page, page_size=page_size,
+        source_ids=source_ids, category=category, snapshot_date=snapshot_date,
+        user=admin_company_read_scope(db, company_id), db=db)
 
 
 @app.post("/admin/companies")
