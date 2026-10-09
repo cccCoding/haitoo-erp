@@ -149,6 +149,7 @@ const productLibraryShopSelectionLabel = computed(() => productLibrarySelectedSh
 const productLibraryTemplateFilter = ref(''), productLibrarySku = ref('');
 const appliedProductLibraryFilters = ref({ sourceIds: [], template: '', sku: '' });
 const rankingShopFilters = ref({});
+const MAX_PRODUCT_LIBRARY_SELECTION = 2000;
 const selectedProductLibraryIds = ref([]), productLibraryBrokenImages = ref([]);
 const showProductLibraryTemplateDialog = ref(false), productLibraryTargetTemplateId = ref(null), productLibraryTemplateSaving = ref(false);
 const productLibraryOrderProduct = ref(null), productLibraryOrders = ref([]), productLibraryOrderTotal = ref(0), productLibraryOrderCount = ref(0), productLibraryOrderPage = ref(1), productLibraryOrderPageSize = ref(20), productLibraryOrderLoading = ref(false);
@@ -181,6 +182,8 @@ const taskStatusFilter = ref(initialTaskStatus !== null && ['queued', 'running',
 const taskSkuQuery = ref(initialTaskSkuQuery);
 const taskTemplateFilterId = ref(initialTaskTemplateId);
 const appliedTaskFilters = ref({ creator_id: taskCreatorFilterId.value, status: taskStatusFilter.value, created_from: initialTaskFrom ? new Date(initialTaskFrom).toISOString() : '', created_to: initialTaskTo ? new Date(initialTaskTo).toISOString() : '', sku_query: initialTaskSkuQuery, template_id: initialTaskTemplateId });
+const selectedBatchClaimImages = ref(new Set());
+const batchClaimHoverPreview = ref(null);
 const selectedTaskIds = ref([]), showBatchClaimDialog = ref(false), batchClaimItems = ref([]), batchClaimLoading = ref(false), batchClaiming = ref(false), batchClaimCompleted = ref(0), batchClaimTotal = ref(0), batchClaimFailed = ref(0);
 const materialPageSize = ref(20), currentMaterialPage = ref(1), materialTotal = ref(0), materialCreatorFilterId = ref(null), materialListRefreshing = ref(false);
 const creatorFiltersInitialized = ref(false);
@@ -625,6 +628,38 @@ const groupedBatchClaimItems = computed(() => {
     });
     return [...groups.values()];
 });
+const allBatchClaimImagesSelected = computed(() => Boolean(batchClaimItems.value.length) && batchClaimItems.value.every(item => selectedBatchClaimImages.value.has(batchClaimImageKey(item.taskId, item.url))));
+function showBatchClaimHoverPreview(event, url, alt) {
+    if (event instanceof PointerEvent && event.pointerType === 'touch')
+        return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const margin = 16, gap = 14;
+    const width = Math.min(360, window.innerWidth - margin * 2);
+    const height = Math.min(480, window.innerHeight - margin * 2);
+    const beside = rect.right + gap + width <= window.innerWidth - margin ? rect.right + gap : rect.left - gap - width;
+    batchClaimHoverPreview.value = {
+        url: imageUrl(url), alt, width, height,
+        left: Math.max(margin, Math.min(beside, window.innerWidth - width - margin)),
+        top: Math.max(margin, Math.min(rect.top + rect.height / 2 - height / 2, window.innerHeight - height - margin)),
+    };
+}
+watch(showBatchClaimDialog, () => { batchClaimHoverPreview.value = null; });
+watch(batchClaiming, () => { batchClaimHoverPreview.value = null; });
+function batchClaimImageKey(taskId, url) { return `${taskId}:${url}`; }
+function toggleBatchClaimImage(taskId, url) {
+    if (batchClaiming.value)
+        return;
+    const key = batchClaimImageKey(taskId, url);
+    if (selectedBatchClaimImages.value.has(key))
+        selectedBatchClaimImages.value.delete(key);
+    else
+        selectedBatchClaimImages.value.add(key);
+}
+function toggleAllBatchClaimImages() {
+    if (batchClaimLoading.value || batchClaiming.value)
+        return;
+    selectedBatchClaimImages.value = allBatchClaimImagesSelected.value ? new Set() : new Set(batchClaimItems.value.map(item => batchClaimImageKey(item.taskId, item.url)));
+}
 function syncTaskUrl() { if (page.value !== 'tasks')
     return; void router.replace({ name: 'tasks', query: { task_type: activeTaskType.value, task_page: String(currentTaskPage.value), task_page_size: String(taskPageSize.value), task_creator: taskCreatorFilterId.value ? String(taskCreatorFilterId.value) : 'all', task_status: taskStatusFilter.value, ...(taskCreatedFrom.value ? { task_from: taskCreatedFrom.value } : {}), ...(taskCreatedTo.value ? { task_to: taskCreatedTo.value } : {}), ...(activeTaskType.value === 'sku_image' && taskSkuQuery.value.trim() ? { task_skus: taskSkuQuery.value } : {}), ...(activeTaskType.value === 'sku_image' && taskTemplateFilterId.value ? { task_template: String(taskTemplateFilterId.value) } : {}) } }); }
 function clearTaskUrl() { if (route.query.task_type)
@@ -1084,8 +1119,8 @@ function toggleProductLibrarySelection(item) {
     if (selectedProductLibraryIds.value.includes(item.id)) {
         selectedProductLibraryIds.value = selectedProductLibraryIds.value.filter(id => id !== item.id);
     }
-    else if (selectedProductLibraryIds.value.length >= 100) {
-        showToast('一次最多选择 100 条产品');
+    else if (selectedProductLibraryIds.value.length >= MAX_PRODUCT_LIBRARY_SELECTION) {
+        showToast(`一次最多选择 ${MAX_PRODUCT_LIBRARY_SELECTION} 条产品`);
     }
     else {
         selectedProductLibraryIds.value = [...selectedProductLibraryIds.value, item.id];
@@ -1100,8 +1135,8 @@ function togglePagedProducts() {
         return;
     }
     const merged = [...new Set([...selectedProductLibraryIds.value, ...ids])];
-    if (merged.length > 100) {
-        showToast('一次最多选择 100 条产品');
+    if (merged.length > MAX_PRODUCT_LIBRARY_SELECTION) {
+        showToast(`一次最多选择 ${MAX_PRODUCT_LIBRARY_SELECTION} 条产品`);
         return;
     }
     selectedProductLibraryIds.value = merged;
@@ -2969,45 +3004,50 @@ async function claimMaterials() {
 function toggleTaskSelection(taskId) { selectedTaskIds.value = selectedTaskIds.value.includes(taskId) ? selectedTaskIds.value.filter(id => id !== taskId) : [...selectedTaskIds.value, taskId]; }
 function taskCanBeSelected(task) { return task.status === 'failed' || activeTaskType.value === 'sku_image' && ['awaiting_selection', 'completed'].includes(task.status) && Boolean(task.result_count || task.result_urls?.length); }
 function toggleAllSelectableTasks() { selectedTaskIds.value = allSelectableTasksSelected.value ? [] : selectablePagedTasks.value.map(task => task.id); }
-function removeBatchClaimImage(taskId, url) { if (!batchClaiming.value)
-    batchClaimItems.value = batchClaimItems.value.filter(item => item.taskId !== taskId || item.url !== url); }
 async function openBatchClaimDialog() {
     if (!selectedClaimableTaskIds.value.length) {
-        showToast('请至少选择一个可领取任务');
+        showToast('请至少选择一个可审核任务');
         return;
     }
     showBatchClaimDialog.value = true;
     batchClaimLoading.value = true;
     batchClaimItems.value = [];
+    selectedBatchClaimImages.value = new Set();
     batchClaimCompleted.value = 0;
+    batchClaimTotal.value = 0;
     batchClaimFailed.value = 0;
     try {
         const details = await Promise.all(selectedClaimableTaskIds.value.map(id => api.get(`/tasks/${id}`, { headers: headers.value }).then(response => response.data)));
         batchClaimItems.value = details.flatMap(task => (task.result_urls || []).map((url) => ({ taskId: task.id, taskLabel: `任务 #${task.id}`, url })));
+        selectedBatchClaimImages.value = new Set(batchClaimItems.value.map(item => batchClaimImageKey(item.taskId, item.url)));
         if (!batchClaimItems.value.length)
-            showToast('所选任务没有可领取图片');
+            showToast('所选任务没有可审核图片');
     }
     catch (e) {
         showBatchClaimDialog.value = false;
-        showToast(e.response?.data?.detail || '加载批量领取内容失败');
+        showToast(e.response?.data?.detail || '加载批量审核内容失败');
     }
     finally {
         batchClaimLoading.value = false;
     }
 }
 async function confirmBatchClaim() {
-    const groups = groupedBatchClaimItems.value;
+    if (batchClaimLoading.value || batchClaiming.value)
+        return;
+    const groups = groupedBatchClaimItems.value.map(group => ({ ...group, urls: group.urls.filter(url => selectedBatchClaimImages.value.has(batchClaimImageKey(group.taskId, url))) }));
     if (!groups.length) {
-        showToast('请至少保留一张图片');
+        showToast('没有待审核任务');
         return;
     }
     batchClaiming.value = true;
     batchClaimCompleted.value = 0;
     batchClaimFailed.value = 0;
     batchClaimTotal.value = groups.length;
+    const successfulTaskIds = new Set();
     for (const group of groups) {
         try {
             await api.post(`/tasks/${group.taskId}/claim-materials`, { result_urls: group.urls }, { headers: headers.value });
+            successfulTaskIds.add(group.taskId);
         }
         catch {
             batchClaimFailed.value++;
@@ -3016,13 +3056,14 @@ async function confirmBatchClaim() {
             batchClaimCompleted.value++;
         }
     }
+    batchClaimItems.value = batchClaimItems.value.filter(item => !successfulTaskIds.has(item.taskId));
+    selectedBatchClaimImages.value = new Set(batchClaimItems.value.filter(item => selectedBatchClaimImages.value.has(batchClaimImageKey(item.taskId, item.url))).map(item => batchClaimImageKey(item.taskId, item.url)));
+    selectedTaskIds.value = selectedTaskIds.value.filter(id => !successfulTaskIds.has(id));
     batchClaiming.value = false;
     if (!batchClaimFailed.value)
         showBatchClaimDialog.value = false;
-    const claimedTaskIds = groups.map(group => group.taskId);
-    selectedTaskIds.value = selectedTaskIds.value.filter(id => !claimedTaskIds.includes(id));
     await refreshTaskList();
-    showToast(batchClaimFailed.value ? `批量领取完成，${batchClaimFailed.value} 个任务失败，可保留弹窗后重试` : `批量领取成功，共处理 ${batchClaimTotal.value} 个任务`);
+    showToast(batchClaimFailed.value ? `批量审核完成，${batchClaimFailed.value} 个任务失败，可点击确认重试` : `批量审核成功，共处理 ${batchClaimTotal.value} 个任务`);
 }
 async function retryTaskResult(task) {
     try {
@@ -6179,6 +6220,7 @@ if (__VLS_ctx.token) {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (__VLS_ctx.selectedProductLibraryIds.length);
+            (__VLS_ctx.MAX_PRODUCT_LIBRARY_SELECTION);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                 ...{ onClick: (...[$event]) => {
                         if (!(__VLS_ctx.token))
@@ -6323,7 +6365,7 @@ if (__VLS_ctx.token) {
                         } },
                     type: "checkbox",
                     checked: (__VLS_ctx.selectedProductLibraryIds.includes(item.id)),
-                    disabled: (__VLS_ctx.selectedProductLibraryIds.length >= 100 && !__VLS_ctx.selectedProductLibraryIds.includes(item.id)),
+                    disabled: (__VLS_ctx.selectedProductLibraryIds.length >= __VLS_ctx.MAX_PRODUCT_LIBRARY_SELECTION && !__VLS_ctx.selectedProductLibraryIds.includes(item.id)),
                     'aria-label': (`选择产品 ${item.sku}`),
                 });
                 if (item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)) {
@@ -6734,7 +6776,7 @@ if (__VLS_ctx.token) {
                         } },
                     type: "checkbox",
                     checked: (__VLS_ctx.selectedProductLibraryIds.includes(item.id)),
-                    disabled: (__VLS_ctx.productLibrarySelectionLoading || (__VLS_ctx.selectedProductLibraryIds.length >= 100 && !__VLS_ctx.selectedProductLibraryIds.includes(item.id))),
+                    disabled: (__VLS_ctx.productLibrarySelectionLoading || (__VLS_ctx.selectedProductLibraryIds.length >= __VLS_ctx.MAX_PRODUCT_LIBRARY_SELECTION && !__VLS_ctx.selectedProductLibraryIds.includes(item.id))),
                     'aria-label': (`选择 ${item.sku || '素材'}`),
                 });
                 if (item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)) {
@@ -7010,7 +7052,7 @@ if (__VLS_ctx.token) {
                         } },
                     type: "checkbox",
                     checked: (__VLS_ctx.selectedProductLibraryIds.includes(item.id)),
-                    disabled: (__VLS_ctx.productLibrarySelectionLoading || (__VLS_ctx.selectedProductLibraryIds.length >= 100 && !__VLS_ctx.selectedProductLibraryIds.includes(item.id))),
+                    disabled: (__VLS_ctx.productLibrarySelectionLoading || (__VLS_ctx.selectedProductLibraryIds.length >= __VLS_ctx.MAX_PRODUCT_LIBRARY_SELECTION && !__VLS_ctx.selectedProductLibraryIds.includes(item.id))),
                     'aria-label': (`选择 ${item.sku || '素材'}`),
                 });
                 if (item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)) {
@@ -7293,7 +7335,7 @@ if (__VLS_ctx.token) {
                         } },
                     type: "checkbox",
                     checked: (__VLS_ctx.selectedProductLibraryIds.includes(item.id)),
-                    disabled: (__VLS_ctx.productLibrarySelectionLoading || (__VLS_ctx.selectedProductLibraryIds.length >= 100 && !__VLS_ctx.selectedProductLibraryIds.includes(item.id))),
+                    disabled: (__VLS_ctx.productLibrarySelectionLoading || (__VLS_ctx.selectedProductLibraryIds.length >= __VLS_ctx.MAX_PRODUCT_LIBRARY_SELECTION && !__VLS_ctx.selectedProductLibraryIds.includes(item.id))),
                     'aria-label': (`选择 ${item.sku || '素材'}`),
                 });
                 if (item.image_url && !__VLS_ctx.productLibraryBrokenImages.includes(item.id)) {
@@ -8778,6 +8820,11 @@ if (__VLS_ctx.showBatchClaimDialog) {
         ...{ class: "modal-backdrop" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ onScroll: (...[$event]) => {
+                if (!(__VLS_ctx.showBatchClaimDialog))
+                    return;
+                __VLS_ctx.batchClaimHoverPreview = null;
+            } },
         ...{ class: "modal-card batch-claim-dialog" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
@@ -8797,6 +8844,13 @@ if (__VLS_ctx.showBatchClaimDialog) {
         });
     }
     else {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.toggleAllBatchClaimImages) },
+            type: "button",
+            ...{ class: "ghost batch-claim-select-all" },
+            disabled: (__VLS_ctx.batchClaiming || !__VLS_ctx.batchClaimItems.length),
+        });
+        (__VLS_ctx.allBatchClaimImagesSelected ? '全部取消' : '全选');
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "batch-claim-table" },
         });
@@ -8812,30 +8866,57 @@ if (__VLS_ctx.showBatchClaimDialog) {
             });
             __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
             (group.taskLabel);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-            (group.urls.length);
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "batch-claim-images" },
             });
-            for (const [url] of __VLS_getVForSourceType((group.urls))) {
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.figure, __VLS_intrinsicElements.figure)({
-                    key: (url),
-                });
-                __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
-                    src: (__VLS_ctx.imageUrl(url)),
-                    alt: (`${group.taskLabel} 结果图`),
-                });
+            for (const [url, index] of __VLS_getVForSourceType((group.urls))) {
                 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
                     ...{ onClick: (...[$event]) => {
                             if (!(__VLS_ctx.showBatchClaimDialog))
                                 return;
                             if (!!(__VLS_ctx.batchClaimLoading))
                                 return;
-                            __VLS_ctx.removeBatchClaimImage(group.taskId, url);
+                            __VLS_ctx.toggleBatchClaimImage(group.taskId, url);
                         } },
+                    ...{ onPointerenter: (...[$event]) => {
+                            if (!(__VLS_ctx.showBatchClaimDialog))
+                                return;
+                            if (!!(__VLS_ctx.batchClaimLoading))
+                                return;
+                            __VLS_ctx.showBatchClaimHoverPreview($event, url, `${group.taskLabel} 结果图 ${index + 1}`);
+                        } },
+                    ...{ onPointerleave: (...[$event]) => {
+                            if (!(__VLS_ctx.showBatchClaimDialog))
+                                return;
+                            if (!!(__VLS_ctx.batchClaimLoading))
+                                return;
+                            __VLS_ctx.batchClaimHoverPreview = null;
+                        } },
+                    ...{ onFocus: (...[$event]) => {
+                            if (!(__VLS_ctx.showBatchClaimDialog))
+                                return;
+                            if (!!(__VLS_ctx.batchClaimLoading))
+                                return;
+                            __VLS_ctx.showBatchClaimHoverPreview($event, url, `${group.taskLabel} 结果图 ${index + 1}`);
+                        } },
+                    ...{ onBlur: (...[$event]) => {
+                            if (!(__VLS_ctx.showBatchClaimDialog))
+                                return;
+                            if (!!(__VLS_ctx.batchClaimLoading))
+                                return;
+                            __VLS_ctx.batchClaimHoverPreview = null;
+                        } },
+                    key: (url),
                     type: "button",
-                    title: "移除此图",
+                    ...{ class: "batch-claim-image" },
+                    ...{ class: ({ selected: __VLS_ctx.selectedBatchClaimImages.has(__VLS_ctx.batchClaimImageKey(group.taskId, url)) }) },
                     disabled: (__VLS_ctx.batchClaiming),
+                    'aria-pressed': (__VLS_ctx.selectedBatchClaimImages.has(__VLS_ctx.batchClaimImageKey(group.taskId, url))),
+                    'aria-label': (`采用${group.taskLabel}结果图 ${index + 1}`),
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+                    src: (__VLS_ctx.imageUrl(url)),
+                    alt: (`${group.taskLabel} 结果图 ${index + 1}`),
                 });
             }
         }
@@ -8879,8 +8960,29 @@ if (__VLS_ctx.showBatchClaimDialog) {
         ...{ class: "primary" },
         disabled: (__VLS_ctx.batchClaimLoading || __VLS_ctx.batchClaiming || !__VLS_ctx.groupedBatchClaimItems.length),
     });
-    (__VLS_ctx.batchClaiming ? `领取中 ${__VLS_ctx.batchClaimCompleted}/${__VLS_ctx.batchClaimTotal}` : __VLS_ctx.batchClaimFailed ? '重试领取' : '确认批量领取');
+    (__VLS_ctx.batchClaiming ? `审核中 ${__VLS_ctx.batchClaimCompleted}/${__VLS_ctx.batchClaimTotal}` : '确认');
 }
+const __VLS_6 = {}.Teleport;
+/** @type {[typeof __VLS_components.Teleport, typeof __VLS_components.Teleport, ]} */ ;
+// @ts-ignore
+const __VLS_7 = __VLS_asFunctionalComponent(__VLS_6, new __VLS_6({
+    to: "body",
+}));
+const __VLS_8 = __VLS_7({
+    to: "body",
+}, ...__VLS_functionalComponentArgsRest(__VLS_7));
+__VLS_9.slots.default;
+if (__VLS_ctx.showBatchClaimDialog && __VLS_ctx.batchClaimHoverPreview) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "batch-claim-hover-preview" },
+        ...{ style: ({ left: `${__VLS_ctx.batchClaimHoverPreview.left}px`, top: `${__VLS_ctx.batchClaimHoverPreview.top}px`, width: `${__VLS_ctx.batchClaimHoverPreview.width}px`, height: `${__VLS_ctx.batchClaimHoverPreview.height}px` }) },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+        src: (__VLS_ctx.batchClaimHoverPreview.url),
+        alt: (__VLS_ctx.batchClaimHoverPreview.alt),
+    });
+}
+var __VLS_9;
 if (__VLS_ctx.showMiaoshouPublishDialog) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
@@ -10734,7 +10836,7 @@ if (__VLS_ctx.showTiktokExportDialog) {
         });
         /** @type {[typeof SearchableSelect, ]} */ ;
         // @ts-ignore
-        const __VLS_6 = __VLS_asFunctionalComponent(SearchableSelect, new SearchableSelect({
+        const __VLS_10 = __VLS_asFunctionalComponent(SearchableSelect, new SearchableSelect({
             ...{ 'onChange': {} },
             modelValue: (__VLS_ctx.tiktokExportCategory),
             options: (__VLS_ctx.tiktokExportOptions?.categories || []),
@@ -10743,7 +10845,7 @@ if (__VLS_ctx.showTiktokExportDialog) {
             placeholder: "请选择商品类目",
             searchPlaceholder: "搜索类目名称，空格分隔多个关键词",
         }));
-        const __VLS_7 = __VLS_6({
+        const __VLS_11 = __VLS_10({
             ...{ 'onChange': {} },
             modelValue: (__VLS_ctx.tiktokExportCategory),
             options: (__VLS_ctx.tiktokExportOptions?.categories || []),
@@ -10751,14 +10853,14 @@ if (__VLS_ctx.showTiktokExportDialog) {
             labelKey: "name",
             placeholder: "请选择商品类目",
             searchPlaceholder: "搜索类目名称，空格分隔多个关键词",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_6));
-        let __VLS_9;
-        let __VLS_10;
-        let __VLS_11;
-        const __VLS_12 = {
+        }, ...__VLS_functionalComponentArgsRest(__VLS_10));
+        let __VLS_13;
+        let __VLS_14;
+        let __VLS_15;
+        const __VLS_16 = {
             onChange: (__VLS_ctx.changeTiktokExportCategory)
         };
-        var __VLS_8;
+        var __VLS_12;
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
             ...{ class: "required" },
@@ -10972,7 +11074,7 @@ if (__VLS_ctx.showShopeeExportDialog) {
         });
         /** @type {[typeof SearchableSelect, ]} */ ;
         // @ts-ignore
-        const __VLS_13 = __VLS_asFunctionalComponent(SearchableSelect, new SearchableSelect({
+        const __VLS_17 = __VLS_asFunctionalComponent(SearchableSelect, new SearchableSelect({
             modelValue: (__VLS_ctx.shopeeExportCategoryId),
             options: (__VLS_ctx.shopeeExportOptions?.categories || []),
             valueKey: "id",
@@ -10980,14 +11082,14 @@ if (__VLS_ctx.showShopeeExportDialog) {
             placeholder: "请选择商品类目",
             searchPlaceholder: "搜索类目名称，空格分隔多个关键词",
         }));
-        const __VLS_14 = __VLS_13({
+        const __VLS_18 = __VLS_17({
             modelValue: (__VLS_ctx.shopeeExportCategoryId),
             options: (__VLS_ctx.shopeeExportOptions?.categories || []),
             valueKey: "id",
             labelKey: "name",
             placeholder: "请选择商品类目",
             searchPlaceholder: "搜索类目名称，空格分隔多个关键词",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_13));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_17));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({
             ...{ class: "required" },
@@ -13847,15 +13949,19 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.a, __VLS_intrinsicElements.a)(
 /** @type {__VLS_StyleScopedClasses['batch-claim-dialog']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-claim-select-all']} */ ;
 /** @type {__VLS_StyleScopedClasses['batch-claim-table']} */ ;
 /** @type {__VLS_StyleScopedClasses['batch-claim-head']} */ ;
 /** @type {__VLS_StyleScopedClasses['batch-claim-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['batch-claim-images']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-claim-image']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['batch-claim-progress']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['batch-claim-hover-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-close']} */ ;
@@ -14610,6 +14716,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             productLibraryShopSelectionLabel: productLibraryShopSelectionLabel,
             productLibraryTemplateFilter: productLibraryTemplateFilter,
             productLibrarySku: productLibrarySku,
+            MAX_PRODUCT_LIBRARY_SELECTION: MAX_PRODUCT_LIBRARY_SELECTION,
             selectedProductLibraryIds: selectedProductLibraryIds,
             productLibraryBrokenImages: productLibraryBrokenImages,
             showProductLibraryTemplateDialog: showProductLibraryTemplateDialog,
@@ -14650,8 +14757,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             taskCreatedTo: taskCreatedTo,
             taskSkuQuery: taskSkuQuery,
             taskTemplateFilterId: taskTemplateFilterId,
+            selectedBatchClaimImages: selectedBatchClaimImages,
+            batchClaimHoverPreview: batchClaimHoverPreview,
             selectedTaskIds: selectedTaskIds,
             showBatchClaimDialog: showBatchClaimDialog,
+            batchClaimItems: batchClaimItems,
             batchClaimLoading: batchClaimLoading,
             batchClaiming: batchClaiming,
             batchClaimCompleted: batchClaimCompleted,
@@ -14812,6 +14922,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             allSelectableTasksSelected: allSelectableTasksSelected,
             someSelectableTasksSelected: someSelectableTasksSelected,
             groupedBatchClaimItems: groupedBatchClaimItems,
+            allBatchClaimImagesSelected: allBatchClaimImagesSelected,
+            showBatchClaimHoverPreview: showBatchClaimHoverPreview,
+            batchClaimImageKey: batchClaimImageKey,
+            toggleBatchClaimImage: toggleBatchClaimImage,
+            toggleAllBatchClaimImages: toggleAllBatchClaimImages,
             changeTaskPageSize: changeTaskPageSize,
             changeTaskPage: changeTaskPage,
             switchTaskType: switchTaskType,
@@ -14974,7 +15089,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             toggleTaskSelection: toggleTaskSelection,
             taskCanBeSelected: taskCanBeSelected,
             toggleAllSelectableTasks: toggleAllSelectableTasks,
-            removeBatchClaimImage: removeBatchClaimImage,
             openBatchClaimDialog: openBatchClaimDialog,
             confirmBatchClaim: confirmBatchClaim,
             retryTaskResult: retryTaskResult,

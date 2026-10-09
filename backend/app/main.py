@@ -30,7 +30,7 @@ from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUp
 from .product_library_statistics import order_facts, sku_statistics
 from .product_library import parse_order_workbook
 from .product_library_rankings import SnapshotAlreadyRunning, company_run_lock, create_daily_snapshot, enqueue_ranking_task, task_payload
-from .schemas import HubEnvironmentSync, HubEnvironmentToggle, HubTaskClaimInput, HubTaskAction, ProductLibraryShopAssignment, ProductLibraryTitleGenerate, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
+from .schemas import MAX_PRODUCT_LIBRARY_SELECTION, HubEnvironmentSync, HubEnvironmentToggle, HubTaskClaimInput, HubTaskAction, ProductLibraryShopAssignment, ProductLibraryTitleGenerate, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
 from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, OperatorGroupCreate, OperatorGroupUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
@@ -2816,26 +2816,27 @@ def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Dep
     selected_urls = list(dict.fromkeys(payload.result_urls))
     if any(url not in task.result_urls for url in selected_urls):
         raise HTTPException(400, "包含不属于该任务的图片")
-    template = db.get(ProductTemplate, task.template_id)
-    owner = db.get(User, task.created_by)
-    if not template or not owner:
-        raise HTTPException(400, "任务缺少产品模板或创作人信息")
-    validate_material_sku_source(template, owner)
-    existing_urls = set(db.scalars(select(MaterialAsset.url).where(MaterialAsset.company_id == task.company_id, MaterialAsset.source_task_id == task.id)).all())
     claimed_count = 0
-    for index, url in enumerate(selected_urls, start=1):
-        if url not in existing_urls:
-            add_material_asset_with_sku(
-                db, template=template, owner=owner, company_id=task.company_id,
-                source_task_id=task.id, url=url, name=f"AI 创作 #{task.id} · 结果 {index}",
-            )
-            claimed_count += 1
-    # 首次领取同时完成任务，并保留第一张领取图作为任务的已选结果。
+    if selected_urls:
+        template = db.get(ProductTemplate, task.template_id)
+        owner = db.get(User, task.created_by)
+        if not template or not owner:
+            raise HTTPException(400, "任务缺少产品模板或创作人信息")
+        validate_material_sku_source(template, owner)
+        existing_urls = set(db.scalars(select(MaterialAsset.url).where(MaterialAsset.company_id == task.company_id, MaterialAsset.source_task_id == task.id)).all())
+        for index, url in enumerate(selected_urls, start=1):
+            if url not in existing_urls:
+                add_material_asset_with_sku(
+                    db, template=template, owner=owner, company_id=task.company_id,
+                    source_task_id=task.id, url=url, name=f"AI 创作 #{task.id} · 结果 {index}",
+                )
+                claimed_count += 1
+    # 首次审核即完成任务；全部不采用时不生成素材，也不设置已选结果。
     if task.status == TaskStatus.AWAITING_SELECTION:
-        task.selected_result_url = selected_urls[0]
+        task.selected_result_url = selected_urls[0] if selected_urls else None
         task.status = TaskStatus.COMPLETED
     db.commit()
-    return {"claimed": claimed_count, "message": "已领取到素材库"}
+    return {"claimed": claimed_count, "message": "已领取到素材库" if selected_urls else "审核完成，未采用图片"}
 
 
 def resolve_product_library_sources(db: Session, user: User, sources: list[ProductLibraryDraftSource], *, lock: bool = False):
@@ -2907,8 +2908,8 @@ def create_draft_from_product_library(payload: ProductLibraryDraftCreate,
 def create_drafts_from_product_library_batch(payload: ProductLibraryDraftBatchCreate,
     user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db)):
     sources = [source for group in payload.groups for source in group.sources]
-    if len(sources) > 100:
-        raise HTTPException(400, "一次最多选择 100 条数据")
+    if len(sources) > MAX_PRODUCT_LIBRARY_SELECTION:
+        raise HTTPException(400, f"一次最多选择 {MAX_PRODUCT_LIBRARY_SELECTION} 条数据")
     template = get_company_template(db, user, payload.template_id)
     records = resolve_product_library_sources(db, user, sources, lock=True)
     drafts, offset = [], 0

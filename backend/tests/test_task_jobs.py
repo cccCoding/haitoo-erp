@@ -581,6 +581,64 @@ class TaskJobTests(unittest.TestCase):
             self.assertEqual(second["claimed"], 0)
             self.assertEqual(asset.sku, original_sku)
 
+    def test_empty_review_completes_task_without_material_validation(self) -> None:
+        task_id = self.add_task(status=TaskStatus.AWAITING_SELECTION)
+        with self.session_factory() as db:
+            task = db.get(PodTask, task_id)
+            task.result_urls = ["https://img.example/discarded.png"]
+            db.get(User, 1).user_code = None
+            db.commit()
+            with patch.object(main, "validate_material_sku_source") as validate, patch.object(main, "add_material_asset_with_sku") as add:
+                result = main.claim_task_materials(task_id, ClaimMaterials(result_urls=[]), user=db.get(User, 1), db=db)
+                validate.assert_not_called()
+                add.assert_not_called()
+            db.refresh(task)
+            self.assertEqual(result["claimed"], 0)
+            self.assertEqual(task.status, TaskStatus.COMPLETED)
+            self.assertIsNone(task.selected_result_url)
+            self.assertEqual(task.result_urls, ["https://img.example/discarded.png"])
+            self.assertEqual(db.scalar(select(func.count(MaterialAsset.id))), 0)
+
+    def test_partial_review_and_empty_repeat_preserve_adopted_material(self) -> None:
+        task_id = self.add_task(status=TaskStatus.AWAITING_SELECTION)
+        adopted, discarded = "https://img.example/adopted.png", "https://img.example/discarded.png"
+        with self.session_factory() as db:
+            task = db.get(PodTask, task_id)
+            task.result_urls = [adopted, discarded]
+            db.commit()
+            result = main.claim_task_materials(task_id, ClaimMaterials(result_urls=[adopted]), user=db.get(User, 1), db=db)
+            self.assertEqual(result["claimed"], 1)
+            self.assertEqual(task.status, TaskStatus.COMPLETED)
+            self.assertEqual(task.selected_result_url, adopted)
+            asset = db.scalar(select(MaterialAsset).where(MaterialAsset.source_task_id == task_id))
+            original_sku = asset.sku
+            main.claim_task_materials(task_id, ClaimMaterials(result_urls=[]), user=db.get(User, 1), db=db)
+            db.refresh(task)
+            assets = db.scalars(select(MaterialAsset).where(MaterialAsset.source_task_id == task_id)).all()
+            self.assertEqual([(item.url, item.sku) for item in assets], [(adopted, original_sku)])
+            self.assertEqual(task.selected_result_url, adopted)
+            self.assertEqual(task.result_urls, [adopted, discarded])
+
+    def test_review_rejects_foreign_images_unauthorized_users_and_unready_tasks(self) -> None:
+        task_id = self.add_task(status=TaskStatus.AWAITING_SELECTION)
+        with self.session_factory() as db:
+            task = db.get(PodTask, task_id)
+            task.result_urls = ["https://img.example/own.png"]
+            db.commit()
+            with self.assertRaises(HTTPException) as invalid:
+                main.claim_task_materials(task_id, ClaimMaterials(result_urls=["https://img.example/foreign.png"]), user=db.get(User, 1), db=db)
+            self.assertEqual(invalid.exception.status_code, 400)
+            with self.assertRaises(HTTPException) as unauthorized:
+                main.claim_task_materials(task_id, ClaimMaterials(result_urls=[]), user=db.get(User, 3), db=db)
+            self.assertEqual(unauthorized.exception.status_code, 404)
+            self.assertEqual(task.status, TaskStatus.AWAITING_SELECTION)
+            task.status = TaskStatus.QUEUED
+            db.commit()
+            with self.assertRaises(HTTPException) as unready:
+                main.claim_task_materials(task_id, ClaimMaterials(result_urls=[]), user=db.get(User, 1), db=db)
+            self.assertEqual(unready.exception.status_code, 400)
+            self.assertEqual(db.scalar(select(func.count(MaterialAsset.id))), 0)
+
     def test_material_draft_reuses_skus_and_rejects_legacy_assets(self) -> None:
         with self.session_factory() as db:
             current = MaterialAsset(company_id=1, template_id=1, url="https://img.example/current.png", name="current", sku="M05LAA123456", claimed_by=1)

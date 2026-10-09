@@ -342,7 +342,7 @@ class ProductLibraryDraftTests(TestCase):
 
     def test_template_batch_selection_validation(self):
         for selection in ({}, {'material_asset_ids':[]}, {'material_asset_ids':[-1]},
-                          {'product_ids':list(range(1,52)), 'material_asset_ids':list(range(1,52))}):
+                          {'product_ids':list(range(1,1002)), 'material_asset_ids':list(range(1,1002))}):
             self.assertEqual(self.set_templates(**selection).status_code, 422)
         self.assertEqual(self.set_templates(material_asset_ids=[1,1]).status_code, 400)
         self.assertEqual(self.set_templates(product_ids=[1,1]).status_code, 400)

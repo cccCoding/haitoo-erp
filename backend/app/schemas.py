@@ -251,15 +251,18 @@ class MaterialDownloadInput(BaseModel):
     material_asset_ids: list[int] = Field(min_length=1, max_length=100)
 
 
+MAX_PRODUCT_LIBRARY_SELECTION = 2000
+
+
 class ProductLibraryBatchTemplateInput(BaseModel):
-    product_ids: list[int] = Field(default_factory=list, max_length=100)
-    material_asset_ids: list[int] = Field(default_factory=list, max_length=100)
+    product_ids: list[int] = Field(default_factory=list, max_length=MAX_PRODUCT_LIBRARY_SELECTION)
+    material_asset_ids: list[int] = Field(default_factory=list, max_length=MAX_PRODUCT_LIBRARY_SELECTION)
     template_id: int = Field(ge=1)
 
     @model_validator(mode="after")
     def validate_selection(self):
-        if not 1 <= len(self.product_ids) + len(self.material_asset_ids) <= 100:
-            raise ValueError("请选择 1-100 条产品或素材")
+        if not 1 <= len(self.product_ids) + len(self.material_asset_ids) <= MAX_PRODUCT_LIBRARY_SELECTION:
+            raise ValueError(f"请选择 1-{MAX_PRODUCT_LIBRARY_SELECTION} 条产品或素材")
         if any(record_id <= 0 for record_id in self.product_ids + self.material_asset_ids):
             raise ValueError("产品或素材 ID 必须为正整数")
         return self
@@ -314,7 +317,7 @@ class AIProviderCredentialUpdate(BaseModel):
 
 
 class ClaimMaterials(BaseModel):
-    result_urls: list[str] = Field(min_length=1, max_length=1000)
+    result_urls: list[str] = Field(min_length=0, max_length=1000)
 
 
 class TaskBatchRetry(BaseModel):
@@ -656,7 +659,7 @@ class ProductLibraryTitleGenerate(ProductLibraryDraftSource):
 
 class ProductLibraryDraftCreate(BaseModel):
     template_id: int
-    sources: list[ProductLibraryDraftSource] = Field(min_length=1, max_length=100)
+    sources: list[ProductLibraryDraftSource] = Field(min_length=1, max_length=MAX_PRODUCT_LIBRARY_SELECTION)
     title: str = Field(min_length=25, max_length=255)
     product_description: str | None = Field(default=None, max_length=5000)
 
@@ -672,4 +675,4 @@ class ProductLibraryDraftGroup(BaseModel):
 
 class ProductLibraryDraftBatchCreate(BaseModel):
     template_id: int
-    groups: list[ProductLibraryDraftGroup] = Field(min_length=1, max_length=20)
+    groups: list[ProductLibraryDraftGroup] = Field(min_length=1, max_length=MAX_PRODUCT_LIBRARY_SELECTION // 5)

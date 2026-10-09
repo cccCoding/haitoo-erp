@@ -418,19 +418,19 @@ class ProductLibraryTests(unittest.TestCase):
                     product_ids=[other_id], template_id=2,
                 ), user=db.get(User, 1), db=db)
 
-    def test_batch_assignment_enforces_100_item_limit(self):
+    def test_batch_assignment_enforces_2000_item_limit(self):
         with self.sessions() as db:
             db.add_all(ProductLibraryProduct(
                 company_id=1, source_id=1, external_product_id=f"product-{index}", sku=f"SKU-{index}", title="", image_url="",
-            ) for index in range(101))
+            ) for index in range(2001))
             db.commit()
             ids = db.scalars(select(ProductLibraryProduct.id).where(ProductLibraryProduct.company_id == 1).order_by(ProductLibraryProduct.id)).all()
             result = main.set_product_library_templates(ProductLibraryBatchTemplateInput(
-                product_ids=ids[:100], template_id=1,
+                product_ids=ids[:2000], template_id=1,
             ), user=db.get(User, 1), db=db)
-            self.assertEqual(result["updated"], 100)
-            self.assertIsNone(db.get(ProductLibraryProduct, ids[100]).template_id)
-            with self.assertRaisesRegex(ValueError, "at most 100"):
+            self.assertEqual(result["updated"], 2000)
+            self.assertIsNone(db.get(ProductLibraryProduct, ids[2000]).template_id)
+            with self.assertRaisesRegex(ValueError, "at most 2000"):
                 ProductLibraryBatchTemplateInput(product_ids=ids, template_id=1)
 
     def test_date_is_required_and_conflicting_order_dates_roll_back(self):
@@ -511,7 +511,7 @@ class ProductLibraryTests(unittest.TestCase):
             self.assertEqual(client.get(f"/product-library/{product_id}/orders?page=0", headers={"Authorization": f"Bearer {token_a}"}).status_code, 422)
             self.assertEqual(client.get(f"/product-library/{product_id}/orders", headers={"Authorization": f"Bearer {token_b}"}).status_code, 404)
             self.assertEqual(client.post("/product-library/templates/batch", headers={"Authorization": f"Bearer {token_a}"},
-                json={"product_ids": list(range(1, 102)), "template_id": 1}).status_code, 422)
+                json={"product_ids": list(range(1, 2002)), "template_id": 1}).status_code, 422)
             self.assertEqual(client.get("/product-library", headers={"Authorization": f"Bearer {token_b}"}).json()["total"], 0)
         finally:
             main.app.dependency_overrides.clear()
