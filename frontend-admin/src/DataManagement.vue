@@ -2,6 +2,7 @@
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import axios from 'axios'
 import { summarizeShopSales } from './shop-sales'
+import { dialogFocus as vDialogFocus } from './dialog-focus'
 
 const props = defineProps<{ token: string; companies: { id: number; name: string }[] }>()
 const emit = defineEmits<{ unauthorized: [] }>()
@@ -73,6 +74,8 @@ async function refresh(withFilters = true) {
   } catch (e: any) { if (id === requestId) error.value = message(e, '加载数据失败，请重试') }
   finally { if (id === requestId) loading.value = false }
 }
+function closePreview() { preview.value = null }
+function resetSearch() { resetFilters(); void refresh(false) }
 function search() { page.value = 1; closeOrders(); void refresh(false) }
 function changePage(next: number) { page.value = next; void refresh(false) }
 function changeTab(next: 'materials' | 'products') { if (tab.value === next) return; tab.value = next; category.value = 'products'; resetFilters(); void refresh() }
@@ -116,10 +119,10 @@ defineExpose({ refresh })
           <label>创作人<select v-model="creatorId"><option value="">全部创作人</option><option v-for="item in members" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
         </template>
         <template v-else-if="!isShops">
-          <div class="data-shop-filter"><span>店铺名称</span><details><summary>{{sourceIds.length ? `已选 ${sourceIds.length} 家店铺` : '全部店铺'}} ▾</summary><div class="data-shop-options"><input v-model="shopSearch" type="search" placeholder="搜索平台、站点或店铺" aria-label="搜索店铺"/><button type="button" class="secondary" @click="sourceIds=[]">清空选择</button><label v-for="shop in shopOptions" :key="shop.id"><input v-model="sourceIds" type="checkbox" :value="shop.id"/>{{shop.label}}</label><p v-if="!shopOptions.length">没有匹配的店铺</p></div></details></div>
+          <div class="data-shop-filter"><span>店铺名称</span><details><summary>{{sourceIds.length ? `已选 ${sourceIds.length} 家店铺` : '全部店铺'}}</summary><div class="data-shop-options"><input v-model="shopSearch" type="search" placeholder="搜索平台、站点或店铺" aria-label="搜索店铺"/><button type="button" class="secondary" @click="sourceIds=[]">清空选择</button><label v-for="shop in shopOptions" :key="shop.id"><input v-model="sourceIds" type="checkbox" :value="shop.id"/>{{shop.label}}</label><p v-if="!shopOptions.length">没有匹配的店铺</p></div></details></div>
           <template v-if="!isRanking"><label>模板<select v-model="templateId"><option value="">全部模板</option><option value="unmatched">未匹配</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label><label>SKU<input v-model="sku" type="search" placeholder="输入 SKU 前缀"/></label></template>
         </template>
-        <button class="primary" type="submit" :disabled="loading || !companyId">搜索</button>
+        <div class="data-filter-actions"><button class="primary" type="submit" :disabled="loading || !companyId">{{loading ? '加载中…' : '搜索'}}</button><button class="secondary" type="button" :disabled="loading || !companyId" @click="resetSearch">重置</button></div>
       </form>
       <p v-if="tab==='products' && descriptions[category]" class="data-note">{{descriptions[category]}}</p>
       <p v-if="isRanking && snapshotDate" class="data-note">{{snapshotDate}} 榜单 · 统计截至 {{throughDate}}</p>
@@ -132,7 +135,7 @@ defineExpose({ refresh })
               <template v-if="isShops"><td>{{row.platform}}</td><td>{{row.site}}</td><td>{{row.shop_name}}</td><td>{{row.assigned_user_name || '未分配'}}</td></template>
               <template v-else><td v-if="isRanking">#{{row.rank}}</td><td><button v-if="row.url || row.image_url" class="data-thumbnail" type="button" :aria-label="`预览 ${row.sku || row.name}`" @click="preview={url:imageUrl(row.url || row.image_url), title:row.name || row.title || row.sku}"><img :src="imageUrl(row.url || row.image_url)" :alt="row.name || row.title || row.sku" loading="lazy"/></button><span v-else>暂无图片</span></td><td><code>{{row.sku || '无 SKU'}}</code></td><td>{{row.template_name || row.template || '—'}}</td>
                 <template v-if="isMaterial"><td v-if="tab==='materials'">{{row.source_type==='ai_created'?'AI创作':'本地上传'}}<small v-if="row.source_task_id">任务 #{{row.source_task_id}}</small></td><td v-if="category==='new_images' && tab==='products'">{{row.usage_status==='used'?'已使用':'未使用'}}</td><td>{{date(row.created_at)}}</td><td>{{row.created_by_name || '历史记录缺失'}}</td></template>
-                <template v-else><td class="data-title">{{row.title || '—'}}</td><td><small v-for="shop in row.shop_sales" :key="shop.source_id">{{shop.shop_name}}-{{shop.sales_quantity}}</small></td><td>{{row.material_created_by_name || '—'}}</td><td>{{date(row.material_created_at)}}</td><td>{{row.order_count}}</td><td>{{row.sales_quantity}}</td><td><button class="secondary" type="button" @click="openOrders(row)">查看</button></td></template>
+                <template v-else><td class="data-title" :title="row.title"><span class="data-title-text">{{row.title || '—'}}</span></td><td><small v-for="shop in row.shop_sales" :key="shop.source_id">{{shop.shop_name}}-{{shop.sales_quantity}}</small></td><td>{{row.material_created_by_name || '—'}}</td><td>{{date(row.material_created_at)}}</td><td>{{row.order_count}}</td><td>{{row.sales_quantity}}</td><td><button class="secondary" type="button" @click="openOrders(row)">查看</button></td></template>
               </template>
             </tr>
           </tbody>
@@ -144,10 +147,58 @@ defineExpose({ refresh })
       <footer class="data-pagination"><span>共 {{total}} 条</span><template v-if="!isShops && !isTop"><label>每页 <select v-model.number="pageSize" :disabled="loading" @change="search"><option v-for="size in [20,50,100,200]" :key="size" :value="size">{{size}}</option></select> 条</label><button class="secondary" :disabled="loading || page<=1" @click="changePage(page-1)">上一页</button><span>第 {{page}} / {{pageCount}} 页</span><button class="secondary" :disabled="loading || page>=pageCount" @click="changePage(page+1)">下一页</button></template></footer>
     </div>
   </section>
-  <div v-if="preview" class="modal-backdrop" @click.self="preview=null"><section class="data-preview" role="dialog" aria-modal="true" aria-label="图片预览"><button class="secondary" autofocus @click="preview=null">关闭</button><img :src="preview.url" :alt="preview.title"/><p>{{preview.title}}</p></section></div>
-  <div v-if="orderProduct" class="modal-backdrop" @click.self="closeOrders"><section class="data-orders" role="dialog" aria-modal="true" aria-labelledby="data-orders-title"><button class="secondary" @click="closeOrders">关闭</button><h2 id="data-orders-title">订单详情</h2><p>{{orderProduct.sku}}</p><p v-if="orderError" class="error" role="alert">{{orderError}}</p><div class="data-table-scroll"><table class="data-table"><thead><tr><th>下单时间</th><th>订单编号</th><th>店铺</th><th>产品 ID</th><th>数量</th></tr></thead><tbody><tr v-for="(order,index) in orders" :key="index"><td>{{date(order.ordered_at)}}</td><td>{{order.order_number}}</td><td>{{order.shop_name}}</td><td>{{order.product_id}}</td><td>{{order.quantity}}</td></tr></tbody></table><p v-if="orderLoading" role="status">正在加载订单…</p><p v-else-if="!orders.length && !orderError">暂无订单。</p></div><footer class="data-pagination"><span>共 {{orderCount}} 单 · {{orderTotal}} 条明细</span><button class="secondary" :disabled="orderLoading || orderPage<=1" @click="changeOrderPage(orderPage-1)">上一页</button><span>第 {{orderPage}} / {{Math.max(1,Math.ceil(orderTotal/20))}} 页</span><button class="secondary" :disabled="orderLoading || orderPage>=Math.ceil(orderTotal/20)" @click="changeOrderPage(orderPage+1)">下一页</button></footer></section></div>
+  <div v-if="preview" v-dialog-focus="{close:closePreview}" class="modal-backdrop" @click.self="preview=null"><section class="data-preview" role="dialog" aria-modal="true" aria-label="图片预览"><button class="secondary" autofocus @click="preview=null">关闭</button><img :src="preview.url" :alt="preview.title"/><p>{{preview.title}}</p></section></div>
+  <div v-if="orderProduct" v-dialog-focus="{close:closeOrders}" class="modal-backdrop" @click.self="closeOrders"><section class="data-orders" role="dialog" aria-modal="true" aria-labelledby="data-orders-title"><button class="secondary" @click="closeOrders">关闭</button><h2 id="data-orders-title">订单详情</h2><p>{{orderProduct.sku}}</p><p v-if="orderError" class="error" role="alert">{{orderError}}</p><div class="data-table-scroll"><table class="data-table"><thead><tr><th>下单时间</th><th>订单编号</th><th>店铺</th><th>产品 ID</th><th>数量</th></tr></thead><tbody><tr v-for="(order,index) in orders" :key="index"><td>{{date(order.ordered_at)}}</td><td>{{order.order_number}}</td><td>{{order.shop_name}}</td><td>{{order.product_id}}</td><td>{{order.quantity}}</td></tr></tbody></table><p v-if="orderLoading" role="status">正在加载订单…</p><p v-else-if="!orders.length && !orderError">暂无订单。</p></div><footer class="data-pagination"><span>共 {{orderCount}} 单 · {{orderTotal}} 条明细</span><button class="secondary" :disabled="orderLoading || orderPage<=1" @click="changeOrderPage(orderPage-1)">上一页</button><span>第 {{orderPage}} / {{Math.max(1,Math.ceil(orderTotal/20))}} 页</span><button class="secondary" :disabled="orderLoading || orderPage>=Math.ceil(orderTotal/20)" @click="changeOrderPage(orderPage+1)">下一页</button></footer></section></div>
 </template>
 
 <style scoped>
-.data-tabs{display:flex;gap:24px;padding:0 24px;border-bottom:1px solid #e4e8f0}.data-tabs button{padding:18px 4px;background:none;color:#778195;font-weight:700;border-bottom:3px solid transparent}.data-tabs button.active{color:#2167e8;border-bottom-color:#2167e8}.data-filters{display:flex;align-items:end;flex-wrap:wrap;gap:16px;padding:24px}.data-filters>label,.data-shop-filter{display:grid;gap:8px;font-size:13px;font-weight:600;color:#596273;min-width:150px}.data-filters select,.data-filters input[type=search],summary{padding:10px 12px;border:1px solid #d8deea;background:#fff;border-radius:8px;font:inherit;min-height:40px;max-width:260px}.data-filters>button{min-height:40px}.data-filters select{width:100%}.data-shop-filter details{position:relative}summary{cursor:pointer}.data-shop-options{position:absolute;top:46px;left:0;z-index:10;background:#fff;border:1px solid #d8deea;border-radius:10px;box-shadow:0 10px 30px #15203320;width:330px;max-width:80vw;max-height:340px;overflow:auto;padding:12px;display:grid;gap:12px}.data-shop-options label{display:flex;align-items:center;gap:8px;font-weight:400}.data-note{padding:0 24px;color:#778195;font-size:13px}.data-note.error{color:#c43f56}.data-table-scroll{overflow:auto}.data-table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}.data-table th{background:#f6f8fc;color:#778195;font-size:12px;white-space:nowrap}.data-table td,.data-table th{padding:14px 18px;border-bottom:1px solid #edf0f5}.data-table td{vertical-align:middle;min-width:90px}.data-table code{white-space:nowrap}.data-table small{display:block;line-height:1.6;min-width:120px}.data-table td.data-title{min-width:230px;max-width:330px;overflow-wrap:anywhere}.data-thumbnail{display:block;padding:0;width:64px;height:80px;border:1px solid #e4e8f0;border-radius:7px;background:#f6f8fc;overflow:hidden}.data-thumbnail img{width:100%;height:100%;object-fit:contain}.data-empty{text-align:center;padding:40px;color:#778195}.data-pagination{display:flex;justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;color:#778195;font-size:13px}.data-pagination>span:first-child{margin-right:auto}.data-pagination select{border:1px solid #d8deea;padding:6px;border-radius:6px}.data-preview,.data-orders{background:#fff;padding:24px;border-radius:14px;max-height:90vh;overflow:auto;width:min(1100px,calc(100vw - 40px))}.data-preview{width:auto;max-width:calc(100vw - 40px);text-align:center}.data-preview img{display:block;max-width:100%;max-height:70vh;margin:16px auto;object-fit:contain}.data-preview>button,.data-orders>button{float:right}.data-orders h2{margin-top:0}button:disabled{opacity:.5;cursor:not-allowed}button:focus-visible,summary:focus-visible{outline:2px solid #2167e8;outline-offset:3px}@media(max-width:620px){.data-filters>label,.data-shop-filter{flex:1;min-width:130px}.data-filters{padding:20px;gap:12px}.data-filters select,.data-filters input{max-width:100%}.data-pagination{justify-content:center}.data-pagination>span:first-child{margin-right:0}}
+.data-tabs { display:flex; gap:24px; padding:0 24px; border-bottom:1px solid var(--admin-border); }
+.data-tabs button { min-height:48px; padding:14px 2px; border-bottom:2px solid transparent; background:none; color:var(--admin-muted); font-size:13px; font-weight:500; }
+.data-tabs button.active { border-bottom-color:var(--admin-primary); color:var(--admin-primary); font-weight:600; }
+.data-filters { display:flex; align-items:end; flex-wrap:wrap; gap:16px; padding:22px 24px; background:#fbfcfe; border-bottom:1px solid var(--admin-border); }
+.data-filters > label, .data-shop-filter { display:grid; gap:7px; min-width:140px; color:#475569; font-size:12px; font-weight:500; }
+.data-filters select, .data-filters input[type=search], summary { min-height:var(--admin-control-height); max-width:260px; padding:9px 12px; border:1px solid #cbd5e1; border-radius:8px; background:white; color:var(--admin-text); font:inherit; font-size:13px; }
+.data-filters select { width:100%; }
+.data-filter-actions { display:flex; gap:8px; }
+.data-shop-filter details { position:relative; }
+summary { cursor:pointer; }
+.data-shop-options { position:absolute; top:46px; left:0; z-index:10; display:grid; gap:12px; width:330px; max-width:80vw; max-height:340px; overflow:auto; padding:14px; border:1px solid var(--admin-border); border-radius:10px; background:white; box-shadow:0 12px 30px #17243b14; }
+.data-shop-options label { display:flex; align-items:center; gap:8px; font-weight:400; }
+.data-note { margin:14px 24px; color:var(--admin-muted); font-size:12px; line-height:1.7; }
+.data-note.error { color:#b4233b; }
+.data-table-scroll { overflow:auto; }
+.data-table { width:100%; border-collapse:collapse; text-align:left; font-size:12px; }
+.data-table th { position:sticky; top:0; z-index:1; background:#f8fafc; color:var(--admin-muted); font-size:11px; font-weight:500; white-space:nowrap; }
+.data-table td, .data-table th { padding:14px 20px; border-bottom:1px solid var(--admin-border); }
+.data-table td { min-width:90px; vertical-align:middle; }
+.data-table tbody tr:hover { background:#fbfcfe; }
+.data-table code { white-space:nowrap; font-size:11px; }
+.data-table small { display:block; min-width:120px; color:var(--admin-muted); font-size:11px; line-height:1.8; }
+.data-table td.data-title { min-width:230px; max-width:330px; overflow-wrap:anywhere; }
+.data-title-text { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; line-height:1.65; }
+.data-thumbnail { display:block; width:56px; height:70px; overflow:hidden; padding:0; border:1px solid var(--admin-border); border-radius:6px; background:#f8fafc; }
+.data-thumbnail:hover { border-color:var(--admin-primary); }
+.data-thumbnail img { display:block; width:100%; height:100%; object-fit:contain; }
+.data-empty { margin:0; padding:44px 24px; color:var(--admin-muted); font-size:13px; text-align:center; }
+.data-pagination { display:flex; justify-content:flex-end; align-items:center; flex-wrap:wrap; gap:12px; padding:18px 24px; color:var(--admin-muted); font-size:12px; }
+.data-pagination > span:first-child { margin-right:auto; }
+.data-pagination select { min-height:32px; padding:4px 8px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px; }
+.data-pagination .secondary { min-height:32px; padding:5px 10px; font-size:12px; }
+.data-preview, .data-orders { width:min(1100px,100%); max-height:calc(100dvh - 48px); overflow:auto; padding:24px; border:1px solid var(--admin-border); border-radius:14px; background:white; box-shadow:0 24px 80px #0f172a26; }
+.data-preview { width:auto; max-width:100%; text-align:center; }
+.data-preview img { display:block; max-width:100%; max-height:65vh; margin:16px auto; object-fit:contain; }
+.data-preview > button, .data-orders > button { float:right; }
+.data-orders h2 { margin-top:0; font-size:20px; }
+.data-orders > p, .data-preview > p { color:var(--admin-muted); font-size:12px; }
+@media(max-width:760px) {
+  .data-tabs { padding:0 20px; }
+  .data-filters { padding:20px; gap:14px 12px; }
+  .data-filters > label, .data-shop-filter { flex:1 1 calc(50% - 12px); min-width:120px; }
+  .data-filters select, .data-filters input[type=search] { width:100%; max-width:100%; }
+  .data-filter-actions { width:100%; }
+  .data-filter-actions button { flex:1; }
+  .data-pagination { padding:16px 20px; gap:10px; }
+  .data-pagination > span:first-child { flex-basis:100%; }
+  .data-preview, .data-orders { max-height:calc(100dvh - 32px); padding:20px; }
+}
 </style>
