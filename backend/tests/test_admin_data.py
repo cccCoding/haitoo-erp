@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 from app import main
 from app.database import Base, get_db
 from app.models import (Company, MaterialAsset, ProductLibraryOrder, ProductLibraryOrderProduct,
-                        ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, User)
+                        ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, TemplateGroup, User)
 from app.security import create_access_token
 
 
@@ -85,6 +85,25 @@ class AdminDataTests(unittest.TestCase):
         self.assertEqual(self.get('products', company_id=2).json()['items'][0]['sales_quantity'], 2)
         self.assertEqual(self.get('shops').json()[0]['assigned_user_name'], '管理员1')
 
+    def test_templates_include_details_and_only_selected_company(self):
+        with self.sessions() as db:
+            db.add_all([TemplateGroup(id=1, company_id=1, name='连衣裙'),
+                        TemplateGroup(id=2, company_id=2, name='其他公司分类')])
+            template = db.get(ProductTemplate, 1)
+            template.group_id = 1
+            template.product_description = '商品详情'
+            template.sku_specifications = {'size': {'options': ['S', 'M']}}
+            template.ai_prompts = [{'name': '提示', 'content': '印花要求'}]
+            db.add(ProductTemplate(id=3, name='平台模板', is_platform=True))
+            db.commit()
+        result = self.get('templates').json()
+        self.assertEqual([item['id'] for item in result['items']], [1])
+        self.assertEqual(result['groups'], [{'id': 1, 'name': '连衣裙'}])
+        self.assertEqual(result['items'][0]['product_description'], '商品详情')
+        self.assertEqual(result['items'][0]['sku_specifications']['size']['options'], ['S', 'M'])
+        self.assertEqual(result['items'][0]['ai_prompts'][0]['content'], '印花要求')
+        self.assertEqual([item['id'] for item in self.get('templates', company_id=2).json()['items']], [2])
+
     def test_categories_reuse_erp_queries(self):
         self.assertEqual(self.get('products', category='stagnant').json()['items'][0]['sku'], 'OLD')
         self.assertEqual(self.get('products', category='new_images', usage_status='used').json()['total'], 1)
@@ -97,7 +116,7 @@ class AdminDataTests(unittest.TestCase):
                 self.assertIsNone(result.json()['snapshot_date'])
 
     def test_access_validation_and_read_only_routes(self):
-        for path in ('filters', 'materials', 'products', 'shops', 'products/1/orders'):
+        for path in ('filters', 'templates', 'materials', 'products', 'shops', 'products/1/orders'):
             with self.subTest(path=path):
                 self.assertEqual(self.get(path, token=self.company_token).status_code, 403)
                 self.assertEqual(self.get(path, company_id=999).status_code, 404)

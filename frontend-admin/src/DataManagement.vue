@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import axios from 'axios'
+import TemplateLibrary from './TemplateLibrary.vue'
 import { summarizeShopSales } from './shop-sales'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
 
 const props = defineProps<{ token: string; companies: { id: number; name: string }[] }>()
 const emit = defineEmits<{ unauthorized: [] }>()
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8001' })
-const tab = ref<'materials' | 'products'>('materials')
+const tab = ref<'templates' | 'materials' | 'products'>('materials')
+const templateGroups = ref<{id: number; name: string}[]>([])
+const templateLibrary = ref<InstanceType<typeof TemplateLibrary> | null>(null)
 const companyId = ref<number | null>(null)
 const templates = ref<any[]>([]), members = ref<any[]>([]), shops = ref<any[]>([])
 const templateId = ref(''), creatorId = ref(''), usageStatus = ref('unused')
@@ -24,7 +27,7 @@ const categories = [
   ['potential', '潜力款'], ['hot', '热销款'], ['booming', '旺款'], ['stagnant', '滞销款'], ['new_images', '新图'], ['shops', '店铺数据'],
 ]
 const descriptions: Record<string, string> = { stagnant: '素材创建超过 90 天且历史累计 0 订单', new_images: '近 5 天新增的素材', potential: '近7天销量大于30', hot: '近7天销量大于70', booming: '近7天销量大于130' }
-const isMaterial = computed(() => tab.value === 'materials' || ['stagnant', 'new_images'].includes(category.value))
+const isMaterial = computed(() => tab.value === 'materials' || (tab.value === 'products' && ['stagnant', 'new_images'].includes(category.value)))
 const isShops = computed(() => tab.value === 'products' && category.value === 'shops')
 const isRanking = computed(() => tab.value === 'products' && !isMaterial.value && !isShops.value && category.value !== 'products')
 const isTop = computed(() => isRanking.value && ['top7', 'top15', 'top30'].includes(category.value))
@@ -40,7 +43,7 @@ function message(e: any, fallback: string) {
 function resetFilters() {
   templateId.value = ''; creatorId.value = ''; sourceIds.value = []; sku.value = ''; shopSearch.value = ''
   usageStatus.value = tab.value === 'materials' ? 'unused' : 'all'
-  page.value = 1; preview.value = null; closeOrders()
+  templateLibrary.value?.reset(); page.value = 1; preview.value = null; closeOrders()
 }
 function closeOrders() { orderRequestId++; orderProduct.value = null; orders.value = []; orderError.value = ''; orderLoading.value = false }
 async function refresh(withFilters = true) {
@@ -51,7 +54,7 @@ async function refresh(withFilters = true) {
   const selectedCompany = companyId.value
   const params: Record<string, any> = { company_id: selectedCompany, page: isTop.value ? 1 : page.value, page_size: isTop.value ? 50 : pageSize.value }
   if (tab.value === 'materials') Object.assign(params, { usage_status: usageStatus.value, creator_id: creatorId.value || undefined, template_id: templateId.value || undefined })
-  else if (!isShops.value) {
+  else if (tab.value === 'products' && !isShops.value) {
     params.category = category.value
     if (isMaterial.value) Object.assign(params, { creator_id: creatorId.value || undefined, usage_status: usageStatus.value })
     else {
@@ -61,13 +64,14 @@ async function refresh(withFilters = true) {
   }
   try {
     const [list, filters] = await Promise.all([
-      api.get(`/admin/data/${tab.value === 'materials' ? 'materials' : isShops.value ? 'shops' : 'products'}`, { headers: headers.value, params, paramsSerializer: { indexes: null } }),
-      withFilters ? api.get('/admin/data/filters', { headers: headers.value, params: { company_id: selectedCompany } }) : Promise.resolve(null),
+      api.get(`/admin/data/${tab.value === 'templates' ? 'templates' : tab.value === 'materials' ? 'materials' : isShops.value ? 'shops' : 'products'}`, { headers: headers.value, params, paramsSerializer: { indexes: null } }),
+      withFilters && tab.value !== 'templates' ? api.get('/admin/data/filters', { headers: headers.value, params: { company_id: selectedCompany } }) : Promise.resolve(null),
     ])
     if (id !== requestId) return
     rows.value = isShops.value ? list.data : list.data.items.map((row: any) => ({ ...row, shop_sales: summarizeShopSales(row.shop_data) }))
     appliedSourceIds.value = [...(params.source_ids || [])]
-    total.value = isShops.value ? list.data.length : list.data.total
+    templateGroups.value = list.data.groups || []
+    total.value = tab.value === 'templates' ? list.data.items.length : isShops.value ? list.data.length : list.data.total
     page.value = list.data.page ?? 1
     snapshotDate.value = list.data.snapshot_date ?? null; throughDate.value = list.data.through_date ?? ''
     if (filters) { templates.value = filters.data.templates; members.value = filters.data.members; shops.value = filters.data.shops }
@@ -78,7 +82,7 @@ function closePreview() { preview.value = null }
 function resetSearch() { resetFilters(); void refresh(false) }
 function search() { page.value = 1; closeOrders(); void refresh(false) }
 function changePage(next: number) { page.value = next; void refresh(false) }
-function changeTab(next: 'materials' | 'products') { if (tab.value === next) return; tab.value = next; category.value = 'products'; resetFilters(); void refresh() }
+function changeTab(next: 'templates' | 'materials' | 'products') { if (tab.value === next) return; tab.value = next; category.value = 'products'; resetFilters(); void refresh() }
 function changeCategory() { resetFilters(); void refresh() }
 watch(companyId, () => { templates.value = []; members.value = []; shops.value = []; resetFilters(); void refresh() })
 watch(() => props.companies, (companies) => {
@@ -104,10 +108,9 @@ defineExpose({ refresh })
 </script>
 
 <template>
-  <section class="data-management panel">
-    <div class="heading"><h2>平台数据</h2><p>按公司查看素材库与产品库数据，仅供查阅。</p></div>
+  <section class="data-management">
     <div class="data-tabs" role="tablist" aria-label="数据管理">
-      <button v-for="item in [{key:'materials' as const,label:'素材库'},{key:'products' as const,label:'产品库'}]" :id="`data-tab-${item.key}`" :key="item.key" role="tab" :aria-selected="tab===item.key" aria-controls="data-tab-panel" :class="{active:tab===item.key}" @click="changeTab(item.key)">{{item.label}}</button>
+      <button v-for="item in [{key:'templates' as const,label:'模板库'},{key:'materials' as const,label:'素材库'},{key:'products' as const,label:'产品库'}]" :id="`data-tab-${item.key}`" :key="item.key" role="tab" :aria-selected="tab===item.key" aria-controls="data-tab-panel" :class="{active:tab===item.key}" @click="changeTab(item.key)">{{item.label}}</button>
     </div>
     <div id="data-tab-panel" role="tabpanel" :aria-labelledby="`data-tab-${tab}`">
       <form class="data-filters" @submit.prevent="search">
@@ -118,7 +121,7 @@ defineExpose({ refresh })
           <label v-if="tab==='materials'">产品模板<select v-model="templateId"><option value="">全部模板</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
           <label>创作人<select v-model="creatorId"><option value="">全部创作人</option><option v-for="item in members" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
         </template>
-        <template v-else-if="!isShops">
+        <template v-else-if="tab==='products' && !isShops">
           <div class="data-shop-filter"><span>店铺名称</span><details><summary>{{sourceIds.length ? `已选 ${sourceIds.length} 家店铺` : '全部店铺'}}</summary><div class="data-shop-options"><input v-model="shopSearch" type="search" placeholder="搜索平台、站点或店铺" aria-label="搜索店铺"/><button type="button" class="secondary" @click="sourceIds=[]">清空选择</button><label v-for="shop in shopOptions" :key="shop.id"><input v-model="sourceIds" type="checkbox" :value="shop.id"/>{{shop.label}}</label><p v-if="!shopOptions.length">没有匹配的店铺</p></div></details></div>
           <template v-if="!isRanking"><label>模板<select v-model="templateId"><option value="">全部模板</option><option value="unmatched">未匹配</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label><label>SKU<input v-model="sku" type="search" placeholder="输入 SKU 前缀"/></label></template>
         </template>
@@ -127,7 +130,8 @@ defineExpose({ refresh })
       <p v-if="tab==='products' && descriptions[category]" class="data-note">{{descriptions[category]}}</p>
       <p v-if="isRanking && snapshotDate" class="data-note">{{snapshotDate}} 榜单 · 统计截至 {{throughDate}}</p>
       <p v-if="error" class="error data-note" role="alert">{{error}}</p>
-      <div class="data-table-scroll" :aria-busy="loading">
+      <TemplateLibrary v-if="tab==='templates'" :key="companyId ?? 'none'" ref="templateLibrary" :items="rows" :groups="templateGroups" :company-name="companies.find(item=>item.id===companyId)?.name || ''" :image-url="imageUrl" :loading="loading" :error="error" :has-company="!!companyId" />
+      <div v-else class="data-table-scroll" :aria-busy="loading">
         <table class="data-table">
           <thead><tr v-if="isShops"><th>平台</th><th>站点</th><th>店铺名称</th><th>负责人</th></tr><tr v-else><th v-if="isRanking">名次</th><th>缩略图</th><th>SKU</th><th>模板</th><template v-if="isMaterial"><th v-if="tab==='materials'">类型</th><th v-if="category==='new_images' && tab==='products'">使用状态</th><th>创建时间</th><th>创作人</th></template><template v-else><th>标题</th><th>店铺数据（店铺-销量）</th><th>创作人</th><th>创建时间</th><th>订单数</th><th>销量</th><th>订单详情</th></template></tr></thead>
           <tbody>
@@ -144,7 +148,7 @@ defineExpose({ refresh })
         <p v-else-if="!companyId" class="data-empty">{{companies.length?'请选择公司查看数据。':'暂无公司。'}}</p>
         <p v-else-if="!rows.length && !error" class="data-empty">{{isRanking && !snapshotDate?'该公司暂无榜单快照。':'没有符合筛选条件的数据。'}}</p>
       </div>
-      <footer class="data-pagination"><span>共 {{total}} 条</span><template v-if="!isShops && !isTop"><label>每页 <select v-model.number="pageSize" :disabled="loading" @change="search"><option v-for="size in [20,50,100,200]" :key="size" :value="size">{{size}}</option></select> 条</label><button class="secondary" :disabled="loading || page<=1" @click="changePage(page-1)">上一页</button><span>第 {{page}} / {{pageCount}} 页</span><button class="secondary" :disabled="loading || page>=pageCount" @click="changePage(page+1)">下一页</button></template></footer>
+      <footer v-if="tab!=='templates'" class="data-pagination"><span>共 {{total}} 条</span><template v-if="!isShops && !isTop"><label>每页 <select v-model.number="pageSize" :disabled="loading" @change="search"><option v-for="size in [20,50,100,200]" :key="size" :value="size">{{size}}</option></select> 条</label><button class="secondary" :disabled="loading || page<=1" @click="changePage(page-1)">上一页</button><span>第 {{page}} / {{pageCount}} 页</span><button class="secondary" :disabled="loading || page>=pageCount" @click="changePage(page+1)">下一页</button></template></footer>
     </div>
   </section>
   <div v-if="preview" v-dialog-focus="{close:closePreview}" class="modal-backdrop" @click.self="preview=null"><section class="data-preview" role="dialog" aria-modal="true" aria-label="图片预览"><button class="secondary" autofocus @click="preview=null">关闭</button><img :src="preview.url" :alt="preview.title"/><p>{{preview.title}}</p></section></div>
@@ -152,6 +156,8 @@ defineExpose({ refresh })
 </template>
 
 <style scoped>
+.data-management { min-width:0; }
+.data-table-scroll, .data-pagination { background:var(--admin-surface); }
 .data-tabs { display:flex; gap:24px; padding:0 24px; border-bottom:1px solid var(--admin-border); }
 .data-tabs button { min-height:48px; padding:14px 2px; border-bottom:2px solid transparent; background:none; color:var(--admin-muted); font-size:13px; font-weight:500; }
 .data-tabs button.active { border-bottom-color:var(--admin-primary); color:var(--admin-primary); font-weight:600; }

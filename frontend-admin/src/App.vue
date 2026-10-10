@@ -13,7 +13,7 @@ const queueSettings = ref({ submit_interval_ms: 1000, result_interval_ms: 5000 }
 const loading = ref(false), saving = ref(''), error = ref('')
 const toast = ref('')
 const refreshing = ref(false)
-const pageDescriptions: Record<string, string> = { overview: '查看平台规模、任务状态与队列健康情况', companies: '管理企业开通与管理员账号', models: '管理印花模型与任务提交参数', data: '跨公司查阅素材、产品和店铺数据' }
+const pageDescriptions: Record<string, string> = { overview: '查看平台规模、任务状态与队列健康情况', companies: '管理企业开通与管理员账号', models: '管理印花模型与任务提交参数', data: '跨公司查阅模板、素材、产品和店铺数据' }
 const route = useRoute()
 const activePage = computed(() => route.name)
 const dataManagement = ref<InstanceType<typeof DataManagement> | null>(null)

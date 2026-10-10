@@ -2595,6 +2595,20 @@ def admin_data_filters(
     }
 
 
+@app.get("/admin/data/templates")
+def admin_data_templates(
+    company_id: int = Query(ge=1),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db),
+):
+    admin_company_read_scope(db, company_id)
+    templates = db.scalars(select(ProductTemplate).where(ProductTemplate.company_id == company_id)
+                           .order_by(ProductTemplate.id.desc())).all()
+    groups = db.scalars(select(TemplateGroup).where(or_(
+        TemplateGroup.company_id == company_id, TemplateGroup.is_platform.is_(True),
+    )).order_by(TemplateGroup.is_platform.desc(), TemplateGroup.name)).all()
+    return {"items": templates, "groups": [{"id": item.id, "name": item.name} for item in groups]}
+
+
 @app.get("/admin/data/materials")
 def admin_data_materials(
     company_id: int = Query(ge=1), page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=1000),
