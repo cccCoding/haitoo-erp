@@ -21,7 +21,7 @@ from typing import Annotated, Literal
 from types import SimpleNamespace
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import delete, func, inspect, or_, select, text, tuple_, update
+from sqlalchemy import case, delete, func, inspect, or_, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from . import hub
@@ -30,6 +30,8 @@ from .database import SessionLocal, engine, get_db
 from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MiaoshouCollectBoxItem, OperatorGroup, PodTask, ProductDraft, ProductLibraryDailySnapshot, ProductLibraryRankingTask, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryOrderSkuQuantity, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
 from .product_library_statistics import order_facts, sku_statistics
 from .product_library import parse_order_workbook
+from .material_import import MAX_IMPORT_BYTES, build_import_template, parse_import_workbook, validate_image_link
+from .schemas import MaterialImportConfirmInput
 from .product_library_rankings import SnapshotAlreadyRunning, company_run_lock, create_daily_snapshot, enqueue_ranking_task, task_payload
 from .schemas import MAX_PRODUCT_LIBRARY_SELECTION, HubEnvironmentSync, HubEnvironmentToggle, HubTaskClaimInput, HubTaskAction, ProductLibraryShopAssignment, ProductLibraryTitleGenerate, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
@@ -1798,7 +1800,7 @@ def validate_material_sku_source(template: ProductTemplate, owner: User) -> tupl
 
 def add_material_asset_with_sku(
     db: Session, *, template: ProductTemplate, owner: User, company_id: int,
-    source_task_id: int | None, url: str, name: str,
+    source_task_id: int | None, url: str, name: str, source_type: str | None = None,
 ) -> MaterialAsset:
     """写入带永久 SKU 的素材；唯一索引冲突时在保存点内重新生成。"""
     template_name, user_code = validate_material_sku_source(template, owner)
@@ -1806,7 +1808,7 @@ def add_material_asset_with_sku(
         random_part = "".join(secrets.choice(SKU_ALPHABET) for _ in range(6))
         asset = MaterialAsset(
             company_id=company_id, source_task_id=source_task_id, template_id=template.id,
-            url=url, name=name, sku=f"{template_name}{user_code}{random_part}", claimed_by=owner.id,
+            url=url, name=name, sku=f"{template_name}{user_code}{random_part}", claimed_by=owner.id, source_type=source_type,
         )
         try:
             with db.begin_nested():
@@ -2360,6 +2362,52 @@ def get_task_detail(task_id: int, user: User = Depends(current_user), db: Sessio
     return serialize_task_view(task, creator.name if creator else "历史记录缺失", template.name if template else "历史模板已删除", user, include_details=True)
 
 
+@app.get("/material-assets/import-template")
+def download_material_import_template(user: User = Depends(current_user)):
+    return Response(
+        content=build_import_template(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote('素材库导入模版.xlsx')}"},
+    )
+
+
+@app.post("/material-assets/import-preview")
+async def preview_material_import(file: UploadFile = File(...), user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if not (file.filename or "").lower().endswith(".xlsx"):
+        raise HTTPException(400, "请上传 .xlsx 格式的素材表格")
+    try:
+        urls = parse_import_workbook(await file.read(MAX_IMPORT_BYTES + 1))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    existing = set(db.scalars(select(MaterialAsset.url).where(
+        MaterialAsset.company_id == user.company_id, MaterialAsset.url.in_(urls),
+    )).all())
+    return {"items": [{"url": url, "exists": url in existing} for url in urls]}
+
+
+@app.post("/material-assets/import-confirm")
+def confirm_material_import(payload: MaterialImportConfirmInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    template = get_company_template(db, user, payload.template_id)
+    validate_material_sku_source(template, user)
+    try:
+        urls = list(dict.fromkeys(validate_image_link(url, index) for index, url in enumerate(payload.urls, start=2)))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    # 外层保存点保证 SQLite 等环境中首个 SKU 保存点也属于整批事务。
+    try:
+        with db.begin_nested():
+            for index, url in enumerate(urls, start=1):
+                add_material_asset_with_sku(
+                    db, template=template, owner=user, company_id=user.company_id,
+                    source_task_id=None, url=url, name=f"导入素材 {index}", source_type="imported",
+                )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"imported": len(urls)}
+
+
 @app.get("/material-assets")
 def list_material_assets(
     page: int = Query(default=1, ge=1),
@@ -2367,11 +2415,14 @@ def list_material_assets(
     creator_id: int | None = Query(default=None, ge=1),
     template_id: int | None = None,
     usage_status: str = "unused",
+    source_type: str = "",
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     if usage_status not in {"unused", "used"}:
         raise HTTPException(422, "不支持的素材状态")
+    if source_type not in {"", "ai_created", "local_upload", "imported"}:
+        raise HTTPException(422, "不支持的素材类型")
     filters = []
     if user.role != Role.SUPER_ADMIN:
         filters.append(MaterialAsset.company_id == user.company_id)
@@ -2382,6 +2433,11 @@ def list_material_assets(
     if template_id is not None:
         filters.append(MaterialAsset.template_id == template_id)
     filters.append(MaterialAsset.usage_status == usage_status)
+    if source_type:
+        effective_source = func.coalesce(func.nullif(MaterialAsset.source_type, ""), case(
+            (MaterialAsset.source_task_id.is_not(None), "ai_created"), else_="local_upload",
+        ))
+        filters.append(effective_source == source_type)
     total_stmt = select(func.count()).select_from(MaterialAsset)
     if filters:
         total_stmt = total_stmt.where(*filters)
@@ -2408,7 +2464,7 @@ def list_material_assets(
                 "created_by": asset.claimed_by,
                 "created_by_name": creator_names.get(asset.claimed_by, "历史记录缺失"),
                 "template_name": template_names.get(asset.template_id, "未设置模板" if asset.template_id is None else "历史模板已删除"),
-                "source_type": "ai_created" if asset.source_task_id is not None else "local_upload",
+                "source_type": asset.source_type or ("ai_created" if asset.source_task_id is not None else "local_upload"),
             }
             for asset in assets
         ],

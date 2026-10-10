@@ -20,6 +20,18 @@ class SchemaMigrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.engine.dispose()
 
+    def test_material_import_migration_preserves_legacy_source(self):
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, "20261008_31")
+            connection.execute(text("INSERT INTO material_assets (id, company_id, source_task_id, url, name, sku, claimed_by, created_at, usage_status) VALUES (900, 1, 123, 'https://example.com/old', 'old', 'OLDSKU', 1, CURRENT_TIMESTAMP, 'used')"))
+            command.upgrade(config, "head")
+            row = connection.execute(text("SELECT source_type, source_task_id, url, sku, usage_status FROM material_assets WHERE id=900")).one()
+            self.assertEqual(tuple(row), (None, 123, 'https://example.com/old', 'OLDSKU', 'used'))
+            command.downgrade(config, "20261008_31")
+            self.assertNotIn('source_type', {c['name'] for c in inspect(connection).get_columns('material_assets')})
+            self.assertEqual(connection.execute(text("SELECT sku FROM material_assets WHERE id=900")).scalar_one(), 'OLDSKU')
+
     def test_unmigrated_database_is_rejected_by_application_check(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "请先执行 python -m app.db_migrate"):
             assert_schema_current(self.engine)
@@ -88,7 +100,7 @@ class SchemaMigrationTests(unittest.TestCase):
             command.upgrade(config, "head")
             current, expected = schema_heads(connection)
             self.assertEqual(current, expected)
-            self.assertEqual(current, {"20261008_31"})
+            self.assertEqual(current, {"20261010_32"})
             columns = {column['name'] for column in inspect(connection).get_columns('product_templates')}
             self.assertNotIn('confirmed_product_info', columns)
             self.assertEqual(connection.execute(text("SELECT title_template FROM product_templates WHERE id=900")).scalar_one(), 'Existing title rules')

@@ -653,6 +653,11 @@ class ProductLibraryDraftSource(BaseModel):
     id: int = Field(gt=0)
 
 
+class MaterialImportConfirmInput(BaseModel):
+    template_id: int = Field(gt=0)
+    urls: list[str] = Field(min_length=1, max_length=1000)
+
+
 class ProductLibraryTitleGenerate(ProductLibraryDraftSource):
     additional_requirements: str = Field(default="", max_length=1000)
 
