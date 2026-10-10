@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import unittest
 from unittest.mock import patch
@@ -158,6 +159,24 @@ class MaterialImportTests(unittest.TestCase):
             with self.assertRaises(HTTPException) as error:
                 main.list_material_assets(source_type='unsupported', user=user, db=db)
             self.assertEqual(error.exception.status_code, 422)
+
+    def test_creation_time_filter_uses_utc_inclusive_boundaries(self):
+        with self.sessions() as db:
+            for index, instant in enumerate([datetime(2026, 10, 10, 0), datetime(2026, 10, 10, 1), datetime(2026, 10, 10, 2)]):
+                db.add(MaterialAsset(company_id=1, claimed_by=1, name=str(index), url=f'https://img.example/date-{index}', sku=f'DATE{index}', created_at=instant))
+            db.commit()
+            user = db.get(User, 1)
+            hk = timezone(timedelta(hours=8))
+            def query(**dates):
+                return main.list_material_assets(page=1, page_size=20, creator_id=None, template_id=None, user=user, db=db, **dates)
+            result = query(created_from=datetime(2026, 10, 10, 8, tzinfo=hk), created_to=datetime(2026, 10, 10, 9, tzinfo=hk))
+            self.assertEqual([item['sku'] for item in result['items']], ['DATE1', 'DATE0'])
+            self.assertEqual(result['total'], 2)
+            self.assertEqual(query(created_from=datetime(2026, 10, 10, 2))['total'], 1)
+            self.assertEqual(query(created_to=datetime(2026, 10, 10, 0))['total'], 1)
+            with self.assertRaises(HTTPException) as error:
+                query(created_from=datetime(2026, 10, 10, 2), created_to=datetime(2026, 10, 10, 9, tzinfo=hk))
+            self.assertEqual(error.exception.status_code, 400)
 
     def test_batch_rolls_back_when_second_insert_fails(self):
         original = main.add_material_asset_with_sku

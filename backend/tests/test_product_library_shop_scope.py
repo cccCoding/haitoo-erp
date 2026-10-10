@@ -109,6 +109,42 @@ class ProductLibraryShopScopeTests(TestCase):
         self.assertEqual([item["id"] for item in self.ranking(3, "potential")["items"]], [1])
         self.assertEqual([item["id"] for item in self.ranking(1, "potential")["items"]], [1, 2, 3])
 
+    def test_creator_filter_matches_material_creator_before_aggregation(self):
+        for product_id, source_id, count in [(1, 1, 31), (2, 2, 40), (3, 2, 131), (5, 3, 35)]:
+            self.add_product(product_id, source_id, count)
+        with self.sessions() as db:
+            db.get(ProductLibraryProduct, 2).sku = 'SKU-1'
+            db.add_all([
+                MaterialAsset(company_id=1, claimed_by=3, sku='SKU-1', name='Member material', url='https://example.com/a'),
+                MaterialAsset(company_id=1, claimed_by=2, sku='SKU-3', name='Leader material', url='https://example.com/b'),
+                MaterialAsset(company_id=2, claimed_by=6, sku='SKU-5', name='Foreign material', url='https://example.com/c'),
+            ])
+            db.commit()
+        self.snapshot()
+        with self.sessions() as db:
+            admin = db.get(User, 1)
+            for category in ('top7', 'top15', 'top30', 'potential', 'hot', 'booming'):
+                result = main.list_product_library_rankings(category=category, page=1, page_size=50, source_ids=None, creator_id=3, user=admin, db=db)
+                expected = [] if category in ('potential', 'booming') else ['SKU-1']
+                self.assertEqual([item['sku'] for item in result['items']], expected)
+                self.assertEqual(result['total'], len(expected))
+                if expected:
+                    self.assertEqual(result['items'][0]['sales_quantity'], 71)
+                    self.assertEqual(result['items'][0]['rank'], 1)
+                    self.assertEqual(result['items'][0]['material_created_by_name'], 'Member')
+            result = main.list_product_library(page=1, page_size=20, template_id=None, source_ids=None, creator_id=3, user=admin, db=db)
+            self.assertEqual(result['total'], 1)
+            self.assertEqual(result['items'][0]['sales_quantity'], 71)
+            scoped = main.list_product_library_rankings(category='top7', page=1, page_size=50, source_ids=[2], creator_id=3, user=admin, db=db)
+            self.assertEqual(scoped['items'][0]['sales_quantity'], 40)
+            # 创建人不能扩大店铺权限；跨公司素材不能作为本公司产品的创建人来源。
+            member = main.list_product_library_rankings(category='hot', page=1, page_size=50, creator_id=3, user=db.get(User, 3), db=db)
+            self.assertEqual(member['total'], 0)
+            foreign = main.list_product_library_rankings(category='top7', page=1, page_size=50, creator_id=6, user=admin, db=db)
+            self.assertEqual(foreign['total'], 0)
+            options = main.product_library_filters(user=db.get(User, 3), db=db)['creators']
+            self.assertEqual(options, [{'id': 2, 'name': 'Leader'}, {'id': 3, 'name': 'Member'}])
+
     def test_assignment_endpoints_and_product_access(self):
         self.add_product(1, 1, 1)
         self.add_product(2, 5, 1)

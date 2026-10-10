@@ -138,7 +138,7 @@ const productLibraryCategoryDescriptions: Partial<Record<ProductLibraryTab,strin
   hot:'近7天销量大于70',
   booming:'近7天销量大于130',
 }
-const productLibraryFilters = ref<{shops:{id:number;label:string}[]}>({shops:[]})
+const productLibraryFilters = ref<{shops:{id:number;label:string}[];creators?:{id:number;name:string}[]}>({shops:[]})
 const productLibrarySelectedShopIds = ref<number[]>([]), productLibraryShopSearch = ref('')
 const productLibraryShopFilterDetails = ref<HTMLDetailsElement | null>(null)
 function closeProductLibraryShopFilterOnOutsideClick(event: PointerEvent) {
@@ -148,7 +148,10 @@ function closeProductLibraryShopFilterOnOutsideClick(event: PointerEvent) {
 const productLibraryShopOptions = computed(() => productLibraryFilters.value.shops.filter(shop => shop.label.toLocaleLowerCase().includes(productLibraryShopSearch.value.trim().toLocaleLowerCase())))
 const productLibraryShopSelectionLabel = computed(() => productLibrarySelectedShopIds.value.length === 0 ? '全部店铺' : productLibrarySelectedShopIds.value.length === 1 ? productLibraryFilters.value.shops.find(shop => shop.id === productLibrarySelectedShopIds.value[0])?.label || '已选 1 家店铺' : `已选 ${productLibrarySelectedShopIds.value.length} 家店铺`)
 const productLibraryTemplateFilter = ref(''), productLibrarySku = ref('')
-const appliedProductLibraryFilters = ref({sourceIds:[] as number[], template:'', sku:''})
+const productLibraryCreatorId = ref<number | null>(null)
+const productLibraryCreatorOptions = computed(() => productLibraryFilters.value.creators || (user.value?.role==='company_admin' ? members.value : []))
+const appliedProductLibraryFilters = ref({sourceIds:[] as number[], template:'', sku:'', creatorId:null as number | null})
+const rankingCreatorFilters = ref<Partial<Record<ProductLibraryTab, number | null>>>({})
 const rankingShopFilters = ref<Partial<Record<ProductLibraryTab, number[]>>>({})
 const MAX_PRODUCT_LIBRARY_SELECTION = 2000
 const selectedProductLibraryIds = ref<number[]>([]), productLibraryBrokenImages = ref<number[]>([])
@@ -192,8 +195,9 @@ const selectedTaskIds = ref<number[]>([]), showBatchClaimDialog = ref(false), ba
 const materialPageSize = ref(20), currentMaterialPage = ref(1), materialTotal = ref(0), materialCreatorFilterId = ref<number | null>(null), materialListRefreshing = ref(false)
 type MaterialSourceType = '' | 'ai_created' | 'local_upload' | 'imported'
 const materialSourceTypeFilter = ref<MaterialSourceType>('')
-const appliedMaterialFilters = ref<{template_id:number | null; creator_id:number | null; source_type:MaterialSourceType}>({template_id:null, creator_id:null, source_type:''})
-function materialQueryParams() { return {page:currentMaterialPage.value, page_size:materialPageSize.value, ...appliedMaterialFilters.value, usage_status:activeMaterialUsageTab.value} }
+const materialCreatedFrom = ref(''), materialCreatedTo = ref('')
+const appliedMaterialFilters = ref<{template_id:number | null; creator_id:number | null; source_type:MaterialSourceType; created_from:string; created_to:string}>({template_id:null, creator_id:null, source_type:'', created_from:'', created_to:''})
+function materialQueryParams() { return {page:currentMaterialPage.value, page_size:materialPageSize.value, ...appliedMaterialFilters.value, created_from:appliedMaterialFilters.value.created_from || undefined, created_to:appliedMaterialFilters.value.created_to || undefined, usage_status:activeMaterialUsageTab.value} }
 const creatorFiltersInitialized = ref(false)
 const previewImageUrl = ref(''), previewImageAlt = ref('')
 type ImageWorkspaceMode = 'carousel' | 'full'
@@ -621,7 +625,8 @@ async function changeMaterialPageSize() { if (materialListRefreshing.value) retu
 async function changeMaterialPage(targetPage: number) { if (materialListRefreshing.value) return; currentMaterialPage.value = Math.min(Math.max(1, targetPage), materialPageCount.value); await refreshMaterialList() }
 async function searchMaterials() {
   if (materialListRefreshing.value) return
-  appliedMaterialFilters.value = {template_id:materialTemplateFilterId.value, creator_id:materialCreatorFilterId.value, source_type:materialSourceTypeFilter.value}
+  if (materialCreatedFrom.value && materialCreatedTo.value && new Date(materialCreatedFrom.value) > new Date(materialCreatedTo.value)) { showToast('创建开始时间不能晚于结束时间'); return }
+  appliedMaterialFilters.value = {template_id:materialTemplateFilterId.value, creator_id:materialCreatorFilterId.value, source_type:materialSourceTypeFilter.value, created_from:toUtcIso(materialCreatedFrom.value), created_to:toUtcIso(materialCreatedTo.value)}
   currentMaterialPage.value = 1
   await refreshMaterialList()
 }
@@ -704,7 +709,7 @@ async function loadProductLibrary(withFilters = false) {
     const params = {page:productLibraryPage.value, page_size:productLibraryPageSize.value,
       source_ids:applied.sourceIds.length ? applied.sourceIds : undefined, sku:applied.sku || undefined,
       template_id:applied.template && applied.template !== 'unmatched' ? Number(applied.template) : undefined,
-      unmatched:applied.template === 'unmatched' ? true : undefined}
+      unmatched:applied.template === 'unmatched' ? true : undefined, creator_id:applied.creatorId || undefined}
     const [list, filters] = await Promise.all([
       api.get('/product-library', {headers:headers.value, params, paramsSerializer:{indexes:null}}),
       withFilters ? api.get('/product-library/filters', {headers:headers.value}) : Promise.resolve(null),
@@ -732,7 +737,7 @@ async function loadProductLibraryRankings() {
     productLibraryRankingLoading.value = true
     productLibraryRankingError.value = ''
     const {data} = await api.get('/product-library/rankings', {headers:headers.value, params:{category, page:isTop50 ? 1 : productLibraryRankingPage.value, page_size:isTop50 ? 50 : productLibraryRankingPageSize.value,
-      source_ids:rankingShopFilters.value[category]?.length ? rankingShopFilters.value[category] : undefined}, paramsSerializer:{indexes:null}})
+      source_ids:rankingShopFilters.value[category]?.length ? rankingShopFilters.value[category] : undefined, creator_id:rankingCreatorFilters.value[category] || undefined}, paramsSerializer:{indexes:null}})
     if (requestId !== productLibraryRankingRequestId) return
     productLibraryRankingItems.value = data.items || []
     productLibraryRankingTotal.value = data.total || 0
@@ -820,6 +825,7 @@ function searchProductLibrary() {
   productLibraryShopFilterDetails.value?.removeAttribute('open')
   if (productLibraryRankingTabKeys.has(activeProductLibraryTab.value)) {
     rankingShopFilters.value[activeProductLibraryTab.value] = [...productLibrarySelectedShopIds.value]
+    rankingCreatorFilters.value[activeProductLibraryTab.value] = productLibraryCreatorId.value
     productLibraryRankingPage.value = 1
     selectedProductLibraryIds.value = []
     void loadProductLibraryRankings()
@@ -827,7 +833,7 @@ function searchProductLibrary() {
   }
   appliedProductLibraryFilters.value = {
     sourceIds:[...productLibrarySelectedShopIds.value], template:productLibraryTemplateFilter.value,
-    sku:productLibrarySku.value.trim(),
+    sku:productLibrarySku.value.trim(), creatorId:productLibraryCreatorId.value,
   }
   productLibraryPage.value=1
   selectedProductLibraryIds.value=[]
@@ -841,6 +847,7 @@ function changeProductLibraryTab(tab: ProductLibraryTab) {
   }
   if (activeProductLibraryTab.value === tab) return
   activeProductLibraryTab.value = tab
+  productLibraryCreatorId.value = tab === 'products' ? appliedProductLibraryFilters.value.creatorId : rankingCreatorFilters.value[tab] ?? null
   productLibrarySelectedShopIds.value = [...(tab === 'products' ? appliedProductLibraryFilters.value.sourceIds : rankingShopFilters.value[tab] || [])]
   productLibraryShopSearch.value = ''
   closeProductLibraryOrders()
@@ -2191,7 +2198,8 @@ async function confirmMaterialImport() {
     materialImportItems.value = []
     activeMaterialUsageTab.value = 'unused'
     materialTemplateFilterId.value = null; materialCreatorFilterId.value = null; materialSourceTypeFilter.value = ''
-    appliedMaterialFilters.value = {template_id:null, creator_id:null, source_type:''}
+    materialCreatedFrom.value = ''; materialCreatedTo.value = ''
+    appliedMaterialFilters.value = {template_id:null, creator_id:null, source_type:'', created_from:'', created_to:''}
     currentMaterialPage.value = 1; selectedMaterialAssetIds.value = []
     showToast(`已导入 ${data.imported} 张素材`)
     await refreshMaterialList()
@@ -2376,7 +2384,7 @@ function openHubstudioDialog() { hubstudioForm.value={app_id:'',app_secret:'',gr
 async function saveHubstudioAccount() { try { hubstudioSaving.value=true; await api.put('/hubstudio/account',hubstudioForm.value,{headers:headers.value}); showHubstudioDialog.value=false; await refresh(); showToast('HubStudio API 凭据已保存') } catch(e:any) { shopError.value=e.response?.data?.detail || '保存 HubStudio 配置失败' } finally { hubstudioSaving.value=false } }
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 function showToast(message: string) { toast.value = message; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = '' }, 3000) }
-function logout(){ hubUploadTemplateId.value=null; hubUploadTemplates.value=[]; hubUploadRequestId++; hubUploadTasks.value=[]; hubUploadTotal.value=0; hubUploadPage.value=1; hubUploadCreatorId.value=null; hubUploadLoading.value=false; hubUploadError.value=''; showHubstudioDialog.value=false; localStorage.removeItem('haitoro_token'); token.value=''; user.value=null; taskCreatorFilterId.value=null; materialCreatorFilterId.value=null; materialTemplateFilterId.value=null; materialSourceTypeFilter.value=''; appliedMaterialFilters.value={template_id:null,creator_id:null,source_type:''}; draftCreatorFilterId.value=null; creatorFiltersInitialized.value=false; productLibraryItems.value=[]; productLibraryTotal.value=0; productLibraryPage.value=1; productLibraryRankingRequestId++; productLibraryRankingItems.value=[]; productLibraryRankingTotal.value=0; productLibraryRankingDate.value=null; productLibraryRankingThroughDate.value=null; productLibraryShops.value=[]; rankingShopFilters.value={}; stagnantRequestId++; stagnantMaterials.value=[]; stagnantTotal.value=0; stagnantPage.value=1; stagnantCreatorId.value=null; stagnantError.value=''; stagnantLoading.value=false; newImagesRequestId++; newImages.value=[]; newImagesTotal.value=0; newImagesPage.value=1; newImagesCreatorId.value=null; newImagesUsageStatus.value='all'; newImagesError.value=''; newImagesLoading.value=false; productLibraryStatisticsTask.value=null; activeProductLibraryTab.value='products'; productLibrarySelectedShopIds.value=[]; productLibraryShopSearch.value=''; productLibraryTemplateFilter.value=''; productLibrarySku.value=''; appliedProductLibraryFilters.value={sourceIds:[],template:'',sku:''}; selectedProductLibraryIds.value=[]; productLibraryFilters.value={shops:[]} }
+function logout(){ hubUploadTemplateId.value=null; hubUploadTemplates.value=[]; hubUploadRequestId++; hubUploadTasks.value=[]; hubUploadTotal.value=0; hubUploadPage.value=1; hubUploadCreatorId.value=null; hubUploadLoading.value=false; hubUploadError.value=''; showHubstudioDialog.value=false; localStorage.removeItem('haitoro_token'); token.value=''; user.value=null; taskCreatorFilterId.value=null; materialCreatorFilterId.value=null; materialTemplateFilterId.value=null; materialSourceTypeFilter.value=''; materialCreatedFrom.value=''; materialCreatedTo.value=''; appliedMaterialFilters.value={template_id:null,creator_id:null,source_type:'',created_from:'',created_to:''}; draftCreatorFilterId.value=null; creatorFiltersInitialized.value=false; productLibraryItems.value=[]; productLibraryTotal.value=0; productLibraryPage.value=1; productLibraryRankingRequestId++; productLibraryRankingItems.value=[]; productLibraryRankingTotal.value=0; productLibraryRankingDate.value=null; productLibraryRankingThroughDate.value=null; productLibraryShops.value=[]; rankingShopFilters.value={}; rankingCreatorFilters.value={}; productLibraryCreatorId.value=null; stagnantRequestId++; stagnantMaterials.value=[]; stagnantTotal.value=0; stagnantPage.value=1; stagnantCreatorId.value=null; stagnantError.value=''; stagnantLoading.value=false; newImagesRequestId++; newImages.value=[]; newImagesTotal.value=0; newImagesPage.value=1; newImagesCreatorId.value=null; newImagesUsageStatus.value='all'; newImagesError.value=''; newImagesLoading.value=false; productLibraryStatisticsTask.value=null; activeProductLibraryTab.value='products'; productLibrarySelectedShopIds.value=[]; productLibraryShopSearch.value=''; productLibraryTemplateFilter.value=''; productLibrarySku.value=''; appliedProductLibraryFilters.value={sourceIds:[],template:'',sku:'',creatorId:null}; selectedProductLibraryIds.value=[]; productLibraryFilters.value={shops:[]} }
 api.interceptors.response.use(
   response => response,
   requestError => {
@@ -2440,7 +2448,7 @@ onUnmounted(() => {
       </section>
       <section v-else-if="page==='materials'" class="page">
         <div class="section-heading material-heading"><div><span>素材入库后将永久绑定产品模板和 SKU；请选择同一模板的素材创建商品草稿。</span><div class="material-usage-tabs"><button v-for="tab in materialUsageTabs" :key="tab.key" :class="{active:activeMaterialUsageTab===tab.key}" @click="changeMaterialUsageTab(tab.key)">{{tab.label}}</button></div></div><div class="material-import-actions"><button class="secondary" :disabled="materialTemplateDownloading" @click="downloadMaterialImportTemplate">{{materialTemplateDownloading ? '下载中…' : '下载模版'}}</button><button class="secondary" :disabled="materialImportPreviewing || materialImportSaving" @click="materialImportFileInput?.click()">{{materialImportPreviewing ? '解析中…' : '导入模版'}}</button><input ref="materialImportFileInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden @change="previewMaterialImport"/><label class="primary material-upload-button" :class="{disabled: materialUploading}"><input type="file" multiple accept="image/png,image/jpeg,image/webp" :disabled="materialUploading" @change="chooseMaterialUploadFiles"/>{{materialUploading ? '上传中…' : '上传本地素材'}}</label></div></div>
-        <div class="material-filter-row material-search-filters"><label class="material-template-filter">产品模板<select v-model="materialTemplateFilterId"><option :value="null">全部模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><label v-if="user?.role==='company_admin'" class="material-template-filter">创作人<select v-model="materialCreatorFilterId"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label><label class="material-template-filter">类型<select v-model="materialSourceTypeFilter"><option value="">全部类型</option><option value="ai_created">AI创作</option><option value="local_upload">本地上传</option><option value="imported">导入</option></select></label><button class="primary material-search-button" :disabled="materialListRefreshing" @click="searchMaterials">{{materialListRefreshing ? '搜索中…' : '搜索'}}</button></div>
+        <div class="material-filter-row material-search-filters"><label class="material-template-filter">产品模板<select v-model="materialTemplateFilterId"><option :value="null">全部模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><label v-if="user?.role==='company_admin'" class="material-template-filter">创作人<select v-model="materialCreatorFilterId"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label><label class="material-template-filter">类型<select v-model="materialSourceTypeFilter"><option value="">全部类型</option><option value="ai_created">AI创作</option><option value="local_upload">本地上传</option><option value="imported">导入</option></select></label><label class="material-template-filter material-time-filter">创建开始时间<input v-model="materialCreatedFrom" type="datetime-local"/></label><label class="material-template-filter material-time-filter">创建结束时间<input v-model="materialCreatedTo" type="datetime-local"/></label><button class="primary material-search-button" :disabled="materialListRefreshing" @click="searchMaterials">{{materialListRefreshing ? '搜索中…' : '搜索'}}</button></div>
         <p v-if="materialUploadError" class="error material-upload-error">{{materialUploadError}}</p>
         <section v-if="selectedMaterialAssetIds.length" class="material-draft-bar"><strong>已选 {{selectedMaterialAssetIds.length}} 张素材</strong><button class="primary" @click="openMaterialDraftDialog">创建商品草稿</button><button class="primary" @click="openMaterialBatchDraftDialog">组合创建草稿</button><button class="secondary" :disabled="materialDownloading" @click="downloadSelectedMaterialAssets">{{materialDownloading ? '下载中…' : '下载到本地'}}</button><button class="negative" :disabled="materialDownloading" @click="deleteSelectedMaterialAssets">删除选中素材</button><button class="ghost" :disabled="materialDownloading" @click="selectedMaterialAssetIds=[]">取消选择</button></section>
         <section class="draft-table material-list refreshable-list" :aria-busy="materialListRefreshing">
@@ -2506,6 +2514,7 @@ onUnmounted(() => {
           <div class="product-library-shop-filter"><span>店铺名称</span><details ref="productLibraryShopFilterDetails"><summary><span :title="productLibraryShopSelectionLabel">{{productLibraryShopSelectionLabel}}</span><span aria-hidden="true">▾</span></summary><div class="product-library-shop-filter-panel"><input v-model="productLibraryShopSearch" type="search" placeholder="搜索平台、站点或店铺" aria-label="搜索店铺"/><div class="product-library-shop-filter-actions"><span>可选 {{productLibraryShopOptions.length }} 家</span><button type="button" :disabled="!productLibrarySelectedShopIds.length" @click="productLibrarySelectedShopIds=[]">清空选择</button></div><div class="product-library-shop-filter-options"><label v-for="shop in productLibraryShopOptions" :key="shop.id" class="product-library-shop-filter-option"><input v-model="productLibrarySelectedShopIds" type="checkbox" :value="shop.id"/><span>{{shop.label}}</span></label><p v-if="!productLibraryShopOptions.length" class="product-library-shop-filter-empty">没有匹配的店铺</p></div></div></details></div>
           <label v-if="activeProductLibraryTab==='products'">模版<select v-model="productLibraryTemplateFilter" :disabled="productLibraryLoading"><option value="">全部模版</option><option value="unmatched">未匹配</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
           <label v-if="activeProductLibraryTab==='products'">SKU<input v-model="productLibrarySku" type="search" placeholder="输入 SKU" :disabled="productLibraryLoading"/></label>
+          <label>创建人<select v-model="productLibraryCreatorId" :disabled="productLibraryLoading || productLibraryRankingLoading"><option :value="null">全部创建人</option><option v-for="creator in productLibraryCreatorOptions" :key="creator.id" :value="creator.id">{{creator.name}}</option></select></label>
           <button type="button" class="primary product-library-search-button" :disabled="productLibraryLoading || productLibraryRankingLoading" @click="searchProductLibrary">搜索</button>
         </div>
         <section v-if="activeProductLibraryTab!=='shops' && selectedProductLibraryIds.length" class="draft-export-bar product-library-selection-bar"><strong>已选 {{selectedProductLibraryIds.length}} / {{MAX_PRODUCT_LIBRARY_SELECTION}} 条</strong><button class="primary" :disabled="productLibrarySelectionLoading" @click="openProductLibraryDraftDialog()">创建商品草稿</button><button class="primary" :disabled="productLibrarySelectionLoading" @click="openProductLibraryDraftDialog(true)">组合创建草稿</button><button v-if="user?.role==='company_admin'" class="primary" :disabled="productLibrarySelectionLoading" @click="openProductLibraryTemplateDialog">批量设置模版</button><button class="ghost" @click="selectedProductLibraryIds=[]">取消选择</button></section>

@@ -165,3 +165,5 @@ nav button.subnav{width:calc(100% - 14px);margin:-3px 0 4px 14px;padding:10px 14
 .material-search-button{margin-top:10px;padding:9px 18px;white-space:nowrap}
 
 .material-heading{flex-wrap:wrap;align-items:flex-start}.material-heading>div:first-child{flex:1 1 380px;min-width:0}.material-search-filters{margin:-6px 0 18px}.material-search-filters .material-search-button{margin-left:0}.material-search-filters .material-template-filter{min-width:0}.material-search-filters select{max-width:100%}@media(max-width:640px){.material-search-filters .material-template-filter{width:100%;justify-content:space-between}.material-search-filters select{width:210px;max-width:calc(100% - 70px)}.material-heading .material-import-actions{width:100%}.material-search-filters .material-search-button{margin-left:0}}
+
+.material-time-filter input{width:230px;max-width:100%;margin:0;padding:8px 10px;border:1px solid #e2dff0;border-radius:10px;background:#fff;color:inherit;font:inherit}@media(max-width:640px){.material-search-filters .material-time-filter{flex-direction:column;align-items:stretch;gap:8px}.material-search-filters .material-time-filter input{width:100%;max-width:100%}}

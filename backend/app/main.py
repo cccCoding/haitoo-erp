@@ -1169,7 +1169,14 @@ def product_library_filters(user: User = Depends(require_roles(Role.COMPANY_ADMI
         User, (User.id == ProductLibrarySource.assigned_user_id) & (User.company_id == user.company_id))
         .where(*conditions)).all()
     sources = [source for source, _ in rows]
+    visible_skus = select(ProductLibraryProduct.sku).join(ProductLibrarySource,
+        ProductLibrarySource.id == ProductLibraryProduct.source_id).where(*product_library_statistics_scope(user))
+    creators = db.execute(select(User.id, User.name).join(MaterialAsset,
+        (MaterialAsset.claimed_by == User.id) & (MaterialAsset.company_id == user.company_id))
+        .where(User.company_id == user.company_id, MaterialAsset.sku.in_(visible_skus))
+        .distinct().order_by(User.id)).all()
     return {
+        "creators": [{"id": creator_id, "name": name} for creator_id, name in creators],
         "platforms": sorted({source.platform for source in sources}),
         "sites": sorted({source.site for source in sources}),
         "shop_names": sorted({source.shop_name for source in sources}),
@@ -1284,6 +1291,7 @@ def list_product_library_rankings(
     category: Literal["top7", "top15", "top30", "potential", "hot", "booming"],
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=1000),
     source_ids: Annotated[list[int] | None, Query()] = None,
+    creator_id: Annotated[int | None, Query(ge=1)] = None,
     user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db),
 ):
     snapshot = db.scalar(select(ProductLibraryDailySnapshot).where(
@@ -1293,7 +1301,7 @@ def list_product_library_rankings(
     if snapshot is None:
         return {"snapshot_date": None, "through_date": None, "total": 0,
                 "page": page, "page_size": page_size, "items": []}
-    conditions = product_library_statistics_scope(user, source_ids)
+    conditions = product_library_statistics_scope(user, source_ids, creator_id)
     result = sku_statistics(db, conditions, order_facts(snapshot, category),
                             page=page, page_size=page_size, category=category)
     details = product_library_material_details(db, user.company_id, [item["sku"] for item in result["items"]])
@@ -1321,7 +1329,7 @@ def refresh_product_library_rankings(
         raise HTTPException(404, str(exc)) from exc
 
 
-def product_library_statistics_scope(user, source_ids=None):
+def product_library_statistics_scope(user, source_ids=None, creator_id=None):
     conditions = [ProductLibraryProduct.company_id == user.company_id,
                   ProductLibrarySource.company_id == user.company_id]
     scope = product_library_source_scope(user)
@@ -1329,6 +1337,10 @@ def product_library_statistics_scope(user, source_ids=None):
         conditions.append(scope)
     if isinstance(source_ids, list) and source_ids:
         conditions.append(ProductLibrarySource.id.in_(source_ids))
+    if creator_id is not None:
+        conditions.append(ProductLibraryProduct.sku.in_(select(MaterialAsset.sku).where(
+            MaterialAsset.company_id == user.company_id, MaterialAsset.claimed_by == creator_id,
+        )))
     return conditions
 
 
@@ -1338,11 +1350,12 @@ def list_product_library(
     platform: str | None = None, site: str | None = None, shop_name: str | None = None, sku: str | None = None,
     template_id: int | None = Query(None, ge=1), unmatched: bool = False,
     source_ids: Annotated[list[int] | None, Query()] = None,
+    creator_id: Annotated[int | None, Query(ge=1)] = None,
     user: User = Depends(require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)), db: Session = Depends(get_db),
 ):
     if template_id is not None and unmatched:
         raise HTTPException(400, "模版筛选条件不能同时选择已匹配和未匹配")
-    conditions = product_library_statistics_scope(user, source_ids)
+    conditions = product_library_statistics_scope(user, source_ids, creator_id)
     for value, column in ((platform, ProductLibrarySource.platform), (site, ProductLibrarySource.site),
                           (shop_name, ProductLibrarySource.shop_name)):
         if value:
@@ -2416,6 +2429,8 @@ def list_material_assets(
     template_id: int | None = None,
     usage_status: str = "unused",
     source_type: str = "",
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -2423,6 +2438,10 @@ def list_material_assets(
         raise HTTPException(422, "不支持的素材状态")
     if source_type not in {"", "ai_created", "local_upload", "imported"}:
         raise HTTPException(422, "不支持的素材类型")
+    created_from = created_from.astimezone(timezone.utc).replace(tzinfo=None) if created_from and created_from.tzinfo else created_from
+    created_to = created_to.astimezone(timezone.utc).replace(tzinfo=None) if created_to and created_to.tzinfo else created_to
+    if created_from and created_to and created_from > created_to:
+        raise HTTPException(400, "创建开始时间不能晚于结束时间")
     filters = []
     if user.role != Role.SUPER_ADMIN:
         filters.append(MaterialAsset.company_id == user.company_id)
@@ -2433,6 +2452,10 @@ def list_material_assets(
     if template_id is not None:
         filters.append(MaterialAsset.template_id == template_id)
     filters.append(MaterialAsset.usage_status == usage_status)
+    if created_from is not None:
+        filters.append(MaterialAsset.created_at >= created_from)
+    if created_to is not None:
+        filters.append(MaterialAsset.created_at <= created_to)
     if source_type:
         effective_source = func.coalesce(func.nullif(MaterialAsset.source_type, ""), case(
             (MaterialAsset.source_task_id.is_not(None), "ai_created"), else_="local_upload",
