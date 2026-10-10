@@ -145,7 +145,7 @@ onMounted(() => token.value && loadAdmin().catch((e: any) => {
         <p v-if="error" class="error banner" role="alert">{{ error }}</p>
       </section>
       <footer class="site-footer">
-        <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">粤ICP备2026142752号</a>
+        <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">粤ICP备2026142752号-1</a>
       </footer>
     </section>
   </main>
@@ -154,7 +154,7 @@ onMounted(() => token.value && loadAdmin().catch((e: any) => {
   <div v-if="showProviderForm" v-dialog-focus="{close:closeProviderForm,busy:saving===providerForm.provider}" class="modal-backdrop" @click.self="closeProviderForm"><form class="modal provider-modal" role="dialog" aria-modal="true" aria-labelledby="provider-dialog-title" @submit.prevent="saveProviderForm"><button class="close" type="button" :disabled="saving===providerForm.provider" @click="closeProviderForm">关闭</button><p class="section-kicker">模型配置</p><h2 id="provider-dialog-title">修改 {{ providerForm.display_name }}</h2><p>调整每条任务提交给服务商的印花数量。</p><p v-if="error" class="error" role="alert">{{error}}</p><label>模型标识<input v-model="providerForm.model" maxlength="120" required placeholder="输入服务商提供的模型 ID" /></label><div class="modal-field-grid"><label>单个任务印花图数量<input v-model.number="providerForm.images_per_task" type="number" min="1" max="100" step="1" required /><small>批量快捷操作会按此数量拆成多条独立任务。</small></label></div><div class="modal-tip"><b>结果映射要求</b><span>只有服务商明确保证输出顺序与输入印花一致时才能设为大于 1；不确定时必须保持 1，避免结果关联错图。</span></div><label class="modal-switch"><input v-model="providerForm.enabled" type="checkbox" /> 启用此模型</label><div class="modal-actions"><button class="secondary" type="button" :disabled="saving===providerForm.provider" @click="closeProviderForm">取消</button><button class="primary" type="submit" :disabled="saving===providerForm.provider">{{saving===providerForm.provider?'保存中…':'保存修改'}}</button></div></form></div>
   <div v-if="toast" class="toast" role="status">{{ toast }}</div>
   <footer v-if="!token" class="site-footer">
-    <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">粤ICP备2026142752号</a>
+    <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">粤ICP备2026142752号-1</a>
   </footer>
 </template>
 
