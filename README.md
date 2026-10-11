@@ -259,6 +259,37 @@ HubStudio 环境可包含本土店和跨境店，当前自动上品只支持用�
 
 超级管理员密码至少 12 个字符，并且必须包含字母、数字和特殊字符。已有数据库升级时，应用不会自动删除历史演示账号或公司；应先创建并验证正式超级管理员，再人工停用历史演示账号，确认其没有业务数据后另行清理。
 
+## 图片任务数量与采用率
+
+`backend/scripts/image_task_statistics.py` 只读统计 SKU 图（`sku_image`）、轮播图（`carousel`）、首图（`main_image`），输出三类汇总及按创建人的明细。统一以 `selected_result_url` 非空（非 NULL 且长度大于 0）判断采用，采用率为 **采用任务数 ÷ 全部任务数**；失败、排队、生成中及未审核任务均计入分母，不关联素材库或商品发布情况。一个任务采用多张图片或重复重试仍只计一次。结果反映运行时保存的采用字段，不能还原历史采用情况；零任务显示 `0.00%`。
+
+默认查询全部公司、全部历史；可使用 `--company-id`、`--creator-id` 筛选公司和任务创建人，`--start-date`、`--end-date` 按任务创建日期筛选。日期格式为 `YYYY-MM-DD`，采用香港时区，包含起止日期全天。明细带公司和人员 ID，同名人员分别统计；已删除的公司或人员信息不影响任务计数。
+
+腾讯云环境（`haitorok`，脚本随 API 镜像部署后，在服务器项目目录执行）：
+
+```bash
+./deploy/tencent.sh exec -T api python scripts/image_task_statistics.py
+
+# 按公司、创建日期筛选；结束日期包含当天全天
+./deploy/tencent.sh exec -T api python scripts/image_task_statistics.py \
+  --company-id 3 \
+  --start-date 2026-10-01 --end-date 2026-10-11
+
+# 导出 UTF-8 CSV，包含汇总及人员明细；文件保存在当前服务器目录
+./deploy/tencent.sh exec -T api python scripts/image_task_statistics.py \
+  --company-id 3 \
+  --start-date 2026-10-01 --end-date 2026-10-11 \
+  --format csv > image-task-statistics.csv
+```
+
+本机测试环境（`haitoo-test`）：
+
+```bash
+./deploy/local.sh exec -T api python scripts/image_task_statistics.py
+```
+
+默认输出中文终端表格，`--format csv` 输出相同统计结果的 CSV。公司和人员筛选可组合使用，不存在或无匹配数据的筛选条件输出三类零值汇总。脚本复用 API 的数据库配置，不修改业务数据或创建数据库表。
+
 ## 清理产品库数据
 
 `backend/scripts/clear_product_library.py` 无需参数，运行即清空所有公司的产品库相关 9 张表（产品、来源店铺、订单及关联、SKU 数量、快照及明细、统计任务），同一事务提交，失败回滚。保留其他业务表、表结构与自增序列。清理期间暂停 API 和产品库统计 worker，避免并发写入。
