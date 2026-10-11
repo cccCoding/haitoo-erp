@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, onBeforeUnmount } from 'vue'
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import axios from 'axios'
 import TemplateLibrary from './TemplateLibrary.vue'
 import { summarizeShopSales } from './shop-sales'
@@ -15,6 +15,7 @@ const companyId = ref<number | null>(null)
 const templates = ref<any[]>([]), members = ref<any[]>([]), shops = ref<any[]>([])
 const templateId = ref(''), creatorId = ref(''), usageStatus = ref('unused')
 const category = ref('products'), sourceIds = ref<number[]>([]), sku = ref(''), shopSearch = ref('')
+const shopFilter = ref<HTMLDetailsElement | null>(null)
 const rows = ref<any[]>([]), total = ref(0), page = ref(1), pageSize = ref(20)
 const loading = ref(false), error = ref(''), snapshotDate = ref<string | null>(null), throughDate = ref('')
 const preview = ref<{ url: string; title: string } | null>(null)
@@ -41,6 +42,7 @@ function message(e: any, fallback: string) {
   return typeof e.response?.data?.detail === 'string' ? e.response.data.detail : fallback
 }
 function resetFilters() {
+  if (shopFilter.value) shopFilter.value.open = false
   templateId.value = ''; creatorId.value = ''; sourceIds.value = []; sku.value = ''; shopSearch.value = ''
   usageStatus.value = tab.value === 'materials' ? 'unused' : 'all'
   templateLibrary.value?.reset(); page.value = 1; preview.value = null; closeOrders()
@@ -103,18 +105,27 @@ async function loadOrders() {
 }
 function openOrders(row: any) { orderProduct.value = row; orderPage.value = 1; orderTotal.value = 0; orderCount.value = 0; void loadOrders() }
 function changeOrderPage(next: number) { orderPage.value = next; void loadOrders() }
-onBeforeUnmount(() => { requestId++; orderRequestId++ })
+function closeShopFilterOnOutsideClick(event: PointerEvent) {
+  if (shopFilter.value?.open && event.target instanceof Node && !shopFilter.value.contains(event.target)) shopFilter.value.open = false
+}
+onMounted(() => document.addEventListener('pointerdown', closeShopFilterOnOutsideClick, true))
+onBeforeUnmount(() => {
+  requestId++; orderRequestId++
+  document.removeEventListener('pointerdown', closeShopFilterOnOutsideClick, true)
+})
 defineExpose({ refresh })
 </script>
 
 <template>
   <section class="data-management">
+    <div class="data-filters data-company-filter">
+      <label>公司<select v-model="companyId" :disabled="!companies.length"><option :value="null" disabled>请选择公司</option><option v-for="company in companies" :key="company.id" :value="company.id">{{company.name}}</option></select></label>
+    </div>
     <div class="data-tabs" role="tablist" aria-label="数据管理">
       <button v-for="item in [{key:'templates' as const,label:'模板库'},{key:'materials' as const,label:'素材库'},{key:'products' as const,label:'产品库'}]" :id="`data-tab-${item.key}`" :key="item.key" role="tab" :aria-selected="tab===item.key" aria-controls="data-tab-panel" :class="{active:tab===item.key}" @click="changeTab(item.key)">{{item.label}}</button>
     </div>
     <div id="data-tab-panel" role="tabpanel" :aria-labelledby="`data-tab-${tab}`">
-      <form class="data-filters" @submit.prevent="search">
-        <label>公司<select v-model="companyId" :disabled="!companies.length"><option :value="null" disabled>请选择公司</option><option v-for="company in companies" :key="company.id" :value="company.id">{{company.name}}</option></select></label>
+      <form v-if="tab!=='templates'" class="data-filters" @submit.prevent="search">
         <label v-if="tab==='products'">数据分类<select v-model="category" @change="changeCategory"><option v-for="item in categories" :key="item[0]" :value="item[0]">{{item[1]}}</option></select></label>
         <template v-if="isMaterial">
           <label v-if="tab==='materials' || category==='new_images'">使用状态<select v-model="usageStatus"><option v-if="category==='new_images' && tab==='products'" value="all">全部状态</option><option value="unused">未使用</option><option value="used">已使用</option></select></label>
@@ -122,7 +133,7 @@ defineExpose({ refresh })
           <label>创作人<select v-model="creatorId"><option value="">全部创作人</option><option v-for="item in members" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
         </template>
         <template v-else-if="tab==='products' && !isShops">
-          <div class="data-shop-filter"><span>店铺名称</span><details><summary>{{sourceIds.length ? `已选 ${sourceIds.length} 家店铺` : '全部店铺'}}</summary><div class="data-shop-options"><input v-model="shopSearch" type="search" placeholder="搜索平台、站点或店铺" aria-label="搜索店铺"/><button type="button" class="secondary" @click="sourceIds=[]">清空选择</button><label v-for="shop in shopOptions" :key="shop.id"><input v-model="sourceIds" type="checkbox" :value="shop.id"/>{{shop.label}}</label><p v-if="!shopOptions.length">没有匹配的店铺</p></div></details></div>
+          <div class="data-shop-filter"><span>店铺名称</span><details ref="shopFilter"><summary>{{sourceIds.length ? `已选 ${sourceIds.length} 家店铺` : '全部店铺'}}</summary><div class="data-shop-options"><input v-model="shopSearch" type="search" placeholder="搜索平台、站点或店铺" aria-label="搜索店铺"/><button type="button" class="secondary" @click="sourceIds=[]">清空选择</button><label v-for="shop in shopOptions" :key="shop.id"><input v-model="sourceIds" type="checkbox" :value="shop.id"/>{{shop.label}}</label><p v-if="!shopOptions.length">没有匹配的店铺</p></div></details></div>
           <template v-if="!isRanking"><label>模板<select v-model="templateId"><option value="">全部模板</option><option value="unmatched">未匹配</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label><label>SKU<input v-model="sku" type="search" placeholder="输入 SKU 前缀"/></label></template>
         </template>
         <div class="data-filter-actions"><button class="primary" type="submit" :disabled="loading || !companyId">{{loading ? '加载中…' : '搜索'}}</button><button class="secondary" type="button" :disabled="loading || !companyId" @click="resetSearch">重置</button></div>
@@ -165,6 +176,7 @@ defineExpose({ refresh })
 .data-filters > label, .data-shop-filter { display:grid; gap:7px; min-width:140px; color:#475569; font-size:12px; font-weight:500; }
 .data-filters select, .data-filters input[type=search], summary { min-height:var(--admin-control-height); max-width:260px; padding:9px 12px; border:1px solid #cbd5e1; border-radius:8px; background:white; color:var(--admin-text); font:inherit; font-size:13px; }
 .data-filters select { width:100%; }
+.data-company-filter > label { width:260px; }
 .data-filter-actions { display:flex; gap:8px; }
 .data-shop-filter details { position:relative; }
 summary { cursor:pointer; }
@@ -200,6 +212,7 @@ summary { cursor:pointer; }
   .data-tabs { padding:0 20px; }
   .data-filters { padding:20px; gap:14px 12px; }
   .data-filters > label, .data-shop-filter { flex:1 1 calc(50% - 12px); min-width:120px; }
+  .data-company-filter > label { flex-basis:100%; }
   .data-filters select, .data-filters input[type=search] { width:100%; max-width:100%; }
   .data-filter-actions { width:100%; }
   .data-filter-actions button { flex:1; }

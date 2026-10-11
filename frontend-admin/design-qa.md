@@ -102,3 +102,15 @@
 ![侧栏与右侧页脚对齐](/Users/rock/.codex/visualizations/2026/10/09/01a11fdf-e3c8-7a30-987b-ed218473e435/admin-review/23-footer-aligned.jpg)
 
 final result: passed
+
+## 2026-10-11 数据管理公司筛选调整
+
+- 将公司筛选移至模板库、素材库、产品库 tab 上方，三个 tab 共用所选公司；数据管理页移除右上角刷新按钮。
+- TypeScript 检查、Vite 构建与 `git diff --check` 通过。
+- 使用真实 Chrome 浏览器验证桌面1920px、960px和390px：公司筛选始终在 tab 上方，页面没有横向溢出；三个 tab 切换保留公司，素材使用状态搜索与重置通过，概览页刷新按钮保留。
+- 本机仅有一家公司，多公司切换未实测；公司变更 watcher 和加载逻辑保持原样。浏览器扩展有自身日志，本轮未发现应用报错。
+- Playwright CLI 在当前环境未能完成启动，改用 Codex 浏览器控制验证。截图保存在 `output/playwright/admin-data-company/desktop.jpg`、`tablet.jpg`、`mobile.jpg`。
+- 已通过 `./deploy/local.sh cp frontend-admin/dist/. admin-web:/usr/share/nginx/html` 更新本机测试容器预览；未重建镜像或部署腾讯云。
+- 后续移除模板库的搜索、重置按钮及整条空白筛选栏，保留模板名称即时搜索。重新构建通过；Chrome 验证桌面、960px、390px布局和模板搜索空结果，素材库搜索与重置按钮仍显示。截图：`output/playwright/admin-data-company/templates-no-actions-desktop.jpg`、`templates-no-actions-tablet.jpg`、`templates-no-actions-mobile.jpg`；本机测试预览已更新。
+- 店铺筛选增加外部点击收起，重置时也关闭面板；组件卸载移除事件监听。构建通过，Chrome 实测内部搜索、勾选、清空选择保持展开，外部点击收起并保留勾选；桌面、960px、390px均通过。本机预览已更新，腾讯云未部署。截图：`output/playwright/admin-data-company/shop-filter-outside-closed.jpg`、`shop-filter-tablet-closed.jpg`、`shop-filter-mobile-closed.jpg`。
+- `output/` 为本地验证产物目录，已加入 `.gitignore`，此前跟踪的6张截图取消跟踪且保留本地文件。
