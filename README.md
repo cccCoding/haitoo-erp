@@ -290,6 +290,36 @@ HubStudio 环境可包含本土店和跨境店，当前自动上品只支持用�
 
 默认输出中文终端表格，`--format csv` 输出相同统计结果的 CSV。公司和人员筛选可组合使用，不存在或无匹配数据的筛选条件输出三类零值汇总。脚本复用 API 的数据库配置，不修改业务数据或创建数据库表。
 
+## 每张白底图大小与创作人
+
+独立只读脚本 `backend/scripts/white_image_statistics.py` 查询数据库中当前登记的白底图，每条输出白底图 ID／名称、公司 ID／名称、创作人 ID／姓名、模板 ID／名称、图片大小、读取状态和图片链接。这里“创作人”指白底图记录的所属人员（`user_id`），数据库没有记录实际上传操作人，管理员代上传时仍显示所属人员。
+
+脚本按公司分页读取 `template-white/company/{公司 ID}/` 的 R2 对象列表（每页最多 1000 个），用对象 key 匹配记录，不逐张调用 `HeadObject` 或下载图片。同一个对象被多条白底图记录引用时，每条记录均展示大小；某公司所需对象全部找到后停止该公司的扫描。只报告数据库已登记白底图，未登记或已删除记录的 R2 文件不在报告中。
+
+大小仅显示 KiB／MiB／GiB／TiB，保留两位小数，不输出原始字节数。R2 对象缺失、链接不属于当前 R2、目录或公司不匹配的记录保留，大小显示 `—` 并标注状态；历史公司、人员或模板信息缺失时保留 ID。需要配置 `R2_PUBLIC_BASE_URL` 来解析图片链接，以及 R2 对象列表读取权限。扫描请求失败时返回非零退出码，不输出部分报告。
+
+默认全部公司，支持 `--company-id`、`--creator-id`、`--template-id` 筛选，按公司、创作人、模板、白底图 ID 排序。开始、每页读取完成及统计完成时将进度打印到 stderr，不混入 CSV；`--no-progress` 可关闭进度。
+
+腾讯云环境（`haitorok`，新版 API 镜像部署后，在服务器项目目录执行）：
+
+```bash
+sudo ./deploy/tencent.sh exec -T api python scripts/white_image_statistics.py
+
+# 筛选指定公司和所属创作人
+sudo ./deploy/tencent.sh exec -T api python scripts/white_image_statistics.py \
+  --company-id 3 --creator-id 12
+
+# 导出每张白底图明细，进度仍显示在终端
+sudo ./deploy/tencent.sh exec -T api python scripts/white_image_statistics.py \
+  --format csv > white-image-statistics.csv
+```
+
+本机测试环境（`haitoo-test`）：
+
+```bash
+./deploy/local.sh exec -T api python scripts/white_image_statistics.py
+```
+
 ## R2 图片文件大小统计
 
 独立脚本 `backend/scripts/r2_image_statistics.py` 使用已有 R2 配置，按对象 key 前缀分页调用 `ListObjectsV2`，每页最多返回 1000 个对象及其大小，直接累加列表里的 `Size`，不逐张调用 `HeadObject` 或 `GetObject`，不下载图片、不查询数据库、不修改或删除 R2 对象。对象列表接口不提供文件夹数量和总大小的汇总值，因此需要读取目标前缀的所有列表页。凭据需要具备目标桶的对象列表读取权限。
