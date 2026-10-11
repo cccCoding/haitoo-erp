@@ -320,6 +320,38 @@ sudo ./deploy/tencent.sh exec -T api python scripts/white_image_statistics.py \
 ./deploy/local.sh exec -T api python scripts/white_image_statistics.py
 ```
 
+## 按白底图统计 SKU 生成图平均大小
+
+独立只读脚本 `backend/scripts/white_image_generation_statistics.py` 仅统计 SKU 图任务，不包含轮播图或首图。每个白底图历史版本一行，包含公司、白底图 ID／名称、所属创作人 ID／姓名及信息来源、模板、白底图链接及大小／读取状态、关联生成图总数、取样数量、成功／无法读取数量、生成图平均大小及读取状态。
+
+来源使用任务保存的 `white_image_id`、`white_image_name`、`white_image_url`，按公司、白底图 ID、历史链接分组；同一 ID 后来替换图片时分开统计，包含当前无生成结果的白底图和可关联的已删除白底图。任务只有历史链接、没有 ID 时仍保留来源链接；缺少历史链接的任务不会用当前图片猜测来源，会向 stderr 提醒未关联任务数量。创作人优先使用白底图记录的所属人员；记录已删除时使用该版本最新来源 SKU 任务的创作人，并标明信息来源。白底图名称优先使用该版本最新任务保存的名称，无任务时使用当前名称。
+
+所有候选结果均参与关联，不按采用状态过滤。同一白底图版本内按生成图链接去重，计算关联总数。按任务完成时间倒序（没有完成时间时使用创建时间）、任务 ID 倒序、任务内结果顺序，最多取最近 **2000 张**作为固定样本。平均大小只用样本中成功读取的大小合计除以成功读取数量；文件缺失、非当前 R2 链接、目录或公司不匹配的样本不按零计算，也不从更老结果中补取。真实零大小文件参与计算；无成功样本时显示 `—`。
+
+白底图按公司目录、生成图按 `generated/` 批量分页读取 R2 对象列表，不下载图片、不逐张调用 `HeadObject`。只缓存目标文件大小，全部找到后停止对应目录扫描；相同对象在不同白底图版本间复用大小。**2000 限制计算样本，不限制列表返回的对象数量**，缺失目标可能导致扫描整个目录。大小仅显示 KiB／MiB／GiB／TiB，保留两位小数，不输出逐张生成图明细或最大／最小大小。统计基于现存任务结果和 R2 文件，不能恢复已清除的历史结果。
+
+默认全部公司，可使用 `--company-id`、`--creator-id`、`--template-id`、`--white-image-id` 筛选；创作人筛选指白底图所属人员，白底图 ID 筛选包含该 ID 的各历史版本。进度写入 stderr，不混入 CSV；`--no-progress` 关闭进度，但缺少来源的任务提醒仍保留。数据库连接在 R2 扫描前关闭；数据库或 R2 请求失败返回非零退出码，不输出部分报告。
+
+腾讯云环境（`haitorok`，新版 API 镜像部署后，在服务器项目目录执行）：
+
+```bash
+sudo ./deploy/tencent.sh exec -T api python scripts/white_image_generation_statistics.py
+
+# 只统计指定公司的指定白底图（含历史版本）
+sudo ./deploy/tencent.sh exec -T api python scripts/white_image_generation_statistics.py \
+  --company-id 3 --white-image-id 12
+
+# 导出汇总，进度仍显示在终端
+sudo ./deploy/tencent.sh exec -T api python scripts/white_image_generation_statistics.py \
+  --format csv > white-image-generation-statistics.csv
+```
+
+本机测试环境（`haitoo-test`）：
+
+```bash
+./deploy/local.sh exec -T api python scripts/white_image_generation_statistics.py
+```
+
 ## R2 图片文件大小统计
 
 独立脚本 `backend/scripts/r2_image_statistics.py` 使用已有 R2 配置，按对象 key 前缀分页调用 `ListObjectsV2`，每页最多返回 1000 个对象及其大小，直接累加列表里的 `Size`，不逐张调用 `HeadObject` 或 `GetObject`，不下载图片、不查询数据库、不修改或删除 R2 对象。对象列表接口不提供文件夹数量和总大小的汇总值，因此需要读取目标前缀的所有列表页。凭据需要具备目标桶的对象列表读取权限。
