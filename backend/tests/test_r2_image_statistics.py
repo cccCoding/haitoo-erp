@@ -20,6 +20,7 @@ class R2ImageStatisticsTests(unittest.TestCase):
         self.client = _r2_client(self.settings.r2_endpoint, "test-access", "test-secret")
 
     def test_pagination_counts_bytes_and_groups_images_by_directory(self):
+        progress = StringIO()
         with Stubber(self.client) as stub:
             stub.add_response("list_objects_v2", {
                 "IsTruncated": True, "NextContinuationToken": "page2",
@@ -38,14 +39,20 @@ class R2ImageStatisticsTests(unittest.TestCase):
                     {"Key": "unknown-image", "Size": 100},
                 ],
             }, {"Bucket": "images", "Prefix": "", "MaxKeys": 1000, "ContinuationToken": "page2"})
-            rows = collect_statistics(self.client, "images")
+            rows = collect_statistics(self.client, "images", progress=progress)
             stub.assert_no_pending_responses()
         groups = dict(rows)
         self.assertEqual((groups["全部对象"].count, groups["全部对象"].total_bytes), (8, 6956))
         self.assertEqual((groups["图片合计"].count, groups["图片合计"].total_bytes), (5, 6656))
         self.assertEqual((groups["非图片对象"].count, groups["非图片对象"].total_bytes), (3, 300))
         self.assertEqual(groups["generated/"].cells("generated/")[3], "2.00 KiB")
-        self.assertEqual((groups["图片合计"].min_bytes, groups["图片合计"].max_bytes), (0, 3072))
+        self.assertIn("开始扫描 R2 图片桶：images", progress.getvalue())
+        self.assertIn("总对象数未知", progress.getvalue())
+        self.assertIn("已读取第 1 页；已扫描 4 个对象", progress.getvalue())
+        self.assertIn("已读取第 2 页；已扫描 8 个对象", progress.getvalue())
+        self.assertIn("图片 5 张，共 6.50 KiB", progress.getvalue())
+        self.assertIn("扫描完成：共 2 页、8 个对象", progress.getvalue())
+        self.assertNotIn("%", progress.getvalue())
         self.assertEqual([label for label, _ in rows[:3]], ["全部对象", "图片合计", "非图片对象"])
         self.assertEqual([label for label, _ in rows[3:]], sorted(groups.keys() - {"全部对象", "图片合计", "非图片对象"}))
 
@@ -56,8 +63,8 @@ class R2ImageStatisticsTests(unittest.TestCase):
             rows = collect_statistics(self.client, "images", "generated/task-1/")
         self.assertEqual(len(rows), 3)
         for _, stats in rows:
-            self.assertEqual((stats.count, stats.total_bytes, stats.min_bytes, stats.max_bytes), (0, 0, 0, 0))
-            self.assertEqual(stats.cells("empty")[2:], ("0.00 KiB",) * 4)
+            self.assertEqual((stats.count, stats.total_bytes), (0, 0))
+            self.assertEqual(stats.cells("empty")[2:], ("0.00 KiB",) * 2)
 
     def test_readable_size_uses_binary_units(self):
         self.assertEqual(readable_size(0), "0.00 KiB")
@@ -92,11 +99,14 @@ class R2ImageStatisticsTests(unittest.TestCase):
                               {"Bucket": "images", "Prefix": "generated/", "MaxKeys": 1000})
             with patch("scripts.r2_image_statistics.get_settings", return_value=self.settings), \
                     patch("scripts.r2_image_statistics.create_client", return_value=self.client), \
-                    redirect_stdout(StringIO()) as output:
+                    redirect_stdout(StringIO()) as output, redirect_stderr(StringIO()) as progress:
                 self.assertEqual(run(["--prefix", "generated/", "--format", "csv"]), 0)
         csv_rows = list(csv.reader(StringIO(output.getvalue())))
-        self.assertEqual(csv_rows[0], ["统计范围", "文件数量", "总大小", "平均大小", "最小大小", "最大大小"])
-        self.assertEqual(csv_rows[2], ["图片合计", "1", "1.46 KiB", "1.46 KiB", "1.46 KiB", "1.46 KiB"])
+        self.assertEqual(csv_rows[0], ["统计范围", "文件数量", "总大小", "平均大小"])
+        self.assertEqual(csv_rows[2], ["图片合计", "1", "1.46 KiB", "1.46 KiB"])
+        self.assertIn("对象前缀：generated/", progress.getvalue())
+        self.assertIn("扫描完成", progress.getvalue())
+        self.assertNotIn("扫描", output.getvalue())
         self.assertNotIn("字节", output.getvalue())
         self.assertNotIn("1500", output.getvalue())
         # CSV 中目录名称包含特殊字符时，仍可正确读取。
@@ -127,6 +137,30 @@ class R2ImageStatisticsTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         self.assertIn("AccessDenied", errors.getvalue())
         self.assertNotIn("secret", errors.getvalue())
+        self.assertIn("已读取第 1 页", errors.getvalue())
+        self.assertNotIn("扫描完成", errors.getvalue())
+
+    def test_no_progress_option_silences_stderr(self):
+        with Stubber(self.client) as stub:
+            stub.add_response("list_objects_v2", {"IsTruncated": False},
+                              {"Bucket": "images", "Prefix": "", "MaxKeys": 1000})
+            with patch("scripts.r2_image_statistics.get_settings", return_value=self.settings), \
+                    patch("scripts.r2_image_statistics.create_client", return_value=self.client), \
+                    redirect_stdout(StringIO()) as output, redirect_stderr(StringIO()) as errors:
+                self.assertEqual(run(["--no-progress"]), 0)
+        self.assertEqual(errors.getvalue(), "")
+        self.assertIn("图片合计", output.getvalue())
+
+    def test_empty_bucket_prints_zero_count_completion_and_flushes_progress(self):
+        with Stubber(self.client) as stub:
+            stub.add_response("list_objects_v2", {"IsTruncated": False},
+                              {"Bucket": "images", "Prefix": "", "MaxKeys": 1000})
+            progress = StringIO()
+            with patch.object(progress, "flush", wraps=progress.flush) as flush:
+                collect_statistics(self.client, "images", progress=progress)
+            self.assertEqual(flush.call_count, 3)
+        self.assertIn("扫描完成：共 1 页、0 个对象", progress.getvalue())
+        self.assertIn("图片 0 张，共 0.00 KiB", progress.getvalue())
 
     def test_connection_failure_does_not_expose_endpoint_or_credentials(self):
         with patch("scripts.r2_image_statistics.get_settings", return_value=self.settings), \

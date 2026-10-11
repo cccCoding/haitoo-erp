@@ -7,6 +7,7 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import sys
+from time import monotonic
 from typing import TextIO
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -19,26 +20,21 @@ from app.storage import StorageError, _r2_client
 
 # 对象列表不返回 Content-Type，按扩展名判断图片；不逐张请求或下载对象。
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp", ".tif", ".tiff", ".svg"}
-HEADERS = ("统计范围", "文件数量", "总大小", "平均大小", "最小大小", "最大大小")
+HEADERS = ("统计范围", "文件数量", "总大小", "平均大小")
 
 
 @dataclass
 class SizeStatistics:
     count: int = 0
     total_bytes: int = 0
-    min_bytes: int = 0
-    max_bytes: int = 0
 
     def add(self, size: int) -> None:
-        self.min_bytes = min(self.min_bytes, size) if self.count else size
-        self.max_bytes = max(self.max_bytes, size)
         self.count += 1
         self.total_bytes += size
 
     def cells(self, label: str) -> tuple[str, ...]:
         average = self.total_bytes / self.count if self.count else 0
-        return (label, str(self.count), readable_size(self.total_bytes),
-                readable_size(average), readable_size(self.min_bytes), readable_size(self.max_bytes))
+        return (label, str(self.count), readable_size(self.total_bytes), readable_size(average))
 
 
 def readable_size(size: float) -> str:
@@ -66,13 +62,20 @@ def create_client(settings: Settings):
     return _r2_client(endpoint.rstrip("/"), settings.r2_access_key_id, settings.r2_secret_access_key)
 
 
-def collect_statistics(client, bucket: str, prefix: str = "") -> list[tuple[str, SizeStatistics]]:
+def collect_statistics(
+    client, bucket: str, prefix: str = "", *, progress: TextIO | None = None,
+) -> list[tuple[str, SizeStatistics]]:
     all_objects, images, others = SizeStatistics(), SizeStatistics(), SizeStatistics()
     directories: dict[str, SizeStatistics] = {}
+    started_at = monotonic()
+    page_count = 0
+    if progress is not None:
+        print(f"开始扫描 R2 图片桶：{bucket}；对象前缀：{prefix or '（全部）'}；总对象数未知。",
+              file=progress, flush=True)
     pages = client.get_paginator("list_objects_v2").paginate(
         Bucket=bucket, Prefix=prefix, PaginationConfig={"PageSize": 1000},
     )
-    for page in pages:
+    for page_count, page in enumerate(pages, start=1):
         for item in page.get("Contents", []):
             key, size = item["Key"], item["Size"]
             all_objects.add(size)
@@ -82,6 +85,15 @@ def collect_statistics(client, bucket: str, prefix: str = "") -> list[tuple[str,
             images.add(size)
             directory = key.split("/", 1)[0] + "/" if "/" in key else "（桶根目录）"
             directories.setdefault(directory, SizeStatistics()).add(size)
+        if progress is not None:
+            print(f"已读取第 {page_count} 页；已扫描 {all_objects.count} 个对象，"
+                  f"累计 {readable_size(all_objects.total_bytes)}；"
+                  f"图片 {images.count} 张，共 {readable_size(images.total_bytes)}；"
+                  f"耗时 {monotonic() - started_at:.1f} 秒。", file=progress, flush=True)
+    if progress is not None:
+        print(f"扫描完成：共 {page_count} 页、{all_objects.count} 个对象；"
+              f"图片 {images.count} 张，共 {readable_size(images.total_bytes)}；"
+              f"耗时 {monotonic() - started_at:.1f} 秒。", file=progress, flush=True)
     return [("全部对象", all_objects), ("图片合计", images), ("非图片对象", others)] + [
         (directory, directories[directory]) for directory in sorted(directories)
     ]
@@ -101,11 +113,13 @@ def run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="只读统计 R2 图片文件数量与大小，不下载图片")
     parser.add_argument("--prefix", default="", help="对象 key 前缀，例如 generated/；默认整个图片桶")
     parser.add_argument("--format", choices=("table", "csv"), default="table", help="输出格式，默认中文终端表格")
+    parser.add_argument("--no-progress", action="store_true", help="关闭 stderr 中的扫描进度")
     args = parser.parse_args(argv)
     settings = get_settings()
     try:
         client = create_client(settings)
-        rows = collect_statistics(client, settings.r2_bucket, args.prefix)
+        rows = collect_statistics(client, settings.r2_bucket, args.prefix,
+                                  progress=None if args.no_progress else sys.stderr)
     except StorageError as exc:
         print(f"R2 配置错误：{exc}", file=sys.stderr)
         return 1
