@@ -168,17 +168,17 @@ HAITOO_BROWSER_TESTS=1 HAITOO_BROWSER_CHANNEL=chrome .venv/bin/python -m unittes
 本机部署（保留 `.env.local` 和数据库卷）：
 
 ```bash
-./deploy/local.sh build api migrate submit-worker result-worker miaoshou-collect-box-worker product-library-rankings-worker
+./deploy/local.sh build api migrate submit-worker result-worker product-library-rankings-worker
 ./deploy/local.sh run --rm migrate
-./deploy/local.sh up -d api submit-worker result-worker miaoshou-collect-box-worker product-library-rankings-worker
+./deploy/local.sh up -d api submit-worker result-worker product-library-rankings-worker
 ```
 
 腾讯云部署（保留 `.env` 和数据库卷，先按项目运维流程备份数据库）：
 
 ```bash
-./deploy/tencent.sh build api migrate submit-worker result-worker miaoshou-collect-box-worker product-library-rankings-worker
+./deploy/tencent.sh build api migrate submit-worker result-worker product-library-rankings-worker
 ./deploy/tencent.sh run --rm migrate
-./deploy/tencent.sh up -d api submit-worker result-worker miaoshou-collect-box-worker product-library-rankings-worker
+./deploy/tencent.sh up -d api submit-worker result-worker product-library-rankings-worker
 ./deploy/tencent.sh exec edge nginx -t
 ./deploy/tencent.sh exec edge nginx -s reload
 ```

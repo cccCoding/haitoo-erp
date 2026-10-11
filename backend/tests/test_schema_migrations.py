@@ -100,7 +100,7 @@ class SchemaMigrationTests(unittest.TestCase):
             command.upgrade(config, "head")
             current, expected = schema_heads(connection)
             self.assertEqual(current, expected)
-            self.assertEqual(current, {"20261010_32"})
+            self.assertEqual(current, {"20261011_33"})
             columns = {column['name'] for column in inspect(connection).get_columns('product_templates')}
             self.assertNotIn('confirmed_product_info', columns)
             self.assertEqual(connection.execute(text("SELECT title_template FROM product_templates WHERE id=900")).scalar_one(), 'Existing title rules')
@@ -143,6 +143,49 @@ class SchemaMigrationTests(unittest.TestCase):
         with self.engine.connect() as connection:
             current, expected = schema_heads(connection)
             self.assertEqual(current, expected)
+
+    def test_remove_collect_box_sync_deletes_cache_and_preserves_account_shops_and_drafts(self):
+        sync_columns = {
+            "miaoshou_collect_box_initial_synced_at",
+            "miaoshou_collect_box_last_synced_at",
+            "miaoshou_collect_box_last_pruned_at",
+        }
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, "20261010_32")
+            connection.execute(text("INSERT INTO companies (id, name, is_active, miaoshou_app_id, miaoshou_secret_encrypted, miaoshou_collect_box_initial_synced_at, miaoshou_collect_box_last_synced_at, miaoshou_collect_box_last_pruned_at, created_at) VALUES (1, 'Company', 1, 'app-id', 'encrypted-secret', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"))
+            connection.execute(text("INSERT INTO shops (id, company_id, name, region, external_shop_id, auth_status, shop_type) VALUES (1, 1, 'Shop', 'MY', 'external-1', 'active', 'cross_border')"))
+            connection.execute(ProductDraft.__table__.insert().values(id=1, company_id=1, title="Published draft", image_urls=[], sku_items=[], status="published", workflow_stage="published", miaoshou_collect_box_id="901", tiktok_collect_box_id="902"))
+            connection.execute(text("INSERT INTO miaoshou_collect_box_items (company_id, common_collect_box_detail_id, title, last_synced_at, created_at, updated_at) VALUES (1, '903', 'External product', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"))
+
+            command.upgrade(config, "head")
+            self.assertNotIn("miaoshou_collect_box_items", inspect(connection).get_table_names())
+            self.assertTrue(sync_columns.isdisjoint(column["name"] for column in inspect(connection).get_columns("companies")))
+            self.assertEqual(tuple(connection.execute(text("SELECT miaoshou_app_id, miaoshou_secret_encrypted FROM companies WHERE id=1")).one()), ("app-id", "encrypted-secret"))
+            self.assertEqual(connection.scalar(text("SELECT external_shop_id FROM shops WHERE id=1")), "external-1")
+            self.assertEqual(tuple(connection.execute(text("SELECT title, miaoshou_collect_box_id, tiktok_collect_box_id FROM product_drafts WHERE id=1")).one()), ("Published draft", "901", "902"))
+
+            command.downgrade(config, "20261010_32")
+            self.assertEqual(connection.scalar(text("SELECT COUNT(*) FROM miaoshou_collect_box_items")), 0)
+            self.assertEqual(tuple(connection.execute(text("SELECT miaoshou_collect_box_initial_synced_at, miaoshou_collect_box_last_synced_at, miaoshou_collect_box_last_pruned_at FROM companies WHERE id=1")).one()), (None, None, None))
+            self.assertEqual(len(inspect(connection).get_indexes("miaoshou_collect_box_items")), 5)
+            command.upgrade(config, "head")
+        assert_schema_current(self.engine)
+
+    def test_mysql_collect_box_removal_only_drops_sync_storage(self):
+        for dialect in ("mysql", "mariadb"):
+            output = StringIO()
+            config = alembic_config()
+            config.output_buffer = output
+            with patch("app.config.get_settings", return_value=SimpleNamespace(database_url=f"{dialect}+pymysql://test@localhost/test")):
+                command.upgrade(config, "20261010_32:20261011_33", sql=True)
+            sql = output.getvalue()
+            self.assertIn("DROP TABLE miaoshou_collect_box_items", sql)
+            self.assertIn("DROP COLUMN miaoshou_collect_box_initial_synced_at", sql)
+            self.assertIn("DROP COLUMN miaoshou_collect_box_last_synced_at", sql)
+            self.assertIn("DROP COLUMN miaoshou_collect_box_last_pruned_at", sql)
+            self.assertNotIn("ALTER TABLE product_drafts", sql)
+            self.assertNotIn("DROP COLUMN miaoshou_app_id", sql)
 
     def test_queue_intervals_migrate_seconds_to_milliseconds_once(self) -> None:
         with self.engine.begin() as connection:

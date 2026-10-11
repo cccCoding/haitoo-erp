@@ -164,25 +164,6 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # 公司级妙手公共采集箱同步；每 5 分钟运行一次，仅缓存外部采集商品。
-  miaoshou-collect-box-worker:
-    build:
-      context: ./backend
-      args:
-        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
-    logging: *default-logging
-    command: python -m app.task_worker miaoshou-collect-box
-    environment:
-      DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
-      SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
-      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
-    depends_on:
-      api:
-        condition: service_started
-    restart: unless-stopped
-
   # 轮询手动提交的产品库统计任务，并清理过期快照。
   product-library-rankings-worker:
     build:
