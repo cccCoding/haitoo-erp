@@ -16,7 +16,7 @@ const templateGroups = ref<{id: number; name: string}[]>([])
 const templateLibrary = ref<InstanceType<typeof TemplateLibrary> | null>(null)
 const companyId = ref<number | null>(null)
 const templates = ref<any[]>([]), members = ref<any[]>([]), shops = ref<any[]>([])
-const templateId = ref(''), creatorId = ref(''), usageStatus = ref('unused')
+const templateId = ref(''), creatorId = ref(''), usageStatus = ref('unused'), sourceType = ref('')
 const category = ref('products'), sourceIds = ref<number[]>([]), sku = ref(''), shopSearch = ref('')
 const shopFilter = ref<HTMLDetailsElement | null>(null)
 const rows = ref<any[]>([]), total = ref(0), page = ref(1), pageSize = ref(20)
@@ -48,6 +48,7 @@ function resetFilters() {
   if (shopFilter.value) shopFilter.value.open = false
   templateId.value = ''; creatorId.value = ''; sourceIds.value = []; sku.value = ''; shopSearch.value = ''
   usageStatus.value = tab.value === 'materials' ? 'unused' : 'all'
+  sourceType.value = ''
   templateLibrary.value?.reset(); page.value = 1; preview.value = null; closeOrders()
 }
 function closeOrders() { orderRequestId++; orderProduct.value = null; orders.value = []; orderError.value = ''; orderLoading.value = false }
@@ -59,7 +60,7 @@ async function refresh(withFilters = true) {
   loading.value = true
   const selectedCompany = companyId.value
   const params: Record<string, any> = { company_id: selectedCompany, page: isTop.value ? 1 : page.value, page_size: isTop.value ? 50 : pageSize.value }
-  if (tab.value === 'materials') Object.assign(params, { usage_status: usageStatus.value, creator_id: creatorId.value || undefined, template_id: templateId.value || undefined })
+  if (tab.value === 'materials') Object.assign(params, { usage_status: usageStatus.value, source_type: sourceType.value || undefined, creator_id: creatorId.value || undefined, template_id: templateId.value || undefined })
   else if (tab.value === 'products' && !isShops.value) {
     params.category = category.value
     if (isMaterial.value) Object.assign(params, { creator_id: creatorId.value || undefined, usage_status: usageStatus.value })
@@ -135,7 +136,8 @@ defineExpose({ refresh })
       <div :id="tab==='products'?'product-category-panel':undefined" :role="tab==='products'?'tabpanel':undefined" :aria-labelledby="tab==='products'?`product-category-${category}`:undefined">
       <form v-if="tab!=='templates' && tab!=='creative'" class="data-filters" @submit.prevent="search">
         <template v-if="isMaterial">
-          <label v-if="tab==='materials' || category==='new_images'">使用状态<select v-model="usageStatus"><option v-if="category==='new_images' && tab==='products'" value="all">全部状态</option><option value="unused">未使用</option><option value="used">已使用</option></select></label>
+          <label v-if="tab==='materials' || category==='new_images'">使用状态<select v-model="usageStatus"><option value="all">全部状态</option><option value="unused">未使用</option><option value="used">已使用</option></select></label>
+          <label v-if="tab==='materials'">类型<select v-model="sourceType"><option value="">全部类型</option><option value="ai_created">AI创作</option><option value="local_upload">本地上传</option><option value="imported">导入</option></select></label>
           <label v-if="tab==='materials'">产品模板<select v-model="templateId"><option value="">全部模板</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
           <label>创作人<select v-model="creatorId"><option value="">全部创作人</option><option v-for="item in members" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
         </template>
@@ -258,8 +260,6 @@ summary { cursor:pointer; }
 .creative-meta { display:grid; gap:6px; color:var(--admin-muted); font-size:11px; line-height:1.6; overflow-wrap:anywhere; }
 .creative-image { display:block; width:100%; height:220px; padding:0; background:var(--admin-surface); }
 .creative-image img { display:block; width:100%; height:100%; object-fit:contain; }
-.creative-size { display:flex; flex-wrap:wrap; align-items:center; gap:8px; color:var(--admin-muted); font-size:12px; }
-.creative-size .secondary { min-height:32px; padding:5px 10px; font-size:12px; }
 .creative-empty { margin:0; padding:40px 24px; text-align:center; color:var(--admin-muted); font-size:13px; }
 .creative-empty.error { color:#b4233b; }
 .creative-empty .secondary { margin-left:8px; }

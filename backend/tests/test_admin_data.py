@@ -73,6 +73,44 @@ class AdminDataTests(unittest.TestCase):
         self.assertEqual(self.get('materials', template_id=2).json()['total'], 0)
         self.assertEqual(self.get('materials', company_id=2, usage_status='used').json()['items'][0]['id'], 21)
 
+    def test_material_source_filter_with_pagination_and_company_scope(self):
+        with self.sessions() as db:
+            for item_id, company_id, source_type, task_id, usage in (
+                (40, 1, 'ai_created', None, 'unused'),
+                (41, 1, '', 100, 'unused'),
+                (42, 1, 'imported', None, 'unused'),
+                (43, 1, 'local_upload', None, 'used'),
+                (44, 2, 'imported', None, 'unused'),
+            ):
+                db.add(MaterialAsset(id=item_id, company_id=company_id, claimed_by=company_id+1,
+                    template_id=company_id, name=f'素材{item_id}', url='/test.jpg',
+                    source_type=source_type, source_task_id=task_id, usage_status=usage))
+            db.commit()
+        ai = self.get('materials', source_type='ai_created', page_size=1).json()
+        self.assertEqual(ai['total'], 2)
+        self.assertEqual([item['id'] for item in ai['items']], [41])
+        second = self.get('materials', source_type='ai_created', page_size=1, page=2).json()
+        self.assertEqual([item['id'] for item in second['items']], [40])
+        imported = self.get('materials', source_type='imported', creator_id=2, template_id=1).json()
+        self.assertEqual(imported['total'], 1)
+        self.assertEqual([item['id'] for item in imported['items']], [42])
+        local = self.get('materials', source_type='local_upload').json()
+        self.assertEqual({item['id'] for item in local['items']}, {10, 30})
+        used = self.get('materials', source_type='local_upload', usage_status='used').json()
+        self.assertEqual({item['id'] for item in used['items']}, {11, 43})
+        self.assertEqual(self.get('materials', source_type='imported', creator_id=3).json()['total'], 0)
+        self.assertEqual(self.get('materials', source_type='imported', company_id=2).json()['items'][0]['id'], 44)
+        self.assertEqual(self.get('materials', source_type='').json()['total'], 5)
+        all_statuses = self.get('materials', usage_status='all').json()
+        self.assertEqual(all_statuses['total'], 7)
+        self.assertEqual({item['usage_status'] for item in all_statuses['items']}, {'unused', 'used'})
+        all_local = self.get('materials', usage_status='all', source_type='local_upload',
+                             creator_id=2, template_id=1, page_size=2).json()
+        self.assertEqual(all_local['total'], 4)
+        self.assertEqual(len(all_local['items']), 2)
+        self.assertEqual({item['id'] for item in self.get('materials', usage_status='all', company_id=2).json()['items']}, {20, 21, 44})
+        self.assertEqual(self.get('materials', source_type='invalid').status_code, 422)
+
     def test_product_statistics_and_order_details_never_cross_companies(self):
         result = self.get('products', sku='SHA', template_id=1).json()
         self.assertEqual(result['total'], 1)

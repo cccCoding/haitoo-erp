@@ -133,3 +133,18 @@ final result: passed
 - 通过 `./deploy/local.sh build admin-web` 与 `./deploy/local.sh up -d --no-deps admin-web` 更新本机测试镜像及预览。腾讯云未部署。
 - 店铺筛选增加外部点击收起，重置时也关闭面板；组件卸载移除事件监听。构建通过，Chrome 实测内部搜索、勾选、清空选择保持展开，外部点击收起并保留勾选；桌面、960px、390px均通过。本机预览已更新，腾讯云未部署。截图：`output/playwright/admin-data-company/shop-filter-outside-closed.jpg`、`shop-filter-tablet-closed.jpg`、`shop-filter-mobile-closed.jpg`。
 - `output/` 为本地验证产物目录，已加入 `.gitignore`，此前跟踪的6张截图取消跟踪且保留本地文件。
+
+## 2026-10-11 素材库类型与全部状态筛选
+
+- Admin 数据管理的素材库新增类型筛选：全部类型、AI创作、本地上传、导入；使用状态增加全部状态。默认仍为未使用、全部类型，搜索回到第一页，重置及切换公司或 tab 清空类型筛选。
+- Admin 接口传递类型参数，复用素材查询的历史类型兼容规则；全部状态不限制使用状态，可与模板、创作人及类型组合筛选。无需数据库迁移。
+- 类型检查与 Vite 构建、19项后端测试、`git diff --check` 通过；测试覆盖来源类型、历史记录、全部状态、组合筛选、分页和公司隔离。
+- 独立 Chrome 使用模拟公司和素材响应，验证三种类型、全部状态、组合参数、搜索回第一页、重置、公司与 tab 切换；1440px、960px、390px 控件完整、页面无横向溢出，无页面脚本错误。三张截图已打开检查，保存在 `output/playwright/admin-material-type/materials-1440.png`、`materials-960.png`、`materials-390.png`，交互断言记录为同目录 `qa-result.log`。真实业务数据未做本轮浏览器联调。
+- 已通过固定本机入口构建并启动 API 与管理端镜像，本机 OpenAPI 确认类型参数和全部状态已生效。腾讯云未部署。
+
+## 2026-10-11 白底图移除文件大小
+
+- 移除创作素材白底图列表与放大弹窗的文件大小展示、读取队列、格式化及重试逻辑，并删除失效样式。页面不再调用 `white-image-sizes` 接口。
+- TypeScript 检查、Vite 构建和 `git diff --check` 通过。独立 Chrome 使用模拟素材数据验证列表、放大、Escape 关闭与焦点回位、搜索空结果、重置、分页和每页50条；大小接口请求数为0，无文件大小文案或页面脚本错误。
+- 已检查1440px、960px、390px截图，无页面横向溢出。截图及断言结果保存于 `output/playwright/admin-white-images-no-size/`。真实业务数据未做本轮浏览器联调。
+- 已通过固定本机入口重建并启动管理端测试镜像；腾讯云未部署。

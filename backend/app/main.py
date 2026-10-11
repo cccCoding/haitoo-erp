@@ -2270,7 +2270,7 @@ def list_material_assets(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    if usage_status not in {"unused", "used"}:
+    if usage_status not in {"all", "unused", "used"}:
         raise HTTPException(422, "不支持的素材状态")
     if source_type not in {"", "ai_created", "local_upload", "imported"}:
         raise HTTPException(422, "不支持的素材类型")
@@ -2287,7 +2287,8 @@ def list_material_assets(
         filters.append(MaterialAsset.claimed_by == creator_id)
     if template_id is not None:
         filters.append(MaterialAsset.template_id == template_id)
-    filters.append(MaterialAsset.usage_status == usage_status)
+    if usage_status != "all":
+        filters.append(MaterialAsset.usage_status == usage_status)
     if created_from is not None:
         filters.append(MaterialAsset.created_at >= created_from)
     if created_to is not None:
@@ -2598,11 +2599,12 @@ def admin_data_white_image_sizes(
 def admin_data_materials(
     company_id: int = Query(ge=1), page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=1000),
     creator_id: int | None = Query(None, ge=1), template_id: int | None = Query(None, ge=1),
-    usage_status: Literal["unused", "used"] = "unused",
+    usage_status: Literal["all", "unused", "used"] = "unused",
+    source_type: Literal["", "ai_created", "local_upload", "imported"] = "",
     user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db),
 ):
     return list_material_assets(page=page, page_size=page_size, creator_id=creator_id,
-        template_id=template_id, usage_status=usage_status,
+        template_id=template_id, usage_status=usage_status, source_type=source_type,
         user=admin_company_read_scope(db, company_id), db=db)
 
 
