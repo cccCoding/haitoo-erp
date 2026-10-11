@@ -290,6 +290,33 @@ HubStudio 环境可包含本土店和跨境店，当前自动上品只支持用�
 
 默认输出中文终端表格，`--format csv` 输出相同统计结果的 CSV。公司和人员筛选可组合使用，不存在或无匹配数据的筛选条件输出三类零值汇总。脚本复用 API 的数据库配置，不修改业务数据或创建数据库表。
 
+## R2 图片文件大小统计
+
+独立脚本 `backend/scripts/r2_image_statistics.py` 使用已有 R2 配置，分页调用 `ListObjectsV2`，直接读取对象的 `Size` 字节数，不下载图片、不查询数据库、不修改或删除 R2 对象。凭据需要具备目标桶的对象列表读取权限。
+
+默认统计 `R2_BUCKET` 图片桶的全部现存对象，分别输出全部对象、图片合计、非图片对象，以及按图片 key 第一段目录（如 `generated/`、`material/`）的图片统计。每行包含文件数量、总大小、平均大小、最小和最大大小。终端与 CSV 中所有大小只显示 KiB／MiB／GiB／TiB，按 1024 自动换算并保留两位小数；不足 1 KiB（包括零值）仍使用 KiB，超过 TiB 范围仍以 TiB 展示，不输出原始字节大小列。可用 `--prefix` 限定对象 key 前缀，前缀直接传给 R2，不会自动添加斜杠。
+
+图片按不区分大小写的扩展名识别：JPG、JPEG、PNG、WebP、GIF、AVIF、BMP、TIF、TIFF、SVG；无扩展名或其他扩展名的对象计入非图片。数据反映扫描期间的现存对象，不代表累计上传量；扫描时若仍有上传或删除，结果可能随之变化。中途读取失败时返回非零退出码，不输出部分汇总。
+
+腾讯云环境（`haitorok`，脚本随新版 API 镜像部署后，在服务器项目目录执行；容器内路径不带 `backend/`）：
+
+```bash
+sudo ./deploy/tencent.sh exec -T api python scripts/r2_image_statistics.py
+
+# 只统计 AI 生成图片目录
+sudo ./deploy/tencent.sh exec -T api python scripts/r2_image_statistics.py --prefix generated/
+
+# 导出 UTF-8 CSV，保存在当前服务器目录
+sudo ./deploy/tencent.sh exec -T api python scripts/r2_image_statistics.py \
+  --format csv > r2-image-statistics.csv
+```
+
+本机测试环境（`haitoo-test`，使用该环境配置的 R2 图片桶）：
+
+```bash
+./deploy/local.sh exec -T api python scripts/r2_image_statistics.py
+```
+
 ## 清理产品库数据
 
 `backend/scripts/clear_product_library.py` 无需参数，运行即清空所有公司的产品库相关 9 张表（产品、来源店铺、订单及关联、SKU 数量、快照及明细、统计任务），同一事务提交，失败回滚。保留其他业务表、表结构与自增序列。清理期间暂停 API 和产品库统计 worker，避免并发写入。
