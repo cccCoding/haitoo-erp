@@ -1862,18 +1862,16 @@ def build_common_collect_box_payload(draft: ProductDraft, template: ProductTempl
     for item in sku_items:
         base_sku_by_image.setdefault(item.get("image_url"), item["sku"])
 
-    # Color 的属性值使用每张图片的基础 SKU，便于在妙手中识别图片与 SKU 的关系。
-    color_map = {}
-    for local_url, base_sku in base_sku_by_image.items():
-        public_url = miaoshou_public_image_url(local_url)
-        color_map[base_sku] = {"name": base_sku, "imgUrls": [public_url], "imgUrl": public_url}
-
     size_names = (template.sku_specifications or {}).get("size", {}).get("options", [])
     size_names = [str(size).strip() for size in size_names if str(size).strip()] or ["Default"]
     size_map = {name: {"name": name} for name in size_names}
+    color_map = {}
     sku_map = {}
-    for image_url, base_sku in base_sku_by_image.items():
-        color_name = base_sku
+    # Color 按原始 SKU 图顺序编号；货号继续使用图片的永久基础 SKU。
+    for color_index, (image_url, base_sku) in enumerate(base_sku_by_image.items(), start=1):
+        color_name = f"Color {color_index}"
+        public_url = miaoshou_public_image_url(image_url)
+        color_map[color_name] = {"name": color_name, "imgUrls": [public_url], "imgUrl": public_url}
         for size_name in size_names:
             platform_sku = base_sku if size_name == "Default" else f"{base_sku}-{size_name}"
             sku_map[f"{color_name};{size_name}"] = {

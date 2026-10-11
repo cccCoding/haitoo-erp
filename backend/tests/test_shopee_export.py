@@ -137,6 +137,9 @@ class ShopeeExportTests(unittest.TestCase):
         fields = {str(sheet.cell(1, column).value).split("|", 1)[0]: column for column in range(1, sheet.max_column + 1)}
         self.assertEqual(sheet.cell(7, fields["ps_category"]).value, "100350")
         self.assertEqual(sheet.cell(7, fields["ps_sku_parent_short"]).value, "42")
+        self.assertEqual(sheet.cell(7, fields["et_title_option_for_variation_1"]).value, "Color 1")
+        self.assertEqual(sheet.cell(7, fields["ps_sku_short"]).value, "Y1AA000001")
+        self.assertIsNone(sheet.cell(7, fields["et_title_variation_2"]).value)
         self.assertIsNone(sheet.cell(7, fields["ps_dangerous_goods"]).value)
         self.assertEqual(sheet.cell(7, fields["et_title_variation_integration_no"]).value, "42")
         self.assertEqual(sheet.cell(7, fields["channel_id.2000"]).value, "开启")
@@ -153,8 +156,16 @@ class ShopeeExportTests(unittest.TestCase):
             products=[{
                 "draft_id": 1, "title": "Unique Shopee product title", "description": "Detailed product description for Shopee.",
                 "image_urls": ["https://img.example/cover.jpg", "https://img.example/gallery.jpg"],
-                "sku_images": [{"image_url": "https://img.example/color.jpg", "sku": "Y1AA000001"}],
+                "sku_images": [
+                    {"image_url": "https://img.example/color.jpg", "sku": "Y1AA000001"},
+                    {"image_url": "https://img.example/color-2.jpg", "sku": "Y1AA000002"},
+                ],
                 "size_chart_url": "https://img.example/size.jpg", "price": 12.5, "quantity": 88,
+            }, {
+                "draft_id": 2, "title": "Another unique Shopee product title", "description": "Another detailed product description.",
+                "image_urls": ["https://img.example/cover-2.jpg"],
+                "sku_images": [{"image_url": "https://img.example/color-3.jpg", "sku": "BASESKUWITHMORETHAN20CHARACTERS"}],
+                "price": 10, "quantity": 99,
             }], template_bytes=self.template_bytes,
         )
         workbook = load_workbook(BytesIO(result), data_only=False)
@@ -164,6 +175,9 @@ class ShopeeExportTests(unittest.TestCase):
         self.assertEqual(sheet.cell(7, fields["et_title_variation_2"]).value, "Size")
         self.assertEqual(sheet.cell(7, fields["et_title_option_for_variation_2"]).value, "S")
         self.assertEqual(sheet.cell(8, fields["ps_sku_short"]).value, "Y1AA000001-M")
+        self.assertEqual([sheet.cell(row, fields["et_title_option_for_variation_1"]).value for row in range(7, 13)], ["Color 1", "Color 1", "Color 2", "Color 2", "Color 1", "Color 1"])
+        self.assertEqual([sheet.cell(row, fields["ps_sku_short"]).value for row in range(7, 13)], ["Y1AA000001-S", "Y1AA000001-M", "Y1AA000002-S", "Y1AA000002-M", "BASESKUWITHMORETHAN20CHARACTERS-S", "BASESKUWITHMORETHAN20CHARACTERS-M"])
+        self.assertEqual([sheet.cell(row, fields["et_title_image_per_variation"]).value for row in range(7, 13)], ["https://img.example/color.jpg"] * 2 + ["https://img.example/color-2.jpg"] * 2 + ["https://img.example/color-3.jpg"] * 2)
         self.assertEqual(sheet.cell(7, fields["channel_id.2000"]).value, "On")
         self.assertEqual(sheet.cell(7, fields["channel_id.2001"]).value, "Off")
         self.assertEqual(sheet.cell(7, fields["ps_sku_parent_short"]).value, "1")

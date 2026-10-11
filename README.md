@@ -389,6 +389,8 @@ python -m app.db_migrate
 
 商品标题去除首尾空白后必须为 25-255 个字符。创建商品草稿只保存本地记录，不会自动调用妙手；用户需要在商品草稿列表点击“发布至妙手”，系统才会创建妙手公共草稿箱商品并继续认领到 TikTok 采集箱。任一步失败时本地草稿都会保留，可从列表重试。
 
+发布至妙手及导出 TikTok、Shopee 表格时，Color 属性值按草稿原始 SKU 图顺序使用 `Color 1`、`Color 2` 等名称，每个商品从 1 开始；同一 SKU 图的所有尺码共用一个 Color 值。规格图片继续关联原始 SKU 图，最终货号/卖家 SKU 仍为 `基础 SKU-尺码`（例如 `M05LRKJLCUYC-S`）；无尺码时只使用基础 SKU。首图和轮播图的编排不影响 Color 编号。此规则用于新建妙手采集箱商品和新导出的表格，不会自动修改已有外部商品。
+
 直传后图片地址由前端提交，服务端在落库处兜底校验：`/material-assets/commit` 校验地址落在当前公司 `material/company/{id}/` 下；模板新增/更新校验 `cover_url`、`size_chart_url` 落在当前公司 `template/` 或 `template-size-chart/` 下。为兼容 R2 之前的历史地址，更新时若字段值与库中现有值一致则直接放行，不强制回溯改造。
 
 `POST /uploads/presign` 的 `category` 走服务端白名单（当前为 `template`、`template-size-chart`、`template-white`），签名本身始终绑定调用方公司。

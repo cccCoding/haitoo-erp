@@ -136,6 +136,8 @@ class TiktokExportTests(unittest.TestCase):
             self.assertEqual(exported_zip.read("xl/worksheets/sheet3.xml"), source_zip.read("xl/worksheets/sheet3.xml"))
         sheet = exported["Template"]
         self.assertEqual([sheet.cell(row, 26).value for row in range(7, 13)], ["Y1AA000001-S", "Y1AA000001-M", "Y1AA000002-S", "Y1AA000002-M", "Y1AA000003-S", "Y1AA000003-M"])
+        self.assertEqual([sheet.cell(row, 15).value for row in range(7, 13)], ["Color 1", "Color 1", "Color 2", "Color 2", "Color 1", "Color 1"])
+        self.assertEqual([sheet.cell(row, 16).value for row in range(7, 13)], ["https://img.example/one.jpg"] * 2 + ["https://img.example/two.jpg"] * 2 + ["https://img.example/three.jpg"] * 2)
         self.assertEqual(sheet["E7"].value, "https://img.example/one.jpg")
         self.assertEqual(sheet["F7"].value, "https://img.example/two.jpg")
         self.assertEqual(sheet["P9"].value, "https://img.example/two.jpg")
@@ -171,6 +173,8 @@ class TiktokExportTests(unittest.TestCase):
         sheet = load_workbook(BytesIO(response.body), data_only=False)["Template"]
         self.assertEqual(sheet["E7"].value, "https://img.example/main.jpg")
         self.assertEqual(sheet["F7"].value, "https://img.example/carousel.jpg")
+        self.assertEqual(sheet["O7"].value, "Color 1")
+        self.assertEqual(sheet["O9"].value, "Color 2")
         self.assertEqual(sheet["P7"].value, "https://img.example/one.jpg")
         self.assertEqual(sheet["P9"].value, "https://img.example/two.jpg")
 
@@ -188,6 +192,7 @@ class TiktokExportTests(unittest.TestCase):
             )
         sheet = load_workbook(BytesIO(workbook_bytes), data_only=False)["Template"]
         self.assertEqual(sheet["N7"].value, "Color")
+        self.assertEqual(sheet["O7"].value, "Color 1")
         self.assertEqual(sheet["Q7"].value, "Size")
         self.assertEqual(sheet["W7"].value, 10)
         self.assertIsNone(sheet["AA7"].value)

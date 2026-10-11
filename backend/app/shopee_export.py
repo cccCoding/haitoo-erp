@@ -283,10 +283,9 @@ def build_workbook(
             raise ValueError(f"商品草稿 #{product['draft_id']} 的 Shopee 二级变体组合不能超过 50 个")
         gallery = list(dict.fromkeys(product["image_urls"]))[:9]
         draft_id = str(product["draft_id"])
-        for sku_image in sku_images:
+        for color_index, sku_image in enumerate(sku_images, start=1):
             base_sku = sku_image["sku"]
-            if len(base_sku) > 20:
-                raise ValueError(f"商品草稿 #{product['draft_id']} 的 Color 变体值不能超过 20 个字符：{base_sku}")
+            color_name = f"Color {color_index}"
             for size in sizes:
                 if row_number > DATA_END_ROW:
                     raise ValueError(f"导出数据超过 Shopee 模板 {DATA_END_ROW - DATA_START_ROW + 1} 行限制")
@@ -302,7 +301,7 @@ def build_workbook(
                     FIELD_PARENT_SKU: draft_id,
                     FIELD_VARIATION_INTEGRATION_NO: draft_id,
                     FIELD_VARIATION_NAME_1: "Color",
-                    FIELD_VARIATION_VALUE_1: base_sku,
+                    FIELD_VARIATION_VALUE_1: color_name,
                     FIELD_VARIATION_IMAGE: sku_image["image_url"],
                     FIELD_VARIATION_NAME_2: None if size == "Default" else "Size",
                     FIELD_VARIATION_VALUE_2: None if size == "Default" else size,

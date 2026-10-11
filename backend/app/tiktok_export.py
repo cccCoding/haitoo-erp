@@ -335,9 +335,10 @@ def build_workbook(*, template, category: str, cod: str, attributes: dict[str, s
             {"image_url": image_url, "sku": product["base_sku_by_image"][image_url]}
             for image_url in image_urls
         ]
-        for sku_image in sku_images:
+        for color_index, sku_image in enumerate(sku_images, start=1):
             image_url = sku_image["image_url"]
             base_sku = sku_image["sku"]
+            color_name = f"Color {color_index}"
             for size in sizes:
                 if row_number > data_end_row:
                     raise ValueError(f"导出数据超过 TikTok 模板 {data_end_row - DATA_START_ROW + 1} 行限制")
@@ -347,7 +348,7 @@ def build_workbook(*, template, category: str, cod: str, attributes: dict[str, s
                     FIELD_PRODUCT_NAME: product["title"],
                     FIELD_PRODUCT_DESCRIPTION: product["description"],
                     FIELD_PROPERTY_NAME_1: "Color",
-                    FIELD_PROPERTY_VALUE_1: base_sku,
+                    FIELD_PROPERTY_VALUE_1: color_name,
                     # 模板 P 列 property_1_image 的中文表头是“主要变体图片 1”。
                     FIELD_PROPERTY_1_IMAGE: image_url,
                     FIELD_PROPERTY_NAME_2: "Size",
