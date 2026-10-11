@@ -21,7 +21,7 @@ from typing import Annotated, Literal
 from types import SimpleNamespace
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import case, delete, func, inspect, or_, select, text, tuple_, update
+from sqlalchemy import and_, case, delete, func, inspect, or_, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from . import hub
@@ -39,6 +39,7 @@ from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredenti
 from .security import create_access_token, current_user, hash_password, require_roles, verify_password
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
+from .creative_resource_sizes import read_white_image_sizes
 from .storage import ExportMissingError, upload_hub_export, read_hub_export, delete_hub_export, StorageError, create_image_upload_url, is_company_r2_url, is_public_r2_url, upload_image_bytes_async
 from .logging_config import configure_logging
 from .tiktok_export import build_workbook as build_tiktok_workbook, category_base_requirements, parse_listing_options, validate_attributes
@@ -2521,6 +2522,76 @@ def admin_data_templates(
         TemplateGroup.company_id == company_id, TemplateGroup.is_platform.is_(True),
     )).order_by(TemplateGroup.is_platform.desc(), TemplateGroup.name)).all()
     return {"items": templates, "groups": [{"id": item.id, "name": item.name} for item in groups]}
+
+
+@app.get("/admin/data/creative-resources")
+def admin_data_creative_resources(
+    company_id: int = Query(ge=1),
+    resource_type: Literal["prompts", "white-images"] = "prompts",
+    creator_id: int | None = Query(None, ge=1), template_id: int | None = Query(None, ge=1),
+    query: str = Query("", max_length=1000),
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=200),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db),
+):
+    admin_company_read_scope(db, company_id)
+    resource = UserTemplatePrompt if resource_type == "prompts" else UserTemplateWhiteImage
+    conditions = [resource.company_id == company_id]
+    if creator_id is not None:
+        conditions.append(resource.user_id == creator_id)
+    if template_id is not None:
+        conditions.append(resource.template_id == template_id)
+    if keyword := query.strip():
+        match = resource.name.icontains(keyword, autoescape=True)
+        if resource_type == "prompts":
+            match = or_(match, resource.content.icontains(keyword, autoescape=True))
+        conditions.append(match)
+    total = db.scalar(select(func.count()).select_from(resource).where(*conditions)) or 0
+    statement = select(resource, User.name, ProductTemplate.name).outerjoin(
+        User, and_(User.id == resource.user_id, User.company_id == company_id),
+    ).outerjoin(ProductTemplate, and_(
+        ProductTemplate.id == resource.template_id,
+        or_(ProductTemplate.company_id == company_id, ProductTemplate.is_platform.is_(True)),
+    )).where(*conditions).order_by(resource.updated_at.desc(), resource.id.desc())
+    items = [
+        {**serialize_record(item), "user_name": user_name, "template_name": template_name}
+        for item, user_name, template_name in db.execute(statement.offset((page - 1) * page_size).limit(page_size))
+    ]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@app.get("/admin/data/creative-resources/filters")
+def admin_data_creative_resource_filters(
+    company_id: int = Query(ge=1),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db),
+):
+    admin_company_read_scope(db, company_id)
+    templates = db.scalars(select(ProductTemplate).where(or_(
+        ProductTemplate.company_id == company_id, ProductTemplate.is_platform.is_(True),
+    )).order_by(ProductTemplate.id)).all()
+    members = db.scalars(select(User).where(User.company_id == company_id).order_by(User.id)).all()
+    return {
+        "templates": [{"id": item.id, "name": item.name} for item in templates],
+        "members": [{"id": item.id, "name": item.name} for item in members],
+    }
+
+
+@app.get("/admin/data/creative-resources/white-image-sizes")
+def admin_data_white_image_sizes(
+    image_ids: Annotated[list[int], Query(min_length=1, max_length=20)],
+    company_id: int = Query(ge=1),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db),
+):
+    admin_company_read_scope(db, company_id)
+    if any(image_id < 1 for image_id in image_ids):
+        raise HTTPException(422, "白底图 ID 必须为正整数")
+    images = db.execute(select(UserTemplateWhiteImage.id, UserTemplateWhiteImage.image_url).where(
+        UserTemplateWhiteImage.company_id == company_id, UserTemplateWhiteImage.id.in_(image_ids),
+    )).all()
+    if len(images) != len(set(image_ids)):
+        raise HTTPException(404, "白底图不存在或不属于所选公司")
+    # R2 网络请求前释放只读事务，避免在大小查询期间占用数据库连接。
+    db.rollback()
+    return {"items": read_white_image_sizes(company_id, [(image_id, url) for image_id, url in images])}
 
 
 @app.get("/admin/data/materials")

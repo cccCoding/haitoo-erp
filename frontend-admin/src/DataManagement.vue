@@ -2,13 +2,16 @@
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import axios from 'axios'
 import TemplateLibrary from './TemplateLibrary.vue'
+import CreativeResources from './CreativeResources.vue'
 import { summarizeShopSales } from './shop-sales'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
 
 const props = defineProps<{ token: string; companies: { id: number; name: string }[] }>()
 const emit = defineEmits<{ unauthorized: [] }>()
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8001' })
-const tab = ref<'templates' | 'materials' | 'products'>('materials')
+type DataTab = 'templates' | 'creative' | 'materials' | 'products'
+const tab = ref<DataTab>('materials')
+const creativeLibrary = ref<InstanceType<typeof CreativeResources> | null>(null)
 const templateGroups = ref<{id: number; name: string}[]>([])
 const templateLibrary = ref<InstanceType<typeof TemplateLibrary> | null>(null)
 const companyId = ref<number | null>(null)
@@ -49,6 +52,7 @@ function resetFilters() {
 }
 function closeOrders() { orderRequestId++; orderProduct.value = null; orders.value = []; orderError.value = ''; orderLoading.value = false }
 async function refresh(withFilters = true) {
+  if (tab.value === 'creative') { await creativeLibrary.value?.refresh(withFilters); return }
   const id = ++requestId
   rows.value = []; total.value = 0; snapshotDate.value = null; error.value = ''
   if (!companyId.value) { loading.value = false; return }
@@ -84,9 +88,9 @@ function closePreview() { preview.value = null }
 function resetSearch() { resetFilters(); void refresh(false) }
 function search() { page.value = 1; closeOrders(); void refresh(false) }
 function changePage(next: number) { page.value = next; void refresh(false) }
-function changeTab(next: 'templates' | 'materials' | 'products') { if (tab.value === next) return; tab.value = next; category.value = 'products'; resetFilters(); void refresh() }
-function changeCategory() { resetFilters(); void refresh() }
-watch(companyId, () => { templates.value = []; members.value = []; shops.value = []; resetFilters(); void refresh() })
+function changeTab(next: DataTab) { if (tab.value === next) return; requestId++; loading.value = false; error.value = ''; tab.value = next; category.value = 'products'; resetFilters(); if (next !== 'creative') void refresh() }
+function changeCategory(next: string) { if (category.value === next) return; category.value = next; resetFilters(); void refresh() }
+watch(companyId, () => { templates.value = []; members.value = []; shops.value = []; resetFilters(); if (tab.value !== 'creative') void refresh() })
 watch(() => props.companies, (companies) => {
   if (!companies.some(item => item.id === companyId.value)) companyId.value = companies[0]?.id ?? null
 }, { immediate: true })
@@ -122,11 +126,14 @@ defineExpose({ refresh })
       <label>公司<select v-model="companyId" :disabled="!companies.length"><option :value="null" disabled>请选择公司</option><option v-for="company in companies" :key="company.id" :value="company.id">{{company.name}}</option></select></label>
     </div>
     <div class="data-tabs" role="tablist" aria-label="数据管理">
-      <button v-for="item in [{key:'templates' as const,label:'模板库'},{key:'materials' as const,label:'素材库'},{key:'products' as const,label:'产品库'}]" :id="`data-tab-${item.key}`" :key="item.key" role="tab" :aria-selected="tab===item.key" aria-controls="data-tab-panel" :class="{active:tab===item.key}" @click="changeTab(item.key)">{{item.label}}</button>
+      <button v-for="item in [{key:'templates' as const,label:'模板库'},{key:'creative' as const,label:'创作素材'},{key:'materials' as const,label:'素材库'},{key:'products' as const,label:'产品库'}]" :id="`data-tab-${item.key}`" :key="item.key" role="tab" :aria-selected="tab===item.key" aria-controls="data-tab-panel" :class="{active:tab===item.key}" @click="changeTab(item.key)">{{item.label}}</button>
     </div>
     <div id="data-tab-panel" role="tabpanel" :aria-labelledby="`data-tab-${tab}`">
-      <form v-if="tab!=='templates'" class="data-filters" @submit.prevent="search">
-        <label v-if="tab==='products'">数据分类<select v-model="category" @change="changeCategory"><option v-for="item in categories" :key="item[0]" :value="item[0]">{{item[1]}}</option></select></label>
+      <nav v-if="tab==='products'" class="product-category-tabs" role="tablist" aria-label="产品库数据分类">
+        <button v-for="item in categories" :id="`product-category-${item[0]}`" :key="item[0]" type="button" role="tab" :aria-selected="category===item[0]" aria-controls="product-category-panel" :class="{active:category===item[0]}" @click="changeCategory(item[0])">{{item[1]}}</button>
+      </nav>
+      <div :id="tab==='products'?'product-category-panel':undefined" :role="tab==='products'?'tabpanel':undefined" :aria-labelledby="tab==='products'?`product-category-${category}`:undefined">
+      <form v-if="tab!=='templates' && tab!=='creative'" class="data-filters" @submit.prevent="search">
         <template v-if="isMaterial">
           <label v-if="tab==='materials' || category==='new_images'">使用状态<select v-model="usageStatus"><option v-if="category==='new_images' && tab==='products'" value="all">全部状态</option><option value="unused">未使用</option><option value="used">已使用</option></select></label>
           <label v-if="tab==='materials'">产品模板<select v-model="templateId"><option value="">全部模板</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
@@ -142,6 +149,7 @@ defineExpose({ refresh })
       <p v-if="isRanking && snapshotDate" class="data-note">{{snapshotDate}} 榜单 · 统计截至 {{throughDate}}</p>
       <p v-if="error" class="error data-note" role="alert">{{error}}</p>
       <TemplateLibrary v-if="tab==='templates'" :key="companyId ?? 'none'" ref="templateLibrary" :items="rows" :groups="templateGroups" :company-name="companies.find(item=>item.id===companyId)?.name || ''" :image-url="imageUrl" :loading="loading" :error="error" :has-company="!!companyId" />
+      <CreativeResources v-else-if="tab==='creative'" ref="creativeLibrary" :token="token" :company-id="companyId" :company-name="companies.find(item=>item.id===companyId)?.name || ''" @unauthorized="emit('unauthorized')" />
       <div v-else class="data-table-scroll" :aria-busy="loading">
         <table class="data-table">
           <thead><tr v-if="isShops"><th>平台</th><th>站点</th><th>店铺名称</th><th>负责人</th></tr><tr v-else><th v-if="isRanking">名次</th><th>缩略图</th><th>SKU</th><th>模板</th><template v-if="isMaterial"><th v-if="tab==='materials'">类型</th><th v-if="category==='new_images' && tab==='products'">使用状态</th><th>创建时间</th><th>创作人</th></template><template v-else><th>标题</th><th>店铺数据（店铺-销量）</th><th>创作人</th><th>创建时间</th><th>订单数</th><th>销量</th><th>订单详情</th></template></tr></thead>
@@ -159,7 +167,8 @@ defineExpose({ refresh })
         <p v-else-if="!companyId" class="data-empty">{{companies.length?'请选择公司查看数据。':'暂无公司。'}}</p>
         <p v-else-if="!rows.length && !error" class="data-empty">{{isRanking && !snapshotDate?'该公司暂无榜单快照。':'没有符合筛选条件的数据。'}}</p>
       </div>
-      <footer v-if="tab!=='templates'" class="data-pagination"><span>共 {{total}} 条</span><template v-if="!isShops && !isTop"><label>每页 <select v-model.number="pageSize" :disabled="loading" @change="search"><option v-for="size in [20,50,100,200]" :key="size" :value="size">{{size}}</option></select> 条</label><button class="secondary" :disabled="loading || page<=1" @click="changePage(page-1)">上一页</button><span>第 {{page}} / {{pageCount}} 页</span><button class="secondary" :disabled="loading || page>=pageCount" @click="changePage(page+1)">下一页</button></template></footer>
+      <footer v-if="tab!=='templates' && tab!=='creative'" class="data-pagination"><span>共 {{total}} 条</span><template v-if="!isShops && !isTop"><label>每页 <select v-model.number="pageSize" :disabled="loading" @change="search"><option v-for="size in [20,50,100,200]" :key="size" :value="size">{{size}}</option></select> 条</label><button class="secondary" :disabled="loading || page<=1" @click="changePage(page-1)">上一页</button><span>第 {{page}} / {{pageCount}} 页</span><button class="secondary" :disabled="loading || page>=pageCount" @click="changePage(page+1)">下一页</button></template></footer>
+      </div>
     </div>
   </section>
   <div v-if="preview" v-dialog-focus="{close:closePreview}" class="modal-backdrop" @click.self="preview=null"><section class="data-preview" role="dialog" aria-modal="true" aria-label="图片预览"><button class="secondary" autofocus @click="preview=null">关闭</button><img :src="preview.url" :alt="preview.title"/><p>{{preview.title}}</p></section></div>
@@ -169,9 +178,12 @@ defineExpose({ refresh })
 <style scoped>
 .data-management { min-width:0; }
 .data-table-scroll, .data-pagination { background:var(--admin-surface); }
-.data-tabs { display:flex; gap:24px; padding:0 24px; border-bottom:1px solid var(--admin-border); }
-.data-tabs button { min-height:48px; padding:14px 2px; border-bottom:2px solid transparent; background:none; color:var(--admin-muted); font-size:13px; font-weight:500; }
+.data-tabs { display:flex; gap:24px; overflow-x:auto; padding:0 24px; border-bottom:1px solid var(--admin-border); }
+.data-tabs button { flex-shrink:0; min-height:48px; padding:14px 2px; border-bottom:2px solid transparent; background:none; color:var(--admin-muted); font-size:13px; font-weight:500; }
 .data-tabs button.active { border-bottom-color:var(--admin-primary); color:var(--admin-primary); font-weight:600; }
+.product-category-tabs { display:flex; flex-wrap:wrap; gap:8px; padding:20px 24px; }
+.product-category-tabs button { min-height:var(--admin-control-height); padding:8px 14px; border:1px solid var(--admin-border); border-radius:8px; background:var(--admin-surface); color:var(--admin-muted); font-size:13px; white-space:nowrap; }
+.product-category-tabs button.active { border-color:var(--admin-primary); background:var(--admin-primary-soft); color:var(--admin-primary); }
 .data-filters { display:flex; align-items:end; flex-wrap:wrap; gap:16px; padding:22px 24px; background:#fbfcfe; border-bottom:1px solid var(--admin-border); }
 .data-filters > label, .data-shop-filter { display:grid; gap:7px; min-width:140px; color:#475569; font-size:12px; font-weight:500; }
 .data-filters select, .data-filters input[type=search], summary { min-height:var(--admin-control-height); max-width:260px; padding:9px 12px; border:1px solid #cbd5e1; border-radius:8px; background:white; color:var(--admin-text); font:inherit; font-size:13px; }
@@ -210,6 +222,7 @@ summary { cursor:pointer; }
 .data-orders > p, .data-preview > p { color:var(--admin-muted); font-size:12px; }
 @media(max-width:760px) {
   .data-tabs { padding:0 20px; }
+  .product-category-tabs { margin-top:0; padding:20px 0; }
   .data-filters { padding:20px; gap:14px 12px; }
   .data-filters > label, .data-shop-filter { flex:1 1 calc(50% - 12px); min-width:120px; }
   .data-company-filter > label { flex-basis:100%; }
@@ -219,5 +232,59 @@ summary { cursor:pointer; }
   .data-pagination { padding:16px 20px; gap:10px; }
   .data-pagination > span:first-child { flex-basis:100%; }
   .data-preview, .data-orders { max-height:calc(100dvh - 32px); padding:20px; }
+}
+</style>
+
+<style>
+.creative-resources { min-width:0; }
+.creative-tabs { display:flex; gap:8px; padding:20px 24px 0; }
+.creative-tabs button { min-height:var(--admin-control-height); padding:8px 16px; border:1px solid var(--admin-border); border-radius:8px; background:var(--admin-surface); color:var(--admin-muted); font-size:13px; }
+.creative-tabs button.active { border-color:var(--admin-primary); background:var(--admin-primary-soft); color:var(--admin-primary); }
+.creative-filters { display:flex; flex-wrap:wrap; align-items:end; gap:16px; padding:20px 24px; border-bottom:1px solid var(--admin-border); }
+.creative-filters > label { display:grid; flex:0 1 200px; min-width:140px; gap:7px; color:var(--admin-muted); font-size:12px; }
+.creative-filters > .creative-keyword { flex-basis:280px; }
+.creative-filters select, .creative-filters input { width:100%; min-height:var(--admin-control-height); padding:9px 12px; }
+.creative-filter-actions { display:flex; gap:8px; }
+.creative-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:22px 24px 16px; }
+.creative-heading h3 { margin:0; font-size:16px; }
+.creative-heading > span { color:var(--admin-muted); font-size:12px; }
+.creative-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:20px; padding:0 24px 24px; }
+.creative-grid.white-image-grid { grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); }
+.creative-card { overflow:hidden; min-width:0; border:1px solid var(--admin-border); border-radius:var(--admin-radius); background:var(--admin-surface); }
+.creative-card-body { display:flex; flex-direction:column; gap:14px; padding:16px; }
+.creative-card-body h3 { margin:0; font-size:16px; overflow-wrap:anywhere; }
+.creative-card-body > .secondary { align-self:start; }
+.creative-excerpt { display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; min-height:88px; margin:0; color:var(--admin-text); font-size:13px; line-height:1.7; white-space:pre-wrap; overflow-wrap:anywhere; }
+.creative-meta { display:grid; gap:6px; color:var(--admin-muted); font-size:11px; line-height:1.6; overflow-wrap:anywhere; }
+.creative-image { display:block; width:100%; height:220px; padding:0; background:var(--admin-surface); }
+.creative-image img { display:block; width:100%; height:100%; object-fit:contain; }
+.creative-size { display:flex; flex-wrap:wrap; align-items:center; gap:8px; color:var(--admin-muted); font-size:12px; }
+.creative-size .secondary { min-height:32px; padding:5px 10px; font-size:12px; }
+.creative-empty { margin:0; padding:40px 24px; text-align:center; color:var(--admin-muted); font-size:13px; }
+.creative-empty.error { color:#b4233b; }
+.creative-empty .secondary { margin-left:8px; }
+.creative-pagination { display:flex; justify-content:flex-end; align-items:center; flex-wrap:wrap; gap:12px; padding:18px 24px; background:var(--admin-surface); color:var(--admin-muted); font-size:12px; }
+.creative-pagination > span:first-child { margin-right:auto; }
+.creative-pagination select { min-height:32px; padding:4px 8px; font-size:12px; }
+.creative-pagination .secondary { min-height:32px; padding:5px 10px; font-size:12px; }
+.creative-detail { width:min(760px,100%); max-height:calc(100dvh - 48px); overflow:auto; padding:24px; border:1px solid var(--admin-border); border-radius:var(--admin-radius); background:var(--admin-surface); }
+.creative-detail header { display:flex; align-items:start; justify-content:space-between; gap:16px; }
+.creative-detail header h2 { margin:0; font-size:21px; overflow-wrap:anywhere; }
+.creative-detail header button { flex-shrink:0; }
+.creative-detail > p { color:var(--admin-muted); font-size:12px; }
+.creative-detail > img { display:block; max-width:100%; max-height:65vh; margin:20px auto; object-fit:contain; }
+.creative-detail > .creative-full-content { margin-top:24px; color:var(--admin-text); white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; line-height:1.8; }
+@media(max-width:760px) {
+  .creative-tabs { padding:20px 0 0; }
+  .creative-filters { padding:20px 0; gap:14px 12px; }
+  .creative-filters > label { flex:1 1 calc(50% - 12px); min-width:120px; }
+  .creative-filters > .creative-keyword { flex-basis:100%; }
+  .creative-filter-actions { width:100%; }
+  .creative-filter-actions button { flex:1; }
+  .creative-heading { padding:20px 0 16px; }
+  .creative-grid, .creative-grid.white-image-grid { grid-template-columns:repeat(auto-fill,minmax(min(220px,100%),1fr)); padding:0 0 20px; gap:16px; }
+  .creative-pagination { padding:16px 12px; gap:10px; }
+  .creative-pagination > span:first-child { flex-basis:100%; }
+  .creative-detail { padding:20px; max-height:calc(100dvh - 32px); }
 }
 </style>

@@ -112,5 +112,24 @@ final result: passed
 - Playwright CLI 在当前环境未能完成启动，改用 Codex 浏览器控制验证。截图保存在 `output/playwright/admin-data-company/desktop.jpg`、`tablet.jpg`、`mobile.jpg`。
 - 已通过 `./deploy/local.sh cp frontend-admin/dist/. admin-web:/usr/share/nginx/html` 更新本机测试容器预览；未重建镜像或部署腾讯云。
 - 后续移除模板库的搜索、重置按钮及整条空白筛选栏，保留模板名称即时搜索。重新构建通过；Chrome 验证桌面、960px、390px布局和模板搜索空结果，素材库搜索与重置按钮仍显示。截图：`output/playwright/admin-data-company/templates-no-actions-desktop.jpg`、`templates-no-actions-tablet.jpg`、`templates-no-actions-mobile.jpg`；本机测试预览已更新。
+
+## 2026-10-11 创作素材与白底图大小
+
+- 在模板库右侧新增只读“创作素材”，内设创作要求、白底图两个子 tab，默认创作要求。员工、模板、关键词筛选与分页共用；切换公司或重新进入时恢复默认。
+- 创作要求支持完整正文弹窗；白底图支持放大和文件大小展示。大小按每批20张、前端最多两批并发读取；后端全进程最多4个 R2 元信息请求，成功结果按对象缓存1小时、容量2000条。大小失败可单独重试，不阻塞列表。
+- `npm run build` 类型检查与 Vite 构建通过；后端14项测试通过，覆盖公司隔离、只读权限、搜索分页、平台模板、缺失关联、R2对象缺失和超时、缓存期限与容量、后端并发限制。
+- 使用本机已安装的 Playwright 和独立 Chrome 会话验证1440px桌面、960px中屏、390px手机。浏览器使用模拟公司、员工和 R2 大小响应，未写入业务数据。已验证默认 tab、筛选与重置、空结果、分页、完整长正文、图片放大、Escape关闭、Tab焦点循环及焦点回位。
+- 已验证大小渐进加载、B/KB/MB格式、失败重试、50张分为20/20/10且最多两批并发、读取期间切换公司忽略旧响应、列表错误重试、筛选加载失败后的搜索恢复，以及三个宽度均无页面横向溢出、无未捕获的页面脚本错误。
+- 截图与断言结果位于 `output/playwright/admin-creative-resources/`：`prompts-desktop.png`、`white-images-desktop.png`、`prompts-960.png`、`white-images-960.png`、`prompts-390.png`、`white-images-390.png`、`prompt-detail.png`、`qa-result.json`。
+- 通过固定本机入口构建并启动 `haitoo-test` 的 API 与管理端镜像，新增3个只读接口已通过本机 OpenAPI检查。无需数据库迁移。真实员工数据及真实 R2 元信息读取未做浏览器联调；腾讯云未部署。
+
+## 2026-10-11 概览入口清理与产品库分类子 tab
+
+- 删除概览页整块“管理入口”卡片及专用样式，保留侧栏导航、平台统计和任务队列。
+- 产品库数据分类由下拉框改为10个子 tab，顺序与标签沿用原分类，默认排行榜。子 tab 放在筛选栏上方，窄屏自动换行；关联 tabpanel 保留可访问标题。
+- 切换分类继续清空筛选、回到第一页、关闭图片与订单弹窗，并按原分类请求数据。店铺数据、滞销款、新图、TOP50及各销量榜单沿用原显示方式。
+- 类型检查和 Vite 构建通过。使用独立 Chrome 和模拟业务响应验证1440px、960px、390px；已逐项验证10个分类的请求参数及选中状态、分页和筛选重置、新图状态搜索与重置、订单弹窗及 Escape、公司切换、快速切换忽略旧响应。页面无横向溢出，子 tab 均可见，无未捕获脚本错误。
+- 截图与断言结果：`output/playwright/admin-product-tabs/overview-desktop.png`、`overview-960.png`、`overview-390.png`、`products-desktop.png`、`products-960.png`、`products-390.png`、`qa-result.json`。真实业务数据未做本轮浏览器联调。
+- 通过 `./deploy/local.sh build admin-web` 与 `./deploy/local.sh up -d --no-deps admin-web` 更新本机测试镜像及预览。腾讯云未部署。
 - 店铺筛选增加外部点击收起，重置时也关闭面板；组件卸载移除事件监听。构建通过，Chrome 实测内部搜索、勾选、清空选择保持展开，外部点击收起并保留勾选；桌面、960px、390px均通过。本机预览已更新，腾讯云未部署。截图：`output/playwright/admin-data-company/shop-filter-outside-closed.jpg`、`shop-filter-tablet-closed.jpg`、`shop-filter-mobile-closed.jpg`。
 - `output/` 为本地验证产物目录，已加入 `.gitignore`，此前跟踪的6张截图取消跟踪且保留本地文件。
