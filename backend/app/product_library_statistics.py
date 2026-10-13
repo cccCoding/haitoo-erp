@@ -27,7 +27,8 @@ def order_facts(snapshot=None, category=None):
     ).subquery()
 
 
-def sku_statistics(db, conditions, facts, *, page, page_size, category=None):
+def sku_statistics(db, conditions, facts, *, page, page_size, category=None,
+                   sku_filter=None, clamp_page=False):
     product, source = ProductLibraryProduct, ProductLibrarySource
     summary = select(
         product.sku.label("sku"), func.min(product.id).label("id"),
@@ -45,11 +46,25 @@ def sku_statistics(db, conditions, facts, *, page, page_size, category=None):
         query = query.where(quantity > low)
         if high is not None:
             query = query.where(quantity <= high)
+    if sku_filter is not None:
+        # 先固定原榜单及排名，再筛选采集状态，避免补入 TOP50 之外的 SKU。
+        ranked = query.add_columns(func.row_number().over(
+            order_by=(quantity.desc(), summary.c.sku.asc())).label("original_rank")).subquery()
+        query = select(ranked)
+        if category and category.startswith("top"):
+            query = query.where(ranked.c.original_rank <= 50)
+        # MySQL 可能把大小写不同的 SKU 聚为一组；状态必须按实际代表记录的原值判断。
+        query = query.join(product, product.id == ranked.c.id).where(sku_filter(product.sku))
+        ordering = (ranked.c.original_rank,)
+    else:
+        ordering = (quantity.desc(), summary.c.sku.asc())
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
-    if category and category.startswith("top"):
+    if category and category.startswith("top") and sku_filter is None:
         total = min(total, 50)
+    if clamp_page:
+        page = min(page, max(1, (total + page_size - 1) // page_size))
     limit = min(page_size, max(0, total - (page - 1) * page_size))
-    rows = db.execute(query.order_by(quantity.desc(), summary.c.sku.asc())
+    rows = db.execute(query.order_by(*ordering)
                       .offset((page - 1) * page_size).limit(limit)).mappings().all()
     ids = [row["id"] for row in rows]
     representatives = {p.id: (p, template_name) for p, template_name in db.execute(
@@ -75,5 +90,5 @@ def sku_statistics(db, conditions, facts, *, page, page_size, category=None):
             "template_id": p.template_id, "template": template or "未匹配", "title": p.title,
             "image_url": p.image_url, "order_count": int(row["order_count"]),
             "sales_quantity": int(row["sales_quantity"]), "shop_data": shop_data.get(p.sku, []),
-            **({"rank": index} if category else {})})
+            **({"rank": row.get("original_rank", index)} if category else {})})
     return {"total": total, "page": page, "page_size": page_size, "items": items}

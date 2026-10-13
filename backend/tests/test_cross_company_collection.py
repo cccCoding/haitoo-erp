@@ -178,14 +178,175 @@ class CrossCompanyCollectionTests(unittest.TestCase):
         self.assertIn('2',response.json()['detail'])
         self.assertEqual(self.collect([1,999]).status_code,400)
 
-    def test_exact_url_matching_and_delete_recollect(self):
+    def test_history_matching_ignores_url_and_survives_asset_deletion(self):
         with self.sessions() as db:
-            db.get(MaterialAsset,3).url='https://img.example/A';db.commit()
+            db.get(MaterialAsset,3).url='https://img.example/a';db.commit()
         first=[r for r in self.listing().json()['items'] if r['id']==1][0]
         self.assertFalse(first['already_collected'])
         result=self.collect().json()
         self.client.delete(f"/material-assets/{result['material_asset_ids'][0]}",headers=self.headers())
-        self.assertEqual(self.collect(key='after-delete').status_code,200)
+        with self.sessions() as db:
+            db.get(MaterialAsset,1).url='https://img.example/changed';db.commit()
+        self.assertTrue(next(r for r in self.listing().json()['items'] if r['id']==1)['already_collected'])
+        self.assertEqual(self.collect(key='after-delete').status_code,409)
+        self.assertEqual(self.collect(key='after-delete-confirmed',allow_recollect=True).status_code,200)
+
+    def add_history(self, db, *, company_id=1, source_company_id=2, sku='ORIGINAL', source_library='material'):
+        batch=CrossCompanyCollectionBatch(company_id=company_id,created_by=1,template_id=1,
+            request_key=f'history-{company_id}-{source_company_id}-{sku}',request_hash='historic',result={})
+        db.add(batch);db.flush()
+        item=CrossCompanyCollectionItem(batch_id=batch.id,company_id=company_id,material_asset_id=9999,
+            source_company_id=source_company_id,source_company_name='历史来源',source_library=source_library,
+            source_record_id=9999,source_sku=sku,source_url='https://img.example/historic',source_name='历史图片')
+        db.add(item);db.flush()
+        return item
+
+    def test_collection_status_filters_pagination_and_combined_filters(self):
+        self.assertEqual(self.collect().status_code,200)
+        self.assertEqual(self.listing().json()['total'],2)
+        for status, expected_id in [('collected',1),('uncollected',2)]:
+            response=self.listing(collection_status=status,page_size=1,page=8,template_id=2)
+            self.assertEqual(response.status_code,200,response.text)
+            result=response.json()
+            self.assertEqual(result['total'],1);self.assertEqual(result['page'],1)
+            self.assertEqual([r['id'] for r in result['items']],[expected_id])
+            self.assertEqual(result['items'][0]['already_collected'],status=='collected')
+        self.assertEqual(self.listing(collection_status='collected',usage_status='unused').json()['total'],0)
+        self.assertEqual(self.listing(collection_status='collected',usage_status='used',
+            source_type='local_upload',created_from='2000-01-01T00:00:00Z').json()['total'],1)
+        self.assertEqual(self.listing(collection_status='bad').status_code,422)
+        self.assertEqual(self.listing(collection_status='collected',source_company_id=1).status_code,404)
+
+    def test_material_status_filters_before_pagination_and_refresh_clamps_page(self):
+        with self.sessions() as db:
+            db.add_all([MaterialAsset(id=i,company_id=2,template_id=2,claimed_by=5,
+                url=f'https://img.example/{i}',name=f'图片{i}',sku=f'NEW{i}') for i in range(4,29)])
+            for i in range(4,28): self.add_history(db,sku=f'NEW{i}')
+            db.commit()
+        result=self.listing(collection_status='uncollected',page_size=1).json()
+        self.assertEqual(result['total'],3);self.assertEqual(result['items'][0]['id'],28)
+        last=self.listing(collection_status='uncollected',page_size=1,page=3).json()
+        self.assertEqual(last['items'][0]['id'],1)
+        self.assertEqual(self.collect().status_code,200)
+        refreshed=self.listing(collection_status='uncollected',page_size=1,page=3).json()
+        self.assertEqual(refreshed['total'],2);self.assertEqual(refreshed['page'],2)
+        self.assertEqual(refreshed['items'][0]['id'],2)
+
+    def test_history_identity_is_shared_between_libraries_and_isolated_by_companies(self):
+        with self.sessions() as db:
+            db.get(MaterialAsset,1).sku='SHARED'
+            self.add_history(db,source_company_id=3,sku='SECOND')
+            self.add_history(db,company_id=2,sku='SECOND')
+            db.commit()
+        self.assertEqual(self.collect().status_code,200)
+        product=self.listing(source_library='product',collection_status='collected').json()
+        self.assertEqual(product['total'],1);self.assertTrue(product['items'][0]['already_collected'])
+        self.assertEqual(self.collect([2],key='other-library',source_library='product').status_code,409)
+        self.assertEqual(self.collect([2],key='confirmed-library',source_library='product',allow_recollect=True).status_code,200)
+        materials=self.listing(collection_status='uncollected').json()
+        self.assertEqual([r['id'] for r in materials['items']],[2])
+        self.assertEqual(self.collect([2],key='isolated-history').status_code,200)
+
+    def test_sku_matching_is_exact_and_original_value_is_preserved(self):
+        self.assertEqual(self.collect().status_code,200)
+        for new_sku in ('original','ORIGINAL '):
+            with self.sessions() as db:
+                db.get(MaterialAsset,1).sku=new_sku;db.commit()
+            result=self.listing(collection_status='collected').json()
+            self.assertEqual(result['total'],0)
+            self.assertEqual(self.collect(key=f'exact-{new_sku}').status_code,200)
+            self.assertEqual(self.listing(collection_status='collected').json()['items'][0]['sku'],new_sku)
+            with self.sessions() as db:
+                self.assertIsNotNone(db.scalar(select(CrossCompanyCollectionItem).where(
+                    CrossCompanyCollectionItem.source_sku==new_sku)))
+
+    def test_missing_sku_is_browsable_but_rejected_atomically_and_old_history_is_ignored(self):
+        for index, sku in enumerate((None,'',' \t\n\u3000')):
+            with self.sessions() as db:
+                db.get(MaterialAsset,1).sku=sku
+                item=db.scalar(select(CrossCompanyCollectionItem))
+                if item: item.source_sku=sku
+                else: self.add_history(db,sku=sku)
+                db.commit()
+            response=self.listing(collection_status='uncollected')
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(response.json()['total'],2)
+            self.assertEqual(self.listing(collection_status='collected').json()['total'],0)
+            rejected=self.collect([1,2],key=f'missing-{index}')
+            self.assertEqual(rejected.status_code,400);self.assertIn('1',rejected.json()['detail'])
+            with self.sessions() as db:
+                self.assertEqual(db.scalar(select(func.count()).select_from(MaterialAsset)),3)
+                self.assertEqual(db.scalar(select(func.count()).select_from(CrossCompanyCollectionBatch)),1)
+        with self.sessions() as db:
+            db.get(ProductLibraryProduct,2).sku='\t';db.commit()
+        self.assertEqual(self.collect([2],key='missing-product',source_library='product').status_code,400)
+
+    def test_product_aggregation_and_duplicate_sku_records_in_a_batch(self):
+        with self.sessions() as db:
+            db.add(ProductLibrarySource(id=4,company_id=2,platform='TikTok',site='MY',shop_name='第二店铺'))
+            db.add(ProductLibraryProduct(id=4,company_id=2,source_id=4,external_product_id='4',
+                sku='SHARED',title='另一张图片',image_url='https://img.example/other',template_id=2))
+            db.add(ProductLibraryOrder(id=4,company_id=2,source_id=4,order_number='extra',ordered_at=datetime.utcnow()))
+            db.add(ProductLibraryOrderProduct(order_id=4,product_id=4,quantity=5));db.commit()
+        result=self.listing(source_library='product',collection_status='uncollected',sku='SH',template_id=2).json()
+        self.assertEqual(result['total'],1);self.assertEqual(result['items'][0]['id'],2)
+        self.assertEqual(result['items'][0]['sales_quantity'],12)
+        duplicate=self.collect([4,2],key='same-sku',source_library='product')
+        self.assertEqual(duplicate.status_code,200,duplicate.text)
+        self.assertEqual(duplicate.json()['collected'],1)
+        self.assertEqual(self.collect([2,4],key='same-sku',source_library='product').json(),duplicate.json())
+        with self.sessions() as db:
+            self.assertEqual(db.scalar(select(func.count()).select_from(CrossCompanyCollectionBatch)),1)
+            self.assertEqual(db.scalar(select(CrossCompanyCollectionItem)).source_record_id,2)
+        self.assertEqual(self.collect([4],source_library='product').status_code,409)
+        self.assertEqual(self.collect([2,4],key='confirmed-dedup',source_library='product',allow_recollect=True).json()['collected'],1)
+        result=self.listing(source_library='product',collection_status='collected',page_size=1,page=9).json()
+        self.assertEqual(result['page'],1);self.assertEqual(result['items'][0]['id'],2)
+        self.assertEqual(result['items'][0]['sales_quantity'],12)
+
+    def test_filtered_rankings_preserve_top50_and_original_ranks(self):
+        from app.product_library_rankings import create_daily_snapshot
+        with self.sessions() as db:
+            db.get(ProductLibraryOrder,2).ordered_at=datetime.utcnow()-timedelta(days=1)
+            for i in range(4,58):
+                db.add(ProductLibraryProduct(id=i,company_id=2,source_id=2,external_product_id=str(i),
+                    sku=f'RANK{i:03}',title=f'排名图片{i}',image_url=f'https://img.example/rank-{i}',template_id=2))
+                db.add(ProductLibraryOrderProduct(order_id=2,product_id=i,quantity=200-i))
+            self.add_history(db,sku='RANK004');self.add_history(db,sku='RANK010');db.commit()
+            create_daily_snapshot(db,2,date.today())
+        for category in ('top7','top15','top30','potential','hot','booming'):
+            params={'source_library':'product','category':category,'page_size':100}
+            original=self.listing(**params).json()['items']
+            for status in ('collected','uncollected'):
+                expected=[r for r in original if r['already_collected']==(status=='collected')]
+                response=self.listing(**params,collection_status=status)
+                self.assertEqual(response.status_code,200,response.text)
+                result=response.json()
+                self.assertEqual(result['total'],len(expected))
+                self.assertEqual(result['items'],expected)
+        params={'source_library':'product','category':'top7','collection_status':'uncollected','page_size':1}
+        first=self.listing(**params).json();second=self.listing(**params,page=2).json()
+        self.assertEqual(first['total'],48);self.assertEqual(first['items'][0]['rank'],2)
+        self.assertEqual(second['items'][0]['rank'],3)
+        self.assertEqual(self.listing(source_library='product',category='top7',collection_status='collected',sku='OTHER').json()['total'],0)
+        with self.sessions() as db:
+            from app.models import ProductLibraryDailySnapshot
+            db.query(ProductLibraryDailySnapshot).delete();db.commit()
+        empty=self.listing(**params,page=8).json()
+        self.assertEqual(empty['total'],0);self.assertEqual(empty['page'],1);self.assertIsNone(empty['snapshot_date'])
+
+    def test_product_status_uses_representative_sku_with_case_variants(self):
+        with self.sessions() as db:
+            db.add(ProductLibraryProduct(id=4,company_id=2,source_id=2,external_product_id='case-variant',
+                sku='shared',title='大小写不同的 SKU',image_url='https://img.example/case',template_id=2))
+            db.commit()
+        self.assertEqual(self.collect([4],source_library='product').status_code,200)
+        original=self.listing(source_library='product').json()['items']
+        for status in ('collected','uncollected'):
+            expected=[row for row in original if row['already_collected']==(status=='collected')]
+            result=self.listing(source_library='product',collection_status=status).json()
+            self.assertEqual(result['total'],len(expected))
+            self.assertEqual(result['items'],expected)
 
     def test_validation_limits_and_sku_requirements(self):
         self.assertEqual(self.collect(list(range(1,102))).status_code,422)

@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import LargeBinary, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -21,6 +21,49 @@ from .security import current_user, require_roles
 router = APIRouter()
 Library = Literal["material", "product"]
 Category = Literal["products", "top7", "top15", "top30", "potential", "hot", "booming"]
+CollectionStatus = Literal["all", "uncollected", "collected"]
+
+
+def has_sku(value):
+    return bool(value and value.strip())
+
+
+def collected_expression(db, target_id, source_id, sku_column):
+    history = CrossCompanyCollectionItem
+    conditions = [history.company_id == target_id, history.source_company_id == source_id,
+                  history.source_sku == sku_column]
+    if db.get_bind().dialect.name in {"mysql", "mariadb"}:
+        # 普通等值条件可利用索引；二进制比较保证大小写及末尾空格精确一致。
+        conditions.append(history.source_sku.cast(LargeBinary) == sku_column.cast(LargeBinary))
+    # 与 Python str.strip 保持一致，历史中的无 SKU 记录不参与状态判断。
+    non_whitespace = history.source_sku
+    for char in " \t\n\r\v\f\x1c\x1d\x1e\x1f\x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000":
+        non_whitespace = func.replace(non_whitespace, char, "")
+    conditions.append(func.length(non_whitespace) > 0)
+    return select(history.id).where(*conditions).exists()
+
+
+def collection_filter(db, target_id, source_id, status):
+    if status == "all":
+        return None
+    def predicate(sku_column):
+        expression = collected_expression(db, target_id, source_id, sku_column)
+        return expression if status == "collected" else ~expression
+    return predicate
+
+
+def collected_skus(db, target_id, source_id, skus, *, lock=False):
+    skus = [sku for sku in skus if has_sku(sku)]
+    if not skus:
+        return set()
+    stmt = select(CrossCompanyCollectionItem.source_sku).where(
+        CrossCompanyCollectionItem.company_id == target_id,
+        CrossCompanyCollectionItem.source_company_id == source_id,
+        CrossCompanyCollectionItem.source_sku.in_(skus))
+    if lock:
+        stmt = stmt.with_for_update()
+    # MySQL 的粗筛可能忽略大小写，最终集合成员判断使用原值精确匹配。
+    return {sku for sku in db.scalars(stmt) if has_sku(sku)}
 
 
 class PermissionInput(BaseModel):
@@ -113,6 +156,7 @@ def items(source_company_id: int = Query(ge=1), source_library: Library = "mater
           usage_status: Literal["all", "unused", "used"] = "all",
           created_from: datetime | None = None, created_to: datetime | None = None,
           sku: str | None = None, category: Category = "products",
+          collection_status: CollectionStatus = "all",
           user: User = Depends(current_user), db: Session = Depends(get_db)):
     from . import main
     target = authorized_company(user, db)
@@ -124,45 +168,45 @@ def items(source_company_id: int = Query(ge=1), source_library: Library = "mater
         if not template or template.company_id != source_company_id:
             raise HTTPException(404, "筛选模板不属于来源公司")
     scope = SimpleNamespace(company_id=source_company_id, role=Role.COMPANY_ADMIN)
+    status_filter = collection_filter(db, target.id, source_company_id, collection_status)
     if source_library == "material":
-        result = main.list_material_assets(page=page, page_size=page_size, creator_id=None,
+        result = main.query_material_assets(page=page, page_size=page_size, creator_id=None,
             template_id=template_id, usage_status=usage_status, source_type=source_type,
-            created_from=created_from, created_to=created_to, user=scope, db=db)
+            created_from=created_from, created_to=created_to, user=scope, db=db,
+            extra_filters=[status_filter(MaterialAsset.sku)] if status_filter else [])
         allowed = ("id", "sku", "name", "url", "template_id", "template_name", "source_type", "usage_status", "created_at")
     else:
+        from .product_library_statistics import sku_statistics, order_facts
+        conditions = main.product_library_statistics_scope(scope)
+        if template_id is not None:
+            conditions.append(ProductLibraryProduct.template_id == template_id)
+        elif unmatched:
+            conditions.append(ProductTemplate.id.is_(None))
+        if sku and sku.strip():
+            prefix = func.substr(ProductLibraryProduct.sku, 1, len(sku.strip()))
+            if db.get_bind().dialect.name in {"mysql", "mariadb"}:
+                prefix = prefix.collate("utf8mb4_bin")
+            conditions.append(prefix == sku.strip())
         if category == "products":
-            result = main.list_product_library(page=page, page_size=page_size,
-                platform=None, site=None, shop_name=None, sku=sku, template_id=template_id,
-                unmatched=unmatched, source_ids=None, creator_id=None, user=scope, db=db)
+            result = sku_statistics(db, conditions, order_facts(), page=page, page_size=page_size,
+                sku_filter=status_filter, clamp_page=True)
         else:
             # 在聚合前应用模板/SKU条件，保持销量、代表记录与榜单的一致范围。
             from datetime import timedelta
             from .models import ProductLibraryDailySnapshot
-            from .product_library_statistics import sku_statistics, order_facts
             snapshot = db.scalar(select(ProductLibraryDailySnapshot).where(
                 ProductLibraryDailySnapshot.company_id == source_company_id,
                 ProductLibraryDailySnapshot.is_complete.is_(True)).order_by(ProductLibraryDailySnapshot.snapshot_date.desc()).limit(1))
             if snapshot is None:
-                result = {"items": [], "total": 0, "page": page, "page_size": page_size, "snapshot_date": None, "through_date": None}
+                result = {"items": [], "total": 0, "page": 1, "page_size": page_size, "snapshot_date": None, "through_date": None}
             else:
-                conditions = main.product_library_statistics_scope(scope)
-                if template_id is not None:
-                    conditions.append(ProductLibraryProduct.template_id == template_id)
-                elif unmatched:
-                    conditions.append(ProductTemplate.id.is_(None))
-                if sku and sku.strip():
-                    prefix = func.substr(ProductLibraryProduct.sku, 1, len(sku.strip()))
-                    if db.get_bind().dialect.name in {"mysql", "mariadb"}:
-                        prefix = prefix.collate("utf8mb4_bin")
-                    conditions.append(prefix == sku.strip())
-                result = sku_statistics(db, conditions, order_facts(snapshot, category), page=page, page_size=page_size, category=category)
+                result = sku_statistics(db, conditions, order_facts(snapshot, category), page=page,
+                    page_size=page_size, category=category, sku_filter=status_filter, clamp_page=True)
                 result.update(snapshot_date=snapshot.snapshot_date.isoformat(), through_date=(snapshot.snapshot_date - timedelta(days=1)).isoformat())
         allowed = ("id", "sku", "title", "image_url", "template_id", "template", "sales_quantity", "rank")
-    urls = [r.get("url", r.get("image_url", "")) for r in result["items"]]
-    # MySQL 的默认字符排序规则会忽略大小写；最终使用 Python 精确匹配。
-    existing = set(db.scalars(select(MaterialAsset.url).where(MaterialAsset.company_id == target.id, MaterialAsset.url.in_(urls)))) if urls else set()
+    existing = collected_skus(db, target.id, source_company_id, [row.get("sku") for row in result["items"]])
     return {k: result[k] for k in ("total", "page", "page_size", "snapshot_date", "through_date") if k in result} | {
-        "items": [{k: row.get(k) for k in allowed} | {"already_collected": url in existing} for row, url in zip(result["items"], urls)]}
+        "items": [{k: row.get(k) for k in allowed} | {"already_collected": row.get("sku") in existing} for row in result["items"]]}
 
 
 def replay(batch, fingerprint):
@@ -197,9 +241,19 @@ def collect(payload: CollectionInput, idempotency_key: Annotated[str, Header(min
     missing = [i for i in payload.record_ids if i not in found]
     if missing:
         raise HTTPException(400, f"来源记录不存在或不属于来源公司：{missing}")
+    missing_skus = [record.id for record in records if not has_sku(record.sku)]
+    if missing_skus:
+        raise HTTPException(400, f"来源图片无 SKU，无法采集，请取消选择后重试：{missing_skus}")
+    seen_skus = set()
+    distinct_records = []
+    for record in records:
+        if record.sku not in seen_skus:
+            distinct_records.append(record)
+        seen_skus.add(record.sku)
     entries = []
     invalid = []
-    for record in records:
+    # 查询按 ID 排序，同 SKU 静默保留最小 ID，重试时代表记录保持一致。
+    for record in distinct_records:
         raw_url = record.url if payload.source_library == "material" else record.image_url
         try:
             validate_image_link(raw_url, record.id)
@@ -208,11 +262,10 @@ def collect(payload: CollectionInput, idempotency_key: Annotated[str, Header(min
         entries.append((record, raw_url))
     if invalid:
         raise HTTPException(400, f"来源图片链接无效，请取消选择后重试：{invalid}")
-    existing = set(db.scalars(select(MaterialAsset.url).where(MaterialAsset.company_id == target.id,
-        MaterialAsset.url.in_([url for _, url in entries])).with_for_update()))
-    duplicate = [r.id for r, url in entries if url in existing]
+    existing = collected_skus(db, target.id, source.id, [record.sku for record, _ in entries], lock=True)
+    duplicate = [record.id for record, _ in entries if record.sku in existing]
     if duplicate and not payload.allow_recollect:
-        raise HTTPException(409, f"图片已存在，请明确选择再次采集：{duplicate}")
+        raise HTTPException(409, f"图片已采集，请明确选择再次采集：{duplicate}")
     try:
         # SQLite 首个 SKU 保存点同样必须位于整批事务内。
         with db.begin_nested():

@@ -2272,6 +2272,14 @@ def list_material_assets(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
+    return query_material_assets(db=db, user=user, page=page, page_size=page_size,
+        creator_id=creator_id, template_id=template_id, usage_status=usage_status,
+        source_type=source_type, created_from=created_from, created_to=created_to)
+
+
+def query_material_assets(*, db, user, page, page_size, creator_id=None, template_id=None,
+                          usage_status="unused", source_type="", created_from=None,
+                          created_to=None, extra_filters=()):
     if usage_status not in {"all", "unused", "used"}:
         raise HTTPException(422, "不支持的素材状态")
     if source_type not in {"", "ai_created", "local_upload", "imported", "cross_company"}:
@@ -2280,7 +2288,7 @@ def list_material_assets(
     created_to = created_to.astimezone(timezone.utc).replace(tzinfo=None) if created_to and created_to.tzinfo else created_to
     if created_from and created_to and created_from > created_to:
         raise HTTPException(400, "创建开始时间不能晚于结束时间")
-    filters = []
+    filters = list(extra_filters)
     if user.role != Role.SUPER_ADMIN:
         filters.append(MaterialAsset.company_id == user.company_id)
     if is_operator(user):

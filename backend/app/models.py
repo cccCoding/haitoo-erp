@@ -386,6 +386,8 @@ class CrossCompanyCollectionBatch(Base):
 
 class CrossCompanyCollectionItem(Base):
     __tablename__ = "cross_company_collection_items"
+    __table_args__ = (Index("ix_collection_items_company_source_sku",
+        "company_id", "source_company_id", "source_sku"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     batch_id: Mapped[int] = mapped_column(index=True)
     company_id: Mapped[int] = mapped_column(index=True)

@@ -26,7 +26,7 @@ class CollectionMySQLTests(unittest.TestCase):
             user=User(company_id=target.id,email=f'{tag}@collection-test.invalid',name='并发测试',role=Role.COMPANY_ADMIN,user_code='QA',password_hash='disabled')
             db.add(user);db.flush()
             template=ProductTemplate(company_id=target.id,name='QA1')
-            asset=MaterialAsset(company_id=source.id,name='并发来源',url='https://img.example/concurrent',claimed_by=user.id)
+            asset=MaterialAsset(company_id=source.id,name='并发来源',sku=f'SRC{tag[:12]}',url='https://img.example/concurrent',claimed_by=user.id)
             db.add_all([template,asset]);db.flush()
             self.target_id=target.id;self.source_id=source.id;self.user_id=user.id
             self.payload=CollectionInput(source_company_id=source.id,source_library='material',record_ids=[asset.id],template_id=template.id)

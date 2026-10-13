@@ -10,6 +10,7 @@ const headers = computed(() => ({Authorization:`Bearer ${props.token}`}))
 const enabled = ref(false), checking = ref(true), companies = ref<any[]>([]), sourceTemplates = ref<any[]>([])
 const companyId = ref<number | null>(null), library = ref('material'), tab = ref(props.historyOnly ? 'history' : 'collect')
 const templateId = ref(''), sourceType = ref(''), usage = ref('all'), from = ref(''), to = ref(''), sku = ref(''), category = ref('products')
+const collectionStatus = ref('all')
 const historyTemplateId = ref<number | null>(null), appliedHistoryTemplateId = ref<number | null>(null)
 const appliedFilters = ref(filterValues())
 const rows = ref<any[]>([]), total = ref(0), page = ref(1), pageSize = ref(20), loading = ref(false), error = ref(''), success = ref('')
@@ -32,6 +33,8 @@ const sourceLabels:Record<string,string> = {ai_created:'AI创作',local_upload:'
 let generation = 0, filterGeneration = 0
 let pendingRequest: {signature:string; key:string} | null = null
 function image(row:any) { return row.url || row.image_url || row.source_url || '' }
+function hasSku(row:any) { return !!row.sku?.trim() }
+function selectable(row:any) { return hasSku(row) && !!image(row) }
 function name(row:any) { return row.name || row.title || row.source_name || row.sku || '素材图片' }
 function date(value:number) { return new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Hong_Kong'}) }
 function fail(e:any) {
@@ -47,18 +50,19 @@ function fail(e:any) {
 function clearSelection() { selected.value = {}; pendingRequest = null }
 function toggle(row:any) {
   if (selected.value[row.id]) { delete selected.value[row.id]; return }
-  if (!image(row) || count.value >= 100) return
+  if (!selectable(row) || count.value >= 100) return
   selected.value[row.id] = row
 }
 function selectNew() {
-  for (const row of rows.value) if (!row.already_collected && image(row) && !selected.value[row.id] && count.value < 100) selected.value[row.id] = row
+  for (const row of rows.value) if (!row.already_collected && selectable(row) && !selected.value[row.id] && count.value < 100) selected.value[row.id] = row
 }
 function filterValues() {
   return {source_company_id:companyId.value,source_library:library.value,
     template_id:templateId.value && templateId.value !== 'unmatched' ? Number(templateId.value) : undefined,
     unmatched:templateId.value === 'unmatched',source_type:sourceType.value,usage_status:usage.value,
     created_from:from.value ? new Date(from.value).toISOString() : undefined,
-    created_to:to.value ? new Date(to.value).toISOString() : undefined,sku:sku.value || undefined,category:category.value}
+    created_to:to.value ? new Date(to.value).toISOString() : undefined,sku:sku.value || undefined,category:category.value,
+    collection_status:collectionStatus.value}
 }
 async function load() {
   const id = ++generation
@@ -87,7 +91,7 @@ async function changeSource() {
     sourceTemplates.value = data.templates
   } catch(e:any) { if (id === filterGeneration) fail(e) }
 }
-function resetFilters() { templateId.value = ''; sourceType.value = ''; usage.value = 'all'; from.value = ''; to.value = ''; sku.value = ''; category.value = 'products' }
+function resetFilters() { templateId.value = ''; sourceType.value = ''; usage.value = 'all'; from.value = ''; to.value = ''; sku.value = ''; category.value = 'products'; collectionStatus.value = 'all' }
 function search() {
   if (loading.value || saving.value) return
   if (tab.value === 'collect') {
@@ -150,6 +154,7 @@ onMounted(async () => {
         <label>创建开始时间<input v-model="from" type="datetime-local" /></label><label>创建结束时间<input v-model="to" type="datetime-local" /></label>
       </template>
       <template v-else><label>SKU 前缀<input v-model="sku" type="search" /></label><label>产品分类<select v-model="category"><option v-for="c in categories" :key="c[0]" :value="c[0]">{{c[1]}}</option></select></label></template>
+      <label>是否已采集<select v-model="collectionStatus"><option value="all">全部</option><option value="uncollected">未采集</option><option value="collected">已采集</option></select></label>
       <button class="primary" :disabled="!companyId || loading || saving">{{loading?'加载中…':'搜索'}}</button><button class="secondary" type="button" :disabled="!companyId || loading || saving" @click="resetFilters">重置筛选</button>
     </form>
     <form v-if="tab==='history'" class="collection-filters collection-history-filters" @submit.prevent="search">
@@ -163,7 +168,7 @@ onMounted(async () => {
     <p v-if="loading" role="status">正在加载…</p>
     <div v-else class="collection-grid">
       <article v-for="row in rows" :key="row.id" class="collection-card" :class="{selected:tab==='collect' && selected[row.id]}">
-        <label v-if="tab==='collect'" class="collection-checkbox"><input type="checkbox" :checked="!!selected[row.id]" :disabled="!image(row) || (!selected[row.id] && count>=100)" :aria-label="`选择 ${row.sku || name(row)}`" @change="toggle(row)" />{{row.already_collected?'已采集，可再次选择':'新图片'}}</label>
+        <label v-if="tab==='collect'" class="collection-checkbox"><input type="checkbox" :checked="!!selected[row.id]" :disabled="!selectable(row) || (!selected[row.id] && count>=100)" :aria-label="`选择 ${row.sku || name(row)}`" @change="toggle(row)" />{{!hasSku(row)?'无 SKU，无法采集':row.already_collected?'已采集，可再次选择':'新图片'}}</label>
         <button v-if="image(row)" class="collection-image" :aria-label="`预览 ${name(row)}`" @click="preview=row"><img :src="image(row)" :alt="name(row)" loading="lazy" /></button><p v-else>暂无图片链接</p>
         <div class="collection-card-body"><strong :title="name(row)">{{name(row)}}</strong><code>{{row.sku || row.source_sku || '无 SKU'}}</code>
           <template v-if="tab==='collect'"><small>模板：{{row.template_name || row.template || '未匹配'}}</small><small v-if="appliedFilters.source_library==='material'">{{sourceLabels[row.source_type]}} · {{row.usage_status==='used'?'已使用':'未使用'}} · {{date(row.created_at)}}</small><small v-else>销量：{{row.sales_quantity ?? 0}}<span v-if="row.rank"> · 排名 #{{row.rank}}</span></small></template>
@@ -177,7 +182,7 @@ onMounted(async () => {
       <h2 id="collect-title">采集到素材库</h2><p>已选 {{count}} 张；统一绑定目标模板并生成新 SKU。图片引用原链接。</p>
       <label>目标产品模板<select v-model="targetTemplate" required :disabled="saving" @change="formError=''"><option :value="null" disabled>请选择模板</option><option v-for="t in usableTemplates" :key="t.id" :value="t.id">{{t.name}}</option></select></label>
       <p v-if="preflight" class="error">{{preflight}} <button v-if="!props.user?.user_code" class="secondary" type="button" @click="closeConfirm();emit('account')">账号设置</button></p>
-      <label v-if="hasExisting" class="collection-recollect"><input v-model="recollect" type="checkbox" :disabled="saving" />我确认再次采集已存在的图片，生成新的素材和 SKU</label>
+      <label v-if="hasExisting" class="collection-recollect"><input v-model="recollect" type="checkbox" :disabled="saving" />我确认再次采集已采集的图片，生成新的素材和 SKU</label>
       <p v-if="formError" class="error" role="alert">{{formError}}</p><div class="modal-actions"><button class="secondary" type="button" :disabled="saving" @click="closeConfirm">取消</button><button class="primary" :disabled="saving || !!preflight || (hasExisting && !recollect)">{{saving?'采集中…':'确认采集'}}</button></div>
     </form></div>
     <div v-if="preview" v-dialog-focus="{close:()=>{preview=null}}" class="modal-backdrop" @click.self="preview=null"><section class="modal-card collection-modal" role="dialog" aria-modal="true" aria-label="图片预览"><h2>{{name(preview)}}</h2><img class="collection-preview" :src="image(preview)" :alt="name(preview)" /><button class="secondary" @click="preview=null">关闭预览</button></section></div>
