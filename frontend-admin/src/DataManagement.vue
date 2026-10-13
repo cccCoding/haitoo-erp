@@ -137,7 +137,7 @@ defineExpose({ refresh })
       <form v-if="tab!=='templates' && tab!=='creative'" class="data-filters" @submit.prevent="search">
         <template v-if="isMaterial">
           <label v-if="tab==='materials' || category==='new_images'">使用状态<select v-model="usageStatus"><option value="all">全部状态</option><option value="unused">未使用</option><option value="used">已使用</option></select></label>
-          <label v-if="tab==='materials'">类型<select v-model="sourceType"><option value="">全部类型</option><option value="ai_created">AI创作</option><option value="local_upload">本地上传</option><option value="imported">导入</option></select></label>
+          <label v-if="tab==='materials'">类型<select v-model="sourceType"><option value="">全部类型</option><option value="ai_created">AI创作</option><option value="local_upload">本地上传</option><option value="imported">导入</option><option value="cross_company">采集</option></select></label>
           <label v-if="tab==='materials'">产品模板<select v-model="templateId"><option value="">全部模板</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
           <label>创作人<select v-model="creatorId"><option value="">全部创作人</option><option v-for="item in members" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
         </template>
@@ -159,7 +159,7 @@ defineExpose({ refresh })
             <tr v-for="row in rows" :key="row.id">
               <template v-if="isShops"><td>{{row.platform}}</td><td>{{row.site}}</td><td>{{row.shop_name}}</td><td>{{row.assigned_user_name || '未分配'}}</td></template>
               <template v-else><td v-if="isRanking">#{{row.rank}}</td><td><button v-if="row.url || row.image_url" class="data-thumbnail" type="button" :aria-label="`预览 ${row.sku || row.name}`" @click="preview={url:imageUrl(row.url || row.image_url), title:row.name || row.title || row.sku}"><img :src="imageUrl(row.url || row.image_url)" :alt="row.name || row.title || row.sku" loading="lazy"/></button><span v-else>暂无图片</span></td><td><code>{{row.sku || '无 SKU'}}</code></td><td>{{row.template_name || row.template || '—'}}</td>
-                <template v-if="isMaterial"><td v-if="tab==='materials'">{{row.source_type==='imported'?'导入':row.source_type==='ai_created'?'AI创作':'本地上传'}}<small v-if="row.source_task_id">任务 #{{row.source_task_id}}</small></td><td v-if="category==='new_images' && tab==='products'">{{row.usage_status==='used'?'已使用':'未使用'}}</td><td>{{date(row.created_at)}}</td><td>{{row.created_by_name || '历史记录缺失'}}</td></template>
+                <template v-if="isMaterial"><td v-if="tab==='materials'">{{row.source_type==='cross_company'?'采集':row.source_type==='imported'?'导入':row.source_type==='ai_created'?'AI创作':'本地上传'}}<small v-if="row.source_task_id">任务 #{{row.source_task_id}}</small></td><td v-if="category==='new_images' && tab==='products'">{{row.usage_status==='used'?'已使用':'未使用'}}</td><td>{{date(row.created_at)}}</td><td>{{row.created_by_name || '历史记录缺失'}}</td></template>
                 <template v-else><td class="data-title" :title="row.title"><span class="data-title-text">{{row.title || '—'}}</span></td><td><small v-for="shop in row.shop_sales" :key="shop.source_id">{{shop.shop_name}}-{{shop.sales_quantity}}</small></td><td>{{row.material_created_by_name || '—'}}</td><td>{{date(row.material_created_at)}}</td><td>{{row.order_count}}</td><td>{{row.sales_quantity}}</td><td><button class="secondary" type="button" @click="openOrders(row)">查看</button></td></template>
               </template>
             </tr>

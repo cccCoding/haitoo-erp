@@ -26,6 +26,7 @@ class Company(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    cross_company_collect_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     miaoshou_app_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     miaoshou_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     hubstudio_app_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -367,6 +368,45 @@ class MaterialAsset(Base):
     # 仅记录是否曾被成功用于创建草稿；已使用素材仍可用于单条草稿复用。
     usage_status: Mapped[str] = mapped_column(String(12), default="unused", nullable=False, index=True)
     claimed_by: Mapped[int] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CrossCompanyCollectionBatch(Base):
+    __tablename__ = "cross_company_collection_batches"
+    __table_args__ = (UniqueConstraint("company_id", "request_key", name="uq_collection_company_request"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    created_by: Mapped[int] = mapped_column()
+    template_id: Mapped[int] = mapped_column()
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    result: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CrossCompanyCollectionItem(Base):
+    __tablename__ = "cross_company_collection_items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int] = mapped_column(index=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    material_asset_id: Mapped[int] = mapped_column(index=True)
+    source_company_id: Mapped[int] = mapped_column()
+    source_company_name: Mapped[str] = mapped_column(String(120))
+    source_library: Mapped[str] = mapped_column(String(12))
+    source_record_id: Mapped[int] = mapped_column()
+    source_sku: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    source_url: Mapped[str] = mapped_column(String(500))
+    source_name: Mapped[str] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CrossCompanyCollectionPermissionLog(Base):
+    __tablename__ = "cross_company_collection_permission_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    changed_by: Mapped[int] = mapped_column()
+    previous_enabled: Mapped[bool] = mapped_column(Boolean)
+    enabled: Mapped[bool] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

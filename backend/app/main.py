@@ -339,6 +339,8 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Haitoro POD API", version="0.1.0", lifespan=lifespan)
+from .cross_company_collection import router as cross_company_collection_router
+app.include_router(cross_company_collection_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins.split(","),
@@ -2272,7 +2274,7 @@ def list_material_assets(
 ):
     if usage_status not in {"all", "unused", "used"}:
         raise HTTPException(422, "不支持的素材状态")
-    if source_type not in {"", "ai_created", "local_upload", "imported"}:
+    if source_type not in {"", "ai_created", "local_upload", "imported", "cross_company"}:
         raise HTTPException(422, "不支持的素材类型")
     created_from = created_from.astimezone(timezone.utc).replace(tzinfo=None) if created_from and created_from.tzinfo else created_from
     created_to = created_to.astimezone(timezone.utc).replace(tzinfo=None) if created_to and created_to.tzinfo else created_to
@@ -2318,6 +2320,14 @@ def list_material_assets(
         template.id: template.name
         for template in db.scalars(select(ProductTemplate).where(ProductTemplate.id.in_(template_ids))).all()
     } if template_ids else {}
+    from .models import CrossCompanyCollectionItem
+    provenance = {item.material_asset_id: {
+        "source_company_name": item.source_company_name, "source_library": item.source_library,
+        "source_sku": item.source_sku, "collected_at": timestamp_ms(item.created_at),
+    } for item in db.scalars(select(CrossCompanyCollectionItem).where(
+        CrossCompanyCollectionItem.material_asset_id.in_([asset.id for asset in assets]),
+        CrossCompanyCollectionItem.company_id.in_({asset.company_id for asset in assets}),
+    ))} if assets else {}
     return {
         "items": [
             serialize_record(asset) | {
@@ -2325,6 +2335,7 @@ def list_material_assets(
                 "created_by_name": creator_names.get(asset.claimed_by, "历史记录缺失"),
                 "template_name": template_names.get(asset.template_id, "未设置模板" if asset.template_id is None else "历史模板已删除"),
                 "source_type": asset.source_type or ("ai_created" if asset.source_task_id is not None else "local_upload"),
+                "collection_source": provenance.get(asset.id),
             }
             for asset in assets
         ],
@@ -2477,11 +2488,18 @@ def admin_overview(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Se
 def list_admin_companies(user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
     companies = db.scalars(select(Company).order_by(Company.id.desc())).all()
     result = []
+    from .models import CrossCompanyCollectionPermissionLog
     for company in companies:
+        permission_log = db.scalar(select(CrossCompanyCollectionPermissionLog).where(
+            CrossCompanyCollectionPermissionLog.company_id == company.id).order_by(
+            CrossCompanyCollectionPermissionLog.id.desc()).limit(1))
         result.append({
             "id": company.id,
             "name": company.name,
             "is_active": company.is_active,
+            "cross_company_collect_enabled": company.cross_company_collect_enabled,
+            "cross_company_collect_updated_at": timestamp_ms(permission_log.created_at) if permission_log else None,
+            "cross_company_collect_updated_by": permission_log.changed_by if permission_log else None,
             "created_at": timestamp_ms(company.created_at),
             "admin_users": [UserOut.model_validate(item) for item in db.scalars(select(User).where(User.company_id == company.id, User.role == Role.COMPANY_ADMIN).order_by(User.id)).all()],
         })
@@ -2600,7 +2618,7 @@ def admin_data_materials(
     company_id: int = Query(ge=1), page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=1000),
     creator_id: int | None = Query(None, ge=1), template_id: int | None = Query(None, ge=1),
     usage_status: Literal["all", "unused", "used"] = "unused",
-    source_type: Literal["", "ai_created", "local_upload", "imported"] = "",
+    source_type: Literal["", "ai_created", "local_upload", "imported", "cross_company"] = "",
     user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db),
 ):
     return list_material_assets(page=page, page_size=page_size, creator_id=creator_id,

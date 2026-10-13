@@ -11,6 +11,8 @@ export const workspaceRoutes: RouteRecordRaw[] = [
   { path: '/templates', name: 'templates', component: RouteOutlet },
   { path: '/creative', name: 'pod', component: RouteOutlet },
   { path: '/tasks', name: 'tasks', component: RouteOutlet },
+  { path: '/materials/collection', name: 'collection', component: RouteOutlet, meta: { requiresCompanyAdmin: true } },
+  { path: '/materials/collection-history', name: 'collection-history', component: RouteOutlet, meta: { requiresCompanyAdmin: true } },
   { path: '/materials', name: 'materials', component: RouteOutlet },
   { path: '/drafts', name: 'drafts', component: RouteOutlet },
   { path: '/product-library', name: 'product-library', component: RouteOutlet },

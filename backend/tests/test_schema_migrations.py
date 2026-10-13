@@ -100,12 +100,25 @@ class SchemaMigrationTests(unittest.TestCase):
             command.upgrade(config, "head")
             current, expected = schema_heads(connection)
             self.assertEqual(current, expected)
-            self.assertEqual(current, {"20261011_33"})
+            self.assertEqual(current, {"20261013_34"})
             columns = {column['name'] for column in inspect(connection).get_columns('product_templates')}
             self.assertNotIn('confirmed_product_info', columns)
             self.assertEqual(connection.execute(text("SELECT title_template FROM product_templates WHERE id=900")).scalar_one(), 'Existing title rules')
             self.assertEqual(connection.execute(text("SELECT name FROM companies WHERE id=900")).scalar_one(), 'Existing Company')
         assert_schema_current(self.engine)
+
+    def test_cross_company_collection_defaults_off_and_preserves_materials(self):
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, "20261011_33")
+            connection.execute(text("INSERT INTO companies (id, name, is_active, created_at) VALUES (900, 'Existing', 1, CURRENT_TIMESTAMP)"))
+            command.upgrade(config, "head")
+            self.assertFalse(connection.scalar(text("SELECT cross_company_collect_enabled FROM companies WHERE id=900")))
+            for table in ("cross_company_collection_batches", "cross_company_collection_items", "cross_company_collection_permission_logs"):
+                self.assertIn(table, inspect(connection).get_table_names())
+            command.downgrade(config, "20261011_33")
+            self.assertNotIn('cross_company_collect_enabled', {c['name'] for c in inspect(connection).get_columns('companies')})
+            self.assertEqual(connection.scalar(text("SELECT name FROM companies WHERE id=900")), 'Existing')
 
     def test_hub_upgrade_preserves_history_without_granting_access(self):
         with self.engine.begin() as connection:

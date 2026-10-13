@@ -109,7 +109,7 @@ nav a.active { background: #263c60; color: #fff; box-shadow: inset 3px 0 #78a6ff
 .queue-model-row { border-top: 1px solid var(--admin-border); }
 .queue-model-row code { overflow-wrap: anywhere; }
 .queue-empty, .empty { margin: 0; padding: 36px 24px; color: var(--admin-muted); text-align: center; font-size: 13px; }
-.company-head, .company-row { display: grid; grid-template-columns: 52px minmax(120px,1fr) minmax(200px,1.6fr) 110px; gap: 20px; align-items: center; padding: 14px 24px; min-width: 600px; text-align: left; }
+.company-head, .company-row { display: grid; grid-template-columns: 52px minmax(120px,1fr) minmax(180px,1.4fr) minmax(170px,1fr) 100px; gap: 20px; align-items: center; padding: 14px 24px; min-width: 600px; text-align: left; }
 .company-row { border-top: 1px solid var(--admin-border); font-size: 13px; }
 .company-row > span:first-child { color: var(--admin-muted); font-variant-numeric: tabular-nums; }
 .company-row b { display: block; font-weight: 600; }
@@ -170,7 +170,7 @@ nav a.active { background: #263c60; color: #fff; box-shadow: inset 3px 0 #78a6ff
   .company-row { grid-template-columns: 36px minmax(0,1fr); min-width: 0; gap: 12px; padding: 18px 20px; }
   .company-admin-list { grid-column: 2; }
   .company-row > span:last-child { grid-column: 2; color: var(--admin-muted); font-size: 12px; }
-  .company-row > span:last-child::before { content: '开通时间 '; }
+  .company-row > span:last-child::before { content: '\5f00\901a\65f6\95f4 ';  }
   .modal-backdrop { padding: 16px; }
   .modal { max-height: calc(100dvh - 32px); padding: 24px; }
   .login-card { padding: 30px 26px; }
@@ -178,3 +178,8 @@ nav a.active { background: #263c60; color: #fff; box-shadow: inset 3px 0 #78a6ff
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+.company-collection .secondary { margin-top: 8px; }
+.modal .collection-switch { display: flex; align-items: center; gap: 10px; }
+.collection-switch input { width: 18px; height: 18px; }
+@media(max-width:700px) { .company-collection { grid-column: 2; } }
