@@ -164,6 +164,30 @@ class ProductLibraryDraftTests(TestCase):
         self.assertEqual(result.status_code, 400)
         self.assertEqual(self.count(), 2)
 
+    def test_material_batch_accepts_39_groups_and_limits_total_assets(self):
+        with self.sessions() as db:
+            db.add_all(MaterialAsset(id=i, company_id=1, template_id=1, claimed_by=3,
+                url=f'https://img/{i}', sku=f'M01AA{i:06d}', name=f'file{i}')
+                for i in range(12, 196))
+            db.commit()
+        groups = [{'material_asset_ids': list(range(i, i + 5)), 'title': f'Batch product title {i:04d} for a cardigan'}
+            for i in range(1, 196, 5)]
+        payload = {'template_id': 1, 'groups': groups}
+        result = self.client.post('/drafts/from-material-assets/batch', headers=self.headers(), json=payload)
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()['total'], 39)
+        self.assertEqual(self.count(), 39)
+        with self.sessions() as db:
+            self.assertTrue(all(db.get(MaterialAsset, i).usage_status == 'used' for i in range(1, 196)))
+
+        too_many = {'template_id': 1, 'groups': [
+            {'material_asset_ids': list(range(i * 8 + 1, i * 8 + 9)), 'title': 'Batch product title for a cardigan'}
+            for i in range(251)]}
+        result = self.client.post('/drafts/from-material-assets/batch', headers=self.headers(), json=too_many)
+        self.assertEqual(result.status_code, 400, result.text)
+        self.assertIn('2000', result.json()['detail'])
+        self.assertEqual(self.count(), 39)
+
     def title_request(self, kind, user=3):
         if kind == 'product':
             return self.client.post('/product-library/generate-draft-title', headers=self.headers(user), json=self.source(1, 'product'))

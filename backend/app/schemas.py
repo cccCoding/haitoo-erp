@@ -355,7 +355,7 @@ class MaterialDraftBatchGroup(BaseModel):
 
 class MaterialDraftBatchCreate(BaseModel):
     template_id: int
-    groups: list[MaterialDraftBatchGroup] = Field(min_length=1, max_length=20)
+    groups: list[MaterialDraftBatchGroup] = Field(min_length=1, max_length=MAX_PRODUCT_LIBRARY_SELECTION // 5)
 
 
 class DraftTitleGenerate(BaseModel):

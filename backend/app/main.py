@@ -3097,6 +3097,8 @@ def create_drafts_from_material_assets_batch(payload: MaterialDraftBatchCreate, 
     all_ids = [asset_id for asset_ids, _title in groups for asset_id in asset_ids]
     if len(set(all_ids)) != len(all_ids):
         raise HTTPException(400, "同一素材不能用于多个组合")
+    if len(all_ids) > MAX_PRODUCT_LIBRARY_SELECTION:
+        raise HTTPException(400, f"一次最多选择 {MAX_PRODUCT_LIBRARY_SELECTION} 张素材")
     stmt = select(MaterialAsset).where(
         MaterialAsset.company_id == user.company_id,
         MaterialAsset.id.in_(all_ids),
