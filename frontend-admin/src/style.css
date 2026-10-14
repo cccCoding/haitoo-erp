@@ -51,7 +51,7 @@ input[type=checkbox] { accent-color: var(--admin-primary); }
 /* 登录与应用外壳 */
 .login-page { flex: 1; display: grid; place-items: center; padding: 40px 20px; background: var(--admin-canvas); }
 .login-card { width: min(420px, 100%); padding: 36px; background: white; border: 1px solid var(--admin-border); border-radius: 16px; box-shadow: 0 12px 40px #17243b08; }
-.mark, .brand span { display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: var(--admin-primary); color: white; font-weight: 800; }
+.mark, .brand img { display: block; width: 34px; height: 34px; flex-shrink: 0; object-fit: contain; }
 .login-card .eyebrow { margin-top: 24px; }
 .login-card h1 { margin: 0; font-size: 25px; letter-spacing: -.04em; }
 .login-card > p { color: var(--admin-muted); line-height: 1.7; }
@@ -146,7 +146,7 @@ nav a.active { background: #263c60; color: #fff; box-shadow: inset 3px 0 #78a6ff
   .shell { display: block; }
   .shell > aside { padding: 16px 20px 12px; }
   .brand { padding: 0; font-size: 16px; }
-  .brand span { width: 28px; height: 28px; border-radius: 7px; }
+  .brand img { width: 28px; height: 28px; }
   .shell aside > p { display: none; }
   nav { display: flex; gap: 4px; margin-top: 14px; }
   nav a { flex: 1; padding: 9px 8px; font-size: 12px; text-align: center; white-space: nowrap; }
