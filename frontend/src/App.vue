@@ -6,6 +6,7 @@ import SearchableSelect from './SearchableSelect.vue'
 import ShopDataHeading from './ShopDataHeading.vue'
 import CrossCompanyCollection from './CrossCompanyCollection.vue'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
+import { batchTitleRequest, createBatchTitleGenerator, emptyTitleGenerationProgress, hasValidBatchTitles, isUnfinishedTitle, titleGenerationStatusLabels, type BatchTitleGroup } from './batch-title-generation'
 
 const pageSizeOptions = [20, 50, 100, 500, 1000]
 const productLibraryPageSizeOptions = [...pageSizeOptions, 2000]
@@ -91,10 +92,28 @@ const materialDraftAssets = ref<any[]>([]), draggedMaterialDraftAssetId = ref<nu
 type MaterialUsageTab = 'unused' | 'used'
 const activeMaterialUsageTab = ref<MaterialUsageTab>('unused')
 const materialUsageTabs: {key: MaterialUsageTab; label: string}[] = [{key:'unused', label:'未使用'}, {key:'used', label:'已使用'}]
-type MaterialBatchGroup = {assets:any[]; title:string; generating:boolean; edited?:boolean; additionalRequirements:string; showAdditionalRequirements:boolean; showTitleHelp:boolean}
+type MaterialBatchGroup = BatchTitleGroup & {assets:any[]; additionalRequirements:string; showAdditionalRequirements:boolean; showTitleHelp:boolean}
 const showMaterialBatchDraftDialog = ref(false), materialBatchGroupSize = ref<5|6|7|8>(5), materialBatchMode = ref<'sequential'|'random'>('sequential'), materialBatchGroups = ref<MaterialBatchGroup[]>([]), materialBatchSaving = ref(false)
 const draggedMaterialBatchAsset = ref<{groupIndex:number; assetId:number} | null>(null)
-watch(showMaterialBatchDraftDialog, () => { for (const group of materialBatchGroups.value) { group.additionalRequirements = ''; group.showAdditionalRequirements = false; group.showTitleHelp = false } })
+let materialBatchGroupId = 0
+const materialBatchTitleProgress = ref(emptyTitleGenerationProgress())
+const materialBatchControlsLocked = computed(() => materialBatchSaving.value || materialBatchTitleProgress.value.running)
+const materialBatchTitlesValid = computed(() => hasValidBatchTitles(materialBatchGroups.value))
+const materialBatchUnfinishedTitles = computed(() => materialBatchGroups.value.filter(isUnfinishedTitle))
+const materialBatchTitleGenerator = createBatchTitleGenerator<MaterialBatchGroup>({
+  progress: materialBatchTitleProgress.value,
+  generate: async (group, signal) => {
+    const request = batchTitleRequest(draftSelectionTemplateId.value!, libraryDraftMode.value, group.assets[0], group.additionalRequirements)
+    const { data } = await api.post(request.url, request.payload, { headers: headers.value, signal, timeout: 60000 })
+    return data.title
+  },
+  isCurrent: group => showMaterialBatchDraftDialog.value && materialBatchGroups.value.includes(group),
+  onFatal: message => showToast(message),
+})
+watch(showMaterialBatchDraftDialog, visible => {
+  if (!visible) materialBatchTitleGenerator.reset()
+  for (const group of materialBatchGroups.value) { group.additionalRequirements = ''; group.showAdditionalRequirements = false; group.showTitleHelp = false }
+}, { flush: 'sync' })
 const pendingMaterialUploadFiles = ref<File[]>([]), showMaterialUploadDialog = ref(false), materialUploadTemplateId = ref<number | null>(null)
 const materialUploadedCount = ref(0), materialUploadTotal = ref(0), pendingMaterialUploadUrls = ref<string[]>([])
 const MATERIAL_UPLOAD_CONCURRENCY = 8, MATERIAL_UPLOAD_MAX_FILES = 100, IMAGE_UPLOAD_RETRY = 2
@@ -648,6 +667,7 @@ const selectableProductLibraryItems = computed(() => activeProductLibraryTab.val
 const productLibrarySelectionLoading = computed(() => productLibraryLoading.value || productLibraryRankingLoading.value || stagnantLoading.value || newImagesLoading.value)
 const draftSelectionAssets = computed(() => libraryDraftMode.value ? libraryDraftSelection.value : selectedMaterialAssets.value)
 const draftSelectionTemplateId = computed(() => libraryDraftMode.value ? libraryDraftSelection.value[0]?.template_id : selectedMaterialTemplateId.value)
+watch([libraryDraftMode, draftSelectionTemplateId, token], () => materialBatchTitleGenerator.reset(), { flush: 'sync' })
 const allPagedProductsSelected = computed(() => selectableProductLibraryItems.value.length > 0 && selectableProductLibraryItems.value.every(item => selectedProductLibraryIds.value.includes(item.id)))
 async function loadProductLibraryShops() {
   if (user.value?.role !== 'company_admin') return
@@ -1381,17 +1401,19 @@ function shuffleAssets(items: any[]) {
   return shuffled
 }
 function buildMaterialBatchGroups() {
+  materialBatchTitleGenerator.reset()
   const assets = materialBatchMode.value === 'random' ? shuffleAssets(draftSelectionAssets.value) : [...draftSelectionAssets.value]
   const completeCount = Math.floor(assets.length / materialBatchGroupSize.value) * materialBatchGroupSize.value
-  materialBatchGroups.value = Array.from({length: completeCount / materialBatchGroupSize.value}, (_, index) => ({ assets: assets.slice(index * materialBatchGroupSize.value, (index + 1) * materialBatchGroupSize.value), title: libraryDraftMode.value ? assets[index * materialBatchGroupSize.value]?.title || '' : '', generating: false, edited:false, additionalRequirements: '', showAdditionalRequirements: false, showTitleHelp: false }))
+  materialBatchGroups.value = Array.from({length: completeCount / materialBatchGroupSize.value}, (_, index) => ({ id: ++materialBatchGroupId, assets: assets.slice(index * materialBatchGroupSize.value, (index + 1) * materialBatchGroupSize.value), title: libraryDraftMode.value ? assets[index * materialBatchGroupSize.value]?.title || '' : '', titleStatus: 'idle', titleError: '', edited:false, additionalRequirements: '', showAdditionalRequirements: false, showTitleHelp: false }))
 }
 function openMaterialBatchDraftDialog() {
   libraryDraftMode.value = false
   if (!canCreateMaterialBatch.value) { showToast('请选择至少 5 张属于同一产品模板的素材'); return }
   buildMaterialBatchGroups(); draggedMaterialBatchAsset.value = null; showMaterialBatchDraftDialog.value = true
 }
-function rebuildMaterialBatchGroups() { draggedMaterialBatchAsset.value = null; if (draftSelectionAssets.value.length >= materialBatchGroupSize.value) buildMaterialBatchGroups(); else materialBatchGroups.value = [] }
+function rebuildMaterialBatchGroups() { if (materialBatchControlsLocked.value) return; materialBatchTitleGenerator.reset(); draggedMaterialBatchAsset.value = null; if (draftSelectionAssets.value.length >= materialBatchGroupSize.value) buildMaterialBatchGroups(); else materialBatchGroups.value = [] }
 function startMaterialBatchDrag(event: DragEvent, groupIndex: number, assetId: number) {
+  if (materialBatchControlsLocked.value) { event.preventDefault(); return }
   draggedMaterialBatchAsset.value = {groupIndex, assetId}
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = 'move'
@@ -1399,11 +1421,13 @@ function startMaterialBatchDrag(event: DragEvent, groupIndex: number, assetId: n
   }
 }
 function moveMaterialBatchAsset(groupIndex: number, from: number, to: number) {
+  if (materialBatchControlsLocked.value) return
   const group = materialBatchGroups.value[groupIndex]
   if (!group || from < 0 || to < 0 || from >= group.assets.length || to >= group.assets.length || from === to) return
   const assets = [...group.assets]
   const [asset] = assets.splice(from, 1)
   assets.splice(to, 0, asset)
+  if (assets[0] !== group.assets[0]) { group.titleStatus = 'idle'; group.titleError = '' }
   group.assets = assets
   if (libraryDraftMode.value && !group.edited) group.title = assets[0]?.title || ''
 }
@@ -1414,15 +1438,25 @@ function dropMaterialBatchAsset(groupIndex: number, targetId: number) {
   const assets = materialBatchGroups.value[groupIndex]?.assets || []
   moveMaterialBatchAsset(groupIndex, assets.findIndex(asset => asset.id === dragged.assetId), assets.findIndex(asset => asset.id === targetId))
 }
-async function generateMaterialBatchTitle(group: MaterialBatchGroup) {
-  if (!draftSelectionTemplateId.value || !group.assets[0]) return
-  const firstAsset = group.assets[0]
-  try { group.generating = true; const {data} = await api.post(libraryDraftMode.value ? '/product-library/generate-draft-title' : `/templates/${draftSelectionTemplateId.value}/generate-draft-title`, { ...(libraryDraftMode.value ? librarySource(group.assets[0]) : {image_url:group.assets[0].url}), additional_requirements: group.additionalRequirements.trim() }, {headers:headers.value}); if (group.assets[0]?.id === firstAsset.id) { group.title = data.title; group.edited = true } }
-  catch (e:any) { showToast(e.response?.data?.detail || 'AI 生成标题失败，请稍后重试') }
-  finally { group.generating = false }
+function editMaterialBatchTitle(group: MaterialBatchGroup) {
+  group.edited = true
+  group.titleStatus = 'idle'
+  group.titleError = ''
+}
+async function generateMaterialBatchTitles(groups: MaterialBatchGroup[] = materialBatchGroups.value) {
+  if (materialBatchControlsLocked.value || !showMaterialBatchDraftDialog.value || !draftSelectionTemplateId.value || !groups.length) return
+  draggedMaterialBatchAsset.value = null
+  await materialBatchTitleGenerator.run(groups)
+}
+function generateMaterialBatchTitle(group: MaterialBatchGroup) {
+  return generateMaterialBatchTitles([group])
+}
+function stopMaterialBatchTitleGeneration() {
+  materialBatchTitleGenerator.stop()
+  draggedMaterialBatchAsset.value = null
 }
 async function createMaterialBatchDrafts() {
-  if (materialBatchSaving.value || !draftSelectionTemplateId.value || !materialBatchGroups.value.length) return
+  if (materialBatchControlsLocked.value || !draftSelectionTemplateId.value || !materialBatchGroups.value.length) return
   if (libraryDraftMode.value && materialBatchGroups.value.some(group => new Set(group.assets.map(asset => asset.sku.trim())).size !== group.assets.length)) { showToast('同一草稿不能包含重复 SKU，请调整组合'); return }
   if (materialBatchGroups.value.some(group => group.title.trim().length < 25 || group.title.trim().length > 255)) { showToast('请为每个组合填写 25-255 个字符的商品标题'); return }
   try {
@@ -2386,6 +2420,7 @@ onMounted(() => {
 })
 let productLibraryStatisticsPollingTimer: ReturnType<typeof setInterval> | undefined
 onUnmounted(() => {
+  materialBatchTitleGenerator.reset()
   document.removeEventListener('pointerdown', closeProductLibraryShopFilterOnOutsideClick)
   if (taskResultPollingTimer) clearInterval(taskResultPollingTimer)
   if (productLibraryStatisticsPollingTimer) clearInterval(productLibraryStatisticsPollingTimer)
@@ -2724,40 +2759,53 @@ onUnmounted(() => {
       <div class="modal-actions"><button class="ghost" @click="showMaterialDraftDialog=false">取消</button><button class="primary" :disabled="materialDraftSaving" @click="createDraftFromMaterialAssets">{{materialDraftSaving ? '创建中…' : '确认创建'}}</button></div>
     </section>
   </div>
-  <div v-if="showMaterialBatchDraftDialog" class="modal-backdrop" @click.self="!materialBatchSaving && (showMaterialBatchDraftDialog=false)">
-    <section class="modal-card material-batch-draft-dialog">
-      <button class="modal-close" :disabled="materialBatchSaving" @click="showMaterialBatchDraftDialog=false">×</button>
-      <h2>组合创建商品草稿</h2>
+  <div v-if="showMaterialBatchDraftDialog" class="modal-backdrop" @click.self="!materialBatchControlsLocked && (showMaterialBatchDraftDialog=false)">
+    <section class="modal-card material-batch-draft-dialog" role="dialog" aria-modal="true" aria-labelledby="material-batch-draft-title">
+      <button class="modal-close" :disabled="materialBatchControlsLocked" aria-label="关闭组合创建弹窗" @click="showMaterialBatchDraftDialog=false">×</button>
+      <h2 id="material-batch-draft-title">组合创建商品草稿</h2>
       <p>可复用已使用素材或数据；每个完整组合会创建一条草稿，产品描述固定采用模板描述。</p>
       <div class="material-batch-options">
-        <label>每组图片<select v-model.number="materialBatchGroupSize" @change="rebuildMaterialBatchGroups"><option :value="5">5 张</option><option :value="6">6 张</option><option :value="7">7 张</option><option :value="8">8 张</option></select></label>
-        <label>组合方式<select v-model="materialBatchMode" @change="rebuildMaterialBatchGroups"><option value="sequential">按列表顺序</option><option value="random">随机组合</option></select></label>
+        <label>每组图片<select v-model.number="materialBatchGroupSize" :disabled="materialBatchControlsLocked" @change="rebuildMaterialBatchGroups"><option :value="5">5 张</option><option :value="6">6 张</option><option :value="7">7 张</option><option :value="8">8 张</option></select></label>
+        <label>组合方式<select v-model="materialBatchMode" :disabled="materialBatchControlsLocked" @change="rebuildMaterialBatchGroups"><option value="sequential">按列表顺序</option><option value="random">随机组合</option></select></label>
       </div>
       <p v-if="draftSelectionAssets.length % materialBatchGroupSize" class="material-batch-remainder">最后 {{draftSelectionAssets.length % materialBatchGroupSize}} 张不足一组，不参与创建，使用状态保持不变。</p>
-
+      <section class="material-batch-title-toolbar" aria-label="批量生成标题">
+        <div class="material-batch-title-actions">
+          <button type="button" class="secondary" :disabled="materialBatchControlsLocked || !materialBatchGroups.length" @click="generateMaterialBatchTitles()">一键 AI 生成所有标题</button>
+          <button v-if="materialBatchUnfinishedTitles.length" type="button" class="ghost" :disabled="materialBatchControlsLocked" @click="generateMaterialBatchTitles(materialBatchUnfinishedTitles)">重试未完成（{{materialBatchUnfinishedTitles.length}}）</button>
+          <button v-if="materialBatchTitleProgress.running" type="button" class="ghost" @click="stopMaterialBatchTitleGeneration">停止生成</button>
+        </div>
+        <p class="material-batch-title-warning">将覆盖所有组合标题；使用各组首图、模板要求和本组补充要求。</p>
+        <div v-if="materialBatchTitleProgress.total" class="material-batch-title-progress" role="status" aria-live="polite">
+          <progress :value="materialBatchTitleProgress.completed" :max="materialBatchTitleProgress.total" aria-label="标题生成进度"></progress>
+          <span>已完成 {{materialBatchTitleProgress.completed}} / {{materialBatchTitleProgress.total}}，成功 {{materialBatchTitleProgress.succeeded}}，失败 {{materialBatchTitleProgress.failed}}<template v-if="materialBatchTitleProgress.stopped">，已停止 {{materialBatchTitleProgress.stopped}}</template></span>
+        </div>
+        <p v-if="materialBatchTitleProgress.error" class="material-batch-title-error" role="alert">{{materialBatchTitleProgress.error}}</p>
+      </section>
       <section class="material-batch-groups">
-        <article v-for="(group,index) in materialBatchGroups" :key="index">
-          <header><strong>草稿 {{index + 1}}</strong><span>{{group.assets.length}} 张素材</span></header>
+        <article v-for="(group,index) in materialBatchGroups" :key="group.id">
+          <header><strong>草稿 {{index + 1}}</strong><div class="material-batch-group-meta"><span class="material-batch-title-status" :class="group.titleStatus">{{titleGenerationStatusLabels[group.titleStatus]}}</span><span>{{group.assets.length}} 张素材</span></div></header>
           <p class="material-batch-sort-hint">拖动图片调整本草稿顺序；点击图片查看大图。</p>
           <div class="material-draft-preview-images material-batch-preview-images">
-            <button v-for="(asset, assetIndex) in group.assets" :key="asset.id" type="button" class="material-draft-sort-item material-batch-sort-item" :class="{dragging: draggedMaterialBatchAsset?.groupIndex === index && draggedMaterialBatchAsset?.assetId === asset.id}" draggable="true" :aria-label="'草稿 ' + (index + 1) + ' 第 ' + (assetIndex + 1) + ' 张图片：' + (asset.name || asset.sku) + '，点击查看大图或拖动调整顺序'" @dragstart="startMaterialBatchDrag($event, index, asset.id)" @dragover.prevent @drop.prevent="dropMaterialBatchAsset(index, asset.id)" @dragend="draggedMaterialBatchAsset=null" @click="openImagePreview(asset.url, (asset.name || asset.sku) + ' · 草稿 ' + (index + 1))">
+            <button v-for="(asset, assetIndex) in group.assets" :key="asset.id" type="button" class="material-draft-sort-item material-batch-sort-item" :class="{dragging: draggedMaterialBatchAsset?.groupIndex === index && draggedMaterialBatchAsset?.assetId === asset.id}" :draggable="!materialBatchControlsLocked" :aria-label="'草稿 ' + (index + 1) + ' 第 ' + (assetIndex + 1) + ' 张图片：' + (asset.name || asset.sku) + (materialBatchControlsLocked ? '，点击查看大图' : '，点击查看大图或拖动调整顺序')" @dragstart="startMaterialBatchDrag($event, index, asset.id)" @dragover.prevent @drop.prevent="dropMaterialBatchAsset(index, asset.id)" @dragend="draggedMaterialBatchAsset=null" @click="openImagePreview(asset.url, (asset.name || asset.sku) + ' · 草稿 ' + (index + 1))">
               <img :src="imageUrl(asset.url)" :alt="asset.name || asset.sku" draggable="false"/>
               <span :class="{'is-first': assetIndex === 0}">{{assetIndex === 0 ? '首' : assetIndex + 1}}</span>
             </button>
           </div>
-          <div class="material-draft-title-row"><input v-model="group.title" @input="group.edited=true" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符的商品标题"/></div>
-          <small :class="{error:group.title.length>0 && group.title.length<25}">{{group.title.length}} / 255 字符</small>
+          <div class="material-draft-title-row"><input v-model="group.title" :disabled="materialBatchControlsLocked" :aria-label="'草稿 ' + (index + 1) + ' 商品标题'" @input="editMaterialBatchTitle(group)" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符的商品标题"/></div>
+          <small :class="{error:group.title.length>0 && group.title.trim().length<25}">{{group.title.length}} / 255 字符</small>
+          <p v-if="group.titleError" class="material-batch-title-error" role="alert">{{group.titleError}}</p>
           <div class="title-additional-requirements draft-title-generation-controls">
             <div class="draft-title-generation-actions">
               <button type="button" class="ghost" :aria-expanded="group.showAdditionalRequirements" :aria-controls="'batch-title-additional-requirements-' + index" @click="group.showAdditionalRequirements=!group.showAdditionalRequirements">{{group.showAdditionalRequirements ? '收起' : '展开'}}补充要求（选填）</button>
-              <div class="draft-title-generate-group"><button type="button" class="secondary" :disabled="group.generating" @click="generateMaterialBatchTitle(group)">{{group.generating ? '生成中…' : 'AI 生成标题'}}</button><button type="button" class="draft-title-help-button" :aria-label="'草稿 ' + (index + 1) + ' 标题生成说明'" :aria-expanded="group.showTitleHelp" :aria-controls="'batch-title-generation-help-' + index" @click="group.showTitleHelp=!group.showTitleHelp">ⓘ</button></div>
+              <div class="draft-title-generate-group"><button type="button" class="secondary" :disabled="materialBatchControlsLocked" @click="generateMaterialBatchTitle(group)">{{group.titleStatus === 'running' ? '生成中…' : 'AI 生成标题'}}</button><button type="button" class="draft-title-help-button" :aria-label="'草稿 ' + (index + 1) + ' 标题生成说明'" :aria-expanded="group.showTitleHelp" :aria-controls="'batch-title-generation-help-' + index" @click="group.showTitleHelp=!group.showTitleHelp">ⓘ</button></div>
             </div>
             <p v-if="group.showTitleHelp" :id="'batch-title-generation-help-' + index" class="draft-title-generation-help">将使用此模版的 AI生成标题要求和首图生成英文标题；仅在要求明确指定时提及材质。</p>
-            <label v-if="group.showAdditionalRequirements" :id="'batch-title-additional-requirements-' + index">本草稿标题补充要求<textarea v-model="group.additionalRequirements" maxlength="1000" placeholder="例如：重点突出蓝色花卉图案"/><small>仅作用于本草稿，不保存到模板；再次生成时保留，关闭弹窗或重新分组后清空。</small></label>
+            <label v-if="group.showAdditionalRequirements" :id="'batch-title-additional-requirements-' + index">本草稿标题补充要求<textarea v-model="group.additionalRequirements" :disabled="materialBatchControlsLocked" maxlength="1000" placeholder="例如：重点突出蓝色花卉图案"/><small>仅作用于本草稿，不保存到模板；再次生成时保留，关闭弹窗或重新分组后清空。</small></label>
           </div>
         </article>
       </section>
-      <div class="modal-actions"><button class="ghost" :disabled="materialBatchSaving" @click="showMaterialBatchDraftDialog=false">取消</button><button class="primary" :disabled="materialBatchSaving || !materialBatchGroups.length" @click="createMaterialBatchDrafts">{{materialBatchSaving ? '创建中…' : '确认创建 ' + materialBatchGroups.length + ' 条草稿'}}</button></div>
+      <div class="modal-actions"><button class="ghost" :disabled="materialBatchControlsLocked" @click="showMaterialBatchDraftDialog=false">取消</button><button class="primary" :disabled="materialBatchControlsLocked || !materialBatchTitlesValid" @click="createMaterialBatchDrafts">{{materialBatchSaving ? '创建中…' : '确认创建 ' + materialBatchGroups.length + ' 条草稿'}}</button></div>
     </section>
   </div>
   <div v-if="showBatchCarouselDialog" class="modal-backdrop" @click.self="!batchCarouselSaving && (showBatchCarouselDialog=false)"><section class="modal-card batch-carousel-dialog"><button class="modal-close" :disabled="batchCarouselSaving" @click="showBatchCarouselDialog=false">×</button><h2>批量制作轮播图</h2><p>已选择 {{selectedDrafts.length}} 条草稿；每个草稿至少保留一张 SKU 图。</p><section class="batch-carousel-list"><article v-for="draft in selectedDrafts" :key="draft.id" class="batch-carousel-draft"><header><b>#{{draft.id}}</b><span :title="draft.title">{{draft.title}}</span><small>{{(batchCarouselSelections[draft.id] || []).length}} / {{draft.sku_items?.length || 0}} 已选</small></header><div class="batch-carousel-skus"><button v-for="item in draft.sku_items || []" :key="item.sku" type="button" :class="{selected:(batchCarouselSelections[draft.id] || []).includes(item.sku)}" @click="toggleBatchCarouselSku(draft.id,item.sku)"><img :src="imageUrl(item.image_url)" :alt="item.sku"/><i>{{item.sku}}</i><span class="batch-carousel-hover"><img :src="imageUrl(item.image_url)" :alt="`${item.sku} 放大图`"/></span></button></div></article></section><section class="batch-carousel-params"><label>创作要求<textarea v-model="batchCarouselParams.prompt" rows="2" maxlength="1000" placeholder="请输入轮播图创作要求"/></label><div><label>AI 模型<select v-model="batchCarouselParams.provider"><option v-for="provider in availableAiProviders" :key="provider.provider" :value="provider.provider">{{provider.display_name}} · {{provider.model}}</option></select></label><label>比例<select v-model="batchCarouselParams.ratio"><option>1:1</option><option>3:4</option></select></label><label>清晰度<select v-model="batchCarouselParams.quality"><option>1K</option><option>2K</option></select></label></div></section><div class="modal-actions"><button class="ghost" :disabled="batchCarouselSaving" @click="showBatchCarouselDialog=false">取消</button><button class="primary" :disabled="batchCarouselSaving" @click="createBatchCarouselTasks">{{batchCarouselSaving?'创建中…':'开始创作轮播图'}}</button></div></section></div>
