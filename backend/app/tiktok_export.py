@@ -1,15 +1,23 @@
 from dataclasses import dataclass
+from copy import copy
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
+import posixpath
+import re
+from xml.etree import ElementTree
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import load_workbook
+from openpyxl.formula import Tokenizer
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.cell_range import CellRange, MultiCellRange
 
 
 TEMPLATE_PATH = Path(__file__).parent / "resources" / "tiktok_seller_batch_upload_zh_v5_0_2.xlsx"
 DATA_START_ROW = 7
+DATA_END_ROW = 5000
+MAX_DATA_ROWS = DATA_END_ROW - DATA_START_ROW + 1
 BASE_FIELD_START_COLUMN = 3  # C
 
 FIELD_CATEGORY = "category"
@@ -134,14 +142,36 @@ def attribute_input_mode(field: dict) -> str:
     return "select"
 
 
+def _template_sheet_part(package: ZipFile) -> str:
+    """上传模板允许工作表重排，不能假定 Template 一定位于 sheet1.xml。"""
+    ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main", "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
+    workbook = ElementTree.fromstring(package.read("xl/workbook.xml"))
+    sheets = workbook.findall("m:sheets/m:sheet", ns)
+    template_sheet = next((sheet for sheet in sheets if sheet.attrib.get("name") == "Template"), None)
+    if template_sheet is None:
+        raise ValueError("TikTok 模板缺少 Template 工作表")
+    relationship_id = template_sheet.attrib.get(f"{{{ns['r']}}}id")
+    relationships = ElementTree.fromstring(package.read("xl/_rels/workbook.xml.rels"))
+    relationship = next((item for item in relationships if item.attrib.get("Id") == relationship_id), None)
+    if relationship is None or relationship.attrib.get("TargetMode") == "External":
+        raise ValueError("无法安全定位 TikTok 模板数据工作表")
+    target = relationship.attrib.get("Target", "")
+    part = posixpath.normpath(target.lstrip("/") if target.startswith("/") else posixpath.join("xl", target))
+    if not part.startswith("xl/worksheets/") or part not in package.namelist():
+        raise ValueError("TikTok 模板数据工作表路径不合法")
+    return part
+
+
 def _preserve_template_package(generated_bytes: bytes, template_bytes: bytes | None = None) -> bytes:
     """仅替换数据工作表 XML，避免 openpyxl 丢弃说明页中的绘图和媒体。"""
     generated_stream = BytesIO(generated_bytes)
     output = BytesIO()
     with ZipFile(_template_source(template_bytes), "r") as source_zip, ZipFile(generated_stream, "r") as generated_zip, ZipFile(output, "w", ZIP_DEFLATED) as output_zip:
-        generated_template_xml = generated_zip.read("xl/worksheets/sheet1.xml")
+        source_part = _template_sheet_part(source_zip)
+        generated_part = _template_sheet_part(generated_zip)
+        generated_template_xml = generated_zip.read(generated_part)
         for info in source_zip.infolist():
-            content = generated_template_xml if info.filename == "xl/worksheets/sheet1.xml" else source_zip.read(info.filename)
+            content = generated_template_xml if info.filename == source_part else source_zip.read(info.filename)
             output_zip.writestr(info, content)
     return output.getvalue()
 
@@ -307,6 +337,101 @@ def validate_attributes(category: str, attributes: dict, options: dict | None = 
     return cleaned
 
 
+def _shift_row_formula(formula: str | None, source_row: int, target_row: int) -> str | None:
+    if not formula:
+        return formula
+    leading_equals = formula.startswith("=")
+    tokens = Tokenizer(formula if leading_equals else f"={formula}")
+    for token in tokens.items:
+        if token.type != "OPERAND" or token.subtype != "RANGE":
+            continue
+        reference = token.value
+        if "!" in reference:
+            sheet_name, reference = reference.rsplit("!", 1)
+            if sheet_name.strip("'") != "Template":
+                continue
+            prefix = f"{sheet_name}!"
+        else:
+            prefix = ""
+        token.value = prefix + re.sub(rf"(?<![A-Za-z0-9_])(\$?[A-Z]{{1,3}}\$?){source_row}(?!\d)", rf"\g<1>{target_row}", reference)
+    result = tokens.render()
+    return result if leading_equals else result[1:]
+
+
+def _expand_range(ranges) -> MultiCellRange:
+    expanded = []
+    for original in ranges:
+        item = copy(original)
+        if item.min_row == DATA_START_ROW and DATA_START_ROW < item.max_row < DATA_END_ROW:
+            item.max_row = DATA_END_ROW
+        expanded.append(item)
+    return MultiCellRange(expanded)
+
+
+def _prepare_data_capacity(sheet) -> None:
+    """将可安全扩展的模板数据区、样式和验证规则统一到第 5000 行。"""
+    if sheet.max_column > 512 or sheet.max_row > 50000 or sheet.tables:
+        raise ValueError("TikTok 模板数据区结构无法安全扩展")
+    if any(item.max_row >= DATA_START_ROW for item in sheet.merged_cells.ranges):
+        raise ValueError("TikTok 模板数据区包含合并单元格，无法安全扩展")
+    source_row = max(DATA_START_ROW, min(sheet.max_row, DATA_END_ROW))
+    styles = {
+        column: copy(sheet.cell(source_row, column)._style)
+        for column in range(1, sheet.max_column + 1)
+        if sheet.cell(source_row, column).has_style
+    }
+    # 使用已有单元格，避免由异常 dimension 声明分配大量空单元格。
+    for cell in list(sheet._cells.values()):
+        if cell.row >= DATA_START_ROW:
+            cell.value = None
+            if not cell.has_style and not cell.comment and not cell.hyperlink:
+                del sheet._cells[(cell.row, cell.column)]
+    for row_number in range(source_row + 1, DATA_END_ROW + 1):
+        for column, style in styles.items():
+            sheet.cell(row_number, column)._style = copy(style)
+        if source_row in sheet.row_dimensions:
+            dimension = copy(sheet.row_dimensions[source_row])
+            dimension.index = row_number
+            sheet.row_dimensions[row_number] = dimension
+
+    singleton_rules: dict[int, dict[int, object]] = {}
+    for validation in list(sheet.data_validations.dataValidation):
+        ranges = list(validation.sqref.ranges)
+        if len(ranges) == 1:
+            item = ranges[0]
+            if item.min_row == item.max_row and item.min_col == item.max_col and DATA_START_ROW <= item.min_row <= DATA_END_ROW:
+                singleton_rules.setdefault(item.min_col, {})[item.min_row] = validation
+        validation.sqref = _expand_range(ranges)
+    # 部分类目属性使用每一行独立的绝对引用；不能简单延长范围共用 $A$7。
+    for column, rules in singleton_rules.items():
+        rows = sorted(rules)
+        if rows[0] != DATA_START_ROW or rows != list(range(DATA_START_ROW, rows[-1] + 1)) or rows[-1] >= DATA_END_ROW:
+            continue
+        prototype = rules[rows[-1]]
+        first = rules[DATA_START_ROW]
+        if any(_shift_row_formula(getattr(prototype, field), rows[-1], DATA_START_ROW) != getattr(first, field) for field in ("formula1", "formula2")):
+            raise ValueError("TikTok 模板的逐行属性验证规则无法安全扩展")
+        for row_number in range(rows[-1] + 1, DATA_END_ROW + 1):
+            validation = copy(prototype)
+            validation.sqref = MultiCellRange([CellRange(min_col=column, max_col=column, min_row=row_number, max_row=row_number)])
+            validation.formula1 = _shift_row_formula(prototype.formula1, rows[-1], row_number)
+            validation.formula2 = _shift_row_formula(prototype.formula2, rows[-1], row_number)
+            sheet.add_data_validation(validation)
+    conditional_rules = list(sheet.conditional_formatting._cf_rules.items())
+    sheet.conditional_formatting._cf_rules.clear()
+    for conditional, rules in conditional_rules:
+        conditional.sqref = _expand_range(conditional.sqref.ranges)
+        for rule in rules:
+            sheet.conditional_formatting.add(conditional, rule)
+
+
+def _set_literal_value(cell, value) -> None:
+    cell.value = value
+    if isinstance(value, str):
+        # 强制 inlineStr，不让用户或 AI 文本被 openpyxl 推断为公式。
+        cell.data_type = "s"
+
+
 def build_workbook(*, template, category: str, cod: str, attributes: dict[str, str], products: list[dict], template_bytes: bytes | None = None, template_type: str | None = None) -> bytes:
     workbook = load_workbook(_template_source(template_bytes), data_only=False, read_only=False)
     sheet = workbook["Template"]
@@ -315,16 +440,16 @@ def build_workbook(*, template, category: str, cod: str, attributes: dict[str, s
     missing_fields = sorted(adapter.required_fields - set(field_columns))
     if missing_fields:
         raise ValueError(f"TikTok 模板缺少导出字段：{', '.join(missing_fields)}")
-    data_end_row = sheet.max_row
-    for row in sheet.iter_rows(min_row=DATA_START_ROW, max_row=data_end_row, min_col=1, max_col=sheet.max_column):
-        for cell in row:
-            cell.value = None
-
     sizes = [
         _clean(size)
         for size in ((template.sku_specifications or {}).get("size", {}).get("options", []))
         if _clean(size)
     ] or ["Default"]
+    projected_rows = sum(len(product.get("sku_images") or list(dict.fromkeys(product["image_urls"]))) * len(sizes) for product in products)
+    if projected_rows > MAX_DATA_ROWS:
+        raise ValueError(f"导出数据超过 TikTok 模板 {MAX_DATA_ROWS} 行限制")
+    _prepare_data_capacity(sheet)
+    data_end_row = DATA_END_ROW
     row_number = DATA_START_ROW
     attribute_columns = {field: column for column, field in _attribute_fields(sheet)}
     weight_grams = round(float(template.package_weight) * 1000, 3)
@@ -372,9 +497,9 @@ def build_workbook(*, template, category: str, cod: str, attributes: dict[str, s
                 for index, gallery_url in enumerate(gallery):
                     values[FIELD_MAIN_IMAGE if index == 0 else f"image_{index + 1}"] = gallery_url
                 for field, value in values.items():
-                    sheet.cell(row_number, field_columns[field]).value = value
+                    _set_literal_value(sheet.cell(row_number, field_columns[field]), value)
                 for field, value in attributes.items():
-                    sheet.cell(row_number, attribute_columns[field]).value = value
+                    _set_literal_value(sheet.cell(row_number, attribute_columns[field]), value)
                 row_number += 1
 
     output = BytesIO()

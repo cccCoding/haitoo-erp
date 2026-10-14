@@ -36,7 +36,9 @@ from .product_library_rankings import SnapshotAlreadyRunning, company_run_lock, 
 from .schemas import MAX_PRODUCT_LIBRARY_SELECTION, HubEnvironmentSync, HubEnvironmentToggle, HubTaskClaimInput, HubTaskAction, ProductLibraryShopAssignment, ProductLibraryTitleGenerate, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
 from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, OperatorGroupCreate, OperatorGroupUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
-from .security import create_access_token, current_user, hash_password, require_roles, verify_password
+from .security import (create_access_token, current_internal_user as current_user,
+                       current_user as authenticated_user, hash_password, require_roles,
+                       validate_supply_user_access, verify_password)
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
 from .creative_resource_sizes import read_white_image_sizes
@@ -341,6 +343,8 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Haitoro POD API", version="0.1.0", lifespan=lifespan)
 from .cross_company_collection import router as cross_company_collection_router
 app.include_router(cross_company_collection_router)
+from .supply_catalog import router as supply_catalog_router
+app.include_router(supply_catalog_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins.split(","),
@@ -509,12 +513,20 @@ def login(payload: LoginInput, request: Request, db: Session = Depends(get_db)):
     if not user.is_active:
         db.commit()
         raise HTTPException(403, "该账号已被停用，请联系管理员")
+    if user.role == Role.SUPPLY_USER:
+        try:
+            validate_supply_user_access(user, db)
+        except HTTPException:
+            from .supply_common import cancel_user_jobs
+            cancel_user_jobs(db, user.id, "货盘账号不可用")
+            db.commit()
+            raise
     clear_email_failures(db, failures)
     return {"access_token": create_access_token(user), "token_type": "bearer", "user": UserOut.model_validate(user)}
 
 
 @app.get("/me")
-def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
+def me(user: User = Depends(authenticated_user), db: Session = Depends(get_db)):
     company = db.get(Company, user.company_id) if user.company_id else None
     group = db.get(OperatorGroup, user.group_id) if user.group_id else None
     return {
@@ -1431,6 +1443,8 @@ def set_product_library_templates(
     payload: ProductLibraryBatchTemplateInput,
     user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
 ):
+    from .supply_common import lock_company
+    lock_company(db, user.company_id)
     if len(set(payload.product_ids)) != len(payload.product_ids):
         raise HTTPException(400, "产品不能重复选择")
     if len(set(payload.material_asset_ids)) != len(payload.material_asset_ids):
@@ -1982,6 +1996,8 @@ async def assign_tiktok_collect_box_to_shop(draft: ProductDraft, company: Compan
 
 @app.put("/templates/{template_id}")
 def update_template(template_id: int, payload: TemplateUpdate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
+    from .supply_common import lock_company
+    lock_company(db, user.company_id)
     template = get_company_template(db, user, template_id)
     for field, value in payload.model_dump(exclude_unset=True).items():
         if field == "cover_url":
@@ -1995,6 +2011,8 @@ def update_template(template_id: int, payload: TemplateUpdate, user: User = Depe
 
 @app.delete("/templates/{template_id}")
 def delete_template(template_id: int, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
+    from .supply_common import lock_company
+    lock_company(db, user.company_id)
     template = get_company_template(db, user, template_id)
     if db.scalar(select(PodTask.id).where(PodTask.template_id == template.id).limit(1)):
         raise HTTPException(400, "该模板已有创作任务，无法删除")
@@ -2267,6 +2285,7 @@ def list_material_assets(
     template_id: int | None = None,
     usage_status: str = "unused",
     source_type: str = "",
+    health: str = "",
     created_from: datetime | None = None,
     created_to: datetime | None = None,
     user: User = Depends(current_user),
@@ -2274,12 +2293,12 @@ def list_material_assets(
 ):
     return query_material_assets(db=db, user=user, page=page, page_size=page_size,
         creator_id=creator_id, template_id=template_id, usage_status=usage_status,
-        source_type=source_type, created_from=created_from, created_to=created_to)
+        source_type=source_type, health=health, created_from=created_from, created_to=created_to)
 
 
 def query_material_assets(*, db, user, page, page_size, creator_id=None, template_id=None,
                           usage_status="unused", source_type="", created_from=None,
-                          created_to=None, extra_filters=()):
+                          created_to=None, extra_filters=(), health=""):
     if usage_status not in {"all", "unused", "used"}:
         raise HTTPException(422, "不支持的素材状态")
     if source_type not in {"", "ai_created", "local_upload", "imported", "cross_company"}:
@@ -2289,6 +2308,15 @@ def query_material_assets(*, db, user, page, page_size, creator_id=None, templat
     if created_from and created_to and created_from > created_to:
         raise HTTPException(400, "创建开始时间不能晚于结束时间")
     filters = list(extra_filters)
+    from .models import SupplyImageHealth
+    from .supply_common import health_records
+    if health not in {"", "unchecked", "available", "invalid", "check_failed"}:
+        raise HTTPException(422, "不支持的图片健康状态")
+    if health:
+        health_company = SupplyImageHealth.company_id == MaterialAsset.company_id
+        checked = select(SupplyImageHealth.id).where(health_company, SupplyImageHealth.url == MaterialAsset.url,
+            SupplyImageHealth.status != "unchecked" if health == "unchecked" else SupplyImageHealth.status == health).exists()
+        filters.append(~checked if health == "unchecked" else checked)
     if user.role != Role.SUPER_ADMIN:
         filters.append(MaterialAsset.company_id == user.company_id)
     if is_operator(user):
@@ -2318,6 +2346,10 @@ def query_material_assets(*, db, user, page, page_size, creator_id=None, templat
     if filters:
         stmt = stmt.where(*filters)
     assets = db.scalars(stmt.order_by(MaterialAsset.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    image_health = {}
+    for company_id in {asset.company_id for asset in assets}:
+        image_health.update({(company_id, url): record for url, record in health_records(db, company_id,
+            [asset.url for asset in assets if asset.company_id == company_id]).items()})
     creator_ids = {asset.claimed_by for asset in assets}
     creator_names = {
         creator.id: creator.name
@@ -2344,6 +2376,9 @@ def query_material_assets(*, db, user, page, page_size, creator_id=None, templat
                 "template_name": template_names.get(asset.template_id, "未设置模板" if asset.template_id is None else "历史模板已删除"),
                 "source_type": asset.source_type or ("ai_created" if asset.source_task_id is not None else "local_upload"),
                 "collection_source": provenance.get(asset.id),
+                "health": image_health[(asset.company_id, asset.url)].status if (asset.company_id, asset.url) in image_health else "unchecked",
+                "checked_at": timestamp_ms(image_health[(asset.company_id, asset.url)].checked_at) if (asset.company_id, asset.url) in image_health and image_health[(asset.company_id, asset.url)].checked_at else None,
+                "health_reason": image_health[(asset.company_id, asset.url)].reason if (asset.company_id, asset.url) in image_health else None,
             }
             for asset in assets
         ],
@@ -2356,6 +2391,9 @@ def query_material_assets(*, db, user, page, page_size, creator_id=None, templat
 @app.delete("/material-assets/{asset_id}")
 def delete_material_asset(asset_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """从当前公司的素材库移除一张图片。"""
+    from .supply_common import lock_company
+    if user.role != Role.SUPER_ADMIN:
+        lock_company(db, user.company_id)
     stmt = select(MaterialAsset).where(MaterialAsset.id == asset_id)
     if user.role != Role.SUPER_ADMIN:
         stmt = stmt.where(MaterialAsset.company_id == user.company_id)
@@ -2967,6 +3005,8 @@ def resolve_product_library_sources(db: Session, user: User, sources: list[Produ
         resolved.update({(source_type, record.id): record for record in db.scalars(stmt).all()})
     if len(resolved) != len(keys):
         raise HTTPException(400, "包含不存在或无权使用的产品库数据")
+    from .supply_common import reject_bad_images
+    reject_bad_images(db, user.company_id, [library_record_image(record) for record in resolved.values()])
     return [resolved[key] for key in keys]
 
 
@@ -3071,6 +3111,8 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
     )).all()
     if len(assets) != len(asset_ids):
         raise HTTPException(400, "包含不存在或无权使用的素材")
+    from .supply_common import reject_bad_images
+    reject_bad_images(db, user.company_id, [asset.url for asset in assets])
     assets_by_id = {asset.id: asset for asset in assets}
     assets = [assets_by_id[asset_id] for asset_id in asset_ids]
     if any(not asset.sku for asset in assets):
@@ -3107,6 +3149,8 @@ def create_drafts_from_material_assets_batch(payload: MaterialDraftBatchCreate, 
     assets_by_id = {asset.id: asset for asset in db.scalars(stmt).all()}
     if len(assets_by_id) != len(all_ids):
         raise HTTPException(400, "包含不存在或无权使用的素材")
+    from .supply_common import reject_bad_images
+    reject_bad_images(db, user.company_id, [asset.url for asset in assets_by_id.values()])
     if any(not asset.sku for asset in assets_by_id.values()):
         raise HTTPException(400, "包含无 SKU 的历史素材，请重新上传或领取后再创建商品草稿")
     if any(asset.template_id != template.id for asset in assets_by_id.values()):
@@ -3981,6 +4025,8 @@ def update_tiktok_category_catalog(
     catalog_id: int, payload: TiktokCategoryCatalogUpdate,
     user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
 ):
+    from .supply_common import lock_company
+    lock_company(db, user.company_id)
     catalog = db.get(TiktokCategoryCatalog, catalog_id)
     if not catalog or catalog.company_id != user.company_id:
         raise HTTPException(404, "类目库不存在")
@@ -4012,6 +4058,8 @@ def update_tiktok_category_catalog(
 def delete_tiktok_category_catalog(
     catalog_id: int, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db),
 ):
+    from .supply_common import lock_company
+    lock_company(db, user.company_id)
     catalog = db.get(TiktokCategoryCatalog, catalog_id)
     if not catalog or catalog.company_id != user.company_id:
         raise HTTPException(404, "类目库不存在")
@@ -4137,10 +4185,15 @@ def build_tiktok_export_response(payload: TiktokDraftExportInput, user: User, db
             "quantity": override.quantity if override and override.quantity is not None else payload.default_quantity,
         })
 
+    from .supply_internal_export import validate_export_images
+    export_template = SimpleNamespace(**{key: getattr(template, key) for key in (
+        "sku_specifications", "package_weight", "package_length", "package_width", "package_height")})
+    export_template_blob, export_template_type = bytes(catalog.template_blob), catalog.template_type
+    validate_export_images(db, user.company_id, products)
     try:
         workbook_bytes = build_tiktok_workbook(
-            template=template, category=payload.category, cod=payload.cod,
-            attributes=attributes, products=products, template_bytes=catalog.template_blob, template_type=catalog.template_type,
+            template=export_template, category=payload.category, cod=payload.cod,
+            attributes=attributes, products=products, template_bytes=export_template_blob, template_type=export_template_type,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

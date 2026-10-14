@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Literal
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +20,19 @@ class Settings(BaseSettings):
     grsai_base_url: str = "https://grsaiapi.com"
     # DeepSeek 英文标题采用 OpenAI 兼容接口，密钥按当前用户从数据库读取。
     deepseek_base_url: str = "https://api.deepseek.com"
+    supply_worker_concurrency: int = Field(default=4, gt=0)
+    supply_company_concurrency: int = Field(default=2, gt=0)
+    supply_title_concurrency: int = Field(default=3, gt=0)
+    supply_image_concurrency: int = Field(default=4, gt=0)
+    supply_heartbeat_seconds: int = Field(default=15, gt=0)
+    supply_lease_seconds: int = Field(default=90, gt=0)
+    supply_file_retention_days: int = Field(default=7, gt=0)
+
+    @model_validator(mode="after")
+    def validate_supply_lease(self):
+        if self.supply_heartbeat_seconds >= self.supply_lease_seconds:
+            raise ValueError("货盘续租间隔必须小于租约有效时间")
+        return self
     # 新图片统一上传 Cloudflare R2；数据库保存 r2_public_base_url 下的完整 URL。
     r2_account_id: str | None = None
     r2_access_key_id: str | None = None

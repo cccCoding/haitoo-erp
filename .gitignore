@@ -10,4 +10,5 @@ output/
 mysql_data/
 backend/uploads/
 .workbuddy-ai/
+.playwright-cli/
 backend/haitoro.db

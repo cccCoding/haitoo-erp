@@ -6,7 +6,8 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import get_db
-from .models import Role, User
+from .models import Company, Role, User
+from .supply_accounts import supply_user_is_expired
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer = HTTPBearer()
@@ -46,6 +47,27 @@ def current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer), db
         user = None
     if not user or not user.is_active or user.token_version != token_version:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已失效")
+    validate_supply_user_access(user, db)
+    return user
+
+
+def validate_supply_user_access(user: User, db: Session) -> None:
+    """登录和令牌认证共用校验，账号续期不会绕过人工停用。"""
+    if user.role != Role.SUPPLY_USER:
+        return
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="货盘账号已停用")
+    if supply_user_is_expired(user):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="货盘账号使用有效期已到期")
+    company = db.get(Company, user.company_id) if user.company_id is not None else None
+    if not company or not company.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="公司已停用或不存在")
+
+
+def current_internal_user(user: User = Depends(current_user)) -> User:
+    """旧业务接口明确允许内部角色，外部货盘用户不能落入默认公司权限。"""
+    if user.role not in {Role.SUPER_ADMIN, Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前账号仅可使用公开货盘")
     return user
 
 

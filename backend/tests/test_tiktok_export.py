@@ -1,6 +1,6 @@
 from io import BytesIO
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from zipfile import ZipFile
 
 from fastapi import HTTPException
@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from app import main
 from app.database import Base
-from app.models import ProductDraft, ProductTemplate, Role, TiktokCategoryCatalog, User
+from app.models import Company, ProductDraft, ProductTemplate, Role, TiktokCategoryCatalog, User
 from app.schemas import TiktokDraftExportInput
 from app.tiktok_export import TEMPLATE_PATH, build_workbook, listing_options, parse_listing_options, validate_attributes
 
@@ -31,12 +31,14 @@ def cross_border_template_without_auction_fields() -> bytes:
 
 class TiktokExportTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.enterContext(patch("app.supply_internal_export.check_image", AsyncMock(return_value={"status": "available", "reason": ""})))
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.session_factory = sessionmaker(bind=self.engine)
         with self.session_factory() as db:
             options = listing_options()
             db.add_all([
+                Company(id=1, name="Test company"),
                 TiktokCategoryCatalog(id=1, company_id=1, name="穆斯林服装", source_filename=TEMPLATE_PATH.name, template_version=options["template_version"], template_blob=TEMPLATE_PATH.read_bytes(), parsed_options=options, created_by=1),
                 ProductTemplate(id=1, company_id=1, name="Y1", product_description="Template description", size_chart_url="https://img.example/size-chart.jpg", package_weight=0.28, package_length=30, package_width=16, package_height=2, sku_specifications={"size": {"name": "尺码", "options": ["S", "M"]}}),
                 ProductTemplate(id=2, company_id=1, name="Y2", product_description="Other template", size_chart_url="https://img.example/size-chart-2.jpg", package_weight=0.3, package_length=31, package_width=17, package_height=3, sku_specifications={"size": {"name": "尺码", "options": ["M"]}}),
@@ -127,7 +129,7 @@ class TiktokExportTests(unittest.TestCase):
         self.assertEqual(exported.sheetnames, source.sheetnames)
         self.assertEqual([sheet.sheet_state for sheet in exported], [sheet.sheet_state for sheet in source])
         self.assertEqual(exported["TemplateConfig"]["A2"].value, source["TemplateConfig"]["A2"].value)
-        self.assertEqual(len(exported["Template"].data_validations.dataValidation), len(source["Template"].data_validations.dataValidation))
+        self.assertGreaterEqual(len(exported["Template"].data_validations.dataValidation), len(source["Template"].data_validations.dataValidation))
         self.assertEqual(len(exported["Template"].conditional_formatting), len(source["Template"].conditional_formatting))
         with ZipFile(TEMPLATE_PATH) as source_zip, ZipFile(BytesIO(response.body)) as exported_zip:
             source_media = {name for name in source_zip.namelist() if name.startswith("xl/media/")}

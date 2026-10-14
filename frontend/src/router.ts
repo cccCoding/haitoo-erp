@@ -16,6 +16,7 @@ export const workspaceRoutes: RouteRecordRaw[] = [
   { path: '/materials', name: 'materials', component: RouteOutlet },
   { path: '/drafts', name: 'drafts', component: RouteOutlet },
   { path: '/product-library', name: 'product-library', component: RouteOutlet },
+  { path: '/supply', name: 'supply', component: RouteOutlet },
   { path: '/settings/miaoshou', name: 'miaoshou', component: RouteOutlet, meta: { requiresCompanyAdmin: true } },
   { path: '/settings/members', name: 'members', component: RouteOutlet, meta: { requiresCompanyAdmin: true } },
   { path: '/settings/shops', name: 'shops', component: RouteOutlet },

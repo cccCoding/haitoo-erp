@@ -9,6 +9,22 @@ from app.config import Settings
 
 
 class TitleGenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_supply_title_uses_same_fixed_model_and_disables_thinking(self):
+        from app.supply_worker import request_title
+        title = 'Floral Long Sleeve Everyday Dress'
+        response = httpx.Response(200, request=httpx.Request('POST', 'https://api.deepseek.com/chat/completions'),
+            json={'choices': [{'finish_reason': 'stop', 'message': {'content': title}}]})
+        client = AsyncMock()
+        client.post.return_value = response
+        with patch('app.supply_worker.httpx.AsyncClient') as factory:
+            factory.return_value.__aenter__.return_value = client
+            result = await request_title('supply-key', {'name': 'Dress'}, '')
+        self.assertEqual(result, title)
+        request = client.post.call_args.kwargs
+        self.assertEqual(request['headers']['Authorization'], 'Bearer supply-key')
+        self.assertEqual(request['json']['model'], 'deepseek-flash')
+        self.assertEqual(request['json']['thinking'], {'type': 'disabled'})
+
     async def generate(self, content='Floral Long Sleeve Everyday Dress', *, status=200, payload=None, **requirements):
         response = httpx.Response(status, json=payload if payload is not None else {
             'choices': [{'finish_reason': 'stop', 'message': {'content': content}}],

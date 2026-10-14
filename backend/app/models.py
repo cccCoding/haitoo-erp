@@ -11,6 +11,7 @@ class Role(str, enum.Enum):
     COMPANY_ADMIN = "company_admin"
     MEMBER = "member"
     TEAM_LEADER = "team_leader"
+    SUPPLY_USER = "supply_user"
 
 
 class TaskStatus(str, enum.Enum):
@@ -32,6 +33,8 @@ class Company(Base):
     hubstudio_app_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     hubstudio_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     hubstudio_group_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    supply_ai_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    supply_ai_model: Mapped[str | None] = mapped_column(String(120), default="deepseek-chat", server_default="deepseek-chat", nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -58,6 +61,9 @@ class User(Base):
     role: Mapped[Role] = mapped_column(Enum(Role), default=Role.MEMBER)
     group_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    supply_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    supply_agent_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    supply_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -280,6 +286,8 @@ class ProductTemplate(Base):
     status: Mapped[str] = mapped_column(String(30), default="published")
     color_count: Mapped[int] = mapped_column(Integer, default=1)
     sku_count: Mapped[int] = mapped_column(Integer, default=1)
+    supply_public: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    supply_fallback_title: Mapped[str | None] = mapped_column(String(220), nullable=True)
 
 
 class UserTemplateWhiteImage(Base):
@@ -356,6 +364,7 @@ class MaterialAsset(Base):
         UniqueConstraint("sku", name="uq_material_assets_sku"),
         Index("ix_material_assets_company_created_id", "company_id", "created_at", "id"),
         Index("ix_material_assets_company_creator_created_id", "company_id", "claimed_by", "created_at", "id"),
+        Index("ix_material_assets_supply_listing", "company_id", "supply_listed", "supply_listed_at"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
@@ -367,7 +376,117 @@ class MaterialAsset(Base):
     sku: Mapped[str | None] = mapped_column(String(24), nullable=True)
     # 仅记录是否曾被成功用于创建草稿；已使用素材仍可用于单条草稿复用。
     usage_status: Mapped[str] = mapped_column(String(12), default="unused", nullable=False, index=True)
+    supply_listed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    # 首次上架后保留时间，避免将从未上架的素材视为已下架。
+    supply_listed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     claimed_by: Mapped[int] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class SupplyAgent(Base):
+    """公司维护的代理归属记录；代理没有登录权限。"""
+    __tablename__ = "supply_agents"
+    __table_args__ = (UniqueConstraint("company_id", "name", name="uq_supply_agents_company_name"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class SupplyStrategy(Base):
+    __tablename__ = "supply_strategies"
+    __table_args__ = (Index("ix_supply_strategies_owner", "company_id", "user_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    user_id: Mapped[int] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    parameters: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SupplyJob(Base):
+    """快照与恢复检查点均持久化；租约版本阻止旧执行者覆盖结果。"""
+    __tablename__ = "supply_jobs"
+    __table_args__ = (
+        UniqueConstraint("company_id", "user_id", "idempotency_key", name="uq_supply_jobs_owner_request"),
+        Index("ix_supply_jobs_queue", "state", "available_at", "lease_expires_at", "created_at"),
+        Index("ix_supply_jobs_company_state", "company_id", "state"),
+        Index("ix_supply_jobs_owner_state", "company_id", "user_id", "state"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    user_id: Mapped[int] = mapped_column(index=True)
+    strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    agent_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    agent_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    template_id: Mapped[int] = mapped_column(index=True)
+    category_catalog_id: Mapped[int] = mapped_column(index=True)
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    category_blob: Mapped[bytes] = mapped_column(LargeBinary().with_variant(MEDIUMBLOB(), "mysql").with_variant(MEDIUMBLOB(), "mariadb"))
+    checkpoint: Mapped[dict] = mapped_column(JSON, default=dict)
+    export_blob: Mapped[bytes | None] = mapped_column(LargeBinary().with_variant(MEDIUMBLOB(), "mysql").with_variant(MEDIUMBLOB(), "mariadb"), nullable=True)
+    state: Mapped[str] = mapped_column(String(30), default="queued", server_default="queued")
+    stage: Mapped[str] = mapped_column(String(80), default="queued", server_default="queued")
+    progress: Mapped[dict] = mapped_column(JSON, default=dict)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_epoch: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    available_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    upload_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    output_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    output_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    output_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    output_deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SupplyImageHealth(Base):
+    """图片状态按公司与完整 URL 共享；换 URL 自然生成新记录。"""
+    __tablename__ = "supply_image_health"
+    __table_args__ = (UniqueConstraint("company_id", "url_hash", name="uq_supply_image_health_company_url"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    url_hash: Mapped[str] = mapped_column(String(64))
+    url: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="unchecked", server_default="unchecked", index=True)
+    check_sequence: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
+class SupplyJobMaterial(Base):
+    __tablename__ = "supply_job_materials"
+    __table_args__ = (
+        UniqueConstraint("job_id", "material_id", "version_hash", "link_index", name="uq_supply_job_material_version_link"),
+        Index("ix_supply_job_materials_usage", "company_id", "material_id", "successful"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    job_id: Mapped[int] = mapped_column(index=True)
+    material_id: Mapped[int] = mapped_column(index=True)
+    version_hash: Mapped[str] = mapped_column(String(64))
+    source: Mapped[str] = mapped_column(String(30), default="snapshot", server_default="snapshot")
+    # -1 为候选关联，0 起为实际商品组；避免 MySQL 的 NULL 唯一键漏洞。
+    link_index: Mapped[int] = mapped_column(Integer, default=-1, server_default="-1")
+    successful: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+
+
+class SupplyAudit(Base):
+    __tablename__ = "supply_audits"
+    __table_args__ = (Index("ix_supply_audits_company_created", "company_id", "created_at"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    user_id: Mapped[int] = mapped_column(index=True)
+    action: Mapped[str] = mapped_column(String(80))
+    target_type: Mapped[str] = mapped_column(String(40))
+    target_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

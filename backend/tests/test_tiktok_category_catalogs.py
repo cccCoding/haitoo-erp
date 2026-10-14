@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from app import main
 from app.database import Base
-from app.models import Role, TiktokCategoryCatalog, User
+from app.models import Company, Role, TiktokCategoryCatalog, User
 from app.schemas import TiktokCategoryCatalogUpdate
 from app.tiktok_export import TEMPLATE_PATH
 
@@ -24,6 +24,7 @@ class TiktokCategoryCatalogTests(unittest.TestCase):
         self.session_factory = sessionmaker(bind=self.engine)
         with self.session_factory() as db:
             db.add_all([
+                Company(id=1, name="Company 1"), Company(id=2, name="Company 2"),
                 User(id=1, company_id=1, email="admin1@example.com", name="Admin 1", password_hash="x", role=Role.COMPANY_ADMIN),
                 User(id=2, company_id=2, email="admin2@example.com", name="Admin 2", password_hash="x", role=Role.COMPANY_ADMIN),
             ])

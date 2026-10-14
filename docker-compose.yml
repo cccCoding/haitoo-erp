@@ -183,6 +183,38 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  # 货盘持久化队列：独立续租，支持多实例接管；只把最终表格写入私有 R2。
+  supply-worker:
+    build:
+      context: ./backend
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
+    logging: *default-logging
+    command: python -m app.supply_worker
+    environment:
+      DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
+      SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_HUB_EXPORT_BUCKET: ${R2_HUB_EXPORT_BUCKET:-}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      SUPPLY_WORKER_CONCURRENCY: ${SUPPLY_WORKER_CONCURRENCY:-4}
+      SUPPLY_COMPANY_CONCURRENCY: ${SUPPLY_COMPANY_CONCURRENCY:-2}
+      SUPPLY_TITLE_CONCURRENCY: ${SUPPLY_TITLE_CONCURRENCY:-3}
+      SUPPLY_IMAGE_CONCURRENCY: ${SUPPLY_IMAGE_CONCURRENCY:-4}
+      SUPPLY_HEARTBEAT_SECONDS: ${SUPPLY_HEARTBEAT_SECONDS:-15}
+      SUPPLY_LEASE_SECONDS: ${SUPPLY_LEASE_SECONDS:-90}
+      SUPPLY_FILE_RETENTION_DAYS: ${SUPPLY_FILE_RETENTION_DAYS:-7}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   web:
     build:
       context: ./frontend

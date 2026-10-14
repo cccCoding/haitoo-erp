@@ -48,6 +48,44 @@ DOCKER_REGISTRY=docker.m.daocloud.io ./deploy/local.sh build
 
 要持续使用替代源，在对应环境文件中设置 `DOCKER_REGISTRY`：腾讯云编辑已有 `.env`，本机编辑已有 `.env.local`，保留其他配置。只在单次命令前设置变量时，仅该命令使用替代源；后续拉取 MySQL 或腾讯云入口 Nginx 时也需要相同变量。上述构建命令不会重启服务。Cloudflare Tunnel 仍使用原有镜像地址。
 
+### 只修改前端时
+
+本机日常调试优先使用 Vite 热更新，保存 Vue、CSS 等文件后即可更新页面，不需要每次构建 Docker 镜像。已有 `node_modules` 且依赖未变化时，直接运行下面命令；只有首次安装或 `package-lock.json` 变化时才在对应前端目录执行 `npm ci`。
+
+本机运营端（后端继续使用已启动的本机测试容器）：
+
+```bash
+./deploy/local.sh stop web
+VITE_API_URL=http://localhost:8001 npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173 --strictPort
+```
+
+本机管理端：
+
+```bash
+./deploy/local.sh stop admin-web
+VITE_API_URL=http://localhost:8001 npm --prefix frontend-admin run dev -- --host 127.0.0.1 --port 5174 --strictPort
+```
+
+使用 `http://localhost:5173`、`http://localhost:5174` 访问，与本机默认 CORS 配置保持一致。调试结束按 `Ctrl+C` 关闭 Vite，恢复本次停止的容器，例如运营端执行 `./deploy/local.sh start web`；管理端执行 `./deploy/local.sh start admin-web`。恢复的是原镜像，保留最新修改需按下述方式构建。
+
+需要验证容器部署时，本机只更新运营端：
+
+```bash
+./deploy/local.sh build --pull=false web
+./deploy/local.sh up -d --no-deps --no-build --pull never web
+```
+
+腾讯云服务器只更新运营端：
+
+```bash
+./deploy/tencent.sh build --pull=false web
+./deploy/tencent.sh up -d --no-deps --no-build --pull never web
+```
+
+管理端将 `web` 替换为 `admin-web`。上述命令适用于依赖服务已运行、仅修改前端的情况；后端或迁移也有改动时，仍需更新对应服务。
+
+两个前端 Dockerfile 已将 `package*.json` 和 `npm ci` 放在源码复制之前，依赖文件未变且缓存保留时可复用依赖层。不要在日常构建时使用 `--no-cache` 或清理构建缓存。日志中的 `load metadata` / `Head ... manifests` 是基础镜像元数据检查，不代表每次都完整下载 Node；即使使用 `--pull=false`，基础镜像缺失或缓存不足时仍可能联网，因此 Docker Hub 返回 EOF 时，本机调试可先使用上面的 Vite 流程。
+
 ### 本机隔离测试环境
 
 本机测试使用独立的 `.env.local`、Compose 项目名和 MySQL 数据卷，不修改腾讯云服务器配置，也不要连接生产数据库。下面初始化命令仅供首次建立环境；已有 `.env.local` 时保留原文件和密钥，直接使用固定入口升级。首次建立时复制配置模板并生成随机密钥：

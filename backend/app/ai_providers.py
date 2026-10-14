@@ -14,6 +14,7 @@ from .config import Settings, get_settings
 
 
 logger = logging.getLogger(__name__)
+DEEPSEEK_TITLE_MODEL = "deepseek-flash"
 
 
 class ProviderError(Exception):
@@ -171,6 +172,8 @@ def validate_generated_title(title: str) -> str:
         raise ProviderError("DeepSeek 未返回标题")
     if not 25 <= len(title) <= 255:
         raise ProviderError("DeepSeek 返回的标题长度必须为 25-255 个字符，请重试或手动填写")
+    if any(char in title for char in ('\n', '\r', '"', '*', '`')) or re.search(r"[\u3400-\u9fff]", title) or not re.search(r"[A-Za-z]", title):
+        raise ProviderError("DeepSeek 标题必须是英文单行文本，不能包含引号或 Markdown")
     return title
 
 
@@ -185,7 +188,7 @@ async def generate_draft_title(title_constraint: str, image_url: str, api_key: s
                 f"{settings.deepseek_base_url.rstrip('/')}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={
-                    "model": "deepseek-flash",
+                    "model": DEEPSEEK_TITLE_MODEL,
                     "thinking": {"type": "disabled"},
                     "messages": [
                         {"role": "system", "content": TITLE_SYSTEM_PROMPT},

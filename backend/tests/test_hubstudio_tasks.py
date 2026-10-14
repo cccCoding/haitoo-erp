@@ -4,7 +4,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -22,6 +22,7 @@ from app.tiktok_export import TEMPLATE_PATH, listing_options
 
 class HubstudioTaskTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch("app.supply_internal_export.check_image", AsyncMock(return_value={"status": "available", "reason": ""})))
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
@@ -417,6 +418,7 @@ class HubstudioTaskTests(unittest.TestCase):
 
 class HubConcurrencyTests(HubstudioTaskTests):
     def setUp(self):
+        self.enterContext(patch("app.supply_internal_export.check_image", AsyncMock(return_value={"status": "available", "reason": ""})))
         self.temp = tempfile.TemporaryDirectory()
         self.engine = create_engine(f"sqlite:///{Path(self.temp.name) / 'hub.db'}", connect_args={"check_same_thread": False, "timeout": 10})
         Base.metadata.create_all(self.engine)

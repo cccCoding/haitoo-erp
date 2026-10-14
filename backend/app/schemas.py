@@ -18,6 +18,9 @@ class UserOut(BaseModel):
     group_id: int | None
     company_id: int | None
     is_active: bool
+    supply_admin: bool = False
+    supply_agent_id: int | None = None
+    supply_expires_at: datetime | None = None
     created_at: datetime
 
     class Config:
@@ -26,6 +29,10 @@ class UserOut(BaseModel):
     @field_serializer("created_at", return_type=int)
     def serialize_created_at(self, value: datetime) -> int:
         return int(value.replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+    @field_serializer("supply_expires_at", return_type=int | None)
+    def serialize_supply_expires_at(self, value: datetime | None):
+        return int(value.replace(tzinfo=timezone.utc).timestamp() * 1000) if value else None
 
 
 class ShopOut(BaseModel):
