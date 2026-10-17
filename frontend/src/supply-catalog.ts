@@ -1,6 +1,3 @@
-export const supplyHealthLabels: Record<string, string> = {
-  unchecked: '未检查', available: '可用', invalid: '已失效', check_failed: '检查失败',
-}
 export interface SupplyUsageTask {
   job_id: number; user_id: number; user_name: string | null; agent_name: string | null;
   link_count: number; completed_at: number | null;
@@ -25,7 +22,7 @@ export const supplyJobLabels: Record<string, string> = {
 }
 export const supplyStageLabels: Record<string, string> = {
   queued: '等待处理', allocating: '组织商品草稿', drafts: '组织商品草稿', titles: '生成标题',
-  images: '最终图片检查', checking_images: '最终图片检查', excel: '生成 Excel', exporting: '生成 Excel',
+  excel: '生成 Excel', exporting: '生成 Excel',
   upload: '上传 Excel', uploading: '上传 Excel', completed: '已完成', cancelled: '已取消', failed: '失败',
 }
 export function unfinishedSupplyJob(job: { state: string }): boolean {

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import axios from 'axios'
+import MaterialTransferDialog from './MaterialTransferDialog.vue'
+import { transferItem, type MaterialTransferItem } from './material-transfer'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
 
 const props = defineProps<{token:string; templates:any[]; user:any; historyOnly?:boolean}>()
@@ -110,23 +112,24 @@ function changeTab(value:string) {
 }
 function closeConfirm() { if (!saving.value) confirming.value = false }
 function openConfirm() { formError.value = ''; recollect.value = false; targetTemplate.value = usableTemplates.value[0]?.id ?? null; confirming.value = true }
+const transferItems=ref<MaterialTransferItem[]>([]), showTransferResults=ref(false)
+async function afterTransfer() { try { await load() } catch { /* 列表错误由 load 显示。 */ } }
 async function submit() {
   if (saving.value || preflight.value || !count.value || (hasExisting.value && !recollect.value)) return
-  const payload = {source_company_id:appliedFilters.value.source_company_id,source_library:appliedFilters.value.source_library,record_ids:Object.keys(selected.value).map(Number).sort((a,b)=>a-b),template_id:targetTemplate.value,allow_recollect:recollect.value}
-  const signature = JSON.stringify(payload)
-  if (!pendingRequest || pendingRequest.signature !== signature) pendingRequest = {signature,key:crypto.randomUUID()}
-  saving.value = true; formError.value = ''
-  try {
-    const {data} = await api.post('/cross-company-collection/collect',payload,{headers:{...headers.value,'Idempotency-Key':pendingRequest.key}})
-    confirming.value = false; clearSelection(); success.value = `已采集 ${data.collected} 张图片到素材库。`; await load()
-  } catch(e:any) {
-    if (e.response?.status === 401 || e.response?.status === 403) fail(e)
-    const detail = e.response?.data?.detail
-    formError.value = typeof detail === 'string' ? detail : '采集失败，请重试；网络重试不会重复创建素材。'
-    // 明确拒绝的请求没有写入；刷新重复标记后允许用户重新确认。
-    if (e.response?.status === 409) { await load(); recollect.value = false }
-  } finally { saving.value = false }
+  const sourceCompanyId=appliedFilters.value.source_company_id, sourceLibrary=appliedFilters.value.source_library
+  const templateId=targetTemplate.value, initialForce=recollect.value, requestHeaders={...headers.value}
+  transferItems.value=Object.values(selected.value).map(row=>transferItem(row.sku || name(row),async(force,requestKey)=>{
+    const {data}=await api.post('/cross-company-collection/collect',{
+      source_company_id:sourceCompanyId,source_library:sourceLibrary,record_ids:[row.id],
+      template_id:templateId,allow_recollect:force || initialForce,
+    },{headers:{...requestHeaders,'Idempotency-Key':requestKey}})
+    return {outcome:data.collected ? 'created' : 'duplicate'}
+  },image(row)))
+  confirming.value=false
+  clearSelection()
+  showTransferResults.value=true
 }
+
 onMounted(async () => {
   try {
     const {data} = await api.get('/cross-company-collection/capability',{headers:headers.value})
@@ -179,12 +182,13 @@ onMounted(async () => {
     <p v-if="!loading && !checking && !rows.length && !error && (tab==='history' || (enabled && appliedFilters.source_company_id))" class="empty">{{appliedFilters.category!=='products' && tab==='collect' && appliedFilters.source_library==='product' && !snapshot?'来源公司暂无可用榜单快照。':'没有符合条件的记录。'}}</p>
     <footer v-if="total" class="collection-pagination"><span>共 {{total}} 条</span><label>每页 <select v-model.number="pageSize" :disabled="loading" @change="changePageSize"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 条</label><button :disabled="loading || page<=1" @click="changePage(page-1)">上一页</button><span>{{page}} / {{pages}}</span><button :disabled="loading || page>=pages" @click="changePage(page+1)">下一页</button></footer>
     <div v-if="confirming" v-dialog-focus="{close:closeConfirm,busy:saving}" class="modal-backdrop" @click.self="closeConfirm"><form class="modal-card collection-modal" role="dialog" aria-modal="true" aria-labelledby="collect-title" @submit.prevent="submit">
-      <h2 id="collect-title">采集到素材库</h2><p>已选 {{count}} 张；统一绑定目标模板并生成新 SKU。图片引用原链接。</p>
+      <h2 id="collect-title">采集到素材库</h2><p>已选 {{count}} 张；统一绑定目标模板并生成新 SKU。相同图片默认跳过，图片统一保存或复用。</p>
       <label>目标产品模板<select v-model="targetTemplate" required :disabled="saving" @change="formError=''"><option :value="null" disabled>请选择模板</option><option v-for="t in usableTemplates" :key="t.id" :value="t.id">{{t.name}}</option></select></label>
       <p v-if="preflight" class="error">{{preflight}} <button v-if="!props.user?.user_code" class="secondary" type="button" @click="closeConfirm();emit('account')">账号设置</button></p>
       <label v-if="hasExisting" class="collection-recollect"><input v-model="recollect" type="checkbox" :disabled="saving" />我确认再次采集已采集的图片，生成新的素材和 SKU</label>
       <p v-if="formError" class="error" role="alert">{{formError}}</p><div class="modal-actions"><button class="secondary" type="button" :disabled="saving" @click="closeConfirm">取消</button><button class="primary" :disabled="saving || !!preflight || (hasExisting && !recollect)">{{saving?'采集中…':'确认采集'}}</button></div>
     </form></div>
+    <MaterialTransferDialog :visible="showTransferResults" :items="transferItems" @close="showTransferResults=false" @changed="afterTransfer"/>
     <div v-if="preview" v-dialog-focus="{close:()=>{preview=null}}" class="modal-backdrop" @click.self="preview=null"><section class="modal-card collection-modal" role="dialog" aria-modal="true" aria-label="图片预览"><h2>{{name(preview)}}</h2><img class="collection-preview" :src="image(preview)" :alt="name(preview)" /><button class="secondary" @click="preview=null">关闭预览</button></section></div>
   </section>
 </template>

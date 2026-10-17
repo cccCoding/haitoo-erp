@@ -32,7 +32,7 @@ class SupplySchemaTests(unittest.TestCase):
             self.assertEqual(tuple(connection.execute(text("SELECT url, usage_status, supply_listed FROM material_assets WHERE id=1")).one()), ("https://example.com/sku.png", "used", 0))
             self.assertEqual(connection.scalar(text("SELECT supply_ai_model FROM companies WHERE id=1")), "deepseek-chat")
             self.assertNotIn("download_revoked", {column["name"] for column in inspect(connection).get_columns("supply_jobs")})
-            for table in ("supply_agents", "supply_strategies", "supply_jobs", "supply_image_health", "supply_job_materials", "supply_audits"):
+            for table in ("supply_agents", "supply_strategies", "supply_jobs", "image_files", "image_addresses", "supply_job_materials", "supply_audits"):
                 self.assertIn(table, inspect(connection).get_table_names())
                 self.assertEqual(inspect(connection).get_foreign_keys(table), [])
 

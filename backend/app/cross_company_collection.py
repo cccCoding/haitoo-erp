@@ -219,6 +219,7 @@ def replay(batch, fingerprint):
 def collect(payload: CollectionInput, idempotency_key: Annotated[str, Header(min_length=1, max_length=128)],
             user: User = Depends(current_user), db: Session = Depends(get_db)):
     from . import main
+    from .image_files import create_material, ingest_cross_url
     # 两家公司按 ID 顺序锁定，避免相互采集时死锁；撤销权限共用公司行锁。
     authorized_company(user, db)
     db.scalars(select(Company).where(Company.id.in_(sorted({user.company_id, payload.source_company_id})))
@@ -266,6 +267,26 @@ def collect(payload: CollectionInput, idempotency_key: Annotated[str, Header(min
     duplicate = [record.id for record, _ in entries if record.sku in existing]
     if duplicate and not payload.allow_recollect:
         raise HTTPException(409, f"图片已采集，请明确选择再次采集：{duplicate}")
+    # 在网络操作前释放锁；复制完成后重新获取两家公司锁并复核授权及来源。
+    snapshots = [(record.id, record.sku, url, (record.name if payload.source_library == "material" else record.title) or record.sku or "采集素材") for record, url in entries]
+    target_id, source_id = target.id, source.id
+    db.commit()
+    files = {record_id: ingest_cross_url(db, target_id, source_id, url) for record_id, _, url, _ in snapshots}
+    db.commit()
+    db.scalars(select(Company).where(Company.id.in_(sorted({target_id, source_id})))
+        .order_by(Company.id).with_for_update().execution_options(populate_existing=True)).all()
+    target = authorized_company(user, db, lock=True)
+    source = source_company(db, target.id, source_id, lock=True)
+    batch = db.scalar(batch_stmt)
+    if batch:
+        return replay(batch, fingerprint)
+    template = main.get_company_template(db, user, payload.template_id)
+    refreshed = {record.id: record for record in db.scalars(select(model).where(model.company_id == source_id,
+        model.id.in_([item[0] for item in snapshots])).with_for_update().execution_options(populate_existing=True))}
+    for record_id, sku, url, _ in snapshots:
+        record = refreshed.get(record_id)
+        if not record or record.sku != sku or (record.url if payload.source_library == "material" else record.image_url) != url:
+            raise HTTPException(409, "来源图片在采集期间发生变化，请重新选择")
     try:
         # SQLite 首个 SKU 保存点同样必须位于整批事务内。
         with db.begin_nested():
@@ -274,15 +295,20 @@ def collect(payload: CollectionInput, idempotency_key: Annotated[str, Header(min
             db.add(batch)
             db.flush()
             asset_ids = []
-            for record, url in entries:
-                name = (record.name if payload.source_library == "material" else record.title) or record.sku or "采集素材"
-                asset = main.add_material_asset_with_sku(db, template=template, owner=user, company_id=target.id,
-                    source_task_id=None, url=url, name=name[:180], source_type="cross_company")
-                asset_ids.append(asset.id)
-                db.add(CrossCompanyCollectionItem(batch_id=batch.id, company_id=target.id, material_asset_id=asset.id,
+            duplicates = 0
+            # 所有入口按文件 ID 升序加锁，避免多图强制创建互相等待。
+            for record_id, sku, url, name in sorted(snapshots, key=lambda item: (files[item[0]].id, item[0])):
+                result = create_material(db, image_file=files[record_id], template=template, owner=user,
+                    request_key=hashlib.sha256(f"collect:{idempotency_key}:{record_id}".encode()).hexdigest(),
+                    force_create=payload.allow_recollect, source_type="cross_company", name=name[:180], commit=False)
+                if result["outcome"] == "duplicate":
+                    duplicates += 1
+                    continue
+                asset_ids.append(result["asset_id"])
+                db.add(CrossCompanyCollectionItem(batch_id=batch.id, company_id=target.id, material_asset_id=result["asset_id"],
                     source_company_id=source.id, source_company_name=source.name, source_library=payload.source_library,
-                    source_record_id=record.id, source_sku=record.sku, source_url=url, source_name=name[:500]))
-            batch.result = {"batch_id": batch.id, "collected": len(asset_ids), "material_asset_ids": asset_ids}
+                    source_record_id=record_id, source_sku=sku, source_url=url, source_name=name[:500]))
+            batch.result = {"batch_id": batch.id, "collected": len(asset_ids), "duplicates": duplicates, "material_asset_ids": asset_ids}
         db.commit()
         return batch.result
     except IntegrityError:

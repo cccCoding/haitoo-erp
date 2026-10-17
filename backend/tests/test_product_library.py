@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 from fastapi import HTTPException, UploadFile
@@ -19,6 +20,7 @@ from app.models import Company, MaterialAsset, ProductLibraryOrder, ProductLibra
 from app.schemas import ProductLibraryBatchTemplateInput
 from app.security import create_access_token
 from app.product_library import ALLOWED_PLATFORMS, ALLOWED_SITES
+from tests.image_file_helpers import mock_image_storage
 
 
 HEADERS = ["店铺名称", "站点", "平台", "订单编号", "数量", "下单时间", "标题", "平台SKU", "产品图片链接", "产品ID"]
@@ -44,6 +46,7 @@ def row(*, sku="M06LFSKA9RPG7B6A-M", product_id="1736307142216353080", order="58
 
 class ProductLibraryTests(unittest.TestCase):
     def setUp(self):
+        self.image_download, self.image_upload = mock_image_storage(self)
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.sessions = sessionmaker(bind=self.engine)
@@ -252,6 +255,90 @@ class ProductLibraryTests(unittest.TestCase):
         item = self.list_items()["items"][0]
         self.assertEqual((item["title"], item["image_url"]), ("Updated title", "https://example.com/new.jpg"))
         self.assertEqual(item["order_count"], 1)
+        with self.sessions() as db:
+            self.assertIsNone(main.by_url(db, 1, revised["产品图片链接"]))
+
+    def test_order_images_keep_original_urls_and_drafts_export_without_network(self):
+        from app.models import TiktokCategoryCatalog
+        from app.schemas import ProductLibraryDraftCreate, ShopeeDraftExportInput, TiktokDraftExportInput
+        from app.tiktok_export import TEMPLATE_PATH, listing_options
+        from app.shopee_export import parse_listing_options
+        from tests.test_shopee_export import shopee_template_bytes
+
+        first_url, second_url = "https://example.com/first.png", "https://example.com/second.png"
+        data = xlsx([row(image=first_url), row(image=second_url, product_id="second", order="second")])
+        self.assertEqual(self.import_bytes(data)["created_products"], 2)
+        self.assertEqual(self.import_bytes(data)["created_products"], 0)
+        self.image_download.assert_not_called()
+        self.image_upload.assert_not_called()
+        shopee_bytes = shopee_template_bytes()
+        with self.sessions() as db:
+            self.assertIsNone(main.by_url(db, 1, first_url))
+            self.assertIsNone(main.by_url(db, 1, second_url))
+            self.assertIsNone(main.by_url(db, 2, first_url))
+            saved_url = first_url
+            template = db.get(ProductTemplate, 1)
+            template.product_description = "Printed long sleeve dress with a comfortable fit."
+            template.package_weight = 0.28
+            template.package_length, template.package_width, template.package_height = 30, 16, 2
+            template.sku_specifications = {"size": {"options": ["S", "M"]}}
+            template.size_chart_url = first_url
+            db.add_all([
+                TiktokCategoryCatalog(id=1, company_id=1, name="TikTok", source_filename="tiktok.xlsx",
+                    template_type="tiktok_local", template_version="V5.0.2", template_blob=TEMPLATE_PATH.read_bytes(),
+                    parsed_options=listing_options(), created_by=1),
+                TiktokCategoryCatalog(id=2, company_id=1, name="Shopee", source_filename="shopee.xlsx",
+                    template_type="shopee_basic", template_version="basic", template_blob=shopee_bytes,
+                    parsed_options=parse_listing_options(shopee_bytes, "shopee_basic"), created_by=1),
+            ])
+            db.commit()
+            product = db.scalar(select(ProductLibraryProduct).order_by(ProductLibraryProduct.id))
+            with patch("app.image_files.download_image", side_effect=AssertionError("创建草稿和导出不能下载")), \
+                    patch("app.image_files.save_content_image", side_effect=AssertionError("创建草稿和导出不能上传")):
+                user = db.get(User, 1)
+                draft = main.create_draft_from_product_library(ProductLibraryDraftCreate(template_id=1,
+                    title="Printed Long Sleeve Dress for Daily Wear",
+                    sources=[{"source_type": "product", "id": product.id}]), user=user, db=db)
+                # 来源产品以后换图，已有草稿仍按创建时的原链接导出。
+                product.image_url = "https://example.com/reimported.png"
+                db.commit()
+                tiktok = main.export_drafts_to_tiktok(TiktokDraftExportInput(draft_ids=[draft["id"]],
+                    category_catalog_id=1, category="女士上装/女士衬衫", default_price=10,
+                    default_quantity=99, cod="Y", attributes={"product_property/100198": "花朵"}), user=user, db=db)
+                shopee = main.export_drafts_to_shopee(ShopeeDraftExportInput(draft_ids=[draft["id"]],
+                    category_catalog_id=2, category_id="100350", default_price=10,
+                    default_quantity=99, shipping_channels=["channel_id.2000"]), user=user, db=db)
+            source_sku = product.sku
+        for response, field_map in ((tiktok, {"main_image": saved_url, "property_1_image": saved_url,
+                "size_chart": saved_url, "seller_sku": source_sku + "-S"}),
+                (shopee, {"ps_item_cover_image": saved_url, "et_title_image_per_variation": saved_url,
+                "et_title_size_chart": saved_url, "ps_sku_short": source_sku + "-S"})):
+            sheet = load_workbook(BytesIO(response.body))["Template"]
+            fields = {str(cell.value).split("|", 1)[0]: cell.column for cell in sheet[1] if cell.value}
+            for field, expected in field_map.items():
+                self.assertEqual(sheet.cell(7, fields[field]).value, expected, field)
+
+    def test_unavailable_images_do_not_block_order_import_or_backfill(self):
+        from app.image_download import ImageDownloadError
+        from app.models import ImageFile
+        from scripts.backfill_image_files import run
+        self.image_download.side_effect = ImageDownloadError("图片已删除")
+        result = self.import_bytes(xlsx([row(), row(image="https://example.com/missing.png", order="missing")]))
+        self.assertEqual(result["created_orders"], 2)
+        with self.sessions() as db:
+            self.assertEqual(db.scalar(select(func.count()).select_from(ImageFile)), 0)
+        self.assertEqual(run(apply=True, session_factory=self.sessions), [])
+        self.image_download.assert_not_called()
+        self.image_upload.assert_not_called()
+
+    def test_storage_failure_does_not_block_order_import(self):
+        from app.storage import StorageError
+        self.image_upload.side_effect = StorageError("R2 暂不可用")
+        self.assertEqual(self.import_bytes(xlsx([row()]))["created_orders"], 1)
+        with self.sessions() as db:
+            self.assertEqual(db.scalar(select(func.count()).select_from(ProductLibraryProduct)), 1)
+            self.assertEqual(db.scalar(select(func.count()).select_from(ProductLibraryOrder)), 1)
+        self.image_upload.assert_not_called()
 
     def test_required_product_details_reject_entire_import(self):
         for field in ("标题", "产品图片链接"):

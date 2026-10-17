@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.credentials import decrypt_secret, encrypt_secret
 from app.models import (Company, MaterialAsset, OperatorGroup, ProductDraft, ProductTemplate, Role, SupplyAgent, SupplyAudit,
-                        SupplyImageHealth, SupplyJob, SupplyStrategy, TemplateGroup, TiktokCategoryCatalog, User)
+                        SupplyJob, SupplyStrategy, TemplateGroup, TiktokCategoryCatalog, User)
 from app.security import create_access_token, hash_password
 from app.supply_accounts import add_calendar_months
 from app.supply_catalog import router
@@ -56,11 +56,14 @@ class SupplyFixture:
                                  url="https://img.example/foreign.png", supply_listed=True))
             db.commit()
             self.tokens = {identity: create_access_token(db.get(User, identity)) for identity in range(1, 8)}
+        from tests.image_file_helpers import index_urls
+        with self.sessions() as db:
+            index_urls(db, 1, [f"https://img.example/{i}.png" for i in range(1,21)] + ["https://img.example/size1.png"])
         self.app = FastAPI()
         self.app.include_router(router)
         self.override_db(self.app)
         self.client = TestClient(self.app)
-        self.image_mock = self.enterContext(patch("app.supply_images.check_image", new_callable=AsyncMock))
+        self.image_mock = self.enterContext(patch("app.image_files.download_image", new_callable=AsyncMock))
         self.upload_mock = self.enterContext(patch("app.supply_files.upload_supply_export"))
 
     def override_db(self, app):
@@ -177,7 +180,7 @@ class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
             for identity in (1, 99, 999):
                 self.assertEqual(self.request("PATCH", f"/supply/materials/{identity}", uid=uid,
                                               json={"supply_listed": False}).status_code, 403)
-                self.assertEqual(self.request("POST", f"/supply/materials/{identity}/recheck", uid=uid).status_code, 403)
+                self.assertEqual(self.request("POST", f"/supply/materials/{identity}/recheck", uid=uid).status_code, 404)
         templates = self.request("GET", "/supply/templates", uid=4)
         self.assertEqual(templates.status_code, 200, templates.text)
         self.assertEqual(templates.json()[0]["available_count"], 20)
@@ -464,17 +467,6 @@ class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
         response = self.request("POST", "/supply/strategies", uid=4, json=self.strategy_input(sku_count=9, link_count=50))
         self.assertEqual(response.status_code, 400)
         self.assertIn("4,994", response.text)
-        with self.sessions() as db:
-            db.get(ProductTemplate, 1).sku_specifications = {"size": {"options": ["S"]}}
-            for identity in range(1, 18):
-                url = db.get(MaterialAsset, identity).url
-                db.add(SupplyImageHealth(company_id=1, url=url, url_hash=digest(url), status="invalid" if identity % 2 else "check_failed"))
-            db.commit()
-        strategy = self.create_strategy()
-        response = self.request("POST", "/supply/jobs", uid=4, json={"strategy_id": strategy, "idempotency_key": "bad-pictures"})
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(self.request("GET", "/supply/materials", uid=2).json()["total"], 3)
-        self.assertEqual(self.request("GET", "/supply/materials?health=invalid").json()["total"], 9)
         self.image_mock.assert_not_called()
 
     def test_download_authentication_recheck_and_manager_audit(self):
@@ -524,43 +516,14 @@ class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
             db.commit()
         self.assertEqual(self.request("GET", "/supply/context", uid=4).status_code, 401)
 
-    def test_internal_draft_creation_reads_health_without_network_checks(self):
-        from app import main
-        self.override_db(main.app)
-        client = TestClient(main.app)
-        headers = {"Authorization": f"Bearer {self.tokens[1]}"}
-        with self.sessions() as db:
-            for identity, status in ((1, "invalid"), (2, "check_failed")):
-                url = db.get(MaterialAsset, identity).url
-                db.add(SupplyImageHealth(company_id=1, url=url, url_hash=digest(url), status=status))
-            db.commit()
-        try:
-            self.assertEqual(client.put("/templates/1", headers=headers, json={"product_description": "Updated factual dress description"}).status_code, 200)
-            response = client.get("/material-assets", headers=headers, params={"usage_status": "all", "health": "invalid"})
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual([item["id"] for item in response.json()["items"]], [1])
-            title = "Printed Long Sleeve Nursing Maxi Dress"
-            for path, payload in (("/drafts/from-material-assets", {"template_id": 1, "material_asset_ids": [1], "title": title}),
-                ("/drafts/from-material-assets/batch", {"template_id": 1, "groups": [{"material_asset_ids": [1, 2, 3, 4, 5], "title": title}]}),
-                ("/drafts/from-product-library", {"template_id": 1, "sources": [{"source_type": "material", "id": 2}], "title": title}),
-                ("/drafts/from-product-library/batch", {"template_id": 1, "groups": [{"sources": [{"source_type": "material", "id": identity} for identity in range(1, 6)], "title": title}]})):
-                with self.subTest(path=path):
-                    response = client.post(path, headers=headers, json=payload)
-                    self.assertEqual(response.status_code, 400, response.text)
-            with self.sessions() as db:
-                self.assertEqual(db.query(ProductDraft).count(), 0)
-                self.assertEqual(db.get(MaterialAsset, 1).usage_status, "unused")
-                db.get(MaterialAsset, 1).url = "https://img.example/replaced-original.png"
-                db.commit()
-            response = client.post("/drafts/from-material-assets", headers=headers,
-                json={"template_id": 1, "material_asset_ids": [1], "title": title})
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(response.json()["image_urls"], ["https://img.example/replaced-original.png"])
-            self.image_mock.assert_not_called()
-            self.upload_mock.assert_not_called()
-        finally:
-            client.close()
-            main.app.dependency_overrides.clear()
+
+    def test_health_fields_and_recheck_endpoint_are_removed(self):
+        row=self.request("GET","/supply/materials").json()["items"][0]
+        self.assertTrue({"health","checked_at","health_reason"}.isdisjoint(row))
+        for uid in (1,2,4):
+            self.assertEqual(self.request("POST","/supply/materials/1/recheck",uid=uid).status_code,404)
+        from sqlalchemy import inspect
+        self.assertNotIn("supply_image_health",inspect(self.engine).get_table_names())
 
     def test_grant_revoked_after_authentication_is_rechecked_before_listing_write(self):
         from app import supply_catalog

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 from PIL import Image
 
-from app import supply_images
+from app import image_download as supply_images
 
 
 def image_bytes(format="PNG"):
@@ -20,55 +20,55 @@ class SupplyImageTests(unittest.IsolatedAsyncioTestCase):
     async def run_check(self, handler, url="https://images.example/item.png"):
         transport = httpx.MockTransport(handler)
         with patch.object(supply_images, "PublicImageTransport", return_value=transport):
-            return await supply_images.check_image(url)
+            return await supply_images._download_once(url)
 
-    async def test_decodes_supported_content_instead_of_trusting_mime(self):
-        for format in ("PNG", "JPEG", "WEBP"):
-            result = await self.run_check(lambda request: httpx.Response(200, content=image_bytes(format), headers={"content-type": "text/plain"}))
-            self.assertEqual(result["status"], "available")
-        result = await self.run_check(lambda request: httpx.Response(200, content=b"<html>not an image</html>", headers={"content-type": "image/png"}))
-        self.assertEqual(result["status"], "invalid")
-        result = await self.run_check(lambda request: httpx.Response(200, content=image_bytes("GIF")))
-        self.assertEqual(result["status"], "invalid")
+    async def test_actual_content_and_supported_formats(self):
+        from app.image_download import decode_image, ImageDownloadError
+        for fmt in ("PNG","JPEG","WEBP"):
+            content=await self.run_check(lambda request:httpx.Response(200,content=image_bytes(fmt),headers={"content-type":"text/plain"}))
+            self.assertTrue(decode_image(content).startswith("image/"))
+        for content in (b"<html>not an image</html>", image_bytes("GIF")):
+            with self.assertRaises(ImageDownloadError): decode_image(content)
 
-    async def test_missing_and_temporary_statuses_have_different_health_states(self):
-        for status in (404, 410):
-            self.assertEqual((await self.run_check(lambda request: httpx.Response(status)))["status"], "invalid")
-        for status in (403, 429, 500, 502):
-            self.assertEqual((await self.run_check(lambda request: httpx.Response(status)))["status"], "check_failed")
+    async def test_missing_fails_once_temporary_errors_retry(self):
+        from app.image_download import download_image, ImageDownloadError
+        handler=Mock(return_value=httpx.Response(404))
+        with self.assertRaises(ImageDownloadError): await self.run_check(handler)
+        self.assertEqual(handler.call_count,1)
+        handler=Mock(return_value=httpx.Response(503))
+        with patch.object(supply_images,"PublicImageTransport",return_value=httpx.MockTransport(handler)),patch.object(asyncio,"sleep",AsyncMock()):
+            with self.assertRaises(ImageDownloadError): await download_image("https://images.example/a")
+        self.assertEqual(handler.call_count,3)
 
-    async def test_rejects_content_length_and_streamed_overflow(self):
-        result = await self.run_check(lambda request: httpx.Response(200, content=b"", headers={"content-length": str(supply_images.MAX_IMAGE_BYTES + 1)}))
-        self.assertEqual(result["status"], "invalid")
-        with patch.object(supply_images, "MAX_IMAGE_BYTES", 8):
-            result = await self.run_check(lambda request: httpx.Response(200, content=b"ninebytes"))
-        self.assertEqual(result["status"], "invalid")
+    async def test_size_bounds_and_unsafe_redirect(self):
+        from app.image_download import ImageDownloadError
+        self.assertEqual(supply_images.MAX_IMAGE_BYTES, 3 * 1024 * 1024)
+        self.assertEqual(await self.run_check(lambda request: httpx.Response(200, content=b"x" * supply_images.MAX_IMAGE_BYTES)),
+            b"x" * supply_images.MAX_IMAGE_BYTES)
+        with self.assertRaises(ImageDownloadError):
+            await self.run_check(lambda request:httpx.Response(200,headers={"content-length":str(supply_images.MAX_IMAGE_BYTES+1)}))
+        with self.assertRaisesRegex(ImageDownloadError, "3 MiB"):
+            await self.run_check(lambda request: httpx.Response(200, content=b"x" * (supply_images.MAX_IMAGE_BYTES + 1)))
+        with patch.object(supply_images,"MAX_IMAGE_BYTES",8):
+            with self.assertRaises(ImageDownloadError): await self.run_check(lambda request:httpx.Response(200,content=b"ninebytes"))
+        handler=Mock(return_value=httpx.Response(302,headers={"location":"http://127.0.0.1/a"}))
+        with self.assertRaises(ImageDownloadError): await self.run_check(handler)
+        self.assertEqual(handler.call_count,1)
 
-    async def test_blocked_initial_urls_never_issue_requests(self):
-        handler = Mock()
-        for url in ("http://127.0.0.1/a", "http://10.1.2.3/a", "http://[::1]/a", "http://169.254.169.254/a", "http://[::ffff:127.0.0.1]/a", "http://localhost/a", "https://images.example:8080/a", "https://user:pass@images.example/a", "file:///etc/passwd"):
-            result = await self.run_check(handler, url)
-            self.assertEqual(result["status"], "check_failed", url)
+    async def test_unsafe_initial_urls_never_request(self):
+        from app.image_download import ImageDownloadError
+        handler=Mock()
+        for url in ("http://127.0.0.1/a","http://10.0.0.1/a","http://localhost/a","file:///etc/passwd","https://user:pass@images.example/a","https://images.example:8080/a"):
+            with self.assertRaises(ImageDownloadError): await self.run_check(handler,url)
         handler.assert_not_called()
 
-    async def test_safe_relative_redirect_and_blocked_private_redirect(self):
-        calls = []
+    async def test_relative_redirect_and_loop_limit(self):
         def handler(request):
-            calls.append(str(request.url))
-            return httpx.Response(302, headers={"location": "/final.png"}) if request.url.path == "/item.png" else httpx.Response(200, content=image_bytes())
-        self.assertEqual((await self.run_check(handler))["status"], "available")
-        self.assertEqual(len(calls), 2)
-        handler = Mock(return_value=httpx.Response(302, headers={"location": "http://127.0.0.1/a"}))
-        self.assertEqual((await self.run_check(handler))["status"], "check_failed")
-        self.assertEqual(handler.call_count, 1)
-
-    async def test_redirect_loops_are_bounded_and_requests_are_not_retried(self):
-        handler = Mock(return_value=httpx.Response(302, headers={"location": "/item.png"}))
-        self.assertEqual((await self.run_check(handler))["status"], "check_failed")
-        self.assertEqual(handler.call_count, supply_images.MAX_REDIRECTS + 1)
-        handler = Mock(side_effect=httpx.ConnectError("temporary"))
-        self.assertEqual((await self.run_check(handler))["status"], "check_failed")
-        self.assertEqual(handler.call_count, 1)
+            return httpx.Response(302,headers={"location":"/final"}) if request.url.path=="/item.png" else httpx.Response(200,content=image_bytes())
+        self.assertEqual(await self.run_check(handler),image_bytes())
+        loop=Mock(return_value=httpx.Response(302,headers={"location":"/item.png"}))
+        with self.assertRaises(supply_images.ImageDownloadError): await self.run_check(loop)
+        self.assertEqual(loop.call_count,6)
 
     async def test_dns_mixed_with_private_address_rejected_before_connect(self):
         records = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)), (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443))]
@@ -104,8 +104,8 @@ class SupplyImageTests(unittest.IsolatedAsyncioTestCase):
         loop = asyncio.get_running_loop()
         records = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 80))]
         with patch.object(loop, "getaddrinfo", AsyncMock(return_value=records)), patch.object(asyncio, "open_connection", AsyncMock(return_value=(reader, writer))) as connect:
-            result = await supply_images.check_image("http://images.example/item.png")
-        self.assertEqual(result["status"], "available")
+            result = await supply_images._download_once("http://images.example/item.png")
+        self.assertEqual(result, content)
         connect.assert_awaited_once_with("8.8.8.8", 80)
         request_bytes = b"".join(call.args[0] for call in writer.write.call_args_list)
         self.assertIn(b"Host: images.example\r\n", request_bytes)

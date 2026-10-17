@@ -251,6 +251,8 @@ class ShopeeExportTests(unittest.TestCase):
                 ),
             ])
             db.commit()
+            from tests.image_file_helpers import index_urls
+            index_urls(db,1,["https://img.example/cover.jpg","https://img.example/color.jpg","https://img.example/size.jpg"])
             response = main.export_drafts_to_shopee(ShopeeDraftExportInput(
                 draft_ids=[1], category_catalog_id=1, category_id="100350", default_price=10,
                 default_quantity=99, shipping_channels=["channel_id.2000"],

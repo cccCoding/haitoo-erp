@@ -41,6 +41,10 @@ class TaskJobTests(unittest.TestCase):
                 UserTemplateWhiteImage(id=1, company_id=1, user_id=1, template_id=1, name="Front", image_url="https://img.example/template-white/1.png"),
             ])
             db.commit()
+        from tests.image_file_helpers import index_urls
+        def indexed(db, company, url):
+            return index_urls(db, company, [url])[0]
+        self.enterContext(patch.object(main, "ingest_url", side_effect=indexed))
 
     def tearDown(self) -> None:
         self.engine.dispose()
@@ -105,13 +109,31 @@ class TaskJobTests(unittest.TestCase):
             template_id=1, white_image_id=1, provider="grsai", creative_requirement="test",
             print_urls=[f"https://img.example/creative/{index}.png" for index in range(5)],
         )
-        with self.session_factory() as db, patch.object(main, "is_company_r2_url", return_value=True):
+        with self.session_factory() as db, patch.object(main, "registered_image_url", return_value=True):
             user = db.get(User, 1)
             response = main.create_task(payload, user=user, db=db)
             tasks = db.scalars(select(PodTask).order_by(PodTask.id)).all()
         self.assertEqual(response["total"], 3)
         self.assertEqual([len(task.parameters["print_urls"]) for task in tasks], [2, 2, 1])
         self.assertTrue(all(task.status == TaskStatus.QUEUED for task in tasks))
+
+    def test_creative_inputs_accept_registered_content_urls_and_reject_unregistered_or_foreign(self):
+        from tests.image_file_helpers import index_urls
+        url = "https://img.example/images/company/1/saved.png"
+        with self.session_factory() as db:
+            index_urls(db, 1, [db.get(UserTemplateWhiteImage, 1).image_url, url])
+            index_urls(db, 2, ["https://img.example/images/company/2/foreign.png"])
+            user = db.get(User, 1)
+            response = main.create_task(PodTaskCreate(template_id=1, white_image_id=1,
+                provider="grsai", creative_requirement="test", print_urls=[url, url]), user=user, db=db)
+            self.assertEqual(response["total"], 1)
+            task = db.scalar(select(PodTask))
+            self.assertEqual(task.parameters["print_urls"], [url])
+            for invalid in ("https://img.example/creative/company/1/unverified.png",
+                    "https://img.example/images/company/2/foreign.png"):
+                with self.subTest(url=invalid), self.assertRaisesRegex(Exception, "图片上传接口保存"):
+                    main.create_task(PodTaskCreate(template_id=1, white_image_id=1, provider="grsai",
+                        creative_requirement="test", print_urls=[invalid]), user=user, db=db)
 
     def test_submit_retries_twice_with_same_idempotency_key(self) -> None:
         task_id = self.add_task()
@@ -168,7 +190,7 @@ class TaskJobTests(unittest.TestCase):
             template_id=1, white_image_id=1, provider="grsai", creative_requirement="test",
             print_urls=["https://img.example/creative/1.png"],
         )
-        with self.session_factory() as db, patch.object(main, "is_company_r2_url", return_value=True):
+        with self.session_factory() as db, patch.object(main, "registered_image_url", return_value=True):
             credential = db.scalar(select(UserAIProviderCredential).where(UserAIProviderCredential.user_id == 1))
             db.delete(credential); db.commit()
             with self.assertRaisesRegex(Exception, "个人 Grsai .*平台密钥"):
@@ -179,7 +201,7 @@ class TaskJobTests(unittest.TestCase):
             template_id=1, white_image_id=1, provider="grsai", creative_requirement="test",
             print_urls=["https://img.example/creative/1.png"],
         )
-        with self.session_factory() as db, patch.object(main, "is_company_r2_url", return_value=True):
+        with self.session_factory() as db, patch.object(main, "registered_image_url", return_value=True):
             response = main.create_task(payload, user=db.get(User, 1), db=db)
             task = db.get(PodTask, response["items"][0]["id"])
             request = task_jobs._request_for(task, db.get(ProductTemplate, 1))
@@ -197,7 +219,7 @@ class TaskJobTests(unittest.TestCase):
                 template_id=1, white_image_id=other_image.id, provider="grsai", creative_requirement="test",
                 print_urls=["https://img.example/creative/1.png"],
             )
-            with patch.object(main, "is_company_r2_url", return_value=True), self.assertRaisesRegex(Exception, "自己的产品白底图"):
+            with patch.object(main, "registered_image_url", return_value=True), self.assertRaisesRegex(Exception, "自己的产品白底图"):
                 main.create_task(payload, user=db.get(User, 1), db=db)
             with self.assertRaisesRegex(Exception, "只能管理自己"):
                 main.list_user_template_resources(template_id=1, user_id=3, user=db.get(User, 1), db=db)
@@ -246,7 +268,7 @@ class TaskJobTests(unittest.TestCase):
             template_id=1, white_image_id=1, provider="grsai-gpt-image-2", quality="2K", creative_requirement="test",
             print_urls=["https://img.example/creative/1.png"],
         )
-        with self.session_factory() as db, patch.object(main, "is_company_r2_url", return_value=True):
+        with self.session_factory() as db, patch.object(main, "registered_image_url", return_value=True):
             response = main.create_task(payload, user=db.get(User, 1), db=db)
             task = db.get(PodTask, response["items"][0]["id"])
         self.assertEqual(task.provider, "grsai-gpt-image-2")
@@ -571,14 +593,14 @@ class TaskJobTests(unittest.TestCase):
             task = db.get(PodTask, task_id)
             task.result_urls = [result_url]
             db.commit()
-            payload = ClaimMaterials(result_urls=[result_url])
+            payload = ClaimMaterials(request_key="review-test-key",result_urls=[result_url])
             first = main.claim_task_materials(task_id, payload, user=db.get(User, 1), db=db)
             asset = db.scalar(select(MaterialAsset).where(MaterialAsset.source_task_id == task_id))
             original_sku = asset.sku
             second = main.claim_task_materials(task_id, payload, user=db.get(User, 1), db=db)
             self.assertRegex(original_sku, r"^M05LAA[A-Z0-9]{6}$")
             self.assertEqual(first["claimed"], 1)
-            self.assertEqual(second["claimed"], 0)
+            self.assertEqual(second["claimed"], 1)
             self.assertEqual(asset.sku, original_sku)
 
     def test_empty_review_completes_task_without_material_validation(self) -> None:
@@ -589,7 +611,7 @@ class TaskJobTests(unittest.TestCase):
             db.get(User, 1).user_code = None
             db.commit()
             with patch.object(main, "validate_material_sku_source") as validate, patch.object(main, "add_material_asset_with_sku") as add:
-                result = main.claim_task_materials(task_id, ClaimMaterials(result_urls=[]), user=db.get(User, 1), db=db)
+                result = main.claim_task_materials(task_id, ClaimMaterials(request_key="review-test-key",result_urls=[]), user=db.get(User, 1), db=db)
                 validate.assert_not_called()
                 add.assert_not_called()
             db.refresh(task)
@@ -606,13 +628,13 @@ class TaskJobTests(unittest.TestCase):
             task = db.get(PodTask, task_id)
             task.result_urls = [adopted, discarded]
             db.commit()
-            result = main.claim_task_materials(task_id, ClaimMaterials(result_urls=[adopted]), user=db.get(User, 1), db=db)
+            result = main.claim_task_materials(task_id, ClaimMaterials(request_key="review-test-key",result_urls=[adopted]), user=db.get(User, 1), db=db)
             self.assertEqual(result["claimed"], 1)
             self.assertEqual(task.status, TaskStatus.COMPLETED)
             self.assertEqual(task.selected_result_url, adopted)
             asset = db.scalar(select(MaterialAsset).where(MaterialAsset.source_task_id == task_id))
             original_sku = asset.sku
-            main.claim_task_materials(task_id, ClaimMaterials(result_urls=[]), user=db.get(User, 1), db=db)
+            main.claim_task_materials(task_id, ClaimMaterials(request_key="review-test-key",result_urls=[]), user=db.get(User, 1), db=db)
             db.refresh(task)
             assets = db.scalars(select(MaterialAsset).where(MaterialAsset.source_task_id == task_id)).all()
             self.assertEqual([(item.url, item.sku) for item in assets], [(adopted, original_sku)])
@@ -626,16 +648,16 @@ class TaskJobTests(unittest.TestCase):
             task.result_urls = ["https://img.example/own.png"]
             db.commit()
             with self.assertRaises(HTTPException) as invalid:
-                main.claim_task_materials(task_id, ClaimMaterials(result_urls=["https://img.example/foreign.png"]), user=db.get(User, 1), db=db)
+                main.claim_task_materials(task_id, ClaimMaterials(request_key="review-test-key",result_urls=["https://img.example/foreign.png"]), user=db.get(User, 1), db=db)
             self.assertEqual(invalid.exception.status_code, 400)
             with self.assertRaises(HTTPException) as unauthorized:
-                main.claim_task_materials(task_id, ClaimMaterials(result_urls=[]), user=db.get(User, 3), db=db)
+                main.claim_task_materials(task_id, ClaimMaterials(request_key="review-test-key",result_urls=[]), user=db.get(User, 3), db=db)
             self.assertEqual(unauthorized.exception.status_code, 404)
             self.assertEqual(task.status, TaskStatus.AWAITING_SELECTION)
             task.status = TaskStatus.QUEUED
             db.commit()
             with self.assertRaises(HTTPException) as unready:
-                main.claim_task_materials(task_id, ClaimMaterials(result_urls=[]), user=db.get(User, 1), db=db)
+                main.claim_task_materials(task_id, ClaimMaterials(request_key="review-test-key",result_urls=[]), user=db.get(User, 1), db=db)
             self.assertEqual(unready.exception.status_code, 400)
             self.assertEqual(db.scalar(select(func.count(MaterialAsset.id))), 0)
 

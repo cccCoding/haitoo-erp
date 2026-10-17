@@ -1,4 +1,4 @@
-"""货盘最终导出阶段的单次图片检查；重试次数由持久化任务管理。"""
+"""上传及外链转存工具；不保存图片状态。"""
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +14,7 @@ import httpx
 from PIL import Image, UnidentifiedImageError
 
 
-MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_IMAGE_BYTES = 3 * 1024 * 1024
 MAX_REDIRECTS = 5
 CHECK_TIMEOUT_SECONDS = 30
 
@@ -169,51 +169,71 @@ class PublicImageTransport(httpx.AsyncBaseTransport):
         await self.pool.aclose()
 
 
-def _decode_image(content: bytes) -> dict:
+class ImageDownloadError(ValueError):
+    def __init__(self, message: str, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def decode_image(content: bytes) -> str:
+    if not content or len(content) > MAX_IMAGE_BYTES:
+        raise ImageDownloadError("图片为空或超过 3 MiB")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(BytesIO(content)) as picture:
-                if picture.format not in {"JPEG", "PNG", "WEBP"}:
-                    return {"status": "invalid", "reason": "仅支持 JPEG、PNG 或 WebP 图片"}
+                mime = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}.get(picture.format)
+                if not mime:
+                    raise ImageDownloadError("仅支持 JPEG、PNG 或 WebP 图片")
                 picture.verify()
-            # verify 检查文件结构；load 确认像素可以真实解码。
             with Image.open(BytesIO(content)) as picture:
                 picture.load()
-    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning):
-        return {"status": "invalid", "reason": "图片内容损坏或不是有效图片"}
-    return {"status": "available", "reason": ""}
+        return mime
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ImageDownloadError("图片内容损坏或不是有效图片") from exc
 
 
-async def check_image(url: str) -> dict:
-    """执行一次检查（允许安全重定向），不在此处自动重试。"""
+async def _download_once(url: str) -> bytes:
     try:
         async with asyncio.timeout(CHECK_TIMEOUT_SECONDS):
-            async with httpx.AsyncClient(transport=PublicImageTransport(), trust_env=False, timeout=httpx.Timeout(10, connect=8), follow_redirects=False) as client:
+            async with httpx.AsyncClient(transport=PublicImageTransport(), trust_env=False,
+                    timeout=httpx.Timeout(10, connect=8), follow_redirects=False) as client:
                 current = _validate_url(url)
                 for redirect in range(MAX_REDIRECTS + 1):
                     async with client.stream("GET", current, headers={"Accept": "image/jpeg,image/png,image/webp", "Accept-Encoding": "identity"}) as response:
                         if response.status_code in {301, 302, 303, 307, 308}:
                             location = response.headers.get("location")
                             if not location or redirect == MAX_REDIRECTS:
-                                return {"status": "check_failed", "reason": "图片重定向过多或缺少目标地址"}
+                                raise ImageDownloadError("图片重定向过多或缺少目标地址")
                             current = _validate_url(urljoin(current, location))
                             continue
-                        if response.status_code in {404, 410}:
-                            return {"status": "invalid", "reason": f"图片已不存在（HTTP {response.status_code}）"}
                         if response.status_code != 200:
-                            return {"status": "check_failed", "reason": f"图片源暂不可访问（HTTP {response.status_code}）"}
+                            raise ImageDownloadError(f"下载图片失败（HTTP {response.status_code}）",
+                                response.status_code in {403, 408, 429} or response.status_code >= 500)
                         length = response.headers.get("content-length", "")
                         if length.isdecimal() and int(length) > MAX_IMAGE_BYTES:
-                            return {"status": "invalid", "reason": "图片超过 20 MB"}
+                            raise ImageDownloadError("图片超过 3 MiB")
                         content = bytearray()
                         async for chunk in response.aiter_bytes():
                             content.extend(chunk)
                             if len(content) > MAX_IMAGE_BYTES:
-                                return {"status": "invalid", "reason": "图片超过 20 MB"}
-                        return await asyncio.to_thread(_decode_image, bytes(content))
+                                raise ImageDownloadError("图片超过 3 MiB")
+                        return bytes(content)
+    except ImageDownloadError:
+        raise
     except UnsafeImageAddress as exc:
-        return {"status": "check_failed", "reason": str(exc)}
-    except (httpx.HTTPError, httpcore.NetworkError, httpcore.TimeoutException, httpcore.ProtocolError, OSError, TimeoutError, ValueError):
-        return {"status": "check_failed", "reason": "图片源网络或响应异常，请稍后重新检查"}
-    return {"status": "check_failed", "reason": "无法完成图片检查"}
+        raise ImageDownloadError(str(exc)) from exc
+    except (httpx.HTTPError, httpcore.NetworkError, httpcore.TimeoutException, httpcore.ProtocolError, OSError, TimeoutError, ValueError) as exc:
+        raise ImageDownloadError("图片源网络或响应异常，请稍后重试", True) from exc
+    raise ImageDownloadError("无法下载图片")
+
+
+async def download_image(url: str) -> bytes:
+    for attempt in range(3):
+        try:
+            return await _download_once(url)
+        except ImageDownloadError as exc:
+            if not exc.retryable or attempt == 2:
+                raise
+            await asyncio.sleep((2, 5)[attempt])
+    raise ImageDownloadError("无法下载图片")

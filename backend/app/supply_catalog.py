@@ -15,12 +15,12 @@ from .ai_providers import DEEPSEEK_TITLE_MODEL
 from .credentials import decrypt_secret, encrypt_secret
 from .database import get_db
 from .models import (Company, MaterialAsset, OperatorGroup, ProductTemplate, Role, SupplyAgent, SupplyAudit,
-                     SupplyImageHealth, SupplyJob, SupplyJobMaterial, SupplyStrategy,
+                     SupplyJob, SupplyJobMaterial, SupplyStrategy,
                      TemplateGroup, TiktokCategoryCatalog, User)
 from .security import current_user, hash_password
 from .supply_accounts import add_calendar_months, supply_user_is_expired
-from .supply_common import (ACTIVE_STATES, BAD_HEALTH, audit, begin_check, cancel_user_jobs,
-    digest, eligible_materials, finish_check, health_records, is_manager, job_payload,
+from .supply_common import (ACTIVE_STATES, audit, cancel_user_jobs,
+    digest, eligible_materials, is_manager, job_payload,
     lock_company, now, require_admin, require_manager, sizes, template_snapshot,
     template_version, timestamp, user_can_run, validate_fallback, validate_strategy, validate_template)
 
@@ -345,13 +345,8 @@ def edit_template(identity: int, payload: TemplatePatch, user=Depends(supply_act
     return {"id": identity, "supply_public": item.supply_public, "supply_fallback_title": item.supply_fallback_title}
 
 
-def health_filter(company_id, status):
-    return select(SupplyImageHealth.url).where(SupplyImageHealth.company_id == company_id,
-        SupplyImageHealth.status == status)
-
-
 @router.get("/materials")
-def materials(template_id: int | None = None, health: Literal["unchecked", "available", "invalid", "check_failed"] | None = None,
+def materials(template_id: int | None = None,
     listed: bool | None = None, search: str = "", page: int = Query(1, ge=1), page_size: int = Query(30, ge=1, le=1000),
     source: Literal["catalog", "library"] = "catalog",
     user=Depends(supply_material_actor), db: Session = Depends(get_db)):
@@ -367,29 +362,18 @@ def materials(template_id: int | None = None, health: Literal["unchecked", "avai
         query = query.where(MaterialAsset.template_id == template_id)
     if search:
         query = query.where(MaterialAsset.name.contains(search) | MaterialAsset.sku.contains(search))
-    if health == "unchecked":
-        checked = select(SupplyImageHealth.url).where(SupplyImageHealth.company_id == user.company_id,
-            SupplyImageHealth.status != "unchecked")
-        query = query.where(MaterialAsset.url.not_in(checked))
-    elif health:
-        query = query.where(MaterialAsset.url.in_(health_filter(user.company_id, health)))
     if not is_manager(user):
         query = query.join(ProductTemplate, ProductTemplate.id == MaterialAsset.template_id).where(
-            ProductTemplate.company_id == user.company_id, ProductTemplate.supply_public.is_(True),
-            MaterialAsset.supply_listed.is_(True), MaterialAsset.url.not_in(select(SupplyImageHealth.url).where(
-                SupplyImageHealth.company_id == user.company_id, SupplyImageHealth.status.in_(BAD_HEALTH))))
+            ProductTemplate.company_id == user.company_id, ProductTemplate.supply_public.is_(True), MaterialAsset.supply_listed.is_(True))
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     assets = db.scalars(query.order_by(MaterialAsset.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
-    records = health_records(db, user.company_id, [asset.url for asset in assets])
     names = {item.id: item.name for item in db.scalars(select(ProductTemplate).where(
         ProductTemplate.company_id == user.company_id, ProductTemplate.id.in_([asset.template_id for asset in assets]))).all()}
     counts = material_statistics(db, user.company_id, [asset.id for asset in assets],
         None if is_manager(user) else user.id)
     return {"items": [{"id": asset.id, "name": asset.name, "sku": asset.sku, "url": asset.url,
         "template_id": asset.template_id, "template_name": names.get(asset.template_id),
-        "supply_listed": asset.supply_listed, "health": records[asset.url].status if asset.url in records else "unchecked",
-        "checked_at": timestamp(records[asset.url].checked_at) if asset.url in records else None,
-        "health_reason": records[asset.url].reason if asset.url in records else None,
+        "supply_listed": asset.supply_listed,
         **counts.get(asset.id, {"use_count": 0, "user_count": 0, "job_count": 0})} for asset in assets],
         "total": total, "page": page, "page_size": page_size}
 
@@ -410,28 +394,6 @@ def list_material(identity: int, payload: ListingInput, user=Depends(supply_mate
     audit(db, user, "material_listing", "material", identity, {"listed": payload.supply_listed})
     db.commit()
     return {"id": identity, "supply_listed": item.supply_listed}
-
-
-@router.post("/materials/{identity}/recheck")
-async def recheck(identity: int, user=Depends(supply_material_actor), db: Session = Depends(get_db)):
-    from .supply_images import check_image
-    item = owned(db, MaterialAsset, identity, user)
-    if not is_manager(user) and not (user.role in (Role.MEMBER, Role.TEAM_LEADER) and item.claimed_by == user.id):
-        raise HTTPException(403, "没有重新检查该素材的权限")
-    url = item.url
-    sequence = begin_check(db, user.company_id, url)
-    result = {"status": "check_failed", "reason": "检查未完成"}
-    for attempt in range(3):
-        result = await check_image(url)
-        if result["status"] != "check_failed":
-            break
-        if attempt < 2:
-            import asyncio
-            await asyncio.sleep((2, 5)[attempt])
-    finish_check(db, user.company_id, url, sequence, result)
-    audit(db, user, "recheck_image", "material", identity, {"status": result["status"]})
-    db.commit()
-    return {"id": identity, **result, "health": result["status"]}
 
 
 @router.get("/catalogs")

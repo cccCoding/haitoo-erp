@@ -12,9 +12,9 @@ from openpyxl import load_workbook
 from sqlalchemy import select
 
 from app.credentials import encrypt_secret
-from app.models import (Company, MaterialAsset, ProductTemplate, SupplyImageHealth, SupplyJob,
+from app.models import (Company, MaterialAsset, ProductTemplate, SupplyJob,
                         SupplyJobMaterial, TiktokCategoryCatalog, User)
-from app.supply_common import (begin_check, digest, eligible_materials, finish_check, normalize_title,
+from app.supply_common import (digest, eligible_materials, normalize_title,
                               template_snapshot, template_version, unique_title)
 if __package__:
     from .test_supply_catalog import SupplyFixture
@@ -32,8 +32,7 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
         self.enterContext(patch("app.supply_worker.RETRY_DELAYS", (0, 0, 0)))
         self.title = self.enterContext(patch("app.supply_worker.request_title", new_callable=AsyncMock,
                                             return_value="Printed Long Sleeve Nursing Maxi Dress for Daily Wear"))
-        self.image = self.enterContext(patch("app.supply_worker.check_image", new_callable=AsyncMock,
-                                            return_value={"status": "available", "reason": ""}))
+        self.image = self.image_mock
         self.contents = []
         def upload(company, job, epoch, filename, content):
             self.contents.append(content)
@@ -148,7 +147,7 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(self.title.call_count, 10)
         urls = [call.args[0] for call in self.image.call_args_list]
         self.assertEqual(len(urls), len(set(urls)))
-        self.assertIn("https://img.example/size1.png", urls)
+        self.image.assert_not_called()
         rows = self.export_rows()
         self.assertEqual(len({normalize_title(row["product_name"]) for row in rows}), 10)
         self.assertEqual({row["product_name"] for row in rows}, {
@@ -167,165 +166,14 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
             f"Printed Long Sleeve Nursing Maxi Dress - L{index:02d}" for index in range(1, 11)])
         self.assertEqual(len({normalize_title(link["title"]) for link in state["links"]}), 10)
 
-    def test_invalid_product_image_is_replaced_with_matching_source_sku(self):
-        identity = self.make_job()
-        with self.sessions() as db:
-            candidates = db.get(SupplyJob, identity).snapshot["candidates"]
-        sample = self.worker.distinct_sample(candidates, 5, random.Random("fixed-seed"))
-        bad_url, bad_sku = sample[0]["url"], sample[0]["sku"]
-        async def image(url):
-            return {"status": "invalid", "reason": "HTTP 404"} if url == bad_url else {"status": "available", "reason": ""}
-        self.image.side_effect = image
-        self.run_job(identity)
-        state = self.assert_completed(identity)
-        rows = self.export_rows()
-        self.assertTrue(all(row["property_1_image"] != bad_url for row in rows))
-        self.assertTrue(all(not row["seller_sku"].startswith(bad_sku + "-") for row in rows))
-        self.assertTrue(any(link["replaced"] for link in state["links"]))
-        self.assertTrue(all(link["title_source"] == "fallback_after_replacement" for link in state["links"] if link["replaced"]))
-        with self.sessions() as db:
-            self.assertEqual(db.scalar(select(SupplyImageHealth).where(SupplyImageHealth.url == bad_url)).status, "invalid")
-        self.assertEqual([call.args[0] for call in self.image.call_args_list].count(bad_url), 1)
 
-    def test_required_size_chart_failure_never_produces_partial_file(self):
-        identity = self.make_job()
-        async def image(url):
-            return {"status": "invalid", "reason": "HTTP 410"} if url.endswith("size1.png") else {"status": "available", "reason": ""}
-        self.image.side_effect = image
-        self.run_job(identity)
-        with self.sessions() as db:
-            job = db.get(SupplyJob, identity)
-            self.assertEqual(job.state, "failed")
-            self.assertIn("尺码图", job.error)
-            self.assertEqual(db.query(SupplyJobMaterial).filter_by(job_id=identity, successful=True).count(), 0)
-        self.upload.assert_not_called()
 
-    def prepare_live_replacement(self, *, incompatible=False):
-        with self.sessions() as db:
-            template = template_snapshot(db.get(ProductTemplate, 1))
-            candidates = eligible_materials(db, 1, 1, template_version(template))[:5]
-            for material in db.scalars(select(MaterialAsset).where(MaterialAsset.id.between(6, 20))):
-                material.supply_listed = False
-            db.commit()
-        identity = self.make_job(candidates=candidates)
-        with self.sessions() as db:
-            db.add(MaterialAsset(id=21, company_id=1, template_id=1, claimed_by=2, name="新增替换素材", sku="NEWREPLACEMENT",
-                                 url="https://img.example/new-replacement.png", supply_listed=True))
-            if incompatible:
-                db.get(ProductTemplate, 1).sku_specifications = {"size": {"options": ["XL"]}}
-            db.commit()
-        bad = candidates[0]["url"]
-        async def image(url):
-            return {"status": "invalid", "reason": "HTTP 404"} if url == bad else {"status": "available", "reason": ""}
-        self.image.side_effect = image
-        return identity
 
-    def test_newly_listed_compatible_material_can_replace_snapshot_failure(self):
-        identity = self.prepare_live_replacement()
-        self.run_job(identity)
-        state = self.assert_completed(identity)
-        self.assertTrue(all(any(item["id"] == 21 for item in link["materials"]) for link in state["links"]))
-        rows = self.export_rows()
-        self.assertTrue(any(row["seller_sku"] == "NEWREPLACEMENT-S" for row in rows))
-        with self.sessions() as db:
-            self.assertEqual(db.query(SupplyJobMaterial).filter_by(job_id=identity, material_id=21, source="replacement", successful=True).count(), 10)
-            self.assertEqual(db.query(SupplyJobMaterial).filter_by(job_id=identity, material_id=21, link_index=-1).count(), 1)
 
-    def test_live_template_version_change_cannot_supply_incompatible_replacement(self):
-        identity = self.prepare_live_replacement(incompatible=True)
-        self.run_job(identity)
-        with self.sessions() as db:
-            job = db.get(SupplyJob, identity)
-            self.assertEqual(job.state, "failed")
-            self.assertIn("替换素材不足", job.error)
-            self.assertEqual(db.query(SupplyJobMaterial).filter_by(job_id=identity, successful=True).count(), 0)
-        self.assertNotIn("https://img.example/new-replacement.png", [call.args[0] for call in self.image.call_args_list])
-        self.upload.assert_not_called()
 
-    def test_live_material_rebound_between_selection_and_snapshot_registration_is_rejected(self):
-        identity = self.prepare_live_replacement()
-        original_query = self.worker.eligible_materials
-        def rebind_after_query(db, company_id, template_id, version):
-            candidates = original_query(db, company_id, template_id, version)
-            if any(item["id"] == 21 for item in candidates):
-                with self.sessions() as changed:
-                    changed.get(MaterialAsset, 21).template_id = 2
-                    changed.commit()
-            return candidates
-        with patch("app.supply_worker.eligible_materials", side_effect=rebind_after_query):
-            self.run_job(identity)
-        with self.sessions() as db:
-            self.assertEqual(db.get(SupplyJob, identity).state, "failed")
-            self.assertEqual(db.query(SupplyJobMaterial).filter_by(job_id=identity, material_id=21).count(), 0)
-        self.upload.assert_not_called()
 
-    def test_recovered_title_and_image_attempt_budgets_do_not_reset(self):
-        identity = self.make_job()
-        with self.sessions() as db:
-            job = db.get(SupplyJob, identity)
-            snapshot = job.snapshot
-            rng = random.Random(snapshot["seed"])
-            links = [{"index": index, "materials": self.worker.distinct_sample(snapshot["candidates"], 5, rng),
-                "replaced": False, "title": None if index == 0 else unique_title("An Already Saved Product Title", snapshot["template"]["supply_fallback_title"], index)} for index in range(10)]
-            bad = links[0]["materials"][0]["url"]
-            job.checkpoint = {"links": links, "title_attempts": {"0": 3},
-                "image_checks": {digest(bad): {"url": bad, "attempts": 2}}}
-            db.add(SupplyImageHealth(company_id=1, url=bad, url_hash=digest(bad), status="check_failed", check_sequence=2))
-            db.commit()
-        self.title.side_effect = ValueError("final title attempt failed")
-        async def image(url):
-            return {"status": "check_failed", "reason": "temporary outage"} if url == bad else {"status": "available", "reason": ""}
-        self.image.side_effect = image
-        self.run_job(identity)
-        state = self.assert_completed(identity)
-        self.assertEqual(self.title.call_count, 1)
-        self.assertEqual(state["title_attempts"]["0"], 4)
-        self.assertEqual([call.args[0] for call in self.image.call_args_list].count(bad), 1)
-        self.assertEqual(state["image_checks"][digest(bad)]["attempts"], 3)
 
-    def test_recovered_replacement_candidate_available_in_old_epoch_is_rechecked(self):
-        with self.sessions() as db:
-            version = template_version(template_snapshot(db.get(ProductTemplate, 1)))
-            candidates = eligible_materials(db, 1, 1, version)[:6]
-        identity = self.make_job(candidates=candidates)
-        original_bad, prior_replacement = candidates[0], candidates[5]
-        with self.sessions() as db:
-            job = db.get(SupplyJob, identity)
-            links = [{"index": index, "materials": copy.deepcopy(candidates[:5]), "replaced": False,
-                "title": unique_title("An Already Saved Product Title", job.snapshot["template"]["supply_fallback_title"], index)} for index in range(10)]
-            job.lease_epoch = 1
-            job.checkpoint = {"links": links,
-                "replacement_attempts": {"0:0": {"tried": [prior_replacement["version_hash"]]}},
-                "image_checks": {digest(prior_replacement["url"]): {"url": prior_replacement["url"], "attempts": 1,
-                    "result": {"status": "available", "reason": ""}, "result_epoch": 1}}}
-            db.commit()
-        async def image(url):
-            return {"status": "invalid", "reason": "source removed after prior check"} if url in {
-                original_bad["url"], prior_replacement["url"]} else {"status": "available", "reason": ""}
-        self.image.side_effect = image
-        self.run_job(identity)
-        state = self.assert_completed(identity)
-        self.assertIn(prior_replacement["url"], [call.args[0] for call in self.image.call_args_list])
-        self.assertEqual(state["image_checks"][digest(prior_replacement["url"])]["attempts"], 2)
-        self.assertTrue(all(item["url"] not in {original_bad["url"], prior_replacement["url"]}
-            for link in state["links"] for item in link["materials"]))
-        self.assertTrue(all(row["property_1_image"] != prior_replacement["url"] for row in self.export_rows()))
 
-    def test_replacement_candidate_budget_exhaustion_cannot_output_partial_file(self):
-        identity = self.make_job()
-        self.image.return_value = {"status": "invalid", "reason": "HTTP 404"}
-        # 尺码图有效，商品源全部失效；缺失位置只能尝试 10 个候选。
-        async def image(url):
-            return {"status": "available", "reason": ""} if url.endswith("size1.png") else {"status": "invalid", "reason": "HTTP 404"}
-        self.image.side_effect = image
-        self.run_job(identity)
-        with self.sessions() as db:
-            job = db.get(SupplyJob, identity)
-            self.assertEqual(job.state, "failed")
-            self.assertIn("替换素材不足", job.error)
-            self.assertEqual(len(job.checkpoint["replacement_attempts"]["0:0"]["tried"]), 10)
-            self.assertEqual(db.query(SupplyJobMaterial).filter_by(job_id=identity, successful=True).count(), 0)
-        self.upload.assert_not_called()
 
     def test_upload_retry_reuses_excel_without_regenerating_or_rechecking(self):
         identity = self.make_job()
@@ -384,15 +232,6 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
             self.assertEqual(db.query(SupplyJobMaterial).filter_by(job_id=identity, successful=True).count(), 0)
         self.delete.assert_called_once()
 
-    def test_stale_health_result_cannot_overwrite_newer_success(self):
-        url = "https://img.example/1.png"
-        with self.sessions() as db:
-            first = begin_check(db, 1, url)
-            second = begin_check(db, 1, url)
-            finish_check(db, 1, url, second, {"status": "available", "reason": ""})
-            finish_check(db, 1, url, first, {"status": "invalid", "reason": "stale"})
-        with self.sessions() as db:
-            self.assertEqual(db.scalar(select(SupplyImageHealth).where(SupplyImageHealth.url == url)).status, "available")
 
     def test_file_cleanup_keeps_task_metadata_and_skips_live_referenced_files(self):
         expired, retained = self.make_job(), self.make_job(uid=7)

@@ -43,6 +43,10 @@ class CrossCompanyCollectionTests(unittest.TestCase):
                 yield db
         main.app.dependency_overrides[get_db] = override
         self.client = TestClient(main.app)
+        from tests.image_file_helpers import index_urls
+        def copied(db, target, source, url):
+            return index_urls(db,target,[url])[0]
+        self.enterContext(patch("app.image_files.ingest_cross_url",side_effect=copied))
 
     def tearDown(self):
         main.app.dependency_overrides.clear()
@@ -254,7 +258,7 @@ class CrossCompanyCollectionTests(unittest.TestCase):
                 db.get(MaterialAsset,1).sku=new_sku;db.commit()
             result=self.listing(collection_status='collected').json()
             self.assertEqual(result['total'],0)
-            self.assertEqual(self.collect(key=f'exact-{new_sku}').status_code,200)
+            self.assertEqual(self.collect(key=f'exact-{new_sku}',allow_recollect=True).status_code,200)
             self.assertEqual(self.listing(collection_status='collected').json()['items'][0]['sku'],new_sku)
             with self.sessions() as db:
                 self.assertIsNotNone(db.scalar(select(CrossCompanyCollectionItem).where(

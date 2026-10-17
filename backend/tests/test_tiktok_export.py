@@ -31,7 +31,6 @@ def cross_border_template_without_auction_fields() -> bytes:
 
 class TiktokExportTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.enterContext(patch("app.supply_internal_export.check_image", AsyncMock(return_value={"status": "available", "reason": ""})))
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.session_factory = sessionmaker(bind=self.engine)
@@ -50,12 +49,31 @@ class TiktokExportTests(unittest.TestCase):
                 ProductDraft(id=4, company_id=1, template_id=1, title="Other user unique TikTok product title", image_urls=["https://img.example/five.jpg"], sku_items=[{"image_url": "https://img.example/five.jpg", "size": None, "sku": "Y1BB000005"}], created_by=2, updated_by=2),
             ])
             db.commit()
+            from tests.image_file_helpers import index_urls
+            index_urls(db, 1, [f"https://img.example/{name}.jpg" for name in ("one","two","three","four","five","main","carousel","size-chart","size-chart-2")])
 
     def tearDown(self) -> None:
         self.engine.dispose()
 
     def payload(self) -> TiktokDraftExportInput:
         return TiktokDraftExportInput(draft_ids=[1, 2], category_catalog_id=1, category="女士上装/女士衬衫", default_price=10, default_quantity=999, cod="Y", attributes={"product_property/100198": "花朵"}, product_overrides=[{"draft_id": 1, "price": 12.5, "quantity": 88}])
+
+    def test_export_maps_every_image_to_saved_r2_without_network(self):
+        from app.models import ImageFile
+        from sqlalchemy import select
+        with self.session_factory() as db:
+            for image_file in db.scalars(select(ImageFile)):
+                image_file.url=f"https://images.example/images/company/1/{image_file.sha256}.png"
+            db.commit()
+            with patch("app.image_files.download_image",side_effect=AssertionError("导出不能联网")) as download:
+                response=main.export_drafts_to_tiktok(self.payload(),user=db.get(User,1),db=db)
+                download.assert_not_called()
+        sheet=load_workbook(BytesIO(response.body),data_only=False)["Template"]
+        fields={cell.value:cell.column for cell in sheet[1] if cell.value}
+        for field in ("main_image","property_1_image","size_chart"):
+            if field in fields:
+                self.assertTrue(str(sheet.cell(7,fields[field]).value).startswith("https://images.example/"))
+        self.assertIn("https://images.example/",str([cell.value for cell in sheet[7]]))
 
     def test_export_request_accepts_at_most_one_hundred_drafts(self) -> None:
         values = self.payload().model_dump()

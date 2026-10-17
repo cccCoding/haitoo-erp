@@ -173,6 +173,50 @@ def create_image_upload_url(mime_type: str, content_length: int, company_id: int
     return {"upload_url": upload_url, "url": f"{public_base_url}/{quote(key, safe='/')}"}
 
 
+def create_temporary_image_upload(mime_type: str, content_length: int, company_id: int) -> dict[str, str]:
+    """只签发临时对象，正式图片永不接受浏览器 PUT。"""
+    return create_image_upload_url(mime_type, content_length, company_id, "image-upload-tmp")
+
+
+def read_image_object(key: str, max_bytes: int = 3 * 1024 * 1024) -> bytes:
+    endpoint, access, secret, bucket, _ = _configuration(get_settings())
+    try:
+        result = _r2_client(endpoint, access, secret).get_object(Bucket=bucket, Key=key)
+        body = result["Body"]
+        try:
+            if result.get("ContentLength", 0) > max_bytes:
+                raise StorageError("图片大小超限")
+            content = body.read(max_bytes + 1)
+            if len(content) > max_bytes:
+                raise StorageError("图片大小超限")
+            return content
+        finally:
+            body.close()
+    except StorageError:
+        raise
+    except Exception as exc:
+        raise StorageError("读取已上传图片失败，请重试") from exc
+
+
+def save_content_image(content: bytes, mime_type: str, company_id: int, sha256: str) -> tuple[str, str]:
+    """同公司同内容始终使用同一对象路径；只接受服务端校验后的内容。"""
+    endpoint, access, secret, bucket, public_base = _configuration(get_settings())
+    key = f"images/company/{company_id}/{sha256}{IMAGE_SUFFIXES[mime_type]}"
+    try:
+        client = _r2_client(endpoint, access, secret)
+        client.put_object(Bucket=bucket, Key=key, Body=content, ContentType=mime_type,
+            CacheControl="public, max-age=31536000, immutable", ContentDisposition="inline",
+            Metadata={"sha256": sha256})
+        saved = client.head_object(Bucket=bucket, Key=key)
+        if saved.get("ContentLength") != len(content) or saved.get("Metadata", {}).get("sha256") != sha256:
+            raise StorageError("图片保存核验失败，请重试")
+        return key, f"{public_base}/{quote(key, safe='/')}"
+    except StorageError:
+        raise
+    except Exception as exc:
+        raise StorageError("保存图片到 R2 失败，请重试") from exc
+
+
 async def upload_image_bytes_async(content: bytes, mime_type: str, company_id: int | None, category: str) -> str:
     """在异步请求/任务中避免阻塞事件循环。"""
     return await asyncio.to_thread(upload_image_bytes, content, mime_type, company_id, category)

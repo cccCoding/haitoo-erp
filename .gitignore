@@ -12,3 +12,6 @@ backend/uploads/
 .workbuddy-ai/
 .playwright-cli/
 backend/haitoro.db
+deploy-backups/
+deploy-reports/
+deploy-image-cache/

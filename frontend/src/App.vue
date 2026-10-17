@@ -5,7 +5,8 @@ import axios from 'axios'
 import SearchableSelect from './SearchableSelect.vue'
 import ShopDataHeading from './ShopDataHeading.vue'
 import CrossCompanyCollection from './CrossCompanyCollection.vue'
-import { supplyHealthLabels } from './supply-catalog'
+import MaterialTransferDialog from './MaterialTransferDialog.vue'
+import { deduplicatedImageUpload, imageSha256, transferItem, type MaterialTransferItem } from './material-transfer'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
 import { batchTitleRequest, createBatchTitleGenerator, emptyTitleGenerationProgress, hasValidBatchTitles, isUnfinishedTitle, titleGenerationStatusLabels, type BatchTitleGroup } from './batch-title-generation'
 
@@ -118,8 +119,7 @@ watch(showMaterialBatchDraftDialog, visible => {
   for (const group of materialBatchGroups.value) { group.additionalRequirements = ''; group.showAdditionalRequirements = false; group.showTitleHelp = false }
 }, { flush: 'sync' })
 const pendingMaterialUploadFiles = ref<File[]>([]), showMaterialUploadDialog = ref(false), materialUploadTemplateId = ref<number | null>(null)
-const materialUploadedCount = ref(0), materialUploadTotal = ref(0), pendingMaterialUploadUrls = ref<string[]>([])
-const MATERIAL_UPLOAD_CONCURRENCY = 8, MATERIAL_UPLOAD_MAX_FILES = 100, IMAGE_UPLOAD_RETRY = 2
+const MATERIAL_UPLOAD_MAX_FILES = 100, IMAGE_UPLOAD_RETRY = 2
 const templateSaving = ref(false)
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'], MAX_IMAGE_BYTES = 3 * 1024 * 1024
 const showDraftEditDialog = ref(false), editingDraft = ref<any>(null), draftEditTitle = ref(''), draftEditProductDescription = ref(''), draftEditSaving = ref(false), draftEditError = ref('')
@@ -217,10 +217,9 @@ const selectedTaskIds = ref<number[]>([]), showBatchClaimDialog = ref(false), ba
 const materialPageSize = ref(20), currentMaterialPage = ref(1), materialTotal = ref(0), materialCreatorFilterId = ref<number | null>(null), materialListRefreshing = ref(false)
 type MaterialSourceType = '' | 'ai_created' | 'local_upload' | 'imported' | 'cross_company'
 const materialSourceTypeFilter = ref<MaterialSourceType>('')
-const materialHealthFilter = ref(''), materialHealthApplied = ref('')
 const materialCreatedFrom = ref(''), materialCreatedTo = ref('')
 const appliedMaterialFilters = ref<{template_id:number | null; creator_id:number | null; source_type:MaterialSourceType; created_from:string; created_to:string}>({template_id:null, creator_id:null, source_type:'', created_from:'', created_to:''})
-function materialQueryParams() { return {page:currentMaterialPage.value, page_size:materialPageSize.value, ...appliedMaterialFilters.value, created_from:appliedMaterialFilters.value.created_from || undefined, created_to:appliedMaterialFilters.value.created_to || undefined, usage_status:activeMaterialUsageTab.value, health:materialHealthApplied.value || undefined} }
+function materialQueryParams() { return {page:currentMaterialPage.value, page_size:materialPageSize.value, ...appliedMaterialFilters.value, created_from:appliedMaterialFilters.value.created_from || undefined, created_to:appliedMaterialFilters.value.created_to || undefined, usage_status:activeMaterialUsageTab.value} }
 const creatorFiltersInitialized = ref(false)
 const previewImageUrl = ref(''), previewImageAlt = ref('')
 type ImageWorkspaceMode = 'carousel' | 'full'
@@ -650,7 +649,6 @@ async function searchMaterials() {
   if (materialListRefreshing.value) return
   if (materialCreatedFrom.value && materialCreatedTo.value && new Date(materialCreatedFrom.value) > new Date(materialCreatedTo.value)) { showToast('创建开始时间不能晚于结束时间'); return }
   appliedMaterialFilters.value = {template_id:materialTemplateFilterId.value, creator_id:materialCreatorFilterId.value, source_type:materialSourceTypeFilter.value, created_from:toUtcIso(materialCreatedFrom.value), created_to:toUtcIso(materialCreatedTo.value)}
-  materialHealthApplied.value = materialHealthFilter.value
   currentMaterialPage.value = 1
   await refreshMaterialList()
 }
@@ -1125,23 +1123,32 @@ async function uploadCreativeAssets() {
   const urls = Array<string>(assets.length)
   let cursor = 0
   creativeUploadedCount.value = assets.filter(asset => asset.uploadedUrl).length
+  const upload = deduplicatedImageUpload(async (file, sha256) => {
+    const {data: target} = await api.post('/uploads/creative-asset/presign', {
+      content_type: file.type, content_length: file.size, sha256,
+    }, {headers: headers.value})
+    if (target.upload_url) {
+      await axios.put(target.upload_url, file, {headers: {'Content-Type': file.type}})
+    }
+    return (await api.post('/uploads/complete', {
+      category: 'creative', upload_token: target.upload_token, file_token: target.file_token,
+    }, {headers: headers.value})).data.url
+  })
   const worker = async () => {
     while (true) {
       const index = cursor++
       if (index >= assets.length) return
       const asset = assets[index]
       if (asset.uploadedUrl) { urls[index] = asset.uploadedUrl; continue }
-      const {data: signed}=await api.post('/uploads/creative-asset/presign',{content_type:asset.file.type,content_length:asset.file.size},{headers:headers.value})
-      await axios.put(signed.upload_url, asset.file, {headers:{'Content-Type':asset.file.type}})
-      asset.uploadedUrl = signed.url
-      urls[index] = signed.url
+      asset.uploadedUrl = await upload(asset.file)
+      urls[index] = asset.uploadedUrl
       creativeUploadedCount.value++
     }
   }
   const workerResults = await Promise.allSettled(Array.from({length: Math.min(4, assets.length)}, worker))
   const failedWorker = workerResults.find((result): result is PromiseRejectedResult => result.status === 'rejected')
   if (failedWorker) throw failedWorker.reason
-  return urls
+  return [...new Set(urls)]
 }
 async function createTask() {
   creativeSubmitError.value = ''
@@ -1262,17 +1269,17 @@ function onCoverChange(event: Event) { const input=event.target as HTMLInputElem
 function onSizeChartChange(event: Event) { const input=event.target as HTMLInputElement, file=input.files?.[0] || null; if(file && !validUploadImageFile(file)){input.value='';return} newTemplateSizeChart.value=file; newTemplateSizeChartPreview.value=file ? URL.createObjectURL(file) : imageUrl(editingTemplate.value?.size_chart_url) }
 function normalizeTemplateNameForSku() { const name=newTemplateName.value.trim().toUpperCase(); if(!/^[A-Z0-9]{1,5}$/.test(name)){templateFormTab.value='basic';showToast('模板名称同时作为 SKU 前缀，仅支持 1-5 位字母或数字');throw new Error('invalid template name')} newTemplateName.value=name }
 async function presignAndUploadImage(file: File, category: string): Promise<string> {
-  let lastError: any
-  for (let attempt = 0; attempt <= IMAGE_UPLOAD_RETRY; attempt++) {
-    try {
-      const { data } = await api.post('/uploads/presign', {
-        category, files: [{ content_type: file.type, content_length: file.size }],
-      }, { headers: headers.value })
-      await axios.put(data[0].upload_url, file, { headers: { 'Content-Type': file.type } })
-      return data[0].url as string
-    } catch (e: any) { lastError = e }
+  const sha256 = await imageSha256(file)
+  const { data } = await api.post('/uploads/presign', {
+    category, files: [{ content_type: file.type, content_length: file.size, sha256 }],
+  }, { headers: headers.value })
+  const target = data[0]
+  if (target.upload_url) {
+    await axios.put(target.upload_url, file, { headers: { 'Content-Type': file.type } })
   }
-  throw lastError
+  return (await api.post('/uploads/complete', {
+    category, upload_token: target.upload_token, file_token: target.file_token,
+  }, { headers: headers.value })).data.url
 }
 async function uploadCover() { normalizeTemplateNameForSku(); if (!newTemplateImage.value) return undefined; return presignAndUploadImage(newTemplateImage.value, 'template') }
 async function uploadSizeChart() { if (!newTemplateSizeChart.value) return undefined; return presignAndUploadImage(newTemplateSizeChart.value, 'template-size-chart') }
@@ -1335,7 +1342,7 @@ async function generateMaterialDraftTitle() {
     materialDraftTitleGenerating.value = false
   }
 }
-function openMaterialDraftDialog() { if (selectedMaterialAssets.value.some(asset=>['invalid','check_failed'].includes(asset.health))) { showToast('所选素材包含不可用图片，请移除后重新选择');return } libraryDraftMode.value = false; if(!selectedMaterialTemplateId.value){showToast('请选择属于同一产品模板的素材');return} materialDraftAssets.value = [...selectedMaterialAssets.value]; draggedMaterialDraftAssetId.value = null; materialDraftTemplateId.value = selectedMaterialTemplateId.value; materialDraftTitle.value = ''; materialDraftProductDescription.value = ''; materialDraftSizeChartPreview.value = ''; onMaterialDraftTemplateChange(); showMaterialDraftDialog.value = true }
+function openMaterialDraftDialog() { libraryDraftMode.value = false; if(!selectedMaterialTemplateId.value){showToast('请选择属于同一产品模板的素材');return} materialDraftAssets.value = [...selectedMaterialAssets.value]; draggedMaterialDraftAssetId.value = null; materialDraftTemplateId.value = selectedMaterialTemplateId.value; materialDraftTitle.value = ''; materialDraftProductDescription.value = ''; materialDraftSizeChartPreview.value = ''; onMaterialDraftTemplateChange(); showMaterialDraftDialog.value = true }
 function librarySource(asset:any) { return {source_type:asset.source_type, id:asset.id} }
 function openProductLibraryDraftDialog(batch = false) {
   if (productLibrarySelectionLoading.value) return
@@ -1419,7 +1426,6 @@ function buildMaterialBatchGroups() {
   materialBatchGroups.value = Array.from({length: completeCount / materialBatchGroupSize.value}, (_, index) => ({ id: ++materialBatchGroupId, assets: assets.slice(index * materialBatchGroupSize.value, (index + 1) * materialBatchGroupSize.value), title: libraryDraftMode.value ? assets[index * materialBatchGroupSize.value]?.title || '' : '', titleStatus: 'idle', titleError: '', edited:false, additionalRequirements: '', showAdditionalRequirements: false, showTitleHelp: false }))
 }
 function openMaterialBatchDraftDialog() {
-  if (selectedMaterialAssets.value.some(asset=>['invalid','check_failed'].includes(asset.health))) { showToast('所选素材包含不可用图片，请移除后重新选择'); return }
   libraryDraftMode.value = false
   if (!canCreateMaterialBatch.value) { showToast('请选择至少 5 张属于同一产品模板的素材'); return }
   buildMaterialBatchGroups(); draggedMaterialBatchAsset.value = null; showMaterialBatchDraftDialog.value = true
@@ -2094,15 +2100,16 @@ async function openClaimMaterialsDialog(task: any) { try { claimingTask.value = 
 function toggleClaimResult(url: string) { selectedClaimResultUrls.value = selectedClaimResultUrls.value.includes(url) ? selectedClaimResultUrls.value.filter(item => item !== url) : [...selectedClaimResultUrls.value, url] }
 async function claimMaterials() {
   if (!claimingTask.value || !selectedClaimResultUrls.value.length) { showToast('请至少选择一张图片'); return }
-  try {
-    claimingMaterials.value = true
-    await api.post(`/tasks/${claimingTask.value.id}/claim-materials`, { result_urls: selectedClaimResultUrls.value }, { headers: headers.value })
-    showClaimMaterialsDialog.value = false
-    selectedTaskIds.value = []
-    await refresh()
-    showToast('领取成功，可在素材库查看')
-  } catch(e:any) { showToast(e.response?.data?.detail || '领取素材失败') }
-  finally { claimingMaterials.value = false }
+  const taskId = claimingTask.value.id, requestHeaders={...headers.value}
+  const items = selectedClaimResultUrls.value.map(url=>transferItem(`任务 #${taskId}`, async (force,requestKey)=>{
+    const {data}=await api.post(`/tasks/${taskId}/claim-materials`,{
+      result_urls:[url],force_create:force,request_key:requestKey,
+    },{headers:requestHeaders})
+    return data.items[0]
+  },imageUrl(url)))
+  showClaimMaterialsDialog.value=false
+  selectedTaskIds.value=[]
+  openMaterialTransfers(items)
 }
 function toggleTaskSelection(taskId: number) { selectedTaskIds.value = selectedTaskIds.value.includes(taskId) ? selectedTaskIds.value.filter(id => id !== taskId) : [...selectedTaskIds.value, taskId] }
 function taskCanBeSelected(task:any) { return task.status === 'failed' || activeTaskType.value === 'sku_image' && ['awaiting_selection','completed'].includes(task.status) && Boolean(task.result_count || task.result_urls?.length) }
@@ -2120,25 +2127,17 @@ async function openBatchClaimDialog() {
 }
 async function confirmBatchClaim() {
   if (batchClaimLoading.value || batchClaiming.value) return
-  const groups = groupedBatchClaimItems.value.map(group => ({ ...group, urls: group.urls.filter(url => selectedBatchClaimImages.value.has(batchClaimImageKey(group.taskId, url))) }))
-  if (!groups.length) { showToast('没有待审核任务'); return }
-  batchClaiming.value = true; batchClaimCompleted.value = 0; batchClaimFailed.value = 0; batchClaimTotal.value = groups.length
-  const successfulTaskIds = new Set<number>()
-  for (const group of groups) {
-    try {
-      await api.post(`/tasks/${group.taskId}/claim-materials`, { result_urls: group.urls }, { headers: headers.value })
-      successfulTaskIds.add(group.taskId)
-    }
-    catch { batchClaimFailed.value++ }
-    finally { batchClaimCompleted.value++ }
-  }
-  batchClaimItems.value = batchClaimItems.value.filter(item => !successfulTaskIds.has(item.taskId))
-  selectedBatchClaimImages.value = new Set(batchClaimItems.value.filter(item => selectedBatchClaimImages.value.has(batchClaimImageKey(item.taskId, item.url))).map(item => batchClaimImageKey(item.taskId, item.url)))
-  selectedTaskIds.value = selectedTaskIds.value.filter(id => !successfulTaskIds.has(id))
-  batchClaiming.value = false
-  if (!batchClaimFailed.value) showBatchClaimDialog.value = false
-  await refreshTaskList()
-  showToast(batchClaimFailed.value ? `批量审核完成，${batchClaimFailed.value} 个任务失败，可点击确认重试` : `批量审核成功，共处理 ${batchClaimTotal.value} 个任务`)
+  const groups=groupedBatchClaimItems.value.map(group=>({...group,urls:group.urls.filter(url=>selectedBatchClaimImages.value.has(batchClaimImageKey(group.taskId,url)))}))
+  const requestHeaders={...headers.value}
+  const items=groups.flatMap(group=>(group.urls.length ? group.urls : [null]).map(url=>transferItem(`任务 #${group.taskId}${url ? '' : '（不采用图片）'}`,async(force,requestKey)=>{
+    const {data}=await api.post(`/tasks/${group.taskId}/claim-materials`,{
+      result_urls:url ? [url] : [],force_create:force,request_key:requestKey,
+    },{headers:requestHeaders})
+    return data.items[0] || {outcome:'created'}
+  },url ? imageUrl(url) : undefined)))
+  showBatchClaimDialog.value=false
+  selectedTaskIds.value=[]
+  openMaterialTransfers(items)
 }
 async function retryTaskResult(task: any) {
   try {
@@ -2206,31 +2205,35 @@ async function previewMaterialImport(event:Event) {
   } catch(e:any) { showToast(e.response?.data?.detail || '解析素材表格失败') }
   finally { materialImportPreviewing.value = false }
 }
+const materialTransferItems = ref<MaterialTransferItem[]>([]), showMaterialTransferResults = ref(false)
+function openMaterialTransfers(items: MaterialTransferItem[]) {
+  materialTransferItems.value = items
+  showMaterialTransferResults.value = true
+}
+async function refreshAfterMaterialTransfer() {
+  try { await Promise.all([refreshMaterialList(), refreshTaskList()]) }
+  catch { showToast('处理结果已保存，列表刷新失败，请刷新页面') }
+}
 async function confirmMaterialImport() {
-  if (materialImportSaving.value) return
   if (!materialImportTemplateId.value) { materialImportError.value = '请选择产品模板'; return }
-  if (!materialImportSelectedCount.value) { materialImportError.value = '请至少选择一张素材'; return }
-  try {
-    materialImportSaving.value = true
-    materialImportError.value = ''
-    const { data } = await api.post('/material-assets/import-confirm', {
-      template_id:materialImportTemplateId.value,
-      urls:materialImportItems.value.filter(item => item.selected).map(item => item.url),
-    }, {headers:headers.value})
-    showMaterialImportDialog.value = false
-    materialImportItems.value = []
-    activeMaterialUsageTab.value = 'unused'
-    materialTemplateFilterId.value = null; materialCreatorFilterId.value = null; materialSourceTypeFilter.value = ''
-    materialCreatedFrom.value = ''; materialCreatedTo.value = ''
-    appliedMaterialFilters.value = {template_id:null, creator_id:null, source_type:'', created_from:'', created_to:''}
-    currentMaterialPage.value = 1; selectedMaterialAssetIds.value = []
-    showToast(`已导入 ${data.imported} 张素材`)
-    await refreshMaterialList()
-  } catch(e:any) {
-    const message = e.response?.data?.detail || '导入素材失败，请稍后重试'
-    if (showMaterialImportDialog.value) materialImportError.value = message
-    else showToast('导入已完成，但列表刷新失败，请刷新页面')
-  } finally { materialImportSaving.value = false }
+  const selected = materialImportItems.value.filter(item=>item.selected)
+  if (!selected.length) { materialImportError.value = '请至少选择一张素材'; return }
+  const templateId = materialImportTemplateId.value, requestHeaders = {...headers.value}
+  const items = selected.map(source => {
+    let fileToken: string | undefined
+    return transferItem(source.url, async (force, requestKey) => {
+      const {data} = await api.post('/material-assets/import-confirm', {
+        template_id:templateId, urls:fileToken ? [] : [source.url], file_token:fileToken,
+        force_create:force || source.exists, request_key:requestKey,
+      }, {headers:requestHeaders})
+      const result = data.items[0]
+      if (result.file_token) fileToken = result.file_token
+      if (result.outcome==='error' && /过期/.test(result.error || '')) fileToken=undefined
+      return result
+    }, source.url)
+  })
+  showMaterialImportDialog.value = false
+  openMaterialTransfers(items)
 }
 function chooseMaterialUploadFiles(event: Event) {
   const input = event.target as HTMLInputElement
@@ -2240,59 +2243,54 @@ function chooseMaterialUploadFiles(event: Event) {
   if (files.length > MATERIAL_UPLOAD_MAX_FILES) { showToast(`单次最多上传 ${MATERIAL_UPLOAD_MAX_FILES} 张图片`); return }
   if (files.some(file => !ALLOWED_IMAGE_TYPES.includes(file.type) || !file.size || file.size > MAX_IMAGE_BYTES)) { showToast('仅支持 JPG、PNG、WebP，且单张不能超过 3MB'); return }
   pendingMaterialUploadFiles.value = files
-  pendingMaterialUploadUrls.value = []
   materialUploadTemplateId.value = null
   showMaterialUploadDialog.value = true
 }
 async function uploadMaterialAssets() {
-  const files = [...pendingMaterialUploadFiles.value]
-  if (!files.length || !materialUploadTemplateId.value) { showToast('请选择产品模板'); return }
-  try {
-    materialUploading.value = true
-    materialUploadError.value = ''
-    materialUploadTotal.value = files.length
-    materialUploadedCount.value = 0
-    // 已直传成功的图片保留 URL，重试时只补传失败的那几张。
-    const missing = files.map((_file, index) => index).filter(index => !pendingMaterialUploadUrls.value[index])
-    if (missing.length) {
-      const { data: signed } = await api.post('/material-assets/presign', {
-        files: missing.map(index => ({ content_type: files[index].type, content_length: files[index].size })),
-      }, { headers: headers.value })
-      let cursor = 0
-      const worker = async () => {
-        while (true) {
-          const slot = cursor++
-          if (slot >= missing.length) return
-          const index = missing[slot], file = files[index], target = signed[slot]
-          for (let attempt = 0; attempt <= IMAGE_UPLOAD_RETRY && !pendingMaterialUploadUrls.value[index]; attempt++) {
-            await axios.put(target.upload_url, file, { headers: { 'Content-Type': file.type } })
-              .then(() => { pendingMaterialUploadUrls.value[index] = target.url })
-              .catch(() => undefined)
-          }
-          if (!pendingMaterialUploadUrls.value[index]) throw new Error(`「${file.name}」上传失败`)
-          materialUploadedCount.value++
+  const files = [...pendingMaterialUploadFiles.value], templateId = materialUploadTemplateId.value
+  if (!files.length || !templateId) { materialUploadError.value='请选择产品模板'; return }
+  const requestHeaders = {...headers.value}
+  const prepared = new Map<string, Promise<any>>()
+  const items = files.map(file => {
+    let target: any, fileHash: string | undefined
+    return transferItem(file.name, async (force, requestKey) => {
+      if (!target) {
+        const sha256 = fileHash || await imageSha256(file)
+        fileHash=sha256
+        if (!prepared.has(sha256)) {
+          const promise = (async () => {
+            const { data } = await api.post('/material-assets/presign', {
+              template_id:templateId, files:[{content_type:file.type,content_length:file.size,sha256}],
+            }, {headers:requestHeaders})
+            const signed = data[0]
+            if (signed.upload_url) {
+              let lastError: unknown
+              for (let attempt=0; attempt<=IMAGE_UPLOAD_RETRY; attempt++) {
+                try { await axios.put(signed.upload_url,file,{headers:{'Content-Type':file.type}}); lastError=undefined; break }
+                catch (error) { lastError=error }
+              }
+              if (lastError) throw lastError
+            }
+            return signed
+          })()
+          prepared.set(sha256,promise)
+          void promise.catch(()=>prepared.delete(sha256))
         }
+        target = await prepared.get(sha256)
       }
-      const results = await Promise.allSettled(Array.from({ length: Math.min(MATERIAL_UPLOAD_CONCURRENCY, missing.length) }, worker))
-      const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
-      if (failed) throw failed.reason
-    }
-    await api.post('/material-assets/commit', {
-      template_id: materialUploadTemplateId.value,
-      items: files.map((file, index) => ({ url: pendingMaterialUploadUrls.value[index], name: file.name })),
-    }, { headers: headers.value })
-    showMaterialUploadDialog.value = false
-    pendingMaterialUploadFiles.value = []
-    pendingMaterialUploadUrls.value = []
-    currentMaterialPage.value = 1
-    await refreshMaterialList()
-    showToast(`已上传 ${files.length} 张素材`)
-  } catch (e:any) {
-    materialUploadError.value = e.response?.data?.detail || e?.message || '上传素材失败，请稍后重试'
-  } finally {
-    materialUploading.value = false
-    materialUploadTotal.value = 0
-  }
+      const {data} = await api.post('/material-assets/commit', {
+        template_id:templateId, items:[{upload_token:target.upload_token,file_token:target.file_token,
+          name:file.name,request_key:requestKey,force_create:force}],
+      }, {headers:requestHeaders})
+      const result = data.items[0]
+      if (result.file_token) { target.file_token=result.file_token; target.upload_token=undefined }
+      if (result.outcome==='error' && /过期/.test(result.error || '')) { target=undefined; if(fileHash) prepared.delete(fileHash) }
+      return result
+    })
+  })
+  showMaterialUploadDialog.value=false
+  pendingMaterialUploadFiles.value=[]
+  openMaterialTransfers(items)
 }
 async function deleteSelectedMaterialAssets() {
   const assetIds = [...selectedMaterialAssetIds.value]
@@ -2418,7 +2416,7 @@ function openHubstudioDialog() { hubstudioForm.value={app_id:'',app_secret:'',gr
 async function saveHubstudioAccount() { try { hubstudioSaving.value=true; await api.put('/hubstudio/account',hubstudioForm.value,{headers:headers.value}); showHubstudioDialog.value=false; await refresh(); showToast('HubStudio API 凭据已保存') } catch(e:any) { shopError.value=e.response?.data?.detail || '保存 HubStudio 配置失败' } finally { hubstudioSaving.value=false } }
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 function showToast(message: string) { toast.value = message; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = '' }, 3000) }
-function logout(){ materialHealthFilter.value=''; materialHealthApplied.value=''; crossCompanyCollectionEnabled.value=false; materialCollectionDetail.value=null; hubUploadTemplateId.value=null; hubUploadTemplates.value=[]; hubUploadRequestId++; hubUploadTasks.value=[]; hubUploadTotal.value=0; hubUploadPage.value=1; hubUploadCreatorId.value=null; hubUploadLoading.value=false; hubUploadError.value=''; showHubstudioDialog.value=false; localStorage.removeItem('haitoro_token'); token.value=''; user.value=null; taskCreatorFilterId.value=null; materialCreatorFilterId.value=null; materialTemplateFilterId.value=null; materialSourceTypeFilter.value=''; materialCreatedFrom.value=''; materialCreatedTo.value=''; appliedMaterialFilters.value={template_id:null,creator_id:null,source_type:'',created_from:'',created_to:''}; draftCreatorFilterId.value=null; creatorFiltersInitialized.value=false; productLibraryItems.value=[]; productLibraryTotal.value=0; productLibraryPage.value=1; productLibraryRankingRequestId++; productLibraryRankingItems.value=[]; productLibraryRankingTotal.value=0; productLibraryRankingDate.value=null; productLibraryRankingThroughDate.value=null; productLibraryShops.value=[]; rankingShopFilters.value={}; rankingCreatorFilters.value={}; productLibraryCreatorId.value=null; stagnantRequestId++; stagnantMaterials.value=[]; stagnantTotal.value=0; stagnantPage.value=1; stagnantCreatorId.value=null; stagnantError.value=''; stagnantLoading.value=false; newImagesRequestId++; newImages.value=[]; newImagesTotal.value=0; newImagesPage.value=1; newImagesCreatorId.value=null; newImagesUsageStatus.value='all'; newImagesError.value=''; newImagesLoading.value=false; productLibraryStatisticsTask.value=null; activeProductLibraryTab.value='products'; productLibrarySelectedShopIds.value=[]; productLibraryShopSearch.value=''; productLibraryTemplateFilter.value=''; productLibrarySku.value=''; appliedProductLibraryFilters.value={sourceIds:[],template:'',sku:'',creatorId:null}; selectedProductLibraryIds.value=[]; productLibraryFilters.value={shops:[]} }
+function logout(){ showMaterialTransferResults.value=false; crossCompanyCollectionEnabled.value=false; materialCollectionDetail.value=null; hubUploadTemplateId.value=null; hubUploadTemplates.value=[]; hubUploadRequestId++; hubUploadTasks.value=[]; hubUploadTotal.value=0; hubUploadPage.value=1; hubUploadCreatorId.value=null; hubUploadLoading.value=false; hubUploadError.value=''; showHubstudioDialog.value=false; localStorage.removeItem('haitoro_token'); token.value=''; user.value=null; taskCreatorFilterId.value=null; materialCreatorFilterId.value=null; materialTemplateFilterId.value=null; materialSourceTypeFilter.value=''; materialCreatedFrom.value=''; materialCreatedTo.value=''; appliedMaterialFilters.value={template_id:null,creator_id:null,source_type:'',created_from:'',created_to:''}; draftCreatorFilterId.value=null; creatorFiltersInitialized.value=false; productLibraryItems.value=[]; productLibraryTotal.value=0; productLibraryPage.value=1; productLibraryRankingRequestId++; productLibraryRankingItems.value=[]; productLibraryRankingTotal.value=0; productLibraryRankingDate.value=null; productLibraryRankingThroughDate.value=null; productLibraryShops.value=[]; rankingShopFilters.value={}; rankingCreatorFilters.value={}; productLibraryCreatorId.value=null; stagnantRequestId++; stagnantMaterials.value=[]; stagnantTotal.value=0; stagnantPage.value=1; stagnantCreatorId.value=null; stagnantError.value=''; stagnantLoading.value=false; newImagesRequestId++; newImages.value=[]; newImagesTotal.value=0; newImagesPage.value=1; newImagesCreatorId.value=null; newImagesUsageStatus.value='all'; newImagesError.value=''; newImagesLoading.value=false; productLibraryStatisticsTask.value=null; activeProductLibraryTab.value='products'; productLibrarySelectedShopIds.value=[]; productLibraryShopSearch.value=''; productLibraryTemplateFilter.value=''; productLibrarySku.value=''; appliedProductLibraryFilters.value={sourceIds:[],template:'',sku:'',creatorId:null}; selectedProductLibraryIds.value=[]; productLibraryFilters.value={shops:[]} }
 api.interceptors.response.use(
   response => response,
   requestError => {
@@ -2444,6 +2442,7 @@ onMounted(() => {
 })
 let productLibraryStatisticsPollingTimer: ReturnType<typeof setInterval> | undefined
 onUnmounted(() => {
+  showMaterialTransferResults.value=false
   materialBatchTitleGenerator.reset()
   document.removeEventListener('pointerdown', closeProductLibraryShopFilterOnOutsideClick)
   if (taskResultPollingTimer) clearInterval(taskResultPollingTimer)
@@ -2485,7 +2484,7 @@ onUnmounted(() => {
       <CrossCompanyCollection v-else-if="page==='collection' || page==='collection-history'" :key="page" :token="token" :templates="templates" :user="user" :history-only="page==='collection-history'" @back="page='materials';refresh()" @revoked="crossCompanyCollectionEnabled=false" @unauthorized="logout" @account="openMyAccountDialog" />
       <section v-else-if="page==='materials'" class="page">
         <div class="section-heading material-heading"><div><span>素材入库后将永久绑定产品模板和 SKU；请选择同一模板的素材创建商品草稿。</span><div class="material-usage-tabs"><button v-for="tab in materialUsageTabs" :key="tab.key" :class="{active:activeMaterialUsageTab===tab.key}" @click="changeMaterialUsageTab(tab.key)">{{tab.label}}</button></div></div><div class="material-import-actions"><button v-if="crossCompanyCollectionEnabled && user?.role==='company_admin'" class="secondary" @click="page='collection'">采集</button><button class="secondary" :disabled="materialTemplateDownloading" @click="downloadMaterialImportTemplate">{{materialTemplateDownloading ? '下载中…' : '下载模版'}}</button><button class="secondary" :disabled="materialImportPreviewing || materialImportSaving" @click="materialImportFileInput?.click()">{{materialImportPreviewing ? '解析中…' : '导入模版'}}</button><input ref="materialImportFileInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden @change="previewMaterialImport"/><label class="secondary material-upload-button" :class="{disabled: materialUploading}"><input type="file" multiple accept="image/png,image/jpeg,image/webp" :disabled="materialUploading" @change="chooseMaterialUploadFiles"/>{{materialUploading ? '上传中…' : '上传本地素材'}}</label></div></div>
-        <div class="material-filter-row material-search-filters"><label class="material-template-filter">产品模板<select v-model="materialTemplateFilterId"><option :value="null">全部模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><label v-if="user?.role==='company_admin'" class="material-template-filter">创作人<select v-model="materialCreatorFilterId"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label><label class="material-template-filter">类型<select v-model="materialSourceTypeFilter"><option value="">全部类型</option><option value="ai_created">AI创作</option><option value="local_upload">本地上传</option><option value="imported">导入</option><option v-if="crossCompanyCollectionEnabled" value="cross_company">采集</option></select></label><label class="material-template-filter">图片状态<select v-model="materialHealthFilter"><option value="">全部状态</option><option v-for="(label,key) in supplyHealthLabels" :key="key" :value="key">{{label}}</option></select></label><label class="material-template-filter material-time-filter">创建开始时间<input v-model="materialCreatedFrom" type="datetime-local"/></label><label class="material-template-filter material-time-filter">创建结束时间<input v-model="materialCreatedTo" type="datetime-local"/></label><button class="primary material-search-button" :disabled="materialListRefreshing" @click="searchMaterials">{{materialListRefreshing ? '搜索中…' : '搜索'}}</button></div>
+        <div class="material-filter-row material-search-filters"><label class="material-template-filter">产品模板<select v-model="materialTemplateFilterId"><option :value="null">全部模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><label v-if="user?.role==='company_admin'" class="material-template-filter">创作人<select v-model="materialCreatorFilterId"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label><label class="material-template-filter">类型<select v-model="materialSourceTypeFilter"><option value="">全部类型</option><option value="ai_created">AI创作</option><option value="local_upload">本地上传</option><option value="imported">导入</option><option v-if="crossCompanyCollectionEnabled" value="cross_company">采集</option></select></label><label class="material-template-filter material-time-filter">创建开始时间<input v-model="materialCreatedFrom" type="datetime-local"/></label><label class="material-template-filter material-time-filter">创建结束时间<input v-model="materialCreatedTo" type="datetime-local"/></label><button class="primary material-search-button" :disabled="materialListRefreshing" @click="searchMaterials">{{materialListRefreshing ? '搜索中…' : '搜索'}}</button></div>
         <p v-if="materialUploadError" class="error material-upload-error">{{materialUploadError}}</p>
         <section v-if="selectedMaterialAssetIds.length" class="material-draft-bar"><strong>已选 {{selectedMaterialAssetIds.length}} 张素材</strong><button class="primary" @click="openMaterialDraftDialog">创建商品草稿</button><button class="primary" @click="openMaterialBatchDraftDialog">组合创建草稿</button><button class="secondary" :disabled="materialDownloading" @click="downloadSelectedMaterialAssets">{{materialDownloading ? '下载中…' : '下载到本地'}}</button><button class="negative" :disabled="materialDownloading" @click="deleteSelectedMaterialAssets">删除选中素材</button><button class="ghost" :disabled="materialDownloading" @click="selectedMaterialAssetIds=[]">取消选择</button></section>
         <section class="draft-table material-list refreshable-list" :aria-busy="materialListRefreshing">
@@ -2661,7 +2660,7 @@ onUnmounted(() => {
     </section>
   </main>
   <div v-if="materialCollectionDetail" class="modal-backdrop" @click.self="materialCollectionDetail=null"><section v-dialog-focus="{close:()=>{materialCollectionDetail=null}}" class="modal-card" role="dialog" aria-modal="true" aria-labelledby="collection-detail-title"><h2 id="collection-detail-title">素材采集来源</h2><p>来源公司：{{materialCollectionDetail.collection_source.source_company_name}}</p><p>来源库：{{materialCollectionDetail.collection_source.source_library==='material'?'素材库':'产品库'}}</p><p>原 SKU：{{materialCollectionDetail.collection_source.source_sku || '无 SKU'}}</p><p>采集时间：{{new Date(materialCollectionDetail.collection_source.collected_at).toLocaleString()}}</p><p>本公司 SKU：{{materialCollectionDetail.sku}}</p></section></div>
-  <div v-if="showMaterialImportDialog" class="modal-backdrop" @click.self="!materialImportSaving && (showMaterialImportDialog=false)"><section class="modal-card material-draft-dialog claim-materials-dialog material-import-dialog" role="dialog" aria-modal="true" aria-labelledby="material-import-title"><button class="modal-close" :disabled="materialImportSaving" aria-label="关闭导入弹窗" @click="showMaterialImportDialog=false">×</button><h2 id="material-import-title">导入素材</h2><p>新链接默认选中，已存在的链接默认不选中；重新选中已有链接会创建新素材和新 SKU。</p><label>产品模板<select v-model="materialImportTemplateId" :disabled="materialImportSaving" @change="materialImportError=''"><option :value="null">请选择产品模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><div class="material-import-toolbar"><strong>共 {{materialImportItems.length}} 张 · 已选 {{materialImportSelectedCount}} 张</strong><button class="secondary" :disabled="materialImportSaving" @click="materialImportItems.forEach(item => item.selected=true)">全选</button><button class="secondary" :disabled="materialImportSaving" @click="materialImportItems.forEach(item => item.selected=false)">取消全选</button></div><div class="material-grid claim-result-grid material-import-grid"><label v-for="item in materialImportItems" :key="item.url" class="material-card" :class="{selected:item.selected}"><input v-model="item.selected" class="material-import-checkbox" type="checkbox" :disabled="materialImportSaving" :aria-label="`选择图片 ${item.url}`"/><img v-if="!item.failed" :src="item.url" alt="待导入图片" loading="lazy" @error="item.failed=true"/><span v-else class="material-import-image-error">图片预览失败<br/>仍可导入此链接</span><div><b>{{item.exists ? '已存在' : '新素材'}}</b><small :title="item.url">{{item.url}}</small></div></label></div><p v-if="materialImportError" class="error material-draft-error" role="alert">{{materialImportError}}</p><div class="modal-actions"><button class="ghost" :disabled="materialImportSaving" @click="showMaterialImportDialog=false">取消</button><button class="primary" :disabled="materialImportSaving" @click="confirmMaterialImport">{{materialImportSaving ? '导入中…' : `确认导入（${materialImportSelectedCount}）`}}</button></div></section></div>
+  <div v-if="showMaterialImportDialog" class="modal-backdrop" @click.self="!materialImportSaving && (showMaterialImportDialog=false)"><section class="modal-card material-draft-dialog claim-materials-dialog material-import-dialog" role="dialog" aria-modal="true" aria-labelledby="material-import-title"><button class="modal-close" :disabled="materialImportSaving" aria-label="关闭导入弹窗" @click="showMaterialImportDialog=false">×</button><h2 id="material-import-title">导入素材</h2><p>新链接默认选中；勾选已存在的链接表示仍创建新素材和新 SKU，图片共用已保存文件。</p><label>产品模板<select v-model="materialImportTemplateId" :disabled="materialImportSaving" @change="materialImportError=''"><option :value="null">请选择产品模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><div class="material-import-toolbar"><strong>共 {{materialImportItems.length}} 张 · 已选 {{materialImportSelectedCount}} 张</strong><button class="secondary" :disabled="materialImportSaving" @click="materialImportItems.forEach(item => item.selected=true)">全选</button><button class="secondary" :disabled="materialImportSaving" @click="materialImportItems.forEach(item => item.selected=false)">取消全选</button></div><div class="material-grid claim-result-grid material-import-grid"><label v-for="item in materialImportItems" :key="item.url" class="material-card" :class="{selected:item.selected}"><input v-model="item.selected" class="material-import-checkbox" type="checkbox" :disabled="materialImportSaving" :aria-label="`选择图片 ${item.url}`"/><img v-if="!item.failed" :src="item.url" alt="待导入图片" loading="lazy" @error="item.failed=true"/><span v-else class="material-import-image-error">图片预览失败<br/>仍可导入此链接</span><div><b>{{item.exists ? '已存在 · 勾选仍创建新 SKU' : '新素材'}}</b><small :title="item.url">{{item.url}}</small></div></label></div><p v-if="materialImportError" class="error material-draft-error" role="alert">{{materialImportError}}</p><div class="modal-actions"><button class="ghost" :disabled="materialImportSaving" @click="showMaterialImportDialog=false">取消</button><button class="primary" :disabled="materialImportSaving" @click="confirmMaterialImport">{{materialImportSaving ? '导入中…' : `确认导入（${materialImportSelectedCount}）`}}</button></div></section></div>
   <div v-if="showClaimMaterialsDialog" class="modal-backdrop" @click.self="showClaimMaterialsDialog=false"><section class="modal-card material-draft-dialog claim-materials-dialog"><button class="modal-close" @click="showClaimMaterialsDialog=false">×</button><h2>领取素材</h2><p>请选择要领取到素材库的图片。</p><div class="material-grid claim-result-grid"><button v-for="url in claimingTask?.result_urls || []" :key="url" class="material-card" :class="{selected:selectedClaimResultUrls.includes(url)}" @click="toggleClaimResult(url)"><span class="material-select-mark">{{selectedClaimResultUrls.includes(url) ? '✓' : ''}}</span><img :src="imageUrl(url)" alt="生成结果图"/></button></div><p v-if="!(claimingTask?.result_urls?.length)" class="empty">暂无可领取图片。</p><div class="modal-actions"><button class="ghost" @click="showClaimMaterialsDialog=false">取消</button><button class="primary" :disabled="claimingMaterials || !selectedClaimResultUrls.length" @click="claimMaterials">{{claimingMaterials ? '领取中…' : '领取'}}</button></div></section></div>
   <div v-if="showBatchClaimDialog" class="modal-backdrop" @click.self="!batchClaiming && (showBatchClaimDialog=false)">
     <section class="modal-card batch-claim-dialog" @scroll="batchClaimHoverPreview=null">
@@ -3082,10 +3081,11 @@ onUnmounted(() => {
   <div v-if="productLibraryOrderProduct" class="modal-backdrop" @click.self="closeProductLibraryOrders"><section class="modal-card product-library-orders-dialog" role="dialog" aria-modal="true" aria-labelledby="product-library-orders-heading"><button class="modal-close" aria-label="关闭订单详情" @click="closeProductLibraryOrders">×</button><h2 id="product-library-orders-heading">订单详情</h2><p>{{productLibraryOrderProduct.sku}}</p><div class="product-library-orders-table" :aria-busy="productLibraryOrderLoading"><div class="product-library-orders-head"><span>下单时间</span><span>订单编号</span><span>店铺</span><span>产品 ID</span><span>数量</span></div><div v-for="(order, index) in productLibraryOrders" :key="index" class="product-library-orders-row"><span>{{new Date(order.ordered_at).toLocaleString()}}</span><span :title="order.order_number">{{order.order_number}}</span><span :title="order.shop_name">{{order.shop_name}}</span><span :title="order.product_id">{{order.product_id}}</span><strong>{{order.quantity}}</strong></div><div v-if="!productLibraryOrders.length && !productLibraryOrderLoading" class="empty">暂无订单</div><div v-if="productLibraryOrderLoading" class="product-library-orders-loading" role="status">正在加载订单…</div></div><footer class="draft-pagination product-library-orders-pagination"><span>共 {{productLibraryOrderCount}} 单 · {{productLibraryOrderTotal}} 条明细</span><label>每页 <select v-model.number="productLibraryOrderPageSize" :disabled="productLibraryOrderLoading" @change="changeProductLibraryOrderPageSize"><option v-for="size in pageSizeOptions" :key="size" :value="size">{{size}}</option></select> 条</label><button :disabled="productLibraryOrderLoading || productLibraryOrderPage===1" @click="changeProductLibraryOrderPage(productLibraryOrderPage-1)">上一页</button><span>第 {{productLibraryOrderPage}} / {{productLibraryOrderPageCount}} 页</span><button :disabled="productLibraryOrderLoading || productLibraryOrderPage===productLibraryOrderPageCount" @click="changeProductLibraryOrderPage(productLibraryOrderPage+1)">下一页</button></footer></section></div>
   <div v-if="showProductLibraryTemplateDialog" class="modal-backdrop" @click.self="!productLibraryTemplateSaving && (showProductLibraryTemplateDialog=false)"><section class="modal-card product-library-template-dialog"><button class="modal-close" :disabled="productLibraryTemplateSaving" aria-label="关闭批量设置模版" @click="showProductLibraryTemplateDialog=false">×</button><h2>批量设置模版</h2><p>将为 {{selectedProductLibraryIds.length}} 条数据设置同一模版，原模版将被替换，SKU 和使用状态保持不变。</p><label>目标模版<select v-model="productLibraryTargetTemplateId" :disabled="productLibraryTemplateSaving"><option :value="null" disabled>请选择模版</option><option v-for="item in templates" :key="item.id" :value="item.id">{{item.name}}</option></select></label><div class="modal-actions"><button class="ghost" :disabled="productLibraryTemplateSaving" @click="showProductLibraryTemplateDialog=false">取消</button><button class="primary" :disabled="productLibraryTemplateSaving || !productLibraryTargetTemplateId" @click="saveProductLibraryTemplate">{{productLibraryTemplateSaving ? '保存中…' : '确认设置'}}</button></div></section></div>
   <div v-if="toast" class="toast" role="alert" style="position:fixed;top:24px;left:50%;z-index:1000;transform:translateX(-50%);padding:12px 18px;border-radius:10px;background:#302954;color:#fff;box-shadow:0 10px 28px #30295440;font-size:14px">{{ toast }}</div>
-  <div v-if="showMaterialUploadDialog" class="modal-backdrop" @click.self="showMaterialUploadDialog=false"><section class="modal-card material-template-dialog"><button class="modal-close" @click="showMaterialUploadDialog=false">×</button><h2>上传本地素材</h2><p>已选择 {{pendingMaterialUploadFiles.length}} 张图片，请先选择产品模板。</p><p v-if="materialUploading" style="margin:-10px 0 16px;color:#5545ca">正在上传 {{materialUploadedCount}} / {{materialUploadTotal}}…</p><label>产品模板<select v-model="materialUploadTemplateId" :disabled="materialUploading"><option :value="null" disabled>请选择产品模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><p v-if="materialUploadError" style="margin:14px 0 0;color:#d34b5f">{{materialUploadError}}</p><div class="modal-actions"><button class="ghost" :disabled="materialUploading" @click="showMaterialUploadDialog=false">取消</button><button class="primary" :disabled="materialUploading" @click="uploadMaterialAssets">{{materialUploading ? '上传中…' : '确认上传'}}</button></div></section></div>
+  <div v-if="showMaterialUploadDialog" class="modal-backdrop" @click.self="showMaterialUploadDialog=false"><section class="modal-card material-template-dialog"><button class="modal-close" @click="showMaterialUploadDialog=false">×</button><h2>上传本地素材</h2><p>已选择 {{pendingMaterialUploadFiles.length}} 张图片，请先选择产品模板。</p><label>产品模板<select v-model="materialUploadTemplateId" :disabled="materialUploading"><option :value="null" disabled>请选择产品模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><p v-if="materialUploadError" style="margin:14px 0 0;color:#d34b5f">{{materialUploadError}}</p><div class="modal-actions"><button class="ghost" :disabled="materialUploading" @click="showMaterialUploadDialog=false">取消</button><button class="primary" :disabled="materialUploading" @click="uploadMaterialAssets">{{materialUploading ? '上传中…' : '确认上传'}}</button></div></section></div>
   <footer class="site-footer">
     <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">粤ICP备2026142752号-1</a>
   </footer>
+  <MaterialTransferDialog :visible="showMaterialTransferResults" :items="materialTransferItems" @close="showMaterialTransferResults=false" @changed="refreshAfterMaterialTransfer"/>
 </template>
 
 <style scoped>

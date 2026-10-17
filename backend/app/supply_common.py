@@ -9,14 +9,13 @@ from decimal import Decimal
 from fastapi import HTTPException
 from sqlalchemy import select, update
 
-from .models import (Company, MaterialAsset, ProductTemplate, Role, SupplyAudit,
-                     SupplyImageHealth, SupplyJob, User)
+from .models import (Company, ImageFile, MaterialAsset, ProductTemplate, Role, SupplyAudit,
+                     SupplyJob, User)
 from .ai_providers import ProviderError, validate_generated_title
 from .supply_accounts import supply_user_is_expired
 from .tiktok_export import category_base_requirements, validate_attributes
 
 ACTIVE_STATES = ("queued", "running", "retry_wait")
-BAD_HEALTH = ("invalid", "check_failed")
 TEMPLATE_FIELDS = ("id", "name", "sku_specifications", "product_description", "size_chart_url",
                    "package_weight", "package_length", "package_width", "package_height",
                    "title_template", "supply_fallback_title")
@@ -83,44 +82,6 @@ def cancel_user_jobs(db, user_id, reason):
         lease_epoch=SupplyJob.lease_epoch + 1))
 
 
-def health_records(db, company_id, urls):
-    hashes = [digest(url) for url in set(urls) if url]
-    return {item.url: item for item in db.scalars(select(SupplyImageHealth).where(
-        SupplyImageHealth.company_id == company_id, SupplyImageHealth.url_hash.in_(hashes))).all()} if hashes else {}
-
-
-def reject_bad_images(db, company_id, urls):
-    bad = [url for url, record in health_records(db, company_id, urls).items() if record.status in BAD_HEALTH]
-    if bad:
-        raise HTTPException(400, "所选图片包含已失效或检查失败记录，请修复后再创建草稿")
-
-
-def begin_check(db, company_id, url):
-    # 同一公司操作按公司行协调，避免首次插入与序号递增发生竞争。
-    lock_company(db, company_id)
-    record = db.scalar(select(SupplyImageHealth).where(SupplyImageHealth.company_id == company_id,
-        SupplyImageHealth.url_hash == digest(url)).with_for_update())
-    if record is None:
-        record = SupplyImageHealth(company_id=company_id, url_hash=digest(url), url=url,
-                                   status="unchecked", check_sequence=0)
-        db.add(record)
-        db.flush()
-    if record.url != url:
-        raise ValueError("图片地址摘要冲突")
-    record.check_sequence += 1
-    sequence = record.check_sequence
-    db.commit()
-    return sequence
-
-
-def finish_check(db, company_id, url, sequence, result):
-    db.execute(update(SupplyImageHealth).where(SupplyImageHealth.company_id == company_id,
-        SupplyImageHealth.url_hash == digest(url), SupplyImageHealth.url == url,
-        SupplyImageHealth.check_sequence == sequence).values(
-            status=result["status"], reason=str(result.get("reason") or "")[:500], checked_at=now()))
-    db.commit()
-
-
 def template_snapshot(template):
     return {field: getattr(template, field) for field in TEMPLATE_FIELDS}
 
@@ -157,9 +118,9 @@ def validate_template(template):
     return snapshot
 
 
-def material_snapshot(asset, version):
+def material_snapshot(asset, version, url=None):
     value = {"id": asset.id, "template_id": asset.template_id, "sku": (asset.sku or "").strip(),
-             "url": (asset.url or "").strip(), "name": asset.name, "template_version": version}
+             "url": (url if url is not None else asset.url or "").strip(), "name": asset.name, "template_version": version}
     value["version_hash"] = digest(value)
     return value
 
@@ -167,10 +128,13 @@ def material_snapshot(asset, version):
 def eligible_materials(db, company_id, template_id, version):
     assets = db.scalars(select(MaterialAsset).where(MaterialAsset.company_id == company_id,
         MaterialAsset.template_id == template_id, MaterialAsset.supply_listed.is_(True)).order_by(MaterialAsset.id)).all()
-    health = health_records(db, company_id, [asset.url for asset in assets])
-    return [material_snapshot(asset, version) for asset in assets if asset.sku and asset.sku.strip()
-            and asset.url and asset.url.strip() and
-            (asset.url not in health or health[asset.url].status not in BAD_HEALTH)]
+    files = {}
+    ids = list({asset.image_file_id for asset in assets if asset.image_file_id})
+    for offset in range(0, len(ids), 400):
+        files.update({item.id: item.url for item in db.scalars(select(ImageFile).where(
+            ImageFile.company_id == company_id, ImageFile.id.in_(ids[offset:offset + 400])))})
+    return [material_snapshot(asset, version, files.get(asset.image_file_id)) for asset in assets if asset.sku and asset.sku.strip()
+            and asset.url and asset.url.strip()]
 
 
 def validate_strategy(db, user, parameters):

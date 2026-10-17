@@ -31,7 +31,7 @@ from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUp
 from .product_library_statistics import order_facts, sku_statistics
 from .product_library import parse_order_workbook
 from .material_import import MAX_IMPORT_BYTES, build_import_template, parse_import_workbook, validate_image_link
-from .schemas import MaterialImportConfirmInput
+from .schemas import MaterialImportConfirmInput, ImageUploadCompleteInput
 from .product_library_rankings import SnapshotAlreadyRunning, company_run_lock, create_daily_snapshot, enqueue_ranking_task, task_payload
 from .schemas import MAX_PRODUCT_LIBRARY_SELECTION, HubEnvironmentSync, HubEnvironmentToggle, HubTaskClaimInput, HubTaskAction, ProductLibraryShopAssignment, ProductLibraryTitleGenerate, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
@@ -42,7 +42,8 @@ from .security import (create_access_token, current_internal_user as current_use
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
 from .credentials import decrypt_secret, encrypt_secret
 from .creative_resource_sizes import read_white_image_sizes
-from .storage import ExportMissingError, upload_hub_export, read_hub_export, delete_hub_export, StorageError, create_image_upload_url, is_company_r2_url, is_public_r2_url, upload_image_bytes_async
+from .storage import ExportMissingError, upload_hub_export, read_hub_export, delete_hub_export, StorageError
+from .image_files import (by_url, create_material, file_ticket, finish_upload, ingest_url, prepare_upload, resolve_export_images, ticket_file)
 from .logging_config import configure_logging
 from .tiktok_export import build_workbook as build_tiktok_workbook, category_base_requirements, parse_listing_options, validate_attributes
 from .shopee_export import build_workbook as build_shopee_workbook, parse_listing_options as parse_shopee_listing_options
@@ -1639,8 +1640,8 @@ async def import_product_library(
 @app.post("/templates")
 def create_template(payload: TemplateCreate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
     data = payload.model_dump()
-    data["cover_url"] = validate_template_image_url(data["cover_url"], user.company_id, None)
-    data["size_chart_url"] = validate_template_image_url(data["size_chart_url"], user.company_id, None)
+    data["cover_url"] = validate_template_image_url(data["cover_url"], user.company_id, None, db)
+    data["size_chart_url"] = validate_template_image_url(data["size_chart_url"], user.company_id, None, db)
     template = ProductTemplate(company_id=user.company_id, **data)
     db.add(template); db.commit(); db.refresh(template)
     return template
@@ -1722,7 +1723,7 @@ def create_user_template_white_image(
     )) or 0
     if count >= 50:
         raise HTTPException(400, "每个模板最多保存 50 张白底图")
-    if not is_company_r2_url(payload.image_url, user.company_id, "template-white"):
+    if not registered_image_url(payload.image_url, user.company_id, db):
         raise HTTPException(400, "白底图必须通过当前公司的专用上传接口上传")
     item = UserTemplateWhiteImage(
         company_id=user.company_id, user_id=owner.id, template_id=template.id,
@@ -1745,7 +1746,7 @@ def update_user_template_white_image(
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ):
     item = get_managed_white_image(db, user, item_id)
-    if payload.image_url is not None and not is_company_r2_url(payload.image_url, user.company_id, "template-white"):
+    if payload.image_url is not None and not registered_image_url(payload.image_url, user.company_id, db):
         raise HTTPException(400, "白底图必须通过当前公司的专用上传接口上传")
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(item, field, value)
@@ -1826,6 +1827,7 @@ def validate_material_sku_source(template: ProductTemplate, owner: User) -> tupl
 def add_material_asset_with_sku(
     db: Session, *, template: ProductTemplate, owner: User, company_id: int,
     source_task_id: int | None, url: str, name: str, source_type: str | None = None,
+    image_file_id: int | None = None, creation_request_key: str | None = None,
 ) -> MaterialAsset:
     """写入带永久 SKU 的素材；唯一索引冲突时在保存点内重新生成。"""
     template_name, user_code = validate_material_sku_source(template, owner)
@@ -1834,6 +1836,7 @@ def add_material_asset_with_sku(
         asset = MaterialAsset(
             company_id=company_id, source_task_id=source_task_id, template_id=template.id,
             url=url, name=name, sku=f"{template_name}{user_code}{random_part}", claimed_by=owner.id, source_type=source_type,
+            image_file_id=image_file_id, creation_request_key=creation_request_key,
         )
         try:
             with db.begin_nested():
@@ -2001,9 +2004,9 @@ def update_template(template_id: int, payload: TemplateUpdate, user: User = Depe
     template = get_company_template(db, user, template_id)
     for field, value in payload.model_dump(exclude_unset=True).items():
         if field == "cover_url":
-            value = validate_template_image_url(value, user.company_id, template.cover_url)
+            value = validate_template_image_url(value, user.company_id, template.cover_url, db)
         elif field == "size_chart_url":
-            value = validate_template_image_url(value, user.company_id, template.size_chart_url)
+            value = validate_template_image_url(value, user.company_id, template.size_chart_url, db)
         setattr(template, field, value)
     db.commit(); db.refresh(template)
     return template
@@ -2022,85 +2025,82 @@ def delete_template(template_id: int, user: User = Depends(require_roles(Role.CO
     return {"deleted": True}
 
 
-# 允许前端直传的业务目录；值即 R2 对象 key 首段。签名始终绑定调用方公司，
-# 越权写到其他公司目录不可行，这里只限制可写入的业务类型。
-DIRECT_UPLOAD_CATEGORIES = frozenset({"template", "template-size-chart", "template-white"})
+# 图片上传用途白名单；均经临时区校验后保存正式文件，签名绑定调用方公司。
+DIRECT_UPLOAD_CATEGORIES = frozenset({"template", "template-size-chart", "template-white", "creative"})
 TEMPLATE_IMAGE_CATEGORIES = ("template", "template-size-chart")
 SUPPORTED_UPLOAD_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
 @app.post("/uploads/presign")
-def presign_image_upload(payload: ImageUploadPresignInput, user: User = Depends(current_user)):
-    """按业务目录批量签发 R2 直传地址，单张图片不再经 API 容器中转。"""
+def presign_image_upload(payload: ImageUploadPresignInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
     if payload.category not in DIRECT_UPLOAD_CATEGORIES:
         raise HTTPException(400, "不支持的上传目录")
     if any(item.content_type not in SUPPORTED_UPLOAD_MIME_TYPES for item in payload.files):
         raise HTTPException(400, "请上传 JPG、PNG 或 WebP 图片")
-    try:
-        return [
-            create_image_upload_url(item.content_type, item.content_length, user.company_id, payload.category)
-            for item in payload.files
-        ]
-    except StorageError as exc:
-        raise HTTPException(503, str(exc)) from exc
+    return [prepare_upload(db, user, sha256=item.sha256, mime_type=item.content_type,
+        size=item.content_length, category=payload.category) for item in payload.files]
 
 
-def validate_template_image_url(url: str | None, company_id: int, current: str | None) -> str | None:
-    """直传后地址由前端提交：只接受本公司模板目录的 R2 对象，或保持不变的历史值。"""
+@app.post("/uploads/complete")
+def complete_image_upload(payload: ImageUploadCompleteInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if payload.category not in DIRECT_UPLOAD_CATEGORIES:
+        raise HTTPException(400, "不支持的上传目录")
+    image_file = finish_upload(db, user, upload_token=payload.upload_token,
+        file_token=payload.file_token, category=payload.category)
+    return {"url": image_file.url}
+
+
+def registered_image_url(url: str, company_id: int, db: Session) -> bool:
+    return by_url(db, company_id, url) is not None
+
+
+def validate_template_image_url(url: str | None, company_id: int, current: str | None, db: Session) -> str | None:
+    """接受本公司已登记的图片，或保持不变的历史值。"""
     if url is None or url == current:
         return url
-    if not any(is_company_r2_url(url, company_id, category) for category in TEMPLATE_IMAGE_CATEGORIES):
+    if not registered_image_url(url, company_id, db):
         raise HTTPException(400, "模板图片和尺码图必须通过上传接口上传")
     return url
 
 
 @app.post("/uploads/creative-asset/presign")
-def presign_creative_asset(payload: UploadPresignInput, user: User = Depends(current_user)):
+def presign_creative_asset(payload: UploadPresignInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
     if payload.content_type not in {"image/jpeg", "image/png", "image/webp"}:
         raise HTTPException(400, "请上传 JPG、PNG 或 WebP 图片")
-    try:
-        return create_image_upload_url(payload.content_type, payload.content_length, user.company_id, "creative")
-    except StorageError as exc:
-        raise HTTPException(503, str(exc)) from exc
+    return prepare_upload(db, user, sha256=payload.sha256, mime_type=payload.content_type,
+        size=payload.content_length, category="creative")
 
 
 MATERIAL_UPLOAD_CATEGORY = "material"
 
 
 @app.post("/material-assets/presign")
-def presign_material_assets(payload: MaterialUploadPresignInput, user: User = Depends(current_user)):
-    """批量签发 R2 直传地址，让本地素材不经过 API 容器中转。"""
-    for item in payload.files:
-        if item.content_type not in {"image/jpeg", "image/png", "image/webp"}:
-            raise HTTPException(400, "请上传 JPG、PNG 或 WebP 图片")
-    try:
-        return [
-            create_image_upload_url(item.content_type, item.content_length, user.company_id, MATERIAL_UPLOAD_CATEGORY)
-            for item in payload.files
-        ]
-    except StorageError as exc:
-        raise HTTPException(503, str(exc)) from exc
+def presign_material_assets(payload: MaterialUploadPresignInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    template = get_company_template(db, user, payload.template_id)
+    validate_material_sku_source(template, user)
+    if any(item.content_type not in {"image/jpeg", "image/png", "image/webp"} for item in payload.files):
+        raise HTTPException(400, "请上传 JPG、PNG 或 WebP 图片")
+    return [prepare_upload(db, user, sha256=item.sha256, mime_type=item.content_type,
+        size=item.content_length) for item in payload.files]
 
 
 @app.post("/material-assets/commit")
 def commit_material_assets(payload: MaterialUploadCommitInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """直传完成后批量登记素材；地址必须是本次签发到本公司素材目录的 R2 对象。"""
     template = get_company_template(db, user, payload.template_id)
     validate_material_sku_source(template, user)
+    results = []
     for item in payload.items:
-        if not is_company_r2_url(item.url, user.company_id, MATERIAL_UPLOAD_CATEGORY):
-            raise HTTPException(400, "素材地址无效，请重新上传")
-    assets = [
-        add_material_asset_with_sku(
-            db, template=template, owner=user, company_id=user.company_id,
-            source_task_id=None, url=item.url, name=(Path(item.name or "本地素材").name.rsplit(".", 1)[0] or "本地素材")[:180],
-        )
-        for item in payload.items
-    ]
-    db.commit()
-    for asset in assets:
-        db.refresh(asset)
-    return [serialize_record(asset) for asset in assets]
+        try:
+            image_file = finish_upload(db, user, upload_token=item.upload_token, file_token=item.file_token)
+            result = create_material(db, image_file=image_file, template=template, owner=user,
+                request_key=f"{user.id}:{item.request_key}", force_create=item.force_create,
+                name=(Path(item.name).name.rsplit(".", 1)[0] or "本地素材")[:180])
+            results.append({**result, "file_token": file_ticket(user, image_file), "request_key": item.request_key})
+        except HTTPException as exc:
+            db.rollback()
+            results.append({"outcome": "error", "error": exc.detail, "request_key": item.request_key})
+    return {"items": results, "created": sum(item["outcome"] == "created" for item in results),
+        "duplicates": sum(item["outcome"] == "duplicate" for item in results)}
 
 
 def serialize_task_view(task: PodTask, creator_name: str, template_name: str, viewer: User, *, include_details: bool) -> dict:
@@ -2248,33 +2248,38 @@ async def preview_material_import(file: UploadFile = File(...), user: User = Dep
         urls = parse_import_workbook(await file.read(MAX_IMPORT_BYTES + 1))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    existing = set(db.scalars(select(MaterialAsset.url).where(
-        MaterialAsset.company_id == user.company_id, MaterialAsset.url.in_(urls),
-    )).all())
-    return {"items": [{"url": url, "exists": url in existing} for url in urls]}
+    items = []
+    for url in urls:
+        image_file = by_url(db, user.company_id, url)
+        exists = bool(image_file and db.scalar(select(MaterialAsset.id).where(
+            MaterialAsset.company_id == user.company_id, MaterialAsset.image_file_id == image_file.id).limit(1)))
+        items.append({"url": url, "exists": exists})
+    return {"items": items}
 
 
 @app.post("/material-assets/import-confirm")
 def confirm_material_import(payload: MaterialImportConfirmInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
     template = get_company_template(db, user, payload.template_id)
     validate_material_sku_source(template, user)
-    try:
-        urls = list(dict.fromkeys(validate_image_link(url, index) for index, url in enumerate(payload.urls, start=2)))
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    # 外层保存点保证 SQLite 等环境中首个 SKU 保存点也属于整批事务。
-    try:
-        with db.begin_nested():
-            for index, url in enumerate(urls, start=1):
-                add_material_asset_with_sku(
-                    db, template=template, owner=user, company_id=user.company_id,
-                    source_task_id=None, url=url, name=f"导入素材 {index}", source_type="imported",
-                )
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    return {"imported": len(urls)}
+    if not payload.urls and not payload.file_token:
+        raise HTTPException(400, "请选择图片")
+    if payload.file_token and payload.urls:
+        raise HTTPException(400, "图片授权和来源链接只能提供一项")
+    results = []
+    sources = list(dict.fromkeys(payload.urls)) if not payload.file_token else [None]
+    for index, url in enumerate(sources):
+        try:
+            image_file = ticket_file(db, user, payload.file_token) if payload.file_token else ingest_url(
+                db, user.company_id, validate_image_link(url, index + 2))
+            result = create_material(db, image_file=image_file, template=template, owner=user,
+                request_key=f"{user.id}:" + hashlib.sha256(f"{payload.request_key}:{index}".encode()).hexdigest(),
+                force_create=payload.force_create, source_type="imported", name=f"导入素材 {index + 1}")
+            results.append({**result, "url": url, "file_token": file_ticket(user, image_file)})
+        except (HTTPException, ValueError) as exc:
+            db.rollback()
+            results.append({"outcome": "error", "url": url, "error": exc.detail if isinstance(exc, HTTPException) else str(exc)})
+    return {"items": results, "imported": sum(item["outcome"] == "created" for item in results),
+        "duplicates": sum(item["outcome"] == "duplicate" for item in results)}
 
 
 @app.get("/material-assets")
@@ -2285,7 +2290,6 @@ def list_material_assets(
     template_id: int | None = None,
     usage_status: str = "unused",
     source_type: str = "",
-    health: str = "",
     created_from: datetime | None = None,
     created_to: datetime | None = None,
     user: User = Depends(current_user),
@@ -2293,12 +2297,12 @@ def list_material_assets(
 ):
     return query_material_assets(db=db, user=user, page=page, page_size=page_size,
         creator_id=creator_id, template_id=template_id, usage_status=usage_status,
-        source_type=source_type, health=health, created_from=created_from, created_to=created_to)
+        source_type=source_type, created_from=created_from, created_to=created_to)
 
 
 def query_material_assets(*, db, user, page, page_size, creator_id=None, template_id=None,
                           usage_status="unused", source_type="", created_from=None,
-                          created_to=None, extra_filters=(), health=""):
+                          created_to=None, extra_filters=()):
     if usage_status not in {"all", "unused", "used"}:
         raise HTTPException(422, "不支持的素材状态")
     if source_type not in {"", "ai_created", "local_upload", "imported", "cross_company"}:
@@ -2308,15 +2312,6 @@ def query_material_assets(*, db, user, page, page_size, creator_id=None, templat
     if created_from and created_to and created_from > created_to:
         raise HTTPException(400, "创建开始时间不能晚于结束时间")
     filters = list(extra_filters)
-    from .models import SupplyImageHealth
-    from .supply_common import health_records
-    if health not in {"", "unchecked", "available", "invalid", "check_failed"}:
-        raise HTTPException(422, "不支持的图片健康状态")
-    if health:
-        health_company = SupplyImageHealth.company_id == MaterialAsset.company_id
-        checked = select(SupplyImageHealth.id).where(health_company, SupplyImageHealth.url == MaterialAsset.url,
-            SupplyImageHealth.status != "unchecked" if health == "unchecked" else SupplyImageHealth.status == health).exists()
-        filters.append(~checked if health == "unchecked" else checked)
     if user.role != Role.SUPER_ADMIN:
         filters.append(MaterialAsset.company_id == user.company_id)
     if is_operator(user):
@@ -2346,10 +2341,6 @@ def query_material_assets(*, db, user, page, page_size, creator_id=None, templat
     if filters:
         stmt = stmt.where(*filters)
     assets = db.scalars(stmt.order_by(MaterialAsset.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
-    image_health = {}
-    for company_id in {asset.company_id for asset in assets}:
-        image_health.update({(company_id, url): record for url, record in health_records(db, company_id,
-            [asset.url for asset in assets if asset.company_id == company_id]).items()})
     creator_ids = {asset.claimed_by for asset in assets}
     creator_names = {
         creator.id: creator.name
@@ -2376,9 +2367,6 @@ def query_material_assets(*, db, user, page, page_size, creator_id=None, templat
                 "template_name": template_names.get(asset.template_id, "未设置模板" if asset.template_id is None else "历史模板已删除"),
                 "source_type": asset.source_type or ("ai_created" if asset.source_task_id is not None else "local_upload"),
                 "collection_source": provenance.get(asset.id),
-                "health": image_health[(asset.company_id, asset.url)].status if (asset.company_id, asset.url) in image_health else "unchecked",
-                "checked_at": timestamp_ms(image_health[(asset.company_id, asset.url)].checked_at) if (asset.company_id, asset.url) in image_health and image_health[(asset.company_id, asset.url)].checked_at else None,
-                "health_reason": image_health[(asset.company_id, asset.url)].reason if (asset.company_id, asset.url) in image_health else None,
             }
             for asset in assets
         ],
@@ -2795,28 +2783,11 @@ def map_task_results(task: PodTask, urls: list[str]) -> list[dict]:
         for index, print_url in enumerate(print_urls)
     ]
 async def persist_generated_images(urls: list[str], company_id: int, task_id: int) -> list[str]:
-    """将模型供应商的临时 URL 复制到 R2，任务结果不依赖第三方 URL 的有效期。"""
-    if not get_settings().ai_generated_image_upload_to_r2:
-        return urls
-    persisted: list[str] = []
-    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-        for url in urls:
-            if is_public_r2_url(url):
-                persisted.append(url)
-                continue
-            response = await client.get(url)
-            if response.is_error:
-                raise ProviderError(f"下载模型生成图片失败：{response.status_code}")
-            mime_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
-            if mime_type not in {"image/jpeg", "image/png", "image/webp"}:
-                raise ProviderError(f"模型生成图片格式不受支持：{mime_type or '未知'}")
-            if len(response.content) > 20 * 1024 * 1024:
-                raise ProviderError("模型生成图片超过 20MB 上限")
-            try:
-                persisted.append(await upload_image_bytes_async(response.content, mime_type, company_id, f"generated/task-{task_id}"))
-            except StorageError as exc:
-                raise ProviderError(str(exc)) from exc
-    return persisted
+    """所有最终结果保存到自有图片存储，按内容复用。"""
+    def persist():
+        with SessionLocal() as db:
+            return [ingest_url(db, company_id, url).url for url in urls]
+    return await asyncio.to_thread(persist)
 
 
 @app.post("/tasks")
@@ -2830,7 +2801,7 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
     ))
     if not white_image:
         raise HTTPException(400, "请选择当前模板下自己的产品白底图")
-    if not is_company_r2_url(white_image.image_url, user.company_id, "template-white"):
+    if not registered_image_url(white_image.image_url, user.company_id, db):
         raise HTTPException(400, "所选产品白底图地址无效，请重新上传")
     raw_print_urls = payload.print_urls or ([payload.print_url] if payload.print_url else [])
     print_urls = list(dict.fromkeys(url for url in raw_print_urls if url))
@@ -2838,8 +2809,8 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
         raise HTTPException(400, "请至少上传一张印花图")
     if len(print_urls) > 500:
         raise HTTPException(400, "单次印花贴合最多支持 500 张图片")
-    if any(not is_company_r2_url(url, user.company_id, "creative") for url in print_urls):
-        raise HTTPException(400, "印花图必须通过当前公司的 R2 直传地址上传")
+    if any(not registered_image_url(url, user.company_id, db) for url in print_urls):
+        raise HTTPException(400, "印花图必须通过当前公司的图片上传接口保存")
     provider = None
     if payload.provider:
         provider = db.get(AIProviderSetting, payload.provider)
@@ -2961,26 +2932,29 @@ def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Dep
     if any(url not in task.result_urls for url in selected_urls):
         raise HTTPException(400, "包含不属于该任务的图片")
     claimed_count = 0
+    duplicates = 0
+    results = []
     if selected_urls:
         template = db.get(ProductTemplate, task.template_id)
         owner = db.get(User, task.created_by)
         if not template or not owner:
             raise HTTPException(400, "任务缺少产品模板或创作人信息")
         validate_material_sku_source(template, owner)
-        existing_urls = set(db.scalars(select(MaterialAsset.url).where(MaterialAsset.company_id == task.company_id, MaterialAsset.source_task_id == task.id)).all())
-        for index, url in enumerate(selected_urls, start=1):
-            if url not in existing_urls:
-                add_material_asset_with_sku(
-                    db, template=template, owner=owner, company_id=task.company_id,
-                    source_task_id=task.id, url=url, name=f"AI 创作 #{task.id} · 结果 {index}",
-                )
-                claimed_count += 1
-    # 首次审核即完成任务；全部不采用时不生成素材，也不设置已选结果。
+        for url in selected_urls:
+            image_file = ingest_url(db, task.company_id, url)
+            result = create_material(db, image_file=image_file, template=template, owner=owner,
+                request_key=hashlib.sha256(f"claim:{user.id}:{task_id}:{payload.request_key}:{url}".encode()).hexdigest(),
+                force_create=payload.force_create, source_type="ai_created", source_task_id=task.id,
+                name=f"AI 创作 #{task.id}")
+            claimed_count += result["outcome"] == "created"
+            duplicates += result["outcome"] == "duplicate"
+            results.append({**result, "url": url})
     if task.status == TaskStatus.AWAITING_SELECTION:
         task.selected_result_url = selected_urls[0] if selected_urls else None
         task.status = TaskStatus.COMPLETED
     db.commit()
-    return {"claimed": claimed_count, "message": "已领取到素材库" if selected_urls else "审核完成，未采用图片"}
+    return {"claimed": claimed_count, "duplicates": duplicates, "items": results,
+        "message": f"已创建 {claimed_count} 张素材，重复跳过 {duplicates} 张"}
 
 
 def resolve_product_library_sources(db: Session, user: User, sources: list[ProductLibraryDraftSource], *, lock: bool = False):
@@ -3005,8 +2979,6 @@ def resolve_product_library_sources(db: Session, user: User, sources: list[Produ
         resolved.update({(source_type, record.id): record for record in db.scalars(stmt).all()})
     if len(resolved) != len(keys):
         raise HTTPException(400, "包含不存在或无权使用的产品库数据")
-    from .supply_common import reject_bad_images
-    reject_bad_images(db, user.company_id, [library_record_image(record) for record in resolved.values()])
     return [resolved[key] for key in keys]
 
 
@@ -3029,7 +3001,9 @@ def build_product_library_draft(user, template, records, title, description):
         company_id=user.company_id, shop_id=None, template_id=template.id, workflow_stage="pending",
         title=title, product_description=description, size_chart_url=template.size_chart_url,
         image_urls=[library_record_image(record) for record in records[:9]],
-        sku_items=[{"image_url": library_record_image(record), "size": None, "sku": record.sku} for record in records],
+        sku_items=[{"image_url": library_record_image(record), "size": None, "sku": record.sku,
+            **({"product_library_image_url": record.image_url} if isinstance(record, ProductLibraryProduct) else {})}
+            for record in records],
         created_by=user.id, updated_by=user.id,
     )
 
@@ -3111,8 +3085,6 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
     )).all()
     if len(assets) != len(asset_ids):
         raise HTTPException(400, "包含不存在或无权使用的素材")
-    from .supply_common import reject_bad_images
-    reject_bad_images(db, user.company_id, [asset.url for asset in assets])
     assets_by_id = {asset.id: asset for asset in assets}
     assets = [assets_by_id[asset_id] for asset_id in asset_ids]
     if any(not asset.sku for asset in assets):
@@ -3149,8 +3121,6 @@ def create_drafts_from_material_assets_batch(payload: MaterialDraftBatchCreate, 
     assets_by_id = {asset.id: asset for asset in db.scalars(stmt).all()}
     if len(assets_by_id) != len(all_ids):
         raise HTTPException(400, "包含不存在或无权使用的素材")
-    from .supply_common import reject_bad_images
-    reject_bad_images(db, user.company_id, [asset.url for asset in assets_by_id.values()])
     if any(not asset.sku for asset in assets_by_id.values()):
         raise HTTPException(400, "包含无 SKU 的历史素材，请重新上传或领取后再创建商品草稿")
     if any(asset.template_id != template.id for asset in assets_by_id.values()):
@@ -3605,12 +3575,13 @@ def apply_draft_image_result(draft_id: int, task_id: int, payload: DraftImageApp
         raise HTTPException(404, "图片任务不存在")
     if task.task_type not in {"carousel", "main_image"} or payload.result_url not in (task.result_urls or []):
         raise HTTPException(400, "请选择该任务生成的候选图片")
+    saved_url = ingest_url(db, draft.company_id, payload.result_url).url
     carousel_items = draft_base_carousel_items(draft)
     if task.task_type == "carousel":
         sku = str((task.parameters or {}).get("source_sku") or "")
         # 生成结果会替换同一 SKU 的默认回退图，而不是与原 SKU 图并列。
         # 已采用的其他生成结果（包括同一 SKU 的其他任务）保持不变。
-        generated_item = {"sku": sku, "image_url": payload.result_url, "task_id": task.id, "source_type": "carousel"}
+        generated_item = {"sku": sku, "image_url": saved_url, "task_id": task.id, "source_type": "carousel"}
         fallback_index = next((
             index for index, item in enumerate(carousel_items)
             if item.get("source_type") == "sku" and item.get("sku") == sku
@@ -3629,7 +3600,7 @@ def apply_draft_image_result(draft_id: int, task_id: int, payload: DraftImageApp
                 raise HTTPException(400, "采用首图前请选择移除一张轮播图")
             carousel_items = [item for item in carousel_items if item.get("sku") != remove_sku]
         carousel_items.insert(0, {
-            "sku": None, "image_url": payload.result_url,
+            "sku": None, "image_url": saved_url,
             "task_id": task.id, "source_type": "main_image",
         })
     draft.carousel_items = carousel_items
@@ -3679,6 +3650,12 @@ def confirm_batch_image_review(payload: BatchImageReviewConfirm, user: User = De
         if draft.workflow_stage != expected_stage:
             raise HTTPException(400, "所选草稿不在对应的图片制作阶段")
         selections_by_draft.setdefault(draft.id, []).append(selection)
+    # 在变更草稿前完成所有文件保存，避免保存服务提交半成品草稿。
+    saved_urls = {}
+    for selection in payload.selections:
+        company_id = drafts_by_id[selection.draft_id].company_id
+        for url in selection.result_urls:
+            saved_urls[(company_id, url)] = ingest_url(db, company_id, url).url
     advanced = 0
     for draft_id, selections in selections_by_draft.items():
         draft = drafts_by_id[draft_id]
@@ -3690,7 +3667,7 @@ def confirm_batch_image_review(payload: BatchImageReviewConfirm, user: User = De
                 continue
             if payload.task_type == "carousel":
                 sku = str((task.parameters or {}).get("source_sku") or "")
-                replacement = [{"sku": sku, "image_url": url, "task_id": task.id, "source_type": "carousel"} for url in selection.result_urls]
+                replacement = [{"sku": sku, "image_url": saved_urls[(draft.company_id, url)], "task_id": task.id, "source_type": "carousel"} for url in selection.result_urls]
                 fallback_index = next((index for index, item in enumerate(items) if item.get("source_type") == "sku" and item.get("sku") == sku), None)
                 if fallback_index is not None:
                     items[fallback_index:fallback_index + 1] = replacement
@@ -3698,7 +3675,7 @@ def confirm_batch_image_review(payload: BatchImageReviewConfirm, user: User = De
                     items.extend(replacement)
             else:
                 items = [item for item in items if item.get("source_type") != "main_image"]
-                items.insert(0, {"sku": None, "image_url": selection.result_urls[0], "task_id": task.id, "source_type": "main_image"})
+                items.insert(0, {"sku": None, "image_url": saved_urls[(draft.company_id, selection.result_urls[0])], "task_id": task.id, "source_type": "main_image"})
             task.selected_result_url = selection.result_urls[0]
             task.status = TaskStatus.COMPLETED
         if len(items) > 9 or len({item.get("image_url") for item in items}) != len(items):
@@ -4179,17 +4156,18 @@ def build_tiktok_export_response(payload: TiktokDraftExportInput, user: User, db
             "description": description,
             "image_urls": image_urls,
             "base_sku_by_image": base_sku_by_image,
+            "original_image_urls": [item["product_library_image_url"] for item in draft.sku_items or []
+                if item.get("product_library_image_url")],
             "sku_images": [{"image_url": url, "sku": sku} for url, sku in base_sku_by_image.items()],
             "size_chart_url": size_chart_url or None,
             "price": override.price if override and override.price is not None else payload.default_price,
             "quantity": override.quantity if override and override.quantity is not None else payload.default_quantity,
         })
 
-    from .supply_internal_export import validate_export_images
     export_template = SimpleNamespace(**{key: getattr(template, key) for key in (
         "sku_specifications", "package_weight", "package_length", "package_width", "package_height")})
     export_template_blob, export_template_type = bytes(catalog.template_blob), catalog.template_type
-    validate_export_images(db, user.company_id, products)
+    resolve_export_images(db, user.company_id, products)
     try:
         workbook_bytes = build_tiktok_workbook(
             template=export_template, category=payload.category, cod=payload.cod,
@@ -4291,6 +4269,8 @@ def export_drafts_to_shopee(payload: ShopeeDraftExportInput, user: User = Depend
         override = overrides.get(draft.id)
         products.append({
             "draft_id": draft.id,
+            "original_image_urls": [item["product_library_image_url"] for item in draft.sku_items or []
+                if item.get("product_library_image_url")],
             "title": draft.title.strip(),
             "description": description,
             "image_urls": image_urls,
@@ -4300,6 +4280,7 @@ def export_drafts_to_shopee(payload: ShopeeDraftExportInput, user: User = Depend
             "quantity": override.quantity if override and override.quantity is not None else payload.default_quantity,
         })
 
+    resolve_export_images(db, user.company_id, products)
     try:
         workbook_bytes = build_shopee_workbook(
             template=template,

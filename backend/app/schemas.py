@@ -226,12 +226,11 @@ class UserTemplatePromptUpdate(BaseModel):
 class UploadPresignInput(BaseModel):
     content_type: str
     content_length: int = Field(gt=0, le=3 * 1024 * 1024)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
-class ImageUploadPresignItem(BaseModel):
+class ImageUploadPresignItem(UploadPresignInput):
     """直传单张图片的元信息；签名绑定大小与类型，防止中途替换文件。"""
-    content_type: str
-    content_length: int = Field(gt=0, le=3 * 1024 * 1024)
 
 
 class ImageUploadPresignInput(BaseModel):
@@ -241,11 +240,21 @@ class ImageUploadPresignInput(BaseModel):
 
 
 class MaterialUploadPresignInput(BaseModel):
-    files: list[UploadPresignInput] = Field(min_length=1, max_length=100)
+    template_id: int = Field(gt=0)
+    files: list[ImageUploadPresignItem] = Field(min_length=1, max_length=100)
+
+
+class ImageUploadCompleteInput(BaseModel):
+    category: str
+    upload_token: str | None = None
+    file_token: str | None = None
 
 
 class MaterialUploadCommitItem(BaseModel):
-    url: str = Field(min_length=1, max_length=500)
+    upload_token: str | None = None
+    file_token: str | None = None
+    request_key: str = Field(min_length=8, max_length=96)
+    force_create: bool = False
     name: str = Field(default="本地素材", max_length=180)
 
 
@@ -325,6 +334,8 @@ class AIProviderCredentialUpdate(BaseModel):
 
 class ClaimMaterials(BaseModel):
     result_urls: list[str] = Field(min_length=0, max_length=1000)
+    force_create: bool = False
+    request_key: str = Field(min_length=8, max_length=96)
 
 
 class TaskBatchRetry(BaseModel):
@@ -662,7 +673,10 @@ class ProductLibraryDraftSource(BaseModel):
 
 class MaterialImportConfirmInput(BaseModel):
     template_id: int = Field(gt=0)
-    urls: list[str] = Field(min_length=1, max_length=1000)
+    urls: list[str] = Field(default_factory=list, max_length=1000)
+    file_token: str | None = None
+    force_create: bool = False
+    request_key: str = Field(min_length=8, max_length=96)
 
 
 class ProductLibraryTitleGenerate(ProductLibraryDraftSource):

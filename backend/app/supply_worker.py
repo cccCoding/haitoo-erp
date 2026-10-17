@@ -19,11 +19,11 @@ from .credentials import decrypt_secret
 from .ai_providers import DEEPSEEK_TITLE_MODEL, validate_generated_title
 from .database import SessionLocal
 from .models import Company, ProductTemplate, SupplyJob, SupplyJobMaterial, User
-from .supply_common import (ACTIVE_STATES, BAD_HEALTH, begin_check, digest, eligible_materials,
-    finish_check, health_records, lock_company, normalize_title, now, sizes, template_snapshot,
+from .supply_common import (ACTIVE_STATES, digest, eligible_materials,
+    lock_company, normalize_title, now, sizes, template_snapshot,
     template_version, unique_title, user_can_run)
 from .supply_files import delete_supply_export, list_supply_exports, upload_supply_export
-from .supply_images import check_image
+from .image_files import resolve_export_images
 from .tiktok_export import build_workbook
 
 logger = logging.getLogger(__name__)
@@ -149,9 +149,7 @@ async def request_title(api_key, template, requirements):
 async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
     settings = get_settings()
     dead = asyncio.Event()
-    image_semaphore = asyncio.Semaphore(settings.supply_image_concurrency)
     title_semaphore = asyncio.Semaphore(settings.supply_title_concurrency)
-    image_futures = {}
     uploaded_key = None
 
     def save(change, stage=None):
@@ -180,16 +178,13 @@ async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
         strategy, template = snap["strategy"], snap["template"]
 
         if not data["checkpoint"].get("links"):
-            with session_factory() as db:
-                health = health_records(db, company_id, [item["url"] for item in snap["candidates"]])
-            candidates = [item for item in snap["candidates"] if item["url"] not in health
-                          or health[item["url"]].status not in BAD_HEALTH]
+            candidates = snap["candidates"]
             rng = random.Random(snap["seed"])
             links = []
             for index in range(strategy["link_count"]):
                 group = distinct_sample(candidates, strategy["sku_count"], rng)
                 if len(group) != strategy["sku_count"]:
-                    raise ValueError("没有足够的未标记失效素材组成完整商品组")
+                    raise ValueError("没有足够素材组成完整商品组")
                 links.append({"index": index, "materials": group, "title": None, "replaced": False})
             save(lambda value, db, job: value.update(links=links), "titles")
 
@@ -227,134 +222,7 @@ async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
                         return
             await asyncio.gather(*(generate(index) for index in range(strategy["link_count"])))
 
-            async def probe(url):
-                async with image_semaphore:
-                    key = digest(url)
-                    while True:
-                        state = save(lambda value, db, job: None, "images")
-                        record = state.get("image_checks", {}).get(key, {})
-                        if record.get("result") and record.get("result_epoch") == epoch:
-                            return record["result"]
-                        attempts = record.get("attempts", 0)
-                        if attempts >= 3:
-                            result = {"status": "check_failed", "reason": "检查次数已用尽或检查中断"}
-                        else:
-                            def consume(value, db, job):
-                                value.setdefault("image_checks", {})[key] = {"url": url, "attempts": attempts + 1}
-                            save(consume)
-                            with session_factory() as db:
-                                sequence = begin_check(db, company_id, url)
-                            try:
-                                result = await check_image(url)
-                            except Exception:
-                                result = {"status": "check_failed", "reason": "图片检查服务暂时不可用"}
-                            with session_factory() as db:
-                                finish_check(db, company_id, url, sequence, result)
-                            if result["status"] == "check_failed" and attempts < 2:
-                                await asyncio.sleep(RETRY_DELAYS[attempts])
-                                continue
-                        def complete(value, db, job):
-                            value.setdefault("image_checks", {}).setdefault(key, {"url": url, "attempts": attempts})["result"] = result
-                            value["image_checks"][key]["result_epoch"] = epoch
-                            checks = value["image_checks"]
-                            job.progress = {**(job.progress or {}), "images_checked": sum(bool(item.get("result")) for item in checks.values()),
-                                "images_total": len(checks)}
-                        save(complete)
-                        return result
-
-            async def checked(url):
-                if url not in image_futures:
-                    image_futures[url] = asyncio.create_task(probe(url))
-                return await image_futures[url]
-
-            state = save(lambda value, db, job: None)
-            urls = list(dict.fromkeys(item["url"] for link in state["links"] for item in link["materials"]))
             chart = (template.get("size_chart_url") or "").strip()
-            if chart:
-                urls.append(chart)
-            await asyncio.gather(*(checked(url) for url in set(urls)))
-            if chart and (await checked(chart))["status"] != "available":
-                raise ValueError("模板尺码图不可用，请修复后重新提交")
-
-            for index in range(strategy["link_count"]):
-                for position in range(strategy["sku_count"]):
-                    state = save(lambda value, db, job: None)
-                    original = state["links"][index]["materials"][position]
-                    if (await checked(original["url"]))["status"] == "available":
-                        continue
-                    current = state["links"][index]["materials"]
-                    peers = [item for pos, item in enumerate(current) if pos != position]
-                    forbidden_ids, forbidden_skus, forbidden_urls = (
-                        {item[field] for item in peers} for field in ("id", "sku", "url"))
-                    acquired = list(state.get("replacement_candidates", {}).values())
-                    checked_good = [item for item in snap["candidates"] + acquired if item["url"] in image_futures
-                        and image_futures[item["url"]].done() and not image_futures[item["url"]].cancelled()
-                        and image_futures[item["url"]].result()["status"] == "available"]
-                    with session_factory() as db:
-                        live_template = db.get(ProductTemplate, template["id"])
-                        live = eligible_materials(db, company_id, template["id"], snap["template_version"]) if (
-                            live_template and live_template.company_id == company_id and live_template.supply_public
-                            and template_version(template_snapshot(live_template)) == snap["template_version"]) else []
-                    rng = random.Random(f"{snap['seed']}:{index}:{position}")
-                    old_candidates, new_candidates = list(snap["candidates"]) + acquired, list(live)
-                    rng.shuffle(old_candidates); rng.shuffle(new_candidates)
-                    replacement = None
-                    position_key = f"{index}:{position}"
-                    for candidate in checked_good + old_candidates + new_candidates:
-                        if candidate["id"] in forbidden_ids or candidate["sku"] in forbidden_skus or candidate["url"] in forbidden_urls:
-                            continue
-                        if candidate["version_hash"] == original["version_hash"]:
-                            continue
-                        state = save(lambda value, db, job: None)
-                        record = state.get("replacement_attempts", {}).get(position_key, {"tried": []})
-                        if candidate["version_hash"] in record["tried"]:
-                            # 已检查成功但尚未来得及提交替换的候选，在恢复后仍可提交。
-                            prior = state.get("image_checks", {}).get(digest(candidate["url"]), {}).get("result")
-                            if prior and prior["status"] == "available" and (await checked(candidate["url"]))["status"] == "available":
-                                replacement = candidate
-                                break
-                            continue
-                        if len(record["tried"]) >= 10:
-                            break
-                        def register(value, db, job):
-                            if candidate not in snap["candidates"] and candidate not in acquired:
-                                current_template = db.get(ProductTemplate, template["id"])
-                                from .models import MaterialAsset
-                                asset = db.get(MaterialAsset, candidate["id"])
-                                if (not asset or asset.company_id != company_id or not asset.supply_listed
-                                    or not current_template or not current_template.supply_public
-                                    or template_version(template_snapshot(current_template)) != snap["template_version"]
-                                    or asset.template_id != template["id"]
-                                    or asset.url != candidate["url"] or asset.sku != candidate["sku"]):
-                                    return False
-                            value.setdefault("replacement_attempts", {}).setdefault(position_key, {"tried": []})["tried"].append(candidate["version_hash"])
-                            association = db.scalar(select(SupplyJobMaterial.id).where(SupplyJobMaterial.job_id == job_id,
-                                SupplyJobMaterial.material_id == candidate["id"], SupplyJobMaterial.version_hash == candidate["version_hash"],
-                                SupplyJobMaterial.link_index == -1))
-                            if not association:
-                                db.add(SupplyJobMaterial(company_id=company_id, job_id=job_id,
-                                    material_id=candidate["id"], version_hash=candidate["version_hash"], source="replacement", link_index=-1))
-                            value.setdefault("replacement_candidates", {})[candidate["version_hash"]] = copy.deepcopy(candidate)
-                            return True
-                        registered = [False]
-                        def register_change(value, db, job):
-                            registered[0] = register(value, db, job)
-                        save(register_change)
-                        if not registered[0]:
-                            continue
-                        if (await checked(candidate["url"]))["status"] == "available":
-                            replacement = candidate
-                            break
-                    if replacement is None:
-                        raise ValueError("图片失效且替换素材不足；未生成残缺表格")
-                    def replace(value, db, job):
-                        link = value["links"][index]
-                        link["materials"][position] = copy.deepcopy(replacement)
-                        link["replaced"] = True
-                        link["title"] = unique_title(None, template["supply_fallback_title"], index)
-                        link["title_source"] = "fallback_after_replacement"
-                    save(replace)
-
             state = save(lambda value, db, job: None, "excel")
             links = state["links"]
             titles = [normalize_title(link["title"]) for link in links]
@@ -368,18 +236,14 @@ async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
                 if len(group) != strategy["sku_count"] or any(len({item[field] for item in group}) != len(group)
                     for field in ("id", "sku", "url")):
                     raise ValueError("最终 SKU 数量不足或重复")
-                if any(state["image_checks"][digest(item["url"])]["result"]["status"] != "available"
-                    or state["image_checks"][digest(item["url"])].get("result_epoch") != epoch for item in group):
-                    raise ValueError("最终图片检查未通过")
                 products.append({"title": link["title"], "description": template["product_description"],
                     "image_urls": [item["url"] for item in group],
                     "sku_images": [{"image_url": item["url"], "sku": item["sku"]} for item in group],
                     "size_chart_url": chart or None, "price": Decimal(strategy["price"]), "quantity": strategy["stock"]})
-            if chart and state["image_checks"][digest(chart)].get("result_epoch") != epoch:
-                raise ValueError("尺码图检查结果属于已过期的执行版本")
             if sum(len(product["sku_images"]) * len(sizes(template)) for product in products) > 4994:
                 raise ValueError("最终数据超过 4,994 行")
             with session_factory() as db:
+                resolve_export_images(db, company_id, products)
                 category_blob = bytes(db.get(SupplyJob, job_id).category_blob)
             content = await asyncio.to_thread(build_workbook, template=SimpleNamespace(**template),
                 category=strategy["category_name"], cod=strategy["cod"], attributes=strategy["attributes"],
@@ -439,9 +303,6 @@ async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
             mutate(job_id, epoch, owner, fail, session_factory)
     finally:
         beat.cancel()
-        for task in image_futures.values():
-            if not task.done():
-                task.cancel()
         with suppress(asyncio.CancelledError):
             await beat
         if uploaded_key:

@@ -82,8 +82,6 @@ services:
       R2_HUB_EXPORT_BUCKET: ${R2_HUB_EXPORT_BUCKET:-}
       R2_ENDPOINT: ${R2_ENDPOINT:-}
       R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
-      # false 时保留模型生成结果的临时 URL；生产环境建议保持 true。
-      AI_GENERATED_IMAGE_UPLOAD_TO_R2: ${AI_GENERATED_IMAGE_UPLOAD_TO_R2:-true}
     expose:
       - "8000"
     depends_on:
@@ -131,7 +129,6 @@ services:
       R2_HUB_EXPORT_BUCKET: ${R2_HUB_EXPORT_BUCKET:-}
       R2_ENDPOINT: ${R2_ENDPOINT:-}
       R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
-      AI_GENERATED_IMAGE_UPLOAD_TO_R2: ${AI_GENERATED_IMAGE_UPLOAD_TO_R2:-true}
     depends_on:
       api:
         condition: service_started
@@ -158,7 +155,6 @@ services:
       R2_HUB_EXPORT_BUCKET: ${R2_HUB_EXPORT_BUCKET:-}
       R2_ENDPOINT: ${R2_ENDPOINT:-}
       R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
-      AI_GENERATED_IMAGE_UPLOAD_TO_R2: ${AI_GENERATED_IMAGE_UPLOAD_TO_R2:-true}
     depends_on:
       api:
         condition: service_started
@@ -206,7 +202,6 @@ services:
       SUPPLY_WORKER_CONCURRENCY: ${SUPPLY_WORKER_CONCURRENCY:-4}
       SUPPLY_COMPANY_CONCURRENCY: ${SUPPLY_COMPANY_CONCURRENCY:-2}
       SUPPLY_TITLE_CONCURRENCY: ${SUPPLY_TITLE_CONCURRENCY:-3}
-      SUPPLY_IMAGE_CONCURRENCY: ${SUPPLY_IMAGE_CONCURRENCY:-4}
       SUPPLY_HEARTBEAT_SECONDS: ${SUPPLY_HEARTBEAT_SECONDS:-15}
       SUPPLY_LEASE_SECONDS: ${SUPPLY_LEASE_SECONDS:-90}
       SUPPLY_FILE_RETENTION_DAYS: ${SUPPLY_FILE_RETENTION_DAYS:-7}

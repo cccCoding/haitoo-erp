@@ -23,7 +23,6 @@ class Settings(BaseSettings):
     supply_worker_concurrency: int = Field(default=4, gt=0)
     supply_company_concurrency: int = Field(default=2, gt=0)
     supply_title_concurrency: int = Field(default=3, gt=0)
-    supply_image_concurrency: int = Field(default=4, gt=0)
     supply_heartbeat_seconds: int = Field(default=15, gt=0)
     supply_lease_seconds: int = Field(default=90, gt=0)
     supply_file_retention_days: int = Field(default=7, gt=0)
@@ -42,7 +41,6 @@ class Settings(BaseSettings):
     r2_endpoint: str | None = None
     r2_public_base_url: str | None = None
     # true 时将模型的临时结果复制到 R2，避免任务结果依赖第三方 URL 的有效期。
-    ai_generated_image_upload_to_r2: bool = True
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

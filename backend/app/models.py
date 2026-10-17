@@ -362,12 +362,15 @@ class MaterialAsset(Base):
     __tablename__ = "material_assets"
     __table_args__ = (
         UniqueConstraint("sku", name="uq_material_assets_sku"),
+        UniqueConstraint("company_id", "creation_request_key", name="uq_material_creation_request"),
         Index("ix_material_assets_company_created_id", "company_id", "created_at", "id"),
         Index("ix_material_assets_company_creator_created_id", "company_id", "claimed_by", "created_at", "id"),
         Index("ix_material_assets_supply_listing", "company_id", "supply_listed", "supply_listed_at"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
+    image_file_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    creation_request_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     source_task_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
     source_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     template_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
@@ -446,18 +449,29 @@ class SupplyJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
-class SupplyImageHealth(Base):
-    """图片状态按公司与完整 URL 共享；换 URL 自然生成新记录。"""
-    __tablename__ = "supply_image_health"
-    __table_args__ = (UniqueConstraint("company_id", "url_hash", name="uq_supply_image_health_company_url"),)
+class ImageFile(Base):
+    """只登记已校验并保存的图片；不存储检查或入库状态。"""
+    __tablename__ = "image_files"
+    __table_args__ = (UniqueConstraint("company_id", "sha256", name="uq_image_file_content"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    sha256: Mapped[str] = mapped_column(String(64))
+    object_key: Mapped[str] = mapped_column(String(500))
+    url: Mapped[str] = mapped_column(String(500))
+    mime_type: Mapped[str] = mapped_column(String(40))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ImageAddress(Base):
+    """来源地址和历史地址映射，按公司隔离。"""
+    __tablename__ = "image_addresses"
+    __table_args__ = (UniqueConstraint("company_id", "url_hash", name="uq_image_address_url"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     url_hash: Mapped[str] = mapped_column(String(64))
     url: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(20), default="unchecked", server_default="unchecked", index=True)
-    check_sequence: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    image_file_id: Mapped[int] = mapped_column(Integer, index=True)
 
 
 class SupplyJobMaterial(Base):

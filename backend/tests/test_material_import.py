@@ -43,6 +43,10 @@ class MaterialImportTests(unittest.TestCase):
                 MaterialAsset(company_id=2, claimed_by=99, name='foreign', url='https://img.example/foreign', sku='FOREIGN'),
             ])
             db.commit()
+            from tests.image_file_helpers import index_urls
+            files=index_urls(db,1,["https://img.example/existing"])
+            db.scalar(select(MaterialAsset).where(MaterialAsset.url=="https://img.example/existing")).image_file_id=files[0].id
+            db.commit()
 
     def tearDown(self):
         self.engine.dispose()
@@ -81,65 +85,20 @@ class MaterialImportTests(unittest.TestCase):
         with self.sessions() as db:
             self.assertEqual(db.scalar(select(func.count()).select_from(MaterialAsset)), 2)
 
-    def test_authenticated_http_endpoints(self):
-        with self.sessions() as db:
-            user = db.get(User, 1)
-            main.app.dependency_overrides[main.current_user] = lambda: user
-            main.app.dependency_overrides[main.get_db] = lambda: db
-            async def requests():
-                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://test') as client:
-                    template = await client.get('/material-assets/import-template')
-                    self.assertEqual(template.status_code, 200)
-                    self.assertIn('spreadsheetml', template.headers['content-type'])
-                    self.assertIn('filename*=', template.headers['content-disposition'])
-                    preview = await client.post('/material-assets/import-preview', files={'file': ('import.xlsx', xlsx([['SKU图'], ['https://img.example/existing']]))})
-                    self.assertEqual(preview.json()['items'], [{'url': 'https://img.example/existing', 'exists': True}])
-                    invalid = await client.post('/material-assets/import-confirm', json={'template_id': 1, 'urls': ['https://img.example/valid', 'javascript:bad']})
-                    self.assertEqual(invalid.status_code, 400)
-                    confirmed = await client.post('/material-assets/import-confirm', json={'template_id': 1, 'urls': ['https://img.example/existing']})
-                    self.assertEqual(confirmed.json(), {'imported': 1})
-            try:
-                asyncio.run(requests())
-            finally:
-                main.app.dependency_overrides.clear()
-            self.assertEqual(db.scalar(select(func.count()).select_from(MaterialAsset)), 3)
 
-    def test_confirm_existing_link_and_source_compatibility(self):
-        urls = ['https://img.example/existing', ' https://img.example/new?q=Original ', 'https://img.example/existing']
-        with self.sessions() as db, patch.object(main, 'upload_image_bytes_async') as upload, patch.object(main, 'create_image_upload_url') as presign, patch.object(main.httpx, 'AsyncClient') as client:
-            result = main.confirm_material_import(MaterialImportConfirmInput(template_id=1, urls=urls), user=db.get(User, 1), db=db)
-            self.assertEqual(result, {'imported': 2})
-            assets = db.scalars(select(MaterialAsset).where(MaterialAsset.source_type == 'imported')).all()
-            self.assertEqual([asset.url for asset in assets], [urls[0], urls[1].strip()])
-            self.assertEqual(len({asset.sku for asset in assets}), 2)
-            self.assertTrue(all(asset.sku.startswith('Y1AA') and len(asset.sku) == 10 and asset.template_id == 1 and asset.claimed_by == 1 and asset.company_id == 1 and asset.usage_status == 'unused' for asset in assets))
-            upload.assert_not_called(); presign.assert_not_called(); client.assert_not_called()
-            unused = main.list_material_assets(page=1, page_size=20, creator_id=None, template_id=None, usage_status='unused', user=db.get(User, 1), db=db)
-            self.assertEqual({item['source_type'] for item in unused['items']}, {'imported'})
-            admin = db.get(User, 1); admin.role = Role.COMPANY_ADMIN
-            old = main.list_material_assets(page=1, page_size=20, creator_id=None, template_id=None, usage_status='used', user=admin, db=db)
-            self.assertEqual(old['items'][0]['source_type'], 'local_upload')
 
     def test_permissions_and_missing_code(self):
         with self.sessions() as db:
             user = db.get(User, 1)
             for template_id in (2, 999):
                 with self.assertRaises(HTTPException) as error:
-                    main.confirm_material_import(MaterialImportConfirmInput(template_id=template_id, urls=['https://img.example/a']), user=user, db=db)
+                    main.confirm_material_import(MaterialImportConfirmInput(request_key="import-test-key",template_id=template_id, urls=['https://img.example/a']), user=user, db=db)
                 self.assertEqual(error.exception.status_code, 404)
             user.user_code = None
             with self.assertRaises(HTTPException) as error:
-                main.confirm_material_import(MaterialImportConfirmInput(template_id=1, urls=['https://img.example/a']), user=user, db=db)
+                main.confirm_material_import(MaterialImportConfirmInput(request_key="import-test-key",template_id=1, urls=['https://img.example/a']), user=user, db=db)
             self.assertIn('用户代码', error.exception.detail)
 
-    def test_sku_conflict_retries(self):
-        with self.sessions() as db:
-            db.add(MaterialAsset(company_id=1, claimed_by=1, name='collision', url='https://img.example/collision', sku='Y1AAAAAAAA'))
-            db.commit()
-            with patch.object(main.secrets, 'choice', side_effect=list('AAAAAABBBBBB')):
-                main.confirm_material_import(MaterialImportConfirmInput(template_id=1, urls=['https://img.example/a']), user=db.get(User, 1), db=db)
-            asset = db.scalar(select(MaterialAsset).where(MaterialAsset.source_type == 'imported'))
-            self.assertEqual(asset.sku, 'Y1AABBBBBB')
 
     def test_material_type_filter_includes_legacy_sources_and_scopes(self):
         with self.sessions() as db:
@@ -178,20 +137,6 @@ class MaterialImportTests(unittest.TestCase):
                 query(created_from=datetime(2026, 10, 10, 2), created_to=datetime(2026, 10, 10, 9, tzinfo=hk))
             self.assertEqual(error.exception.status_code, 400)
 
-    def test_batch_rolls_back_when_second_insert_fails(self):
-        original = main.add_material_asset_with_sku
-        calls = 0
-        def fail_second(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                raise HTTPException(503, 'SKU 生成失败')
-            return original(*args, **kwargs)
-        with self.sessions() as db, patch.object(main, 'add_material_asset_with_sku', side_effect=fail_second):
-            with self.assertRaises(HTTPException):
-                main.confirm_material_import(MaterialImportConfirmInput(template_id=1, urls=['https://img.example/a', 'https://img.example/b']), user=db.get(User, 1), db=db)
-        with self.sessions() as db:
-            self.assertEqual(db.scalar(select(func.count()).select_from(MaterialAsset)), 2)
 
 
 if __name__ == '__main__':

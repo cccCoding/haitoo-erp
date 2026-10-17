@@ -18,6 +18,7 @@ from app.models import (
     ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, User,
 )
 from app.security import create_access_token
+from tests.image_file_helpers import mock_image_storage
 
 
 class StagnantMaterialTests(unittest.TestCase):
@@ -106,6 +107,7 @@ class StagnantMaterialTests(unittest.TestCase):
         self.assertEqual([item["sku"] for item in self.listing(user_id=4)["items"]], ["OTHER_COMPANY"])
 
     def test_imported_order_removes_material_without_statistics_task(self):
+        mock_image_storage(self)
         with self.sessions() as db:
             self.asset(db, "M06LZERO123")
             db.commit()
