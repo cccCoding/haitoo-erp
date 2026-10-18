@@ -1,7 +1,7 @@
 """回填的旧库兼容、并发限流、缓存恢复和部署增量测试；不访问实际 R2。"""
 from collections import Counter
 from contextlib import redirect_stderr, redirect_stdout
-from io import StringIO
+from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import tempfile
@@ -12,6 +12,8 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from alembic import command
+from fastapi import HTTPException
+from PIL import Image
 from sqlalchemy import create_engine, event, inspect, select, text, update
 from sqlalchemy.orm import sessionmaker
 
@@ -140,6 +142,84 @@ class ImageBackfillTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["workers"], 6)
         self.assertEqual(run.call_args.kwargs["limit"], 100)
         self.assertFalse(run.call_args.kwargs["collect_results"])
+        self.assertIsNone(run.call_args.kwargs["max_r2_bytes"])
+
+    def large_picture(self, side=1024):
+        output = BytesIO()
+        Image.new("RGB", (side, side), "red").save(output, format="PNG", compress_level=0)
+        content = output.getvalue()
+        self.assertGreater(len(content), 3 * 1024 * 1024)
+        return content
+
+    def r2_storage(self, content):
+        self.enterContext(patch("app.storage.get_settings", return_value=SimpleNamespace(
+            r2_public_base_url="https://images.example")))
+        self.enterContext(patch("app.storage._configuration", return_value=(
+            "https://r2.example", "access", "secret", "images", "https://images.example")))
+        client = self.enterContext(patch("app.storage._r2_client")).return_value
+        client.get_object.side_effect = lambda **kwargs: {
+            "ContentLength": len(content), "Body": BytesIO(content)}
+        return client
+
+    def test_large_historical_r2_apply_preserves_bytes_url_and_sku_but_new_import_rejects(self):
+        url = "https://images.example/material/company/1/large.png"
+        content = self.large_picture(side=3456)
+        self.assertGreater(len(content), 32 * 1024 * 1024)
+        self.seed([(1, 1, url)])
+        client = self.r2_storage(content)
+        save = self.mock_storage()
+        with self.sessions() as db, self.assertRaises(HTTPException):
+            image_files.ingest_url(db, 1, url)  # 普通导入仍限制 3 MiB。
+        rows = self.run_backfill(apply=True)
+        self.assertEqual(rows[0]["result"], "saved")
+        self.assertEqual(rows[0]["source"], "network")
+        with self.sessions() as db:
+            asset = db.get(MaterialAsset, 1)
+            image_file = image_files.by_url(db, 1, url)
+            self.assertEqual(asset.image_file_id, image_file.id)
+            self.assertEqual(asset.sku, "OLD1")
+            self.assertEqual(image_file.url, url)
+            self.assertEqual(image_file.sha256, image_files.digest(content))
+            self.assertEqual(image_file.size_bytes, len(content))
+        save.assert_not_called()  # 历史正式对象只读取校验，不改写原图。
+        client.get_object.reset_mock()
+        self.assertEqual(self.run_backfill(apply=True)[0]["source"], "indexed")
+        client.get_object.assert_not_called()
+
+    def test_large_historical_r2_prepare_and_apply_cache_enforce_configured_limit(self):
+        url = "https://images.example/material/company/1/large.png"
+        self.seed([(1, 1, url)])
+        client = self.r2_storage(self.large_picture())
+        self.mock_storage()
+        rejected = self.run_backfill(prepare=True, cache_dir=self.cache_dir, max_r2_bytes=3 * 1024 * 1024)
+        self.assertEqual(rejected[0]["result"], "error")
+        self.assertEqual(self.run_backfill(prepare=True, cache_dir=self.cache_dir)[0]["result"], "prepared")
+        client.get_object.reset_mock()
+        rejected = self.run_backfill(apply=True, cache_dir=self.cache_dir, max_r2_bytes=3 * 1024 * 1024)
+        self.assertEqual(rejected[0]["result"], "error")
+        applied = self.run_backfill(apply=True, cache_dir=self.cache_dir)
+        self.assertEqual(applied[0]["source"], "cache")
+        client.get_object.assert_not_called()
+
+    def test_historical_r2_override_does_not_allow_large_external_or_invalid_images(self):
+        self.seed([(1, 1, "https://source.example/large.png")])
+        save = self.mock_storage()
+        with patch.object(image_files, "download_image", AsyncMock(return_value=self.large_picture())):
+            rows = self.run_backfill(apply=True)
+        self.assertEqual(rows[0]["result"], "error")
+        self.assertIn("3 MiB", rows[0]["error"])
+        with patch.object(cache_module, "download_image", AsyncMock(return_value=self.large_picture())):
+            rows = self.run_backfill(prepare=True, cache_dir=self.cache_dir)
+        self.assertEqual(rows[0]["result"], "error")
+        url = "https://images.example/material/company/1/broken.png"
+        with self.sessions() as db:
+            db.execute(update(MaterialAsset).values(url=url))
+            db.commit()
+        self.r2_storage(b"not an image")
+        rows = self.run_backfill(apply=True)
+        self.assertEqual(rows[0]["result"], "error")
+        self.assertIn("图片内容损坏", rows[0]["error"])
+        save.assert_not_called()
 
     def test_partial_failure_retry_and_report_latest_result(self):
         self.seed([(1, 1, "https://source.example/bad"), (2, 1, "https://source.example/good")])
@@ -294,7 +374,8 @@ class ImageBackfillTests(unittest.TestCase):
 
     def test_invalid_options_and_unsupported_prepare_schema(self):
         for kwargs in ({"prepare": True}, {"prepare": True, "apply": True, "cache_dir": self.cache_dir},
-                       {"workers": 33}, {"per_host": 0}, {"limit": 0}, {"progress_seconds": 0}):
+                       {"workers": 33}, {"per_host": 0}, {"limit": 0}, {"progress_seconds": 0},
+                       {"max_r2_bytes": 0}, {"max_r2_bytes": -1}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 self.run_backfill(**kwargs)
         with self.assertRaisesRegex(RuntimeError, "预缓存要求"):

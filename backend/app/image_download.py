@@ -175,9 +175,11 @@ class ImageDownloadError(ValueError):
         self.retryable = retryable
 
 
-def decode_image(content: bytes) -> str:
-    if not content or len(content) > MAX_IMAGE_BYTES:
-        raise ImageDownloadError("图片为空或超过 3 MiB")
+def decode_image(content: bytes, *, max_bytes: int | None = MAX_IMAGE_BYTES) -> str:
+    if not content:
+        raise ImageDownloadError("图片为空")
+    if max_bytes is not None and len(content) > max_bytes:
+        raise ImageDownloadError(f"图片超过 {max_bytes / (1024 * 1024):g} MiB")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)

@@ -178,16 +178,16 @@ def create_temporary_image_upload(mime_type: str, content_length: int, company_i
     return create_image_upload_url(mime_type, content_length, company_id, "image-upload-tmp")
 
 
-def read_image_object(key: str, max_bytes: int = 3 * 1024 * 1024) -> bytes:
+def read_image_object(key: str, max_bytes: int | None = 3 * 1024 * 1024) -> bytes:
     endpoint, access, secret, bucket, _ = _configuration(get_settings())
     try:
         result = _r2_client(endpoint, access, secret).get_object(Bucket=bucket, Key=key)
         body = result["Body"]
         try:
-            if result.get("ContentLength", 0) > max_bytes:
+            if max_bytes is not None and result.get("ContentLength", 0) > max_bytes:
                 raise StorageError("图片大小超限")
-            content = body.read(max_bytes + 1)
-            if len(content) > max_bytes:
+            content = body.read() if max_bytes is None else body.read(max_bytes + 1)
+            if max_bytes is not None and len(content) > max_bytes:
                 raise StorageError("图片大小超限")
             return content
         finally:

@@ -18,7 +18,8 @@ from app.models import MaterialAsset, PodTask, ProductDraft, ProductTemplate, Us
 from app.image_files import by_url, ingest_url, product_library_image_urls, register_bytes
 from app.schema_version import assert_schema_current, schema_heads
 from app.storage import r2_object_key
-from scripts.image_backfill_cache import ImageBackfillCache
+from app.image_download import MAX_IMAGE_BYTES
+from scripts.image_backfill_cache import DEFAULT_R2_MAX_BYTES, ImageBackfillCache
 
 
 # 只读 36 版已有字段，允许迁移前在旧系统运行时预缓存；不得加载整个新版 ORM。
@@ -127,7 +128,7 @@ def _open_report(path):
     return path.open("a", encoding="utf-8")
 
 
-def _process_group(rows, *, apply, prepare, cache, session_factory):
+def _process_group(rows, *, apply, prepare, cache, session_factory, max_r2_bytes):
     first = rows[0]
     company, url = first["company_id"], first["url"]
     try:
@@ -148,10 +149,11 @@ def _process_group(rows, *, apply, prepare, cache, session_factory):
                             key = r2_object_key(url)
                             owned = key and f"/company/{company}/" in f"/{key}"
                             image_file = register_bytes(db, company, content, source_url=url,
-                                preserve_url=url if owned else None)
+                                preserve_url=url if owned else None,
+                                max_bytes=max_r2_bytes if key else MAX_IMAGE_BYTES)
                             cached = True
                         else:
-                            image_file = ingest_url(db, company, url)
+                            image_file = ingest_url(db, company, url, max_r2_bytes=max_r2_bytes)
                     file_id = image_file.id
                     asset_ids = [row["id"] for row in rows if row["model"] == "MaterialAsset"]
                     for offset in range(0, len(asset_ids), 400):
@@ -178,11 +180,14 @@ def _process_group(rows, *, apply, prepare, cache, session_factory):
 
 def run(*, apply=False, prepare=False, cache_dir=None, company_id=None, report=None,
         retry_from=None, session_factory=SessionLocal, workers=1, per_host=4,
-        limit=None, progress_seconds=5, verbose=True, collect_results=True):
+        limit=None, progress_seconds=5, verbose=True, collect_results=True,
+        max_r2_bytes=DEFAULT_R2_MAX_BYTES):
     if prepare and (apply or not cache_dir):
         raise ValueError("预缓存需要 --cache-dir，且不能与 --apply 同时使用")
     if not 1 <= workers <= 32 or per_host < 1 or progress_seconds <= 0 or (limit is not None and limit < 1):
         raise ValueError("并发数须为 1–32；域名并发、进度间隔及数量限制须为正数")
+    if max_r2_bytes is not None and max_r2_bytes < MAX_IMAGE_BYTES:
+        raise ValueError("历史 R2 图片上限须至少为 3 MiB，也可不限制")
     started = time.monotonic()
     groups = {}
     with session_factory() as db:
@@ -193,7 +198,7 @@ def run(*, apply=False, prepare=False, cache_dir=None, company_id=None, report=N
         groups = {key: rows for key, rows in groups.items() if key in failures}
     total_available = len(groups)
     batches = list(groups.values())[:limit]
-    cache = ImageBackfillCache(cache_dir) if cache_dir else None
+    cache = ImageBackfillCache(cache_dir, max_r2_bytes=max_r2_bytes) if cache_dir else None
 
     def host(rows):
         try:
@@ -205,7 +210,8 @@ def run(*, apply=False, prepare=False, cache_dir=None, company_id=None, report=N
 
     def process(rows):
         with semaphores[host(rows)]:
-            return _process_group(rows, apply=apply, prepare=prepare, cache=cache, session_factory=session_factory)
+            return _process_group(rows, apply=apply, prepare=prepare, cache=cache,
+                session_factory=session_factory, max_r2_bytes=max_r2_bytes)
 
     counts = Counter()
     output = []
@@ -295,6 +301,8 @@ def main():
     parser.add_argument("--cache-dir", help="持久化图片缓存目录；预缓存和正式回填须挂载同一目录")
     parser.add_argument("--workers", type=int, default=8, help="并行处理的不同图片地址数，默认 8，最多 32")
     parser.add_argument("--per-host", type=int, default=4, help="同一来源域名的最大并发，默认 4")
+    parser.add_argument("--max-r2-image-mib", type=int, default=0,
+        help="仅历史 R2 图片的单张上限，默认 0 表示不限制；若设置上限须至少为 3 MiB；新上传和外链仍为 3 MiB")
     parser.add_argument("--limit", type=int, help="本次最多处理多少个不同的公司/地址，用于小批量测速；不表示全量完成")
     parser.add_argument("--progress-seconds", type=float, default=5, help="进度、吞吐和预计剩余时间的输出间隔，默认 5 秒")
     parser.add_argument("--verbose", action="store_true", help="同时向标准输出打印逐项结果；完整结果始终保存在报告中")
@@ -307,6 +315,8 @@ def main():
         parser.error("--prepare 需要 --cache-dir，且不能与 --apply 同时使用")
     if not 1 <= args.workers <= 32 or args.per_host < 1 or args.progress_seconds <= 0 or (args.limit is not None and args.limit < 1):
         parser.error("--workers 须为 1–32，其余数量及间隔须为正数")
+    if args.max_r2_image_mib != 0 and args.max_r2_image_mib < 3:
+        parser.error("--max-r2-image-mib 须为 0 或至少为 3")
     if args.prepare:
         assert_prepare_schema(engine)
     else:
@@ -328,6 +338,7 @@ def main():
     summary = run(apply=args.apply, prepare=args.prepare, cache_dir=args.cache_dir,
         company_id=args.company_id, report=args.report, retry_from=args.retry_from,
         workers=args.workers, per_host=args.per_host, limit=args.limit,
+        max_r2_bytes=args.max_r2_image_mib * 1024 * 1024 if args.max_r2_image_mib else None,
         progress_seconds=args.progress_seconds, verbose=args.verbose, collect_results=False)
     if summary["errors"]:
         raise SystemExit(1)

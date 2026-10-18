@@ -13,9 +13,17 @@ from app.image_files import digest
 from app.storage import r2_object_key, read_image_object
 
 
+# 历史文件不因新上传的大小限制回填失败；普通上传仍使用原上限。
+DEFAULT_R2_MAX_BYTES = None
+
+
 class ImageBackfillCache:
-    def __init__(self, directory):
+    def __init__(self, directory, *, max_r2_bytes=DEFAULT_R2_MAX_BYTES):
         self.directory = Path(directory)
+        self.max_r2_bytes = max_r2_bytes
+
+    def max_bytes(self, url):
+        return self.max_r2_bytes if r2_object_key(url) else MAX_IMAGE_BYTES
 
     def _company_dir(self, company_id):
         if not isinstance(company_id, int) or company_id <= 0:
@@ -34,9 +42,11 @@ class ImageBackfillCache:
         path = directory / "files" / sha
         if not path.exists():
             return None
+        max_bytes = self.max_bytes(url)
         with path.open("rb") as stream:
-            content = stream.read(MAX_IMAGE_BYTES + 1)
-        if len(content) > MAX_IMAGE_BYTES or len(content) != metadata.get("size_bytes") or digest(content) != sha:
+            content = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
+        if ((max_bytes is not None and len(content) > max_bytes)
+                or len(content) != metadata.get("size_bytes") or digest(content) != sha):
             raise ValueError("图片缓存校验失败，请移除该地址缓存后重新预缓存")
         return content
 
@@ -58,8 +68,8 @@ class ImageBackfillCache:
         if content is not None:
             return True
         key = r2_object_key(url)
-        content = read_image_object(key) if key else asyncio.run(download_image(url))
-        mime = decode_image(content)
+        content = read_image_object(key, max_bytes=self.max_r2_bytes) if key else asyncio.run(download_image(url))
+        mime = decode_image(content, max_bytes=self.max_bytes(url))
         sha = digest(content)
         directory = self._company_dir(company_id)
         self._write_atomic(directory / "files" / sha, content)

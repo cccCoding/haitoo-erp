@@ -93,7 +93,7 @@ class ImageFileTests(unittest.TestCase):
                         result = main.confirm_material_import(MaterialImportConfirmInput(
                             template_id=1, urls=[url], request_key=f"import-{category}"), user=db.get(User, 1), db=db)
                     self.assertEqual(result["imported"], 1)
-                    read.assert_called_once_with(f"{category}/company/1/upload.png")
+                    read.assert_called_once_with(f"{category}/company/1/upload.png", max_bytes=3 * 1024 * 1024)
                     asset = db.get(MaterialAsset, result["items"][0]["asset_id"])
                     image_file = db.get(ImageFile, asset.image_file_id)
                     self.assertTrue(image_file.object_key.startswith("images/company/1/"))

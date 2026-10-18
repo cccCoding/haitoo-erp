@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from .credentials import decrypt_secret, encrypt_secret
-from .image_download import ImageDownloadError, decode_image, download_image
+from .image_download import MAX_IMAGE_BYTES, ImageDownloadError, decode_image, download_image
 from .models import Company, ImageAddress, ImageFile, MaterialAsset, ProductLibraryProduct, ProductLibrarySource
 from .storage import (StorageError, create_temporary_image_upload, r2_object_key,
     read_image_object, save_content_image)
@@ -55,9 +55,9 @@ def add_address(db, company_id: int, url: str, image_file: ImageFile):
 
 
 def register_bytes(db, company_id: int, content: bytes, *, source_url: str | None = None,
-                   preserve_url: str | None = None) -> ImageFile:
+                   preserve_url: str | None = None, max_bytes: int | None = MAX_IMAGE_BYTES) -> ImageFile:
     try:
-        mime = decode_image(content)
+        mime = decode_image(content, max_bytes=max_bytes)
         sha = digest(content)
         image_file = by_content(db, company_id, sha)
         if image_file is None:
@@ -92,7 +92,7 @@ def register_bytes(db, company_id: int, content: bytes, *, source_url: str | Non
         raise HTTPException(400 if isinstance(exc, ImageDownloadError) else 503, str(exc)) from exc
 
 
-def ingest_url(db, company_id: int, url: str) -> ImageFile:
+def ingest_url(db, company_id: int, url: str, *, max_r2_bytes: int | None = MAX_IMAGE_BYTES) -> ImageFile:
     url = url.strip()
     existing = by_url(db, company_id, url)
     if existing:
@@ -101,9 +101,10 @@ def ingest_url(db, company_id: int, url: str) -> ImageFile:
     db.commit()
     try:
         key = r2_object_key(url)
-        content = read_image_object(key) if key else asyncio.run(download_image(url))
+        content = read_image_object(key, max_bytes=max_r2_bytes) if key else asyncio.run(download_image(url))
         owned = key and f"/company/{company_id}/" in f"/{key}"
-        return register_bytes(db, company_id, content, source_url=url, preserve_url=url if owned else None)
+        return register_bytes(db, company_id, content, source_url=url, preserve_url=url if owned else None,
+            max_bytes=max_r2_bytes if key else MAX_IMAGE_BYTES)
     except (ImageDownloadError, StorageError) as exc:
         raise HTTPException(400 if isinstance(exc, ImageDownloadError) else 503, str(exc)) from exc
 
