@@ -55,7 +55,8 @@ def add_address(db, company_id: int, url: str, image_file: ImageFile):
 
 
 def register_bytes(db, company_id: int, content: bytes, *, source_url: str | None = None,
-                   preserve_url: str | None = None, max_bytes: int | None = MAX_IMAGE_BYTES) -> ImageFile:
+                   preserve_url: str | None = None, max_bytes: int | None = MAX_IMAGE_BYTES,
+                   release_before_storage: bool = False) -> ImageFile:
     try:
         mime = decode_image(content, max_bytes=max_bytes)
         sha = digest(content)
@@ -69,6 +70,9 @@ def register_bytes(db, company_id: int, content: bytes, *, source_url: str | Non
             if key:
                 url = preserve_url
             else:
+                if release_before_storage:
+                    # 回填已完成只读查重；释放连接后等待 R2，登记时仍由唯一约束解决竞争。
+                    db.commit()
                 key, url = save_content_image(content, mime, company_id, sha)
             try:
                 with db.begin_nested():
@@ -92,7 +96,8 @@ def register_bytes(db, company_id: int, content: bytes, *, source_url: str | Non
         raise HTTPException(400 if isinstance(exc, ImageDownloadError) else 503, str(exc)) from exc
 
 
-def ingest_url(db, company_id: int, url: str, *, max_r2_bytes: int | None = MAX_IMAGE_BYTES) -> ImageFile:
+def ingest_url(db, company_id: int, url: str, *, max_r2_bytes: int | None = MAX_IMAGE_BYTES,
+               release_before_storage: bool = False) -> ImageFile:
     url = url.strip()
     existing = by_url(db, company_id, url)
     if existing:
@@ -104,7 +109,8 @@ def ingest_url(db, company_id: int, url: str, *, max_r2_bytes: int | None = MAX_
         content = read_image_object(key, max_bytes=max_r2_bytes) if key else asyncio.run(download_image(url))
         owned = key and f"/company/{company_id}/" in f"/{key}"
         return register_bytes(db, company_id, content, source_url=url, preserve_url=url if owned else None,
-            max_bytes=max_r2_bytes if key else MAX_IMAGE_BYTES)
+            max_bytes=max_r2_bytes if key else MAX_IMAGE_BYTES,
+            release_before_storage=release_before_storage)
     except (ImageDownloadError, StorageError) as exc:
         raise HTTPException(400 if isinstance(exc, ImageDownloadError) else 503, str(exc)) from exc
 

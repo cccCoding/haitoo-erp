@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from datetime import datetime
 import json
 from pathlib import Path
@@ -11,7 +12,8 @@ from threading import BoundedSemaphore
 import time
 from urllib.parse import urlsplit
 
-from sqlalchemy import func, select, update
+from sqlalchemy import create_engine, func, select, update
+from sqlalchemy.orm import sessionmaker
 
 from app.database import SessionLocal, engine
 from app.models import MaterialAsset, PodTask, ProductDraft, ProductTemplate, UserTemplateWhiteImage
@@ -30,6 +32,17 @@ REFERENCE_FIELDS = {
     ProductDraft: ("template_id", "image_urls", "size_chart_url", "sku_items", "carousel_items"),
     PodTask: ("result_urls", "selected_result_url", "parameters"),
 }
+
+
+@contextmanager
+def backfill_sessions(bind, workers):
+    """维护任务使用独立连接池，容量匹配并发，不改变 API/Worker 配置。"""
+    maintenance_engine = create_engine(bind.url, pool_pre_ping=True,
+        pool_size=workers, max_overflow=0)
+    try:
+        yield sessionmaker(bind=maintenance_engine, autoflush=False, expire_on_commit=False)
+    finally:
+        maintenance_engine.dispose()
 
 
 def assert_prepare_schema(bind):
@@ -150,10 +163,12 @@ def _process_group(rows, *, apply, prepare, cache, session_factory, max_r2_bytes
                             owned = key and f"/company/{company}/" in f"/{key}"
                             image_file = register_bytes(db, company, content, source_url=url,
                                 preserve_url=url if owned else None,
-                                max_bytes=max_r2_bytes if key else MAX_IMAGE_BYTES)
+                                max_bytes=max_r2_bytes if key else MAX_IMAGE_BYTES,
+                                release_before_storage=True)
                             cached = True
                         else:
-                            image_file = ingest_url(db, company, url, max_r2_bytes=max_r2_bytes)
+                            image_file = ingest_url(db, company, url, max_r2_bytes=max_r2_bytes,
+                                release_before_storage=True)
                     file_id = image_file.id
                     asset_ids = [row["id"] for row in rows if row["model"] == "MaterialAsset"]
                     for offset in range(0, len(asset_ids), 400):
@@ -335,11 +350,13 @@ def main():
             pass  # 由逐项处理报告缺失配置；只有磁盘缓存命中的预缓存无需 R2。
         else:
             _r2_client(*configuration[:3])
-    summary = run(apply=args.apply, prepare=args.prepare, cache_dir=args.cache_dir,
-        company_id=args.company_id, report=args.report, retry_from=args.retry_from,
-        workers=args.workers, per_host=args.per_host, limit=args.limit,
-        max_r2_bytes=args.max_r2_image_mib * 1024 * 1024 if args.max_r2_image_mib else None,
-        progress_seconds=args.progress_seconds, verbose=args.verbose, collect_results=False)
+    with backfill_sessions(engine, args.workers) as sessions:
+        summary = run(apply=args.apply, prepare=args.prepare, cache_dir=args.cache_dir,
+            company_id=args.company_id, report=args.report, retry_from=args.retry_from,
+            session_factory=sessions,
+            workers=args.workers, per_host=args.per_host, limit=args.limit,
+            max_r2_bytes=args.max_r2_image_mib * 1024 * 1024 if args.max_r2_image_mib else None,
+            progress_seconds=args.progress_seconds, verbose=args.verbose, collect_results=False)
     if summary["errors"]:
         raise SystemExit(1)
 

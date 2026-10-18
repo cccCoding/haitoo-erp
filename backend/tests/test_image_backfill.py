@@ -343,6 +343,47 @@ class ImageBackfillTests(unittest.TestCase):
         self.assertTrue(any(row["event"] == "progress" for row in progress))
         self.assertEqual(progress[-1]["eta_seconds"], 0)
 
+    def test_24_workers_reach_storage_without_holding_database_connections(self):
+        self.seed([(index + 1, 1, f"https://source.example/{index}") for index in range(24)])
+        checked_out = []
+        with backfill.backfill_sessions(self.engine, 24) as sessions:
+            bind = sessions.kw["bind"]
+            # 所有线程同时进入模拟的慢 R2 写入，复现超过旧连接池 15 条上限的情形。
+            barrier = threading.Barrier(24, action=lambda: checked_out.append(bind.pool.checkedout()))
+
+            async def download(url):
+                return picture((int(url.rsplit("/", 1)[1]), 0, 0))
+
+            def save(content, mime, company, sha):
+                barrier.wait(timeout=5)
+                return f"images/company/{company}/{sha}.png", f"https://images.example/{sha}.png"
+
+            with patch.object(image_files, "download_image", side_effect=download), \
+                    patch.object(image_files, "save_content_image", side_effect=save):
+                summary = backfill.run(apply=True, workers=24, per_host=24,
+                    session_factory=sessions, verbose=False, collect_results=False)
+        self.assertEqual(summary["errors"], 0)
+        self.assertEqual(summary["completed_urls"], 24)
+        self.assertEqual(checked_out, [0])
+        with self.sessions() as db:
+            self.assertTrue(all(asset.image_file_id is not None for asset in db.scalars(select(MaterialAsset))))
+
+    def test_cached_image_upload_releases_database_connection_before_storage(self):
+        self.seed([(1, 1, "https://source.example/a")])
+        with patch.object(cache_module, "download_image", AsyncMock(return_value=picture())):
+            self.run_backfill(prepare=True, cache_dir=self.cache_dir)
+        with backfill.backfill_sessions(self.engine, 1) as sessions:
+            bind = sessions.kw["bind"]
+
+            def save(content, mime, company, sha):
+                self.assertEqual(bind.pool.checkedout(), 0)
+                return "images/company/1/a.png", "https://images.example/a.png"
+
+            with patch.object(image_files, "save_content_image", side_effect=save):
+                rows = backfill.run(apply=True, cache_dir=self.cache_dir, session_factory=sessions,
+                    verbose=False)
+        self.assertEqual(rows[0]["source"], "cache")
+
     def test_limit_counts_unique_company_urls_and_preview_does_not_download(self):
         self.seed([(1, 1, "https://source.example/a"), (2, 1, "https://source.example/a"),
             (3, 2, "https://source.example/a")])
