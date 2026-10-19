@@ -553,9 +553,15 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
                   <img v-if="item.cover_url" :src="imageUrl(item.cover_url)" :alt="item.name" loading="lazy"/>
                   <span v-else>暂无模板图片</span>
                 </div>
-                <div class="supply-section-heading"><h3>{{item.name}}</h3><span v-if="user.role!=='supply_user'" class="supply-tag" :class="{published:item.supply_public}">{{item.supply_public?'已公开':'未公开'}}</span></div>
-                <p class="supply-template-description">{{item.description || '暂无模板描述'}}</p>
-                <p v-if="canManage" class="supply-fallback">{{item.supply_fallback_title || '尚未设置兜底基础标题'}}</p>
+                <div class="supply-section-heading"><h3 class="supply-template-text" :title="item.name">{{item.name}}</h3><span v-if="user.role!=='supply_user'" class="supply-tag" :class="{published:item.supply_public}">{{item.supply_public?'已公开':'未公开'}}</span></div>
+                <div class="supply-template-field">
+                  <span class="supply-template-field-label">模板描述</span>
+                  <p class="supply-template-text supply-template-description" :title="item.description || '暂无模板描述'">{{item.description || '暂无模板描述'}}</p>
+                </div>
+                <div v-if="canManage" class="supply-template-field supply-template-title-field">
+                  <span class="supply-template-field-label">兜底标题</span>
+                  <p class="supply-template-text supply-fallback" :title="item.supply_fallback_title || '尚未设置兜底基础标题'">{{item.supply_fallback_title || '尚未设置兜底基础标题'}}</p>
+                </div>
                 <div v-if="canManage" class="supply-actions"><button class="primary" :disabled="!!busy" @click="togglePublic(item)">{{item.supply_public?'取消公开':'公开'}}</button><button v-if="canAdmin" class="secondary" :disabled="!!busy" @click="editFallback(item)">兜底标题</button></div>
               </article>
             </div><p v-if="!filteredTemplates.length" class="empty">暂无符合条件的产品模板。</p>
@@ -711,8 +717,14 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
 .supply-card .supply-section-heading{flex-wrap:nowrap;align-items:flex-start;margin-bottom:0}
 .supply-card h3{min-width:0;overflow-wrap:anywhere}
 .supply-tag.published{background:#eaf9ef;color:#167144;flex-shrink:0}
-.supply-template-description{white-space:pre-wrap;overflow-wrap:anywhere}
-.supply-card .supply-actions{margin-top:auto}
+.supply-template-field{min-width:0;margin-top:16px}
+.supply-template-field-label{display:block;margin-bottom:6px;color:#64748b;font-size:12px;font-weight:600}
+.supply-card .supply-template-text{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere}
+.supply-template-field p{margin:0;min-height:0}
+.supply-template-title-field{padding:12px;background:#f8f7ff;border:1px solid #ede9fe;border-radius:8px}
+.supply-template-title-field .supply-template-field-label{color:#6d55c5}
+.supply-template-title-field .supply-fallback{color:#334155;font-weight:500}
+.supply-card .supply-actions{margin-top:auto;padding-top:18px}
 .supply-listing-dialog{max-width:calc(100vw - 32px);display:flex;flex-direction:column;overflow:hidden}
 .supply-listing-content{min-height:0;overflow:auto;padding:2px}
 .supply-listing-feedback{flex-shrink:0}
