@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from functools import lru_cache
 import logging
+import time
 from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
 
@@ -178,15 +179,45 @@ def create_temporary_image_upload(mime_type: str, content_length: int, company_i
     return create_image_upload_url(mime_type, content_length, company_id, "image-upload-tmp")
 
 
+def _image_storage_request(operation: str, bucket: str, key: str, request):
+    """定位图片读写等待；不记录签名 URL、凭据、响应正文或异常原文。"""
+    operation_id = uuid4().hex
+    started_at = time.perf_counter()
+    logger.info("R2 图片请求开始 | operation=%s operation_id=%s bucket=%s key=%s",
+        operation, operation_id, bucket, key)
+    try:
+        result = request()
+    except Exception as exc:
+        response = exc.response if isinstance(exc, ClientError) else {}
+        metadata = response.get("ResponseMetadata", {})
+        logger.error(
+            "R2 图片请求失败 | operation=%s operation_id=%s bucket=%s key=%s "
+            "duration_ms=%.2f exception_type=%s error_code=%s status=%s retry_attempts=%s",
+            operation, operation_id, bucket, key, (time.perf_counter() - started_at) * 1000,
+            type(exc).__name__, response.get("Error", {}).get("Code", "-"),
+            metadata.get("HTTPStatusCode", "-"), metadata.get("RetryAttempts", "-"))
+        raise
+    metadata = result.get("ResponseMetadata", {}) if isinstance(result, dict) else {}
+    logger.info(
+        "R2 图片请求完成 | operation=%s operation_id=%s bucket=%s key=%s "
+        "duration_ms=%.2f status=%s retry_attempts=%s",
+        operation, operation_id, bucket, key, (time.perf_counter() - started_at) * 1000,
+        metadata.get("HTTPStatusCode", "-"), metadata.get("RetryAttempts", "-"))
+    return result
+
+
 def read_image_object(key: str, max_bytes: int | None = 3 * 1024 * 1024) -> bytes:
     endpoint, access, secret, bucket, _ = _configuration(get_settings())
     try:
-        result = _r2_client(endpoint, access, secret).get_object(Bucket=bucket, Key=key)
+        client = _r2_client(endpoint, access, secret)
+        result = _image_storage_request("get_object", bucket, key,
+            lambda: client.get_object(Bucket=bucket, Key=key))
         body = result["Body"]
         try:
             if max_bytes is not None and result.get("ContentLength", 0) > max_bytes:
                 raise StorageError("图片大小超限")
-            content = body.read() if max_bytes is None else body.read(max_bytes + 1)
+            content = _image_storage_request("read_body", bucket, key,
+                lambda: body.read() if max_bytes is None else body.read(max_bytes + 1))
             if max_bytes is not None and len(content) > max_bytes:
                 raise StorageError("图片大小超限")
             return content
@@ -204,10 +235,12 @@ def save_content_image(content: bytes, mime_type: str, company_id: int, sha256: 
     key = f"images/company/{company_id}/{sha256}{IMAGE_SUFFIXES[mime_type]}"
     try:
         client = _r2_client(endpoint, access, secret)
-        client.put_object(Bucket=bucket, Key=key, Body=content, ContentType=mime_type,
+        _image_storage_request("put_object", bucket, key,
+            lambda: client.put_object(Bucket=bucket, Key=key, Body=content, ContentType=mime_type,
             CacheControl="public, max-age=31536000, immutable", ContentDisposition="inline",
-            Metadata={"sha256": sha256})
-        saved = client.head_object(Bucket=bucket, Key=key)
+            Metadata={"sha256": sha256}))
+        saved = _image_storage_request("head_object", bucket, key,
+            lambda: client.head_object(Bucket=bucket, Key=key))
         if saved.get("ContentLength") != len(content) or saved.get("Metadata", {}).get("sha256") != sha256:
             raise StorageError("图片保存核验失败，请重试")
         return key, f"{public_base}/{quote(key, safe='/')}"
