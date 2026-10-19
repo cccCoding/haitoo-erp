@@ -128,6 +128,30 @@ class SupplyStatisticsTests(SupplyFixture, unittest.TestCase):
             self.assertNotIn("export_blob", sql)
             self.assertNotIn("supply_jobs.checkpoint", sql)
 
+    def test_agent_link_counts_keep_success_and_company_scope_with_large_snapshots(self):
+        with self.sessions() as db:
+            for identity, options in (
+                (1, {"links": 10}),
+                (2, {"links": 3, "user_id": 2}),
+                (3, {"links": 7, "state": "failed", "agent_name": "最新名称"}),
+                (4, {"links": 2, "agent_id": None, "agent_name": None}),
+                (5, {"links": 8, "agent_id": None, "state": "running"}),
+                (6, {"links": 6, "agent_id": 3, "state": "cancelled"}),
+                (7, {"links": 9, "company_id": 2}),
+                (8, {"links": 9, "company_id": 2, "agent_id": None}),
+            ):
+                job = self.add_job(db, identity, **options)
+                job.snapshot = {**job.snapshot, "candidates": [{"description": "x" * 524288}]}
+            db.commit()
+        response = self.request("GET", "/supply/statistics")
+        self.assertEqual(response.status_code, 200, response.text)
+        agents = {row["agent_id"]: row for row in response.json()["agents"]}
+        self.assertEqual(set(agents), {1, None, 3})
+        self.assertEqual(agents[1], {"agent_id": 1, "agent_name": "最新名称", "job_count": 3,
+            "success_count": 2, "user_count": 2, "link_count": 13, "download_count": 0})
+        self.assertEqual(agents[None]["link_count"], 2)
+        self.assertEqual(agents[3]["link_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -671,13 +671,17 @@ def statistics(user=Depends(supply_actor), db: Session = Depends(get_db)):
     agents = (select(SupplyJob.agent_id.label("agent_id"), func.max(SupplyJob.id).label("latest_job_id"),
         func.count(SupplyJob.id).label("job_count"),
         func.count(case((completed, SupplyJob.id))).label("success_count"),
-        func.count(func.distinct(case((completed, SupplyJob.user_id)))).label("user_count"),
-        func.coalesce(func.sum(case((completed, SupplyJob.snapshot["strategy"]["link_count"].as_integer()),
-                                   else_=0)), 0).label("link_count"))
+        func.count(func.distinct(case((completed, SupplyJob.user_id)))).label("user_count"))
         .where(SupplyJob.company_id == user.company_id).group_by(SupplyJob.agent_id).subquery())
+    # JSON 快照可能包含大量候选素材；不要让它参与代理分组的 filesort。
+    # 对每个代理单独求和，无 GROUP BY 的聚合只读取链接数，不排序快照。
+    link_count = (select(func.coalesce(func.sum(SupplyJob.snapshot["strategy"]["link_count"].as_integer()), 0))
+        .where(SupplyJob.company_id == user.company_id, completed,
+            SupplyJob.agent_id.is_not_distinct_from(agents.c.agent_id))
+        .correlate(agents).scalar_subquery())
     grouped = {row["agent_id"]: {**row, "agent_name": row["agent_name"] or "内部使用", "download_count": 0}
         for row in db.execute(select(agents.c.agent_id, agents.c.job_count, agents.c.success_count,
-            agents.c.user_count, agents.c.link_count, SupplyJob.agent_name)
+            agents.c.user_count, link_count.label("link_count"), SupplyJob.agent_name)
             .join(SupplyJob, SupplyJob.id == agents.c.latest_job_id)).mappings()}
     download_rows = db.execute(select(SupplyJob.agent_id, func.count(SupplyAudit.id)).join(
         SupplyAudit, SupplyAudit.target_id == SupplyJob.id).where(SupplyJob.company_id == user.company_id,

@@ -70,6 +70,33 @@ class SupplyMysqlTests(unittest.TestCase):
         self.assertNotIn("download_revoked", columns)
         self.assertEqual(str(columns["category_blob"]["type"]), "MEDIUMBLOB")
 
+    def test_statistics_with_large_snapshots_and_small_sort_buffer(self):
+        from app.supply_catalog import statistics
+        with self.sessions() as db:
+            for index, (agent_id, state, links) in enumerate((
+                (1, "completed", 10), (1, "completed", 3), (1, "failed", 7),
+                (None, "completed", 2), (None, "running", 8), (2, "cancelled", 6),
+            )):
+                db.add(SupplyJob(company_id=self.company_id, user_id=self.user_ids[index % 3],
+                    agent_id=agent_id, agent_name=f"历史代理{index}", template_id=1, category_catalog_id=1,
+                    idempotency_key=uuid4().hex, request_hash="a" * 64, category_blob=b"test",
+                    state=state, snapshot={"strategy": {"link_count": links},
+                        "candidates": [{"description": "x" * 524288}]}))
+            db.commit()
+        with self.sessions() as db:
+            previous = db.scalar(text("SELECT @@SESSION.sort_buffer_size"))
+            try:
+                db.execute(text("SET SESSION sort_buffer_size = 32768"))
+                result = statistics(user=db.get(User, self.user_ids[0]), db=db)
+                agents = {row["agent_id"]: row for row in result["agents"]}
+                self.assertEqual(result["summary"]["job_count"], 6)
+                self.assertEqual(agents[1], {"agent_id": 1, "agent_name": "历史代理2", "job_count": 3,
+                    "success_count": 2, "user_count": 2, "link_count": 13, "download_count": 0})
+                self.assertEqual(agents[None]["link_count"], 2)
+                self.assertEqual(agents[2]["link_count"], 0)
+            finally:
+                db.execute(text("SET SESSION sort_buffer_size = :size"), {"size": previous})
+
     def test_parallel_claims_respect_company_limit(self):
         from app.supply_worker import claim_job
         for index in range(3):
