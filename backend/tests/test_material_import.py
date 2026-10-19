@@ -3,10 +3,12 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import unittest
 from unittest.mock import patch
+from zipfile import ZipFile
 import httpx
 
 from fastapi import HTTPException, UploadFile
 from openpyxl import Workbook, load_workbook
+from pydantic import ValidationError
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -66,11 +68,11 @@ class MaterialImportTests(unittest.TestCase):
         self.assertEqual(parse_import_workbook(data), ['https://img.example/a?q=A', 'https://img.example/a?q=a'])
 
     def test_parser_errors(self):
-        cases = [([['图片']], '缺少'), ([['SKU图', 'SKU图']], '只能有一个'), ([['SKU图'], ['ftp://example.com/a']], '第 2 行'), ([['SKU图'], [123]], '第 2 行'), ([['SKU图'], ['=HYPERLINK("https://example.com","a")']], '第 2 行'), ([['SKU图']] + [['https://img.example/a']] * 1001, '超限')]
+        cases = [([['图片']], '缺少'), ([['SKU图', 'SKU图']], '只能有一个'), ([['SKU图'], ['ftp://example.com/a']], '第 2 行'), ([['SKU图'], [123]], '第 2 行'), ([['SKU图'], ['=HYPERLINK("https://example.com","a")']], '第 2 行'), ([['SKU图']] + [['https://img.example/a']] * 10001, '10,000 条非空图片记录')]
         for rows, message in cases:
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 parse_import_workbook(xlsx(rows))
-        for data, message in [(b'broken', '无法读取'), (b'x' * (MAX_IMPORT_BYTES + 1), '10MB')]:
+        for data, message in [(b'broken', '无法读取'), (b'x' * (MAX_IMPORT_BYTES + 1), '20MB')]:
             with self.assertRaisesRegex(ValueError, message):
                 parse_import_workbook(data)
         for url in ['https:///a', 'https://example.com:bad/a', 'https://example.com/a b', 'https://example.com/' + 'a' * 500]:
@@ -78,6 +80,30 @@ class MaterialImportTests(unittest.TestCase):
                 validate_image_link(url, 2)
         with self.assertRaises(HTTPException):
             self.preview(xlsx([['SKU图'], ['https://img.example/a']]), 'a.xls')
+
+    def test_import_accepts_10000_nonempty_records_and_ignores_blank_rows(self):
+        urls = [f'https://img.example/{index}' for index in range(10000)]
+        data = xlsx([['SKU图'], [None], ['  ']] + [[url] for url in urls] + [[None]])
+        self.assertEqual(parse_import_workbook(data), urls)
+        payload = MaterialImportConfirmInput(template_id=1, urls=urls, request_key='import-limit-test')
+        self.assertEqual(len(payload.urls), 10000)
+        with self.assertRaises(ValidationError):
+            MaterialImportConfirmInput(template_id=1, urls=urls + ['https://img.example/extra'], request_key='import-limit-test')
+
+    def test_import_accepts_20mb_file_and_rejects_one_byte_over(self):
+        self.assertEqual(MAX_IMPORT_BYTES, 20 * 1024 * 1024)
+        data = xlsx([['SKU图'], ['https://img.example/a']])
+        output = BytesIO(data)
+        # 添加不影响工作表的 ZIP 成员，将合法 XLSX 精确填充到文件上限。
+        filename = 'padding.bin'
+        padding_size = MAX_IMPORT_BYTES - len(data) - 76 - 2 * len(filename)
+        with ZipFile(output, 'a') as archive:
+            archive.writestr(filename, b'x' * padding_size)
+        data = output.getvalue()
+        self.assertEqual(len(data), MAX_IMPORT_BYTES)
+        self.assertEqual(parse_import_workbook(data), ['https://img.example/a'])
+        with self.assertRaisesRegex(ValueError, '20MB'):
+            parse_import_workbook(data + b'x')
 
     def test_company_wide_preview_is_read_only(self):
         result = self.preview(xlsx([['SKU图'], ['https://img.example/existing'], ['https://img.example/existing'], ['https://img.example/foreign']]))

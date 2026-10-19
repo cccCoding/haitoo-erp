@@ -4,9 +4,9 @@ import copy
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -99,28 +99,137 @@ class SupplyFixture:
 
 
 class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
-    def test_material_pagination_supports_500_and_1000_without_cross_company_rows(self):
+    def test_material_pagination_supports_up_to_1500_without_cross_company_rows(self):
         with self.sessions() as db:
             db.add_all([MaterialAsset(id=identity, company_id=1, template_id=1, claimed_by=2,
                 sku=f"PAGE{identity}", name=f"分页素材{identity}",
                 url=f"https://img.example/page-{identity}.png", supply_listed=True)
-                for identity in range(1000, 2000)])
+                for identity in range(1000, 2500)])
             db.commit()
-        for page_size in (500, 1000):
+        for page_size in (60, 150, 300, 500, 900, 1000, 1500):
             with self.subTest(page_size=page_size):
                 response = self.request("GET", "/supply/materials", params={"page_size": page_size})
                 self.assertEqual(response.status_code, 200, response.text)
                 first = response.json()
                 self.assertEqual(first["page_size"], page_size)
-                self.assertEqual(first["total"], 1020)
+                self.assertEqual(first["total"], 1520)
                 self.assertEqual(len(first["items"]), page_size)
                 last = self.request("GET", "/supply/materials", params={
-                    "page_size": page_size, "page": 1020 // page_size + 1}).json()
-                self.assertEqual(len(last["items"]), 20)
+                    "page_size": page_size, "page": 1520 // page_size + 1}).json()
+                self.assertEqual(len(last["items"]), 1520 % page_size)
                 self.assertTrue({row["id"] for row in first["items"]}.isdisjoint(
                     row["id"] for row in last["items"]))
                 self.assertNotIn(99, [row["id"] for row in first["items"] + last["items"]])
-        self.assertEqual(self.request("GET", "/supply/materials", params={"page_size": 1001}).status_code, 422)
+        self.assertEqual(self.request("GET", "/supply/materials", params={"page_size": 1501}).status_code, 422)
+
+    def test_batch_listing_supports_1500_and_preserves_first_listing_time(self):
+        original_time = datetime(2026, 1, 1)
+        ids = list(range(1000, 2500))
+        with self.sessions() as db:
+            db.add_all([MaterialAsset(id=identity, company_id=1, template_id=1, claimed_by=2,
+                sku=f"BATCH{identity}", name=f"批量素材{identity}", url=f"https://img.example/{identity}.png",
+                supply_listed=False, supply_listed_at=original_time if identity == 1000 else None)
+                for identity in ids])
+            db.commit()
+        commits = []
+        def committed(session):
+            commits.append(session)
+        event.listen(self.sessions.class_, "after_commit", committed)
+        try:
+            response = self.request("PATCH", "/supply/materials/batch", json={"material_ids": ids, "supply_listed": True})
+        finally:
+            event.remove(self.sessions.class_, "after_commit", committed)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(response.json(), {"ids": ids, "count": 1500, "supply_listed": True})
+        with self.sessions() as db:
+            assets = db.scalars(select(MaterialAsset).where(MaterialAsset.id.in_(ids))).all()
+            self.assertTrue(all(item.supply_listed and item.supply_listed_at for item in assets))
+            self.assertEqual(db.get(MaterialAsset, 1000).supply_listed_at, original_time)
+            audits = db.scalars(select(SupplyAudit).where(SupplyAudit.action == "material_listing")).all()
+            self.assertEqual({item.target_id for item in audits}, set(ids))
+            self.assertEqual(len(audits), 1500)
+        # 重复 ID 只处理一次；批量下架和再次上架沿用首次上架时间。
+        for listed in (False, True):
+            response = self.request("PATCH", "/supply/materials/batch", uid=3,
+                json={"material_ids": [1000, 1000, 1001], "supply_listed": listed})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["count"], 2)
+            with self.sessions() as db:
+                self.assertEqual(db.get(MaterialAsset, 1000).supply_listed, listed)
+                self.assertEqual(db.get(MaterialAsset, 1000).supply_listed_at, original_time)
+        self.image_mock.assert_not_called()
+
+    def test_batch_listing_rejects_invalid_items_without_any_changes(self):
+        with self.sessions() as db:
+            db.get(MaterialAsset, 1).supply_listed = False
+            db.add_all([MaterialAsset(id=identity, company_id=1, claimed_by=2, name=f"无效素材{identity}",
+                template_id=template_id, sku=sku, url=url)
+                for identity, template_id, sku, url in (
+                    (21, 1, "", "https://img.example/21.png"),
+                    (22, 1, "NOIMAGE", ""),
+                    (23, None, "NOTEMPLATE", "https://img.example/23.png"),
+                    (24, 2, "FOREIGNTEMPLATE", "https://img.example/24.png"))])
+            db.commit()
+        for invalid_id, expected in ((21, 400), (22, 400), (23, 400), (24, 400), (99, 404), (999, 404)):
+            with self.subTest(invalid_id=invalid_id):
+                response = self.request("PATCH", "/supply/materials/batch",
+                    json={"material_ids": [1, invalid_id], "supply_listed": True})
+                self.assertEqual(response.status_code, expected, response.text)
+                self.assertIn("整批操作未执行", response.json()["detail"])
+                if expected == 400:
+                    self.assertIn(f"ID {invalid_id}", response.json()["detail"])
+                with self.sessions() as db:
+                    self.assertFalse(db.get(MaterialAsset, 1).supply_listed)
+                    self.assertIsNone(db.get(MaterialAsset, 1).supply_listed_at)
+                    self.assertEqual(db.scalars(select(SupplyAudit)).all(), [])
+
+    def test_batch_delisting_keeps_never_listed_materials_out_of_catalog_history(self):
+        with self.sessions() as db:
+            db.add(MaterialAsset(id=21, company_id=1, template_id=1, claimed_by=2,
+                sku="NEVERLISTED", name="待上架素材", url="https://img.example/21.png"))
+            db.commit()
+        response = self.request("PATCH", "/supply/materials/batch",
+            json={"material_ids": [1, 21], "supply_listed": False})
+        self.assertEqual(response.status_code, 200, response.text)
+        with self.sessions() as db:
+            self.assertFalse(db.get(MaterialAsset, 1).supply_listed)
+            self.assertIsNotNone(db.get(MaterialAsset, 1).supply_listed_at)
+            self.assertFalse(db.get(MaterialAsset, 21).supply_listed)
+            self.assertIsNone(db.get(MaterialAsset, 21).supply_listed_at)
+        removed = self.request("GET", "/supply/materials?listed=false").json()
+        self.assertEqual([row["id"] for row in removed["items"]], [1])
+
+    def test_batch_listing_requires_manager_and_valid_selection(self):
+        for uid in (2, 4, 5):
+            response = self.request("PATCH", "/supply/materials/batch", uid=uid,
+                json={"material_ids": [1, 2], "supply_listed": False})
+            self.assertEqual(response.status_code, 404 if uid == 5 else 403, response.text)
+        for ids in ([], [0], [-1], list(range(1, 1502))):
+            response = self.request("PATCH", "/supply/materials/batch",
+                json={"material_ids": ids, "supply_listed": False})
+            self.assertEqual(response.status_code, 422, response.text)
+        with self.sessions() as db:
+            self.assertTrue(db.get(MaterialAsset, 1).supply_listed)
+            self.assertEqual(db.scalars(select(SupplyAudit)).all(), [])
+
+    def test_batch_listing_rolls_back_updates_and_audits_after_write_failure(self):
+        def fail_after_audit_write(conn, cursor, statement, parameters, context, executemany):
+            compiled = context.compiled
+            if compiled and compiled.statement.is_insert and compiled.statement.table.name == SupplyAudit.__tablename__:
+                raise HTTPException(500, "模拟写入失败")
+        event.listen(self.engine, "after_cursor_execute", fail_after_audit_write)
+        try:
+            response = self.request("PATCH", "/supply/materials/batch",
+                json={"material_ids": [1, 2], "supply_listed": False})
+        finally:
+            event.remove(self.engine, "after_cursor_execute", fail_after_audit_write)
+        self.assertEqual(response.status_code, 500, response.text)
+        with self.sessions() as db:
+            for identity in (1, 2):
+                self.assertTrue(db.get(MaterialAsset, identity).supply_listed)
+                self.assertIsNone(db.get(MaterialAsset, identity).supply_listed_at)
+            self.assertEqual(db.scalars(select(SupplyAudit)).all(), [])
 
     def test_listing_lifecycle_separates_library_listed_and_delisted_materials(self):
         with self.sessions() as db:
@@ -538,6 +647,22 @@ class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(response.status_code, 403, response.text)
         with self.sessions() as db:
             self.assertTrue(db.get(MaterialAsset, 1).supply_listed)
+
+    def test_grant_revoked_after_authentication_is_rechecked_before_batch_listing(self):
+        from app import supply_catalog
+        original_lock = supply_catalog.lock_company
+        def revoke_before_lock(db, company_id):
+            with self.sessions() as changed:
+                changed.get(User, 3).supply_admin = False
+                changed.commit()
+            return original_lock(db, company_id)
+        with patch("app.supply_catalog.lock_company", side_effect=revoke_before_lock):
+            response = self.request("PATCH", "/supply/materials/batch", uid=3,
+                json={"material_ids": [1, 2], "supply_listed": False})
+        self.assertEqual(response.status_code, 403, response.text)
+        with self.sessions() as db:
+            self.assertTrue(db.get(MaterialAsset, 1).supply_listed)
+            self.assertTrue(db.get(MaterialAsset, 2).supply_listed)
 
     def test_user_cancel_and_suspension_release_pending_excel_blob(self):
         cancelled = self.submit()

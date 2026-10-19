@@ -38,9 +38,10 @@ const materialResultListed = ref('true')
 const materialsLoading = ref(false), materialPages = computed(() => Math.max(1, Math.ceil(materialTotal.value / materialPageSize.value)))
 const showListingPicker = ref(false), listingCandidates = ref<any[]>([]), listingTotal = ref(0), listingPage = ref(1)
 const listingLoading = ref(false), listingSelectedIds = ref<number[]>([]), listingTemplate = ref<number | null>(null)
-const listingSearch = ref(''), listingError = ref(''), listingPageSize = 60
+const listingSearch = ref(''), listingError = ref(''), listingPageSize = ref(60)
+const listingNotice = ref('')
 const listingHoverPreview = ref<{ row: any; anchor: DOMRect; left: number; top: number; width: number; height: number } | null>(null)
-const listingPages = computed(() => Math.max(1, Math.ceil(listingTotal.value / listingPageSize)))
+const listingPages = computed(() => Math.max(1, Math.ceil(listingTotal.value / listingPageSize.value)))
 const canListMaterial = (row: any) => !!row.sku && !!row.url && !!row.template_id
 const selectableListingIds = computed<number[]>(() => listingCandidates.value.filter(canListMaterial).map(row => row.id))
 const strategies = ref<any[]>([]), jobs = ref<any[]>([]), jobsLoading = ref(false), jobsScope = ref('own')
@@ -255,12 +256,11 @@ async function toggleListing(row: any) {
   })
 }
 async function batchListing(listed: boolean) {
+  if (!selectedMaterialIds.value.length) return
   await action('batch-listing', async () => {
-    const results = await Promise.allSettled(selectedMaterialIds.value.map(id => api.patch(`/supply/materials/${id}`, { supply_listed: listed }, { headers: headers.value })))
-    const failed = results.filter(item => item.status === 'rejected')
+    await api.patch('/supply/materials/batch', { material_ids: [...selectedMaterialIds.value], supply_listed: listed }, { headers: headers.value })
     await Promise.all([loadMaterials(), loadTemplates()]); emit('changed')
-    if (failed.length) { error.value = `${failed.length} 条操作失败，其他素材已处理。${fail((failed[0] as PromiseRejectedResult).reason)}` }
-    else notice.value = listed ? '所选素材已重新上架。' : '所选素材已下架，已提交任务继续使用快照。'
+    notice.value = listed ? '所选素材已重新上架。' : '所选素材已下架，已提交任务继续使用快照。'
   })
 }
 function closeListingPicker() {
@@ -293,7 +293,7 @@ async function openListingPicker() {
   if (!canManage.value || busy.value) return
   listingTemplate.value=null; listingSearch.value=''
   listingCandidates.value=[]; listingTotal.value=0; listingSelectedIds.value=[]
-  listingError.value=''; dialogError.value=''; showListingPicker.value=true
+  listingError.value=''; listingNotice.value=''; dialogError.value=''; showListingPicker.value=true
   await loadListingCandidates(true)
 }
 async function loadListingCandidates(reset = false) {
@@ -306,7 +306,7 @@ async function loadListingCandidates(reset = false) {
     const {data}=await api.get('/supply/materials',{headers:headers.value,params:{
       source:'library', template_id:listingTemplate.value || undefined,
       search:listingSearch.value.trim() || undefined,
-      page:listingPage.value, page_size:listingPageSize,
+      page:listingPage.value, page_size:listingPageSize.value,
     }})
     if (stopped || request!==listingRequest || !canManage.value) return
     listingCandidates.value=list(data); listingTotal.value=data.total ?? listingCandidates.value.length
@@ -318,20 +318,18 @@ async function loadListingCandidates(reset = false) {
 async function listSelectedMaterials() {
   if (!listingSelectedIds.value.length || listingLoading.value) return
   await action('list-selected', async () => {
-    listingError.value=''
+    listingError.value=''; listingNotice.value=''; clearListingHoverPreview()
     const ids=[...listingSelectedIds.value]
-    const results=await Promise.allSettled(ids.map(id=>api.patch(`/supply/materials/${id}`,{supply_listed:true},{headers:headers.value})))
-    const failedIds=ids.filter((_,index)=>results[index].status==='rejected')
-    const succeeded=ids.filter(id=>!failedIds.includes(id))
-    listingCandidates.value=listingCandidates.value.filter(row=>!succeeded.includes(row.id))
-    listingTotal.value=Math.max(0,listingTotal.value-succeeded.length); listingSelectedIds.value=failedIds
-    if (failedIds.length) {
-      const failure=results.find(result=>result.status==='rejected') as PromiseRejectedResult
-      listingError.value=`${succeeded.length} 条已上架，${failedIds.length} 条失败。${fail(failure.reason)}`
-    } else { showListingPicker.value=false; notice.value=`已上架 ${succeeded.length} 条素材。` }
+    const {data}=await api.patch('/supply/materials/batch',{material_ids:ids,supply_listed:true},{headers:headers.value})
+    listingCandidates.value=listingCandidates.value.filter(row=>!ids.includes(row.id))
+    listingTotal.value=Math.max(0,listingTotal.value-data.count); listingSelectedIds.value=[]
+    listingNotice.value=`已上架 ${data.count} 条素材。`; notice.value=listingNotice.value
     materialListed.value='true'
     appliedMaterialFilters.value.listed='true'
-    await Promise.all([loadMaterials(true),loadTemplates()]); emit('changed')
+    const refreshed=await Promise.allSettled([loadListingCandidates(),loadMaterials(true),loadTemplates()])
+    const refreshFailure=refreshed.find(result=>result.status==='rejected') as PromiseRejectedResult | undefined
+    if (refreshFailure) listingError.value=[listingError.value, `刷新数据失败：${fail(refreshFailure.reason)}`].filter(Boolean).join('；')
+    emit('changed')
   })
 }
 function closeUsage() {
@@ -606,6 +604,13 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
       <section v-dialog-focus="{close:closeListingPicker,busy:!!busy}" class="modal-card supply-dialog supply-wide-dialog supply-listing-dialog" role="dialog" aria-modal="true" aria-labelledby="supply-listing-title">
         <button class="modal-close" :disabled="!!busy" aria-label="关闭上架窗口" @click="closeListingPicker">×</button>
         <h2 id="supply-listing-title">从素材库上架</h2>
+        <div class="supply-listing-feedback" aria-live="polite">
+          <p v-if="busy==='list-selected'" class="supply-message supply-listing-progress" role="status">正在上架所选素材，请稍候…</p>
+          <template v-else>
+            <p v-if="listingNotice" class="supply-notice" role="status">{{listingNotice}}</p>
+            <p v-if="listingError || dialogError" class="error supply-message" role="alert">{{listingError || dialogError}}</p>
+          </template>
+        </div>
         <div class="supply-listing-content" @scroll.passive="clearListingHoverPreview">
         <form class="supply-filters" @submit.prevent="loadListingCandidates(true)">
           <label>产品模板<select v-model="listingTemplate" :disabled="!!busy"><option :value="null">全部模板</option><option v-for="item in templates" :key="item.id" :value="item.id">{{item.name}}</option></select></label>
@@ -613,7 +618,6 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
           <button class="secondary" :disabled="listingLoading || !!busy">查询</button>
         </form>
         <div class="supply-section-heading"><span>共 {{listingTotal}} 条可选素材</span><label class="supply-check"><input type="checkbox" :checked="selectableListingIds.length>0 && selectableListingIds.every(id=>listingSelectedIds.includes(id))" :indeterminate="listingSelectedIds.length>0 && listingSelectedIds.length<selectableListingIds.length" :disabled="listingLoading || !!busy || !selectableListingIds.length" @change="listingSelectedIds=listingSelectedIds.length===selectableListingIds.length?[]:[...selectableListingIds]"/>本页全选</label></div>
-        <p v-if="listingError || dialogError" class="error" role="alert">{{listingError || dialogError}}</p>
         <div v-if="listingLoading" class="empty" role="status">正在读取素材库…</div>
         <div v-else class="supply-material-grid">
           <label v-for="row in listingCandidates" :key="row.id" class="supply-material supply-listing-option" :class="{selected:listingSelectedIds.includes(row.id)}">
@@ -623,7 +627,7 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
           </label>
         </div>
         <p v-if="!listingLoading && !listingCandidates.length && !listingError" class="empty">暂无符合条件的待上架素材。</p>
-        <footer class="supply-pagination"><span>每页 {{listingPageSize}} 条</span><button :disabled="listingLoading || !!busy || listingPage===1" @click="listingPage--;loadListingCandidates()">上一页</button><span>{{listingPage}} / {{listingPages}}</span><button :disabled="listingLoading || !!busy || listingPage>=listingPages" @click="listingPage++;loadListingCandidates()">下一页</button></footer>
+        <footer class="supply-pagination"><label>每页<select v-model.number="listingPageSize" :disabled="listingLoading || !!busy" @change="loadListingCandidates(true)"><option v-for="size in [60,150,300,900,1500]" :key="size" :value="size">{{size}}</option></select>条</label><button :disabled="listingLoading || !!busy || listingPage===1" @click="listingPage--;loadListingCandidates()">上一页</button><span>{{listingPage}} / {{listingPages}}</span><button :disabled="listingLoading || !!busy || listingPage>=listingPages" @click="listingPage++;loadListingCandidates()">下一页</button></footer>
         </div>
         <div class="modal-actions"><span>本页已选 {{listingSelectedIds.length}} 条</span><button class="ghost" :disabled="!!busy" @click="closeListingPicker">取消</button><button class="primary" :disabled="!!busy || listingLoading || !listingSelectedIds.length" @click="listSelectedMaterials">{{busy==='list-selected'?'上架中…':'确认上架'}}</button></div>
       </section>
@@ -711,6 +715,9 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
 .supply-card .supply-actions{margin-top:auto}
 .supply-listing-dialog{max-width:calc(100vw - 32px);display:flex;flex-direction:column;overflow:hidden}
 .supply-listing-content{min-height:0;overflow:auto;padding:2px}
+.supply-listing-feedback{flex-shrink:0}
+.supply-listing-feedback .supply-listing-progress{background:#eef2ff;color:#465fe0}
+.supply-listing-feedback .supply-notice{color:#166534}
 .supply-listing-dialog .supply-filters{border:0;border-radius:0;padding:0;background:transparent}
 .supply-listing-dialog .supply-filters label{flex:0 1 200px;max-width:100%}
 .supply-listing-dialog h2,.supply-listing-dialog .modal-actions{flex-shrink:0}

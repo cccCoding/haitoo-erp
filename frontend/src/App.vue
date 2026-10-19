@@ -2193,7 +2193,7 @@ async function previewMaterialImport(event:Event) {
   input.value = ''
   if (!file || materialImportPreviewing.value || materialImportSaving.value) return
   if (!file.name.toLowerCase().endsWith('.xlsx')) { showToast('请上传 .xlsx 格式的素材表格'); return }
-  if (file.size > 10 * 1024 * 1024) { showToast('Excel 文件不能超过 10MB'); return }
+  if (file.size > 20 * 1024 * 1024) { showToast('Excel 文件不能超过 20MB'); return }
   try {
     materialImportPreviewing.value = true
     const form = new FormData(); form.append('file', file)

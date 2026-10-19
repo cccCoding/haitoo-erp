@@ -6,8 +6,8 @@ from typing import Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
-from sqlalchemy import case, func, or_, select
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, PositiveInt, field_validator
+from sqlalchemy import case, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -80,6 +80,10 @@ class TemplatePatch(Input):
 
 class ListingInput(Input):
     supply_listed: bool
+
+
+class BatchListingInput(ListingInput):
+    material_ids: list[PositiveInt] = Field(min_length=1, max_length=1500)
 
 
 class StrategyInput(Input):
@@ -347,7 +351,7 @@ def edit_template(identity: int, payload: TemplatePatch, user=Depends(supply_act
 
 @router.get("/materials")
 def materials(template_id: int | None = None,
-    listed: bool | None = None, search: str = "", page: int = Query(1, ge=1), page_size: int = Query(30, ge=1, le=1000),
+    listed: bool | None = None, search: str = "", page: int = Query(1, ge=1), page_size: int = Query(30, ge=1, le=1500),
     source: Literal["catalog", "library"] = "catalog",
     user=Depends(supply_material_actor), db: Session = Depends(get_db)):
     query = select(MaterialAsset).where(MaterialAsset.company_id == user.company_id)
@@ -376,6 +380,42 @@ def materials(template_id: int | None = None,
         "supply_listed": asset.supply_listed,
         **counts.get(asset.id, {"use_count": 0, "user_count": 0, "job_count": 0})} for asset in assets],
         "total": total, "page": page, "page_size": page_size}
+
+
+@router.patch("/materials/batch")
+def batch_list_materials(payload: BatchListingInput, user=Depends(supply_material_actor), db: Session = Depends(get_db)):
+    lock_actor(db, user, manager=True)
+    ids = list(dict.fromkeys(payload.material_ids))
+    assets = db.scalars(select(MaterialAsset).where(
+        MaterialAsset.company_id == user.company_id, MaterialAsset.id.in_(ids)
+    ).order_by(MaterialAsset.id).with_for_update()).all()
+    if len(assets) != len(ids):
+        raise HTTPException(404, "部分素材不存在或不属于当前公司，整批操作未执行")
+    if payload.supply_listed:
+        template_ids = set(db.scalars(select(ProductTemplate.id).where(
+            ProductTemplate.company_id == user.company_id,
+            ProductTemplate.id.in_({item.template_id for item in assets}))))
+        invalid = [item for item in assets if item.template_id not in template_ids or not item.sku or not item.url]
+        if invalid:
+            labels = "、".join(f"{item.sku or item.name or '素材'}（ID {item.id}）" for item in invalid[:10])
+            raise HTTPException(400, f"{len(invalid)} 条素材缺少有效模板、SKU 或图片：{labels}。整批操作未执行")
+    at = now()
+    first_listing = MaterialAsset.supply_listed_at.is_(None)
+    if not payload.supply_listed:
+        first_listing = first_listing & MaterialAsset.supply_listed.is_(True)
+    # MySQL 按 SET 顺序赋值，须先用原上架状态计算首次上架时间。
+    db.execute(update(MaterialAsset).where(
+        MaterialAsset.company_id == user.company_id, MaterialAsset.id.in_(ids)
+    ).ordered_values(
+        (MaterialAsset.supply_listed_at, case((first_listing, at), else_=MaterialAsset.supply_listed_at)),
+        (MaterialAsset.supply_listed, payload.supply_listed),
+    ).execution_options(synchronize_session=False))
+    db.execute(insert(SupplyAudit), [
+        {"company_id": user.company_id, "user_id": user.id, "action": "material_listing",
+         "target_type": "material", "target_id": item.id, "details": {"listed": payload.supply_listed}}
+        for item in assets])
+    db.commit()
+    return {"ids": ids, "count": len(ids), "supply_listed": payload.supply_listed}
 
 
 @router.patch("/materials/{identity}")

@@ -673,7 +673,7 @@ class ProductLibraryDraftSource(BaseModel):
 
 class MaterialImportConfirmInput(BaseModel):
     template_id: int = Field(gt=0)
-    urls: list[str] = Field(default_factory=list, max_length=1000)
+    urls: list[str] = Field(default_factory=list, max_length=10000)
     file_token: str | None = None
     force_create: bool = False
     request_key: str = Field(min_length=8, max_length=96)
