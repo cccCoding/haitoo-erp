@@ -2646,9 +2646,9 @@ onUnmounted(() => {
         <div class="creative-resource-toolbar"><span>共 {{visibleManagedWhiteImages.length}} 张白底图</span></div>
         <div class="creative-resource-table-wrap" :aria-busy="managedResourcesLoading">
           <table class="creative-resource-table white-image-resource-table">
-            <thead><tr><th scope="col">图片</th><th scope="col">模板</th><th scope="col">名称</th><th scope="col">创建时间</th><th scope="col">创建人</th><th scope="col">操作</th></tr></thead>
-            <tbody><tr v-for="item in pagedManagedWhiteImages" :key="item.id"><td><button type="button" class="resource-table-thumbnail" :aria-label="`查看白底图 ${item.name}`" @click="openImagePreview(item.image_url,item.name)"><img :src="imageUrl(item.image_url)" :alt="item.name"/></button></td><td>{{resourceTemplateName(item)}}</td><td class="resource-name-cell">{{item.name}}</td><td class="resource-time-cell">{{resourceCreatedAt(item)}}</td><td>{{resourceOwnerName(item)}}</td><td><div v-if="item.deleted_at==null" class="creative-resource-row-actions"><button type="button" :disabled="personalResourceSaving" @click="openResourceEditor('white-images',item)">编辑</button><button type="button" class="danger" :disabled="personalResourceSaving" @click="deleteWhiteImage(item)">删除</button></div><span v-else class="resource-image-unavailable">已删除</span></td></tr>
-              <tr v-if="!visibleManagedWhiteImages.length && !managedResourcesLoading"><td colspan="6" class="empty">暂无符合条件的白底图。</td></tr>
+            <thead><tr><th scope="col">ID</th><th scope="col">图片</th><th scope="col">模板</th><th scope="col">名称</th><th scope="col">创建时间</th><th scope="col">创建人</th><th scope="col">操作</th></tr></thead>
+            <tbody><tr v-for="item in pagedManagedWhiteImages" :key="item.id"><td>{{item.id}}</td><td><button type="button" class="resource-table-thumbnail" :aria-label="`查看白底图 ${item.name}`" @click="openImagePreview(item.image_url,item.name)"><img :src="imageUrl(item.image_url)" :alt="item.name"/></button></td><td>{{resourceTemplateName(item)}}</td><td class="resource-name-cell">{{item.name}}</td><td class="resource-time-cell">{{resourceCreatedAt(item)}}</td><td>{{resourceOwnerName(item)}}</td><td><div v-if="item.deleted_at==null" class="creative-resource-row-actions"><button type="button" :disabled="personalResourceSaving" @click="openResourceEditor('white-images',item)">编辑</button><button type="button" class="danger" :disabled="personalResourceSaving" @click="deleteWhiteImage(item)">删除</button></div><span v-else class="resource-image-unavailable">已删除</span></td></tr>
+              <tr v-if="!visibleManagedWhiteImages.length && !managedResourcesLoading"><td colspan="7" class="empty">暂无符合条件的白底图。</td></tr>
             </tbody>
           </table>
         </div>
@@ -2657,9 +2657,9 @@ onUnmounted(() => {
         <div class="creative-resource-toolbar"><span>共 {{visibleManagedPrompts.length}} 条创作要求</span></div>
         <div class="creative-resource-table-wrap" :aria-busy="managedResourcesLoading">
           <table class="creative-resource-table prompt-resource-table">
-            <thead><tr><th scope="col">名称</th><th scope="col">模板</th><th scope="col">提示词</th><th scope="col">创建时间</th><th scope="col">创建人</th><th scope="col">操作</th></tr></thead>
-            <tbody><tr v-for="item in pagedManagedPrompts" :key="item.id"><td class="resource-name-cell">{{item.name}}</td><td>{{resourceTemplateName(item)}}</td><td><div class="resource-prompt-content">{{item.content}}</div></td><td class="resource-time-cell">{{resourceCreatedAt(item)}}</td><td>{{resourceOwnerName(item)}}</td><td><div class="creative-resource-row-actions"><button type="button" :disabled="personalResourceSaving" @click="openResourceEditor('prompts',item)">编辑</button><button type="button" class="danger" :disabled="personalResourceSaving" @click="deletePersonalPrompt(item)">删除</button></div></td></tr>
-              <tr v-if="!visibleManagedPrompts.length && !managedResourcesLoading"><td colspan="6" class="empty">暂无符合条件的创作要求。</td></tr>
+            <thead><tr><th scope="col">ID</th><th scope="col">名称</th><th scope="col">模板</th><th scope="col">提示词</th><th scope="col">创建时间</th><th scope="col">创建人</th><th scope="col">操作</th></tr></thead>
+            <tbody><tr v-for="item in pagedManagedPrompts" :key="item.id"><td>{{item.id}}</td><td class="resource-name-cell">{{item.name}}</td><td>{{resourceTemplateName(item)}}</td><td><div class="resource-prompt-content">{{item.content}}</div></td><td class="resource-time-cell">{{resourceCreatedAt(item)}}</td><td>{{resourceOwnerName(item)}}</td><td><div class="creative-resource-row-actions"><button type="button" :disabled="personalResourceSaving" @click="openResourceEditor('prompts',item)">编辑</button><button type="button" class="danger" :disabled="personalResourceSaving" @click="deletePersonalPrompt(item)">删除</button></div></td></tr>
+              <tr v-if="!visibleManagedPrompts.length && !managedResourcesLoading"><td colspan="7" class="empty">暂无符合条件的创作要求。</td></tr>
             </tbody>
           </table>
         </div>
@@ -2670,9 +2670,9 @@ onUnmounted(() => {
         <p v-if="materialStylesLoading" role="status">正在加载风格…</p>
         <div class="creative-resource-table-wrap" :aria-busy="materialStylesLoading">
           <table class="creative-resource-table style-resource-table">
-            <thead><tr><th scope="col">风格名称</th><th scope="col">白底图</th><th scope="col">模板</th><th scope="col">创建人</th><th scope="col">素材数量</th><th scope="col">来源状态</th></tr></thead>
-            <tbody><tr v-for="item in pagedResourceStyles" :key="item.id"><td class="resource-name-cell">{{item.name}}</td><td><button v-if="item.white_image_url" type="button" class="resource-table-thumbnail" :aria-label="`查看风格白底图 ${item.name}`" @click="openImagePreview(item.white_image_url,item.name)"><img :src="imageUrl(item.white_image_url)" :alt="item.name"/></button><span v-else class="resource-image-unavailable">{{item.source_exists ? '无权查看' : '白底图已删除'}}</span></td><td>{{resourceTemplateName(item)}}</td><td>{{item.created_by_name || '历史记录缺失'}}</td><td>{{item.material_count}} 张素材</td><td><span class="chip" :class="item.source_exists ? 'purple' : 'blue'">{{item.source_exists ? '来源白底图存在' : '来源白底图已删除'}}</span></td></tr>
-              <tr v-if="!visibleResourceStyles.length && !materialStylesLoading"><td colspan="6" class="empty">暂无符合条件的风格，新增白底图后自动创建。</td></tr>
+            <thead><tr><th scope="col">ID</th><th scope="col">风格名称</th><th scope="col">白底图</th><th scope="col">模板</th><th scope="col">创建人</th><th scope="col">素材数量</th><th scope="col">来源状态</th></tr></thead>
+            <tbody><tr v-for="item in pagedResourceStyles" :key="item.id"><td>{{item.id}}</td><td class="resource-name-cell">{{item.name}}</td><td><button v-if="item.white_image_url" type="button" class="resource-table-thumbnail" :aria-label="`查看风格白底图 ${item.name}`" @click="openImagePreview(item.white_image_url,item.name)"><img :src="imageUrl(item.white_image_url)" :alt="item.name"/></button><span v-else class="resource-image-unavailable">{{item.source_exists ? '无权查看' : '白底图已删除'}}</span></td><td>{{resourceTemplateName(item)}}</td><td>{{item.created_by_name || '历史记录缺失'}}</td><td>{{item.material_count}} 张素材</td><td><span class="chip" :class="item.source_exists ? 'purple' : 'blue'">{{item.source_exists ? '来源白底图存在' : '来源白底图已删除'}}</span></td></tr>
+              <tr v-if="!visibleResourceStyles.length && !materialStylesLoading"><td colspan="7" class="empty">暂无符合条件的风格，新增白底图后自动创建。</td></tr>
             </tbody>
           </table>
         </div>
