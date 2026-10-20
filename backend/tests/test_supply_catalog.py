@@ -637,6 +637,33 @@ class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
         self.assertIn("4,994", response.text)
         self.image_mock.assert_not_called()
 
+    def test_job_download_status_uses_historical_company_job_downloads(self):
+        identity = self.submit()
+        other = self.submit(uid=7, key="other-user-download-status")
+        with self.sessions() as db:
+            for company, action, target, job_id in (
+                (2, "download", "job", identity), (1, "download", "material", identity),
+                (1, "submit_job", "job", identity), (1, "download", "job", other),
+                (1, "download", "job", other),
+            ):
+                db.add(SupplyAudit(company_id=company, user_id=3, action=action,
+                    target_type=target, target_id=job_id, details={}))
+            db.commit()
+        own = self.request("GET", "/supply/jobs", uid=4).json()["items"]
+        self.assertEqual([(row["id"], row["downloaded"]) for row in own], [(identity, False)])
+        self.assertFalse(self.request("GET", f"/supply/jobs/{identity}", uid=4).json()["downloaded"])
+        company = self.request("GET", "/supply/jobs?scope=company", uid=3).json()["items"]
+        self.assertEqual({row["id"]: row["downloaded"] for row in company}, {identity: False, other: True})
+        with self.sessions() as db:
+            job = db.get(SupplyJob, other)
+            job.state = "completed"
+            job.output_expires_at = datetime.utcnow() - timedelta(days=1)
+            job.output_deleted_at = datetime.utcnow()
+            db.commit()
+        detail = self.request("GET", f"/supply/jobs/{other}", uid=7).json()
+        self.assertTrue(detail["downloaded"])
+        self.assertTrue(detail["file_expired"])
+
     def test_download_authentication_recheck_and_manager_audit(self):
         identity = self.submit()
         with self.sessions() as db:
@@ -646,12 +673,18 @@ class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
             job.output_expires_at = datetime.utcnow() + timedelta(days=30)
             job.output_sha256, job.output_size = "b" * 64, 7
             db.commit()
+        from app.storage import StorageError
+        with patch("app.supply_files.read_supply_export", side_effect=StorageError("unavailable")):
+            self.assertEqual(self.request("GET", f"/supply/jobs/{identity}/download", uid=4).status_code, 502)
+        self.assertFalse(self.request("GET", f"/supply/jobs/{identity}", uid=4).json()["downloaded"])
         with patch("app.supply_files.read_supply_export", return_value=b"PKexcel") as read:
             response = self.request("GET", f"/supply/jobs/{identity}/download", uid=3)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, b"PKexcel")
         self.assertEqual(response.headers["cache-control"], "private, no-store")
         read.assert_called_once()
+        self.assertTrue(self.request("GET", f"/supply/jobs/{identity}", uid=4).json()["downloaded"])
+        self.assertTrue(self.request("GET", "/supply/jobs", uid=4).json()["items"][0]["downloaded"])
         with self.sessions() as db:
             audit = db.scalar(select(SupplyAudit).where(SupplyAudit.action == "download"))
             self.assertEqual(audit.user_id, 3)

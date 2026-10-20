@@ -559,6 +559,14 @@ def accessible_job(db, user, identity, lock=False):
     return item
 
 
+def downloaded_job_ids(db, company_id, identities):
+    if not identities:
+        return set()
+    return set(db.scalars(select(SupplyAudit.target_id).where(
+        SupplyAudit.company_id == company_id, SupplyAudit.target_type == "job",
+        SupplyAudit.action == "download", SupplyAudit.target_id.in_(identities)).distinct()))
+
+
 @router.get("/jobs")
 def jobs(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
     scope: Literal["own", "company"] = "own",
@@ -570,13 +578,16 @@ def jobs(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
         query = query.where(SupplyJob.user_id == user.id)
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     items = db.scalars(query.order_by(SupplyJob.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
-    return {"items": [job_payload(item) for item in items], "total": total, "page": page, "page_size": page_size}
+    downloaded = downloaded_job_ids(db, user.company_id, [item.id for item in items])
+    return {"items": [{**job_payload(item), "downloaded": item.id in downloaded} for item in items],
+        "total": total, "page": page, "page_size": page_size}
 
 
 @router.get("/jobs/{identity}")
 def job_detail(identity: int, user=Depends(supply_actor), db: Session = Depends(get_db)):
     item = accessible_job(db, user, identity)
-    return {**job_payload(item), "drafts": item.checkpoint.get("links", []), "strategy": item.snapshot.get("strategy")}
+    return {**job_payload(item), "downloaded": item.id in downloaded_job_ids(db, user.company_id, [item.id]),
+        "drafts": item.checkpoint.get("links", []), "strategy": item.snapshot.get("strategy")}
 
 
 @router.post("/jobs/{identity}/cancel")
