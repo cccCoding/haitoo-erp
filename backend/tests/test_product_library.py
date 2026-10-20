@@ -412,12 +412,13 @@ class ProductLibraryTests(unittest.TestCase):
                 ("/hub-upload-tasks", {}), (f"/product-library/{product_id}/orders", {}),
             ]
             for endpoint, params in endpoints:
-                for page_size in (500, 1000):
+                maximum = 2000 if endpoint == "/material-assets" else 1000
+                for page_size in sorted({500, 1000, maximum}):
                     with self.subTest(endpoint=endpoint, page_size=page_size):
                         response = client.get(endpoint, params={**params, "page_size": page_size}, headers=headers)
                         self.assertEqual(response.status_code, 200, response.text)
                         self.assertEqual(response.json()["page_size"], page_size)
-                for invalid_size in (0, 1001):
+                for invalid_size in (0, maximum + 1):
                     with self.subTest(endpoint=endpoint, invalid_size=invalid_size):
                         response = client.get(endpoint, params={**params, "page_size": invalid_size}, headers=headers)
                         self.assertEqual(response.status_code, 422, response.text)

@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from app import main
 from app.database import Base, get_db
 from app.models import (Company, CrossCompanyCollectionBatch, CrossCompanyCollectionItem,
-    CrossCompanyCollectionPermissionLog, MaterialAsset, ProductLibraryProduct, ProductLibrarySource,
+    CrossCompanyCollectionPermissionLog, MaterialAsset, MaterialStyle, ProductLibraryProduct, ProductLibrarySource,
     ProductLibraryOrder, ProductLibraryOrderProduct, ProductTemplate, Role, User)
 from app.security import create_access_token
 
@@ -100,6 +100,11 @@ class CrossCompanyCollectionTests(unittest.TestCase):
         self.assertEqual(len(self.client.get('/cross-company-collection/companies',headers=self.headers()).json()),2)
 
     def test_material_sku_provenance_idempotency_and_duplicates(self):
+        with self.sessions() as db:
+            style=MaterialStyle(company_id=2,template_id=2,name='来源公司风格',created_by=5,source_white_image_id=100)
+            db.add(style);db.flush()
+            db.get(MaterialAsset,1).style_id=style.id
+            db.commit()
         response=self.collect([1,1,2]);self.assertEqual(response.status_code,200,response.text)
         result=response.json();self.assertEqual(result['collected'],2)
         self.assertEqual(self.collect([2,1]).json(),result)
@@ -115,6 +120,7 @@ class CrossCompanyCollectionTests(unittest.TestCase):
                 self.assertTrue(a.sku.startswith('Y1AA'));self.assertEqual(a.template_id,1)
                 self.assertEqual(a.company_id,1);self.assertEqual(a.claimed_by,1);self.assertEqual(a.usage_status,'unused')
                 self.assertIsNone(a.source_task_id)
+                self.assertIsNone(a.style_id)
             self.assertEqual(db.get(MaterialAsset,1).usage_status,'used')
             item=db.scalar(select(CrossCompanyCollectionItem));self.assertEqual(item.source_sku,'ORIGINAL')
         listed=self.client.get('/material-assets',headers=self.headers(),params={'source_type':'cross_company','usage_status':'all'}).json()

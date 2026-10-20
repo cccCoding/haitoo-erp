@@ -12,6 +12,8 @@ const props = withDefaults(defineProps<{
   searchPlaceholder?: string
   disabled?: boolean
   maxVisible?: number
+  emptyLabel?: string
+  noMatchLabel?: string
 }>(), {
   valueKey: 'value',
   labelKey: 'label',
@@ -19,6 +21,8 @@ const props = withDefaults(defineProps<{
   searchPlaceholder: '输入关键词搜索',
   disabled: false,
   maxVisible: 200,
+  emptyLabel: '暂无可选类目',
+  noMatchLabel: '没有匹配的类目',
 })
 
 const emit = defineEmits<{ 'update:modelValue': [OptionValue]; change: [OptionValue] }>()
@@ -187,7 +191,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
           :aria-selected="option.value === modelValue"
           @mouseenter="activeIndex = index"
           @mousedown.prevent
-          @click="selectOption(option.value)"
+          @click.prevent="selectOption(option.value)"
         >
           <span
             v-for="(segment, segmentIndex) in highlightSegments(option.label)"
@@ -195,7 +199,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
             :class="{ 'search-select-hit': segment.match }"
           >{{ segment.text }}</span>
         </li>
-        <li v-if="!visibleOptions.length" class="search-select-empty">{{ keyword.trim() ? '没有匹配的类目' : '暂无可选类目' }}</li>
+        <li v-if="!visibleOptions.length" class="search-select-empty">{{ keyword.trim() ? noMatchLabel : emptyLabel }}</li>
       </ul>
       <div class="search-select-footer">
         <span>匹配 {{ matchedOptions.length }} / 共 {{ normalizedOptions.length }} 项</span>

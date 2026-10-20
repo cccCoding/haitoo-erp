@@ -6,20 +6,110 @@ from datetime import datetime, timedelta
 from io import BytesIO
 import random
 import unittest
+from collections import Counter
 from unittest.mock import AsyncMock, patch
 
 from openpyxl import load_workbook
 from sqlalchemy import select
 
 from app.credentials import encrypt_secret
-from app.models import (Company, MaterialAsset, ProductTemplate, SupplyJob,
-                        SupplyJobMaterial, TiktokCategoryCatalog, User)
+from app.models import (Company, MaterialAsset, MaterialStyle, ProductTemplate, SupplyJob,
+                        SupplyJobMaterial, TiktokCategoryCatalog, User, UserTemplateWhiteImage)
 from app.supply_common import (digest, eligible_materials, normalize_title,
                               template_snapshot, template_version, unique_title)
 if __package__:
     from .test_supply_catalog import SupplyFixture
 else:
     from test_supply_catalog import SupplyFixture
+
+
+class SupplyStyleSamplingTests(unittest.TestCase):
+    def candidates(self, counts):
+        items = []
+        for style_id, count in counts:
+            for _ in range(count):
+                identity = len(items) + 1
+                items.append({"id": identity, "sku": f"SKU{identity}", "url": f"https://img/{identity}",
+                              "style_id": style_id, "name": "同名风格"})
+        return items
+
+    def test_complete_styles_are_kept_separate_and_ungrouped_are_not_used(self):
+        from app.supply_worker import style_sample
+        candidates = self.candidates([(1, 6), (2, 7), (None, 10)])
+        original = copy.deepcopy(candidates)
+        chosen_styles = set()
+        for seed in range(20):
+            group = style_sample(candidates, 5, random.Random(seed))
+            self.assertEqual(len(group), 5)
+            self.assertEqual(len({item['style_id'] for item in group}), 1)
+            self.assertIsNotNone(group[0]['style_id'])
+            chosen_styles.add(group[0]['style_id'])
+        self.assertEqual(chosen_styles, {1, 2})
+        self.assertEqual(candidates, original)
+        group[0]['sku'] = 'changed'
+        self.assertEqual(candidates, original)
+
+    def test_shortfall_uses_largest_styles_before_ungrouped(self):
+        from app.supply_worker import style_sample
+        for counts, expected in [([(1, 3), (2, 2), (3, 1), (None, 9)], {1: 3, 2: 2}),
+                                 ([(1, 2), (2, 1), (None, 9)], {1: 2, 2: 1, None: 2})]:
+            for seed in range(10):
+                group = style_sample(self.candidates(counts), 5, random.Random(seed))
+                self.assertEqual(Counter(item['style_id'] for item in group), expected)
+
+    def test_remaining_groups_are_recounted_after_url_conflicts(self):
+        from app.supply_worker import style_sample
+        candidates = self.candidates([(1, 3), (2, 2), (3, 2), (None, 6)])
+        candidates[3]['url'] = candidates[0]['url']
+        for seed in range(10):
+            group = style_sample(candidates, 5, random.Random(seed))
+            self.assertEqual(Counter(item['style_id'] for item in group), {1: 3, 3: 2})
+
+    def test_raw_group_size_does_not_bypass_deduplication(self):
+        from app.supply_worker import style_sample
+        for field in ('id', 'sku', 'url'):
+            candidates = self.candidates([(1, 6), (2, 5)])
+            for item in candidates[:6]:
+                item[field] = candidates[0][field]
+            group = style_sample(candidates, 5, random.Random(3))
+            self.assertEqual({item['style_id'] for item in group}, {2})
+            for unique_field in ('id', 'sku', 'url'):
+                self.assertEqual(len({item[unique_field] for item in group}), 5)
+
+    def test_conflicts_can_fall_back_to_original_sampler(self):
+        from app import supply_worker as worker
+        candidates = [
+            {'id': 1, 'sku': 'a', 'url': 'x', 'style_id': 1},
+            {'id': 2, 'sku': 'b', 'url': 'y', 'style_id': 1},
+            {'id': 3, 'sku': 'c', 'url': 'x', 'style_id': 2},
+            {'id': 4, 'sku': 'd', 'url': 'y', 'style_id': 2},
+            {'id': 5, 'sku': 'a', 'url': 'z', 'style_id': None},
+        ]
+        with patch.object(worker, 'distinct_sample', wraps=worker.distinct_sample) as sample:
+            group = worker.style_sample(candidates, 3, random.Random(4))
+        self.assertTrue(any(call.args[0] is candidates for call in sample.call_args_list))
+        for field in ('id', 'sku', 'url'):
+            self.assertEqual(len({item[field] for item in group}), 3)
+
+    def test_legacy_and_unassigned_snapshots_keep_original_rng_sequence(self):
+        from app.supply_worker import distinct_sample, style_sample
+        for legacy in (False, True):
+            candidates = self.candidates([(None, 12)])
+            if legacy:
+                for item in candidates:
+                    item.pop('style_id')
+            expected_rng, actual_rng = random.Random('seed'), random.Random('seed')
+            for _ in range(10):
+                self.assertEqual(style_sample(candidates, 5, actual_rng),
+                                 distinct_sample(candidates, 5, expected_rng))
+            self.assertEqual(actual_rng.getstate(), expected_rng.getstate())
+
+    def test_styled_sampling_is_seeded_and_reports_true_shortfalls(self):
+        from app.supply_worker import style_sample
+        candidates = self.candidates([(1, 3), (2, 2), (3, 2)])
+        self.assertEqual(style_sample(candidates, 5, random.Random('seed')),
+                         style_sample(candidates, 5, random.Random('seed')))
+        self.assertLess(len(style_sample(candidates[:3], 5, random.Random(0))), 5)
 
 
 class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
@@ -64,6 +154,17 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
         self.enterContext(patch("app.supply_worker.list_supply_exports", return_value=[]))
         with self.sessions() as db:
             db.get(Company, 1).supply_ai_secret_encrypted = encrypt_secret("test-deepseek-key")
+            db.commit()
+
+    def assign_styles(self):
+        with self.sessions() as db:
+            for identity in (1, 2):
+                db.add(UserTemplateWhiteImage(id=identity, company_id=1, template_id=1, user_id=2,
+                    name=f'白底图{identity}', image_url=f'https://img.example/white{identity}.png'))
+                db.add(MaterialStyle(id=identity, company_id=1, template_id=1, created_by=2,
+                    source_white_image_id=identity, name='同名风格'))
+            for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.company_id == 1)):
+                asset.style_id = 1 if asset.id <= 10 else 2
             db.commit()
 
     def make_job(self, uid=4, *, candidates=None, link_count=10, key=None):
@@ -176,6 +277,73 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
         self.assertTrue(all(row["seller_sku"].endswith(("-S", "-M")) for row in rows))
         self.assertTrue(all(25 <= len(link["title"]) <= 255 for link in state["links"]))
 
+    def test_export_keeps_each_link_in_snapshot_style_after_style_and_source_changes(self):
+        self.assign_styles()
+        identity = self.submit()
+        with self.sessions() as db:
+            original = copy.deepcopy(db.get(SupplyJob, identity).snapshot['candidates'])
+            self.assertEqual({item['style_id'] for item in original}, {1, 2})
+            for item in original:
+                self.assertEqual(item['version_hash'], digest({key: value for key, value in item.items()
+                                                              if key != 'version_hash'}))
+            # 提交后改风格、删除来源白底图、下架素材，仍然只使用原快照。
+            for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.company_id == 1)):
+                asset.style_id = 2 if asset.id <= 10 else None
+            for white in db.scalars(select(UserTemplateWhiteImage)):
+                white.deleted_at = datetime.utcnow()
+            db.commit()
+            current = eligible_materials(db, 1, 1, original[0]['template_version'])
+            self.assertNotEqual(original[0]['version_hash'], current[0]['version_hash'])
+            for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.company_id == 1)):
+                asset.supply_listed = False
+            db.commit()
+        self.run_job(identity)
+        state = self.assert_completed(identity)
+        snapshot_styles = {item['sku']: item['style_id'] for item in original}
+        rows = self.export_rows()
+        for link in state['links']:
+            self.assertEqual(len({item['style_id'] for item in link['materials']}), 1)
+            exported = [row for row in rows if row['product_name'] == link['title']]
+            self.assertEqual(len(exported), 10)
+            self.assertEqual({row['seller_sku'].rsplit('-', 1)[0] for row in exported},
+                             {item['sku'] for item in link['materials']})
+            self.assertEqual(len({snapshot_styles[row['seller_sku'].rsplit('-', 1)[0]] for row in exported}), 1)
+            self.assertEqual({row['property_1_image'] for row in exported},
+                             {item['url'] for item in link['materials']})
+        self.assertLess(len({item['id'] for link in state['links'] for item in link['materials']}), 50)
+
+    def test_legacy_snapshot_uses_original_selection_even_when_current_assets_have_styles(self):
+        self.assign_styles()
+        with self.sessions() as db:
+            candidates = eligible_materials(db, 1, 1, template_version(template_snapshot(db.get(ProductTemplate, 1))))
+        for item in candidates:
+            item.pop('style_id')
+            item['version_hash'] = digest({key: value for key, value in item.items() if key != 'version_hash'})
+        identity = self.make_job(candidates=candidates)
+        self.run_job(identity)
+        state = self.assert_completed(identity)
+        rng = random.Random('fixed-seed')
+        for link in state['links']:
+            self.assertEqual(link['materials'], self.worker.distinct_sample(candidates, 5, rng))
+
+    def test_existing_link_checkpoint_is_exported_without_resampling(self):
+        self.assign_styles()
+        identity = self.make_job()
+        with self.sessions() as db:
+            job = db.get(SupplyJob, identity)
+            candidates = job.snapshot['candidates']
+            # 已保存的历史混合风格链接也不能被新算法重排。
+            group = [candidates[index] for index in (0, 10, 1, 11, 2)]
+            links = [{'index': index, 'materials': copy.deepcopy(group), 'title': None, 'replaced': False}
+                     for index in range(10)]
+            job.checkpoint = {'links': links}
+            db.commit()
+        with patch.object(self.worker, 'style_sample', side_effect=AssertionError('不应重新选图')):
+            self.run_job(identity)
+        state = self.assert_completed(identity)
+        for link in state['links']:
+            self.assertEqual(link['materials'], group)
+
     def test_title_failure_has_durable_four_call_budget_then_fallback(self):
         identity = self.make_job()
         self.title.side_effect = ValueError("provider failed")
@@ -197,6 +365,7 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
 
 
     def test_upload_retry_reuses_excel_without_regenerating_or_rechecking(self):
+        self.assign_styles()
         identity = self.make_job()
         upload = self.upload.side_effect
         self.upload.side_effect = ValueError("storage outage")
@@ -208,11 +377,14 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
             self.assertIsNotNone(job.export_blob)
             self.assertEqual(job.upload_attempts, 1)
             first_bytes = bytes(job.export_blob)
+            first_links = copy.deepcopy(job.checkpoint['links'])
             job.available_at = datetime.utcnow() - timedelta(seconds=1)
             db.commit()
         self.upload.side_effect = upload
-        self.run_job(identity)
-        self.assert_completed(identity)
+        with patch.object(self.worker, 'style_sample', side_effect=AssertionError('重试不能重新选图')):
+            self.run_job(identity)
+        state = self.assert_completed(identity)
+        self.assertEqual(state['links'], first_links)
         self.assertEqual(self.contents[-1], first_bytes)
         self.assertEqual(self.title.call_count, first_titles)
         self.assertEqual(self.image.call_count, first_images)

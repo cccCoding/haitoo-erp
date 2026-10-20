@@ -176,7 +176,7 @@ def finish_upload(db, user, *, upload_token: str | None, file_token: str | None,
 def create_material(db, *, image_file: ImageFile, template, owner, request_key: str,
                     force_create: bool = False, source_type: str = "local_upload",
                     source_task_id: int | None = None, name: str = "素材", commit: bool = True,
-                    is_infringing: bool = False) -> dict:
+                    is_infringing: bool = False, style_id: int | None = None) -> dict:
     from .main import add_material_asset_with_sku
     company_id, file_id = image_file.company_id, image_file.id
     if template.company_id != company_id or owner.company_id != company_id:
@@ -203,10 +203,13 @@ def create_material(db, *, image_file: ImageFile, template, owner, request_key: 
         if commit:
             db.commit()
         return {"outcome": "duplicate"}
+    from .material_styles import validate_style
+    validate_style(db, style_id, company_id, template.id)
     asset = add_material_asset_with_sku(db, template=template, owner=owner, company_id=company_id,
         source_task_id=source_task_id, source_type=source_type, url=locked.url, name=name,
         image_file_id=file_id, creation_request_key=request_key)
     asset.is_infringing = is_infringing
+    asset.style_id = style_id
     if commit:
         db.commit()
     else:

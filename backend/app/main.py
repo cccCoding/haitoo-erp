@@ -26,9 +26,10 @@ from sqlalchemy.orm import Session
 from . import hub
 from .config import get_settings
 from .database import SessionLocal, engine, get_db
-from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, OperatorGroup, PodTask, ProductDraft, ProductLibraryDailySnapshot, ProductLibraryRankingTask, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryOrderSkuQuantity, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
+from .models import AIProviderSetting, Company, HubAgent, HubAgentPairing, HubUploadTask, MaterialAsset, MaterialStyle, OperatorGroup, PodTask, ProductDraft, ProductLibraryDailySnapshot, ProductLibraryRankingTask, ProductLibraryOrder, ProductLibraryOrderProduct, ProductLibraryOrderSkuQuantity, ProductLibraryProduct, ProductLibrarySource, ProductTemplate, Role, Shop, TaskQueueSetting, TaskStatus, TemplateGroup, TiktokCategoryCatalog, User, UserAIProviderCredential, UserShop, UserTemplatePrompt, UserTemplateWhiteImage
 from .product_library_statistics import order_facts, sku_statistics
 from .product_library import parse_order_workbook
+from .material_styles import router as material_styles_router, style_for_white_image, task_style_id
 from .material_import import MAX_IMPORT_BYTES, build_import_template, parse_import_workbook, validate_image_link
 from .schemas import MaterialImportConfirmInput, ImageUploadCompleteInput
 from .schemas import MaterialInfringementInput, MaterialInfringementBatchInput
@@ -346,6 +347,7 @@ from .cross_company_collection import router as cross_company_collection_router
 app.include_router(cross_company_collection_router)
 from .supply_catalog import router as supply_catalog_router
 app.include_router(supply_catalog_router)
+app.include_router(material_styles_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins.split(","),
@@ -1472,6 +1474,8 @@ def set_product_library_templates(
     for product in all_products:
         product.template_id = template.id
     for asset in assets:
+        if asset.template_id != template.id:
+            asset.style_id = None
         asset.template_id = template.id
     db.commit()
     return {"updated": len(products) + len(assets), "template_id": template.id, "template": template.name}
@@ -1683,18 +1687,30 @@ def commit_template_resource(db: Session, duplicate_message: str) -> None:
 def list_user_template_resources(
     template_id: int | None = None,
     user_id: int | None = None,
+    scope: Literal["own", "company"] = "own",
+    white_image_status: Literal["active", "deleted"] = "active",
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    owner = get_resource_owner(db, user, user_id)
+    if scope == "company":
+        if user.role != Role.COMPANY_ADMIN:
+            raise HTTPException(403, "仅公司管理员可查看全部成员的模板资源")
+        if user_id is not None:
+            raise HTTPException(400, "全部成员范围不能同时指定成员")
+        owner = None
+    else:
+        owner = get_resource_owner(db, user, user_id)
     white_image_query = select(UserTemplateWhiteImage).where(
         UserTemplateWhiteImage.company_id == user.company_id,
-        UserTemplateWhiteImage.user_id == owner.id,
+        UserTemplateWhiteImage.deleted_at.is_(None) if white_image_status == "active"
+        else UserTemplateWhiteImage.deleted_at.is_not(None),
     )
     prompt_query = select(UserTemplatePrompt).where(
         UserTemplatePrompt.company_id == user.company_id,
-        UserTemplatePrompt.user_id == owner.id,
     )
+    if owner is not None:
+        white_image_query = white_image_query.where(UserTemplateWhiteImage.user_id == owner.id)
+        prompt_query = prompt_query.where(UserTemplatePrompt.user_id == owner.id)
     if template_id is not None:
         template = get_usable_template(db, user, template_id)
         white_image_query = white_image_query.where(UserTemplateWhiteImage.template_id == template.id)
@@ -1702,7 +1718,9 @@ def list_user_template_resources(
     white_images = db.scalars(white_image_query.order_by(UserTemplateWhiteImage.id.desc())).all()
     prompts = db.scalars(prompt_query.order_by(UserTemplatePrompt.id.desc())).all()
     return {
-        "user_id": owner.id,
+        "user_id": owner.id if owner is not None else None,
+        "scope": scope,
+        "white_image_status": white_image_status,
         "template_id": template_id,
         "white_images": [serialize_record(item) for item in white_images],
         "prompts": [serialize_record(item) for item in prompts],
@@ -1717,9 +1735,12 @@ def create_user_template_white_image(
 ):
     template = get_usable_template(db, user, payload.template_id)
     owner = get_resource_owner(db, user, payload.user_id)
+    from .supply_common import lock_company
+    lock_company(db, user.company_id)
     count = db.scalar(select(func.count()).select_from(UserTemplateWhiteImage).where(
         UserTemplateWhiteImage.user_id == owner.id,
         UserTemplateWhiteImage.template_id == template.id,
+        UserTemplateWhiteImage.deleted_at.is_(None),
     )) or 0
     if count >= 50:
         raise HTTPException(400, "每个模板最多保存 50 张白底图")
@@ -1729,8 +1750,15 @@ def create_user_template_white_image(
         company_id=user.company_id, user_id=owner.id, template_id=template.id,
         name=payload.name, image_url=payload.image_url,
     )
-    db.add(item); commit_template_resource(db, "该模板下已有同名白底图"); db.refresh(item)
-    return serialize_record(item)
+    try:
+        db.add(item)
+        db.flush()
+        style = style_for_white_image(db, item)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(400, "该模板下已有同名白底图") from exc
+    return serialize_record(item) | {"style_id": style.id}
 
 
 def get_managed_white_image(db: Session, user: User, item_id: int) -> UserTemplateWhiteImage:
@@ -1745,11 +1773,14 @@ def update_user_template_white_image(
     item_id: int, payload: UserTemplateWhiteImageUpdate,
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ):
+    from .supply_common import lock_company
+    lock_company(db, user.company_id)
     item = get_managed_white_image(db, user, item_id)
-    if payload.image_url is not None and not registered_image_url(payload.image_url, user.company_id, db):
-        raise HTTPException(400, "白底图必须通过当前公司的专用上传接口上传")
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(item, field, value)
+    if item.deleted_at is not None:
+        raise HTTPException(400, "已删除的白底图不能编辑")
+    style = style_for_white_image(db, item)
+    item.name = payload.name
+    style.name = payload.name
     item.updated_at = datetime.utcnow()
     commit_template_resource(db, "该模板下已有同名白底图"); db.refresh(item)
     return serialize_record(item)
@@ -1757,8 +1788,13 @@ def update_user_template_white_image(
 
 @app.delete("/user-template-white-images/{item_id}")
 def delete_user_template_white_image(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    from .supply_common import lock_company
+    lock_company(db, user.company_id)
     item = get_managed_white_image(db, user, item_id)
-    db.delete(item); db.commit()
+    style_for_white_image(db, item)
+    if item.deleted_at is None:
+        item.deleted_at = datetime.utcnow()
+    db.commit()
     return {"deleted": True}
 
 
@@ -2093,7 +2129,7 @@ def commit_material_assets(payload: MaterialUploadCommitInput, user: User = Depe
         try:
             image_file = finish_upload(db, user, upload_token=item.upload_token, file_token=item.file_token)
             result = create_material(db, image_file=image_file, template=template, owner=user,
-                is_infringing=item.is_infringing,
+                is_infringing=item.is_infringing, style_id=item.style_id,
                 request_key=f"{user.id}:{item.request_key}", force_create=item.force_create,
                 name=(Path(item.name).name.rsplit(".", 1)[0] or "本地素材")[:180])
             results.append({**result, "file_token": file_ticket(user, image_file), "request_key": item.request_key})
@@ -2273,7 +2309,7 @@ def confirm_material_import(payload: MaterialImportConfirmInput, user: User = De
             image_file = ticket_file(db, user, payload.file_token) if payload.file_token else ingest_url(
                 db, user.company_id, validate_image_link(url, index + 2))
             result = create_material(db, image_file=image_file, template=template, owner=user,
-                is_infringing=payload.is_infringing,
+                is_infringing=payload.is_infringing, style_id=payload.style_id,
                 request_key=f"{user.id}:" + hashlib.sha256(f"{payload.request_key}:{index}".encode()).hexdigest(),
                 force_create=payload.force_create, source_type="imported", name=f"导入素材 {index + 1}")
             results.append({**result, "url": url, "file_token": file_ticket(user, image_file)})
@@ -2287,10 +2323,11 @@ def confirm_material_import(payload: MaterialImportConfirmInput, user: User = De
 @app.get("/material-assets")
 def list_material_assets(
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=1000),
+    page_size: int = Query(default=20, ge=1, le=2000),
     creator_id: int | None = Query(default=None, ge=1),
     template_id: int | None = None,
     usage_status: str = "unused",
+    style_id: Annotated[int | None, Query(ge=0)] = None,
     source_type: str = "",
     created_from: datetime | None = None,
     created_to: datetime | None = None,
@@ -2298,13 +2335,13 @@ def list_material_assets(
     db: Session = Depends(get_db),
 ):
     return query_material_assets(db=db, user=user, page=page, page_size=page_size,
-        creator_id=creator_id, template_id=template_id, usage_status=usage_status,
+        creator_id=creator_id, template_id=template_id, usage_status=usage_status, style_id=style_id,
         source_type=source_type, created_from=created_from, created_to=created_to)
 
 
 def query_material_assets(*, db, user, page, page_size, creator_id=None, template_id=None,
                           usage_status="unused", source_type="", created_from=None,
-                          created_to=None, extra_filters=()):
+                          created_to=None, extra_filters=(), style_id=None):
     if usage_status not in {"all", "unused", "used"}:
         raise HTTPException(422, "不支持的素材状态")
     if source_type not in {"", "ai_created", "local_upload", "imported", "cross_company"}:
@@ -2322,6 +2359,8 @@ def query_material_assets(*, db, user, page, page_size, creator_id=None, templat
         filters.append(MaterialAsset.claimed_by == creator_id)
     if template_id is not None:
         filters.append(MaterialAsset.template_id == template_id)
+    if style_id is not None:
+        filters.append(MaterialAsset.style_id.is_(None) if style_id == 0 else MaterialAsset.style_id == style_id)
     if usage_status != "all":
         filters.append(MaterialAsset.usage_status == usage_status)
     if created_from is not None:
@@ -2343,6 +2382,10 @@ def query_material_assets(*, db, user, page, page_size, creator_id=None, templat
     if filters:
         stmt = stmt.where(*filters)
     assets = db.scalars(stmt.order_by(MaterialAsset.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    style_ids = {asset.style_id for asset in assets if asset.style_id is not None}
+    styles = {style.id: style for style in db.scalars(select(MaterialStyle).where(
+        MaterialStyle.id.in_(style_ids), MaterialStyle.company_id.in_({asset.company_id for asset in assets})
+    )).all()} if style_ids else {}
     creator_ids = {asset.claimed_by for asset in assets}
     creator_names = {
         creator.id: creator.name
@@ -2364,6 +2407,7 @@ def query_material_assets(*, db, user, page, page_size, creator_id=None, templat
     return {
         "items": [
             serialize_record(asset) | {
+                "style_name": styles[asset.style_id].name if asset.style_id in styles else None,
                 "created_by": asset.claimed_by,
                 "created_by_name": creator_names.get(asset.claimed_by, "历史记录缺失"),
                 "template_name": template_names.get(asset.template_id, "未设置模板" if asset.template_id is None else "历史模板已删除"),
@@ -2566,6 +2610,8 @@ def admin_data_creative_resources(
     admin_company_read_scope(db, company_id)
     resource = UserTemplatePrompt if resource_type == "prompts" else UserTemplateWhiteImage
     conditions = [resource.company_id == company_id]
+    if resource_type == "white-images":
+        conditions.append(UserTemplateWhiteImage.deleted_at.is_(None))
     if creator_id is not None:
         conditions.append(resource.user_id == creator_id)
     if template_id is not None:
@@ -2775,6 +2821,7 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
         UserTemplateWhiteImage.company_id == user.company_id,
         UserTemplateWhiteImage.user_id == user.id,
         UserTemplateWhiteImage.template_id == template.id,
+        UserTemplateWhiteImage.deleted_at.is_(None),
     ))
     if not white_image:
         raise HTTPException(400, "请选择当前模板下自己的产品白底图")
@@ -2806,7 +2853,9 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
         raise HTTPException(400, f"尚未配置个人 {provider.display_name} 平台密钥，请联系公司管理员配置")
     images_per_task = max(1, provider.images_per_task or 1)
     chunks = [print_urls[start:start + images_per_task] for start in range(0, len(print_urls), images_per_task)]
+    style = style_for_white_image(db, white_image)
     common_parameters = payload.model_dump(exclude={"print_urls", "print_url", "white_image_id"}) | {
+        "style_id": style.id,
         "white_image_id": white_image.id,
         "white_image_name": white_image.name,
         "white_image_url": white_image.image_url,
@@ -2920,7 +2969,7 @@ def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Dep
         for url in selected_urls:
             image_file = ingest_url(db, task.company_id, url)
             result = create_material(db, image_file=image_file, template=template, owner=owner,
-                is_infringing=payload.is_infringing,
+                is_infringing=payload.is_infringing, style_id=task_style_id(db, task),
                 request_key=hashlib.sha256(f"claim:{user.id}:{task_id}:{payload.request_key}:{url}".encode()).hexdigest(),
                 force_create=payload.force_create, source_type="ai_created", source_task_id=task.id,
                 name=f"AI 创作 #{task.id}")

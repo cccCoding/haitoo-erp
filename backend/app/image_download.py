@@ -13,21 +13,27 @@ import httpcore
 import httpx
 from PIL import Image, UnidentifiedImageError
 
+from .config import get_settings
+
 
 MAX_IMAGE_BYTES = 3 * 1024 * 1024
 MAX_REDIRECTS = 5
 CHECK_TIMEOUT_SECONDS = 30
+# 本机 Clash / Mihomo 的 Fake-IP 网段；不放行其他私网或保留地址。
+FAKE_IP_NETWORKS = (ipaddress.ip_network("198.18.0.0/15"), ipaddress.ip_network("2001:2::/48"))
 
 
 class UnsafeImageAddress(ValueError):
     """图片请求尝试访问非公网地址。"""
 
 
-def _public_address(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+def _public_address(value: str, *, allow_fake_ip: bool = False) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     try:
         address = ipaddress.ip_address(value)
     except ValueError as exc:
         raise UnsafeImageAddress("图片连接地址无法识别") from exc
+    if allow_fake_ip and any(address in network for network in FAKE_IP_NETWORKS):
+        return address
     effective = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped else address
     if not effective.is_global or effective.is_multicast or effective.is_reserved:
         raise UnsafeImageAddress("图片地址必须位于公网")
@@ -109,19 +115,29 @@ class _PinnedStream(httpcore.AsyncNetworkStream):
 
 class PublicImageNetworkBackend(httpcore.AsyncNetworkBackend):
     """先验证所有 DNS 结果，再连接固定 IP；TLS 仍验证原域名证书。"""
+    def __init__(self, *, allow_fake_ip: bool = False):
+        self.allow_fake_ip = allow_fake_ip
+
     async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         if port not in {80, 443}:
             raise UnsafeImageAddress("图片 URL 不支持非标准端口")
+        # 兼容开关仅用于域名解析；直接提供 IP 的 URL 始终走严格公网校验。
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            allow_fake_ip = self.allow_fake_ip
+        else:
+            allow_fake_ip = False
         try:
             records = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM), timeout)
-            addresses = list(dict.fromkeys(str(_public_address(record[4][0])) for record in records))
+            addresses = list(dict.fromkeys(str(_public_address(record[4][0], allow_fake_ip=allow_fake_ip)) for record in records))
             if not addresses:
                 raise httpcore.ConnectError("图片域名没有可用地址")
             # 将经验证的 IP 直接传给建连函数，防止再次解析时 DNS 重绑定。
             reader, writer = await asyncio.wait_for(asyncio.open_connection(addresses[0], port), timeout)
             peer = writer.get_extra_info("peername")
             try:
-                if not peer or str(_public_address(peer[0])) != addresses[0]:
+                if not peer or str(_public_address(peer[0], allow_fake_ip=allow_fake_ip)) != addresses[0]:
                     raise UnsafeImageAddress("图片实际连接地址与已验证地址不一致")
             except Exception:
                 writer.close()
@@ -155,7 +171,8 @@ class _ResponseStream(httpx.AsyncByteStream):
 
 class PublicImageTransport(httpx.AsyncBaseTransport):
     def __init__(self):
-        self.pool = httpcore.AsyncConnectionPool(network_backend=PublicImageNetworkBackend(), max_connections=1, max_keepalive_connections=0, retries=0)
+        backend = PublicImageNetworkBackend(allow_fake_ip=get_settings().image_download_allow_fake_ip)
+        self.pool = httpcore.AsyncConnectionPool(network_backend=backend, max_connections=1, max_keepalive_connections=0, retries=0)
 
     async def handle_async_request(self, request):
         response = await self.pool.handle_async_request(httpcore.Request(

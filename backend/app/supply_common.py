@@ -121,7 +121,7 @@ def validate_template(template):
 def material_snapshot(asset, version, url=None):
     value = {"id": asset.id, "template_id": asset.template_id, "sku": (asset.sku or "").strip(),
              "url": (url if url is not None else asset.url or "").strip(), "name": asset.name, "template_version": version,
-             "is_infringing": bool(asset.is_infringing)}
+             "is_infringing": bool(asset.is_infringing), "style_id": asset.style_id}
     value["version_hash"] = digest(value)
     return value
 

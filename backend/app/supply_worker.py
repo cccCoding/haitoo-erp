@@ -48,6 +48,53 @@ def distinct_sample(candidates, count, rng):
     return selected
 
 
+def style_sample(candidates, count, rng):
+    """优先同风格，混用时选最大可用分组，未分组仅在最后补齐。"""
+    groups, ungrouped = {}, []
+    for candidate in candidates:
+        style_id = candidate.get("style_id")
+        if type(style_id) is int and style_id > 0:
+            groups.setdefault(style_id, []).append(candidate)
+        else:
+            ungrouped.append(candidate)
+    # 旧快照及全部未分组的任务保留原有随机顺序。
+    if not groups:
+        return distinct_sample(candidates, count, rng)
+
+    samples = {style_id: distinct_sample(items, count, rng) for style_id, items in groups.items()}
+    complete = [items for items in samples.values() if len(items) == count]
+    if complete:
+        return rng.choice(complete)
+
+    selected, ids, skus, urls = [], set(), set(), set()
+
+    def available(items):
+        return [item for item in items
+                if item["id"] not in ids and item["sku"] not in skus and item["url"] not in urls]
+
+    def add(items):
+        selected.extend(items)
+        for item in items:
+            ids.add(item["id"]); skus.add(item["sku"]); urls.add(item["url"])
+
+    while samples:
+        largest = max(len(items) for items in samples.values())
+        if not largest:
+            break
+        style_id = rng.choice([key for key, items in samples.items() if len(items) == largest])
+        add(samples[style_id])
+        if len(selected) == count:
+            return selected
+        del groups[style_id]
+        samples = {key: distinct_sample(available(items), count - len(selected), rng)
+                   for key, items in groups.items()}
+    add(distinct_sample(available(ungrouped), count - len(selected), rng))
+    if len(selected) == count:
+        return selected
+    # 风格优先的贪心选择可能与其他图片冲突，退回原有全量随机去重方案。
+    return distinct_sample(candidates, count, rng)
+
+
 def _cancel(job, message):
     job.state, job.stage, job.error, job.completed_at = "cancelled", "cancelled", message, now()
     job.lease_owner, job.lease_expires_at = None, None
@@ -182,7 +229,7 @@ async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
             rng = random.Random(snap["seed"])
             links = []
             for index in range(strategy["link_count"]):
-                group = distinct_sample(candidates, strategy["sku_count"], rng)
+                group = style_sample(candidates, strategy["sku_count"], rng)
                 if len(group) != strategy["sku_count"]:
                     raise ValueError("没有足够素材组成完整商品组")
                 links.append({"index": index, "materials": group, "title": None, "replaced": False})

@@ -179,14 +179,12 @@ class UserTemplateWhiteImageCreate(BaseModel):
 
 
 class UserTemplateWhiteImageUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=80)
-    image_url: str | None = Field(default=None, min_length=1, max_length=500)
+    model_config = {"extra": "forbid"}
+    name: str = Field(min_length=1, max_length=80)
 
     @field_validator("name")
     @classmethod
-    def normalize_name(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
+    def normalize_name(cls, value: str) -> str:
         value = value.strip()
         if not value:
             raise ValueError("白底图名称不能为空")
@@ -251,6 +249,7 @@ class ImageUploadCompleteInput(BaseModel):
 
 
 class MaterialUploadCommitItem(BaseModel):
+    style_id: PositiveInt | None = None
     is_infringing: bool = False
     upload_token: str | None = None
     file_token: str | None = None
@@ -270,6 +269,11 @@ class MaterialInfringementInput(BaseModel):
 
 class MaterialInfringementBatchInput(MaterialInfringementInput):
     material_asset_ids: list[PositiveInt] = Field(min_length=1, max_length=1000)
+
+
+class MaterialStyleBatchInput(BaseModel):
+    material_asset_ids: list[PositiveInt] = Field(min_length=1, max_length=2000)
+    style_id: PositiveInt | None
 
 
 MAX_PRODUCT_LIBRARY_SELECTION = 2000
@@ -678,6 +682,7 @@ class ProductLibraryDraftSource(BaseModel):
 
 
 class MaterialImportConfirmInput(BaseModel):
+    style_id: PositiveInt | None = None
     is_infringing: bool = False
     template_id: int = Field(gt=0)
     urls: list[str] = Field(default_factory=list, max_length=10000)

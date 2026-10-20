@@ -118,6 +118,13 @@ chmod 600 .env.local
 
 停止本机环境时使用相同的参数执行 `./deploy/local.sh down`；不要加 `-v`，否则会删除测试 MySQL 数据卷。
 
+本机 Clash / Mihomo 等代理可能将公网图片域名解析成 `198.18.0.0/15` 或
+`2001:2::/48` 网段的 Fake-IP。`docker-compose.local.yml` 仅为 API 和结果 Worker
+开启 `IMAGE_DOWNLOAD_ALLOW_FAKE_IP`，允许通过这些域名下载图片，仍校验连接 IP
+一致性、重定向和图片大小，并拒绝直接填写的保留 IP 及其他内网地址。
+此模式信任本机代理的域名映射；应用默认关闭兼容开关，腾讯云配置不启用它。
+直接使用虚拟环境运行本机后端时，可按需设置 `IMAGE_DOWNLOAD_ALLOW_FAKE_IP=true`。
+
 两个密码必须是至少 32 个字符的十六进制随机字符串。MySQL 只监听 Compose
 内部网络的 `3306` 端口，不映射到宿主机；API 和 Worker 使用应用密码连接数据库。
 已有部署升级时，将 `CREDENTIAL_ENCRYPTION_KEY` 设置为当前 `SECRET_KEY` 的值，

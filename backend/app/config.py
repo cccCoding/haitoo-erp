@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
     log_level: str = "INFO"
     log_timezone: str = "Asia/Hong_Kong"
+    # 仅本机代理兼容：允许图片域名解析到 Fake-IP 保留网段，生产环境保持关闭。
+    image_download_allow_fake_ip: bool = False
     # auto 仅在请求来自内部代理时读取 Cloudflare / Nginx 覆写的客户端 IP 头。
     login_client_ip_source: Literal["peer", "auto"] = "peer"
     # Grsai 异步图像生成接口，用于印花贴合。

@@ -3,8 +3,14 @@ services:
   api:
     environment:
       LOGIN_CLIENT_IP_SOURCE: peer
+      # 本机代理 Fake-IP 兼容；腾讯云不加载此配置。
+      IMAGE_DOWNLOAD_ALLOW_FAKE_IP: "true"
     ports:
       - "127.0.0.1:8001:8000"
+
+  result-worker:
+    environment:
+      IMAGE_DOWNLOAD_ALLOW_FAKE_IP: "true"
 
   web:
     ports:

@@ -296,6 +296,8 @@ class UserTemplateWhiteImage(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "template_id", "name", name="uq_user_template_white_image_name"),
         Index("ix_user_template_white_images_owner_template", "user_id", "template_id"),
+        Index("ix_user_template_white_images_company_deleted", "company_id", "deleted_at"),
+        {"sqlite_autoincrement": True},
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
@@ -303,6 +305,7 @@ class UserTemplateWhiteImage(Base):
     template_id: Mapped[int] = mapped_column(index=True)
     name: Mapped[str] = mapped_column(String(80))
     image_url: Mapped[str] = mapped_column(String(500))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -357,6 +360,23 @@ class PodTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class MaterialStyle(Base):
+    """由白底图产生的永久风格；来源删除后仍保留，不设置级联外键。"""
+    __tablename__ = "material_styles"
+    __table_args__ = (
+        UniqueConstraint("source_white_image_id", name="uq_material_styles_white_image"),
+        Index("ix_material_styles_company_template", "company_id", "template_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column()
+    template_id: Mapped[int] = mapped_column()
+    source_white_image_id: Mapped[int] = mapped_column()
+    name: Mapped[str] = mapped_column(String(80))
+    created_by: Mapped[int] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class MaterialAsset(Base):
     """公司级素材库中的 AI 领取、本地上传或链接导入图片。"""
     __tablename__ = "material_assets"
@@ -366,6 +386,7 @@ class MaterialAsset(Base):
         Index("ix_material_assets_company_created_id", "company_id", "created_at", "id"),
         Index("ix_material_assets_company_creator_created_id", "company_id", "claimed_by", "created_at", "id"),
         Index("ix_material_assets_supply_listing", "company_id", "supply_listed", "supply_listed_at"),
+        Index("ix_material_assets_company_template_style", "company_id", "template_id", "style_id"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
@@ -374,6 +395,7 @@ class MaterialAsset(Base):
     source_task_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
     source_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     template_id: Mapped[int | None] = mapped_column(index=True, nullable=True)
+    style_id: Mapped[int | None] = mapped_column(nullable=True)
     url: Mapped[str] = mapped_column(String(500))
     name: Mapped[str] = mapped_column(String(180))
     sku: Mapped[str | None] = mapped_column(String(24), nullable=True)
