@@ -99,6 +99,65 @@ class SupplyFixture:
 
 
 class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
+    def test_material_list_exposes_infringement_to_managers_and_members(self):
+        with self.sessions() as db:
+            db.get(MaterialAsset, 1).is_infringing = True
+            db.commit()
+        for uid in (1, 2, 3):
+            response = self.request("GET", "/supply/materials", uid=uid)
+            self.assertEqual(response.status_code, 200, response.text)
+            items = {row["id"]: row for row in response.json()["items"]}
+            self.assertTrue(items[1]["is_infringing"])
+            self.assertFalse(items[2]["is_infringing"])
+
+    def test_infringement_modes_filter_snapshot_and_report_insufficient_materials(self):
+        with self.sessions() as db:
+            for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.id <= 10)):
+                asset.is_infringing = True
+            db.commit()
+        for mode, expected in (("exclude", set(range(11, 21))), ("include", set(range(1, 21))), ("only", set(range(1, 11)))):
+            identity = self.submit(self.create_strategy(infringement_filter=mode), key=f"mode-{mode}-request")
+            with self.sessions() as db:
+                snap = db.get(SupplyJob, identity).snapshot
+                self.assertEqual(snap["strategy"]["infringement_filter"], mode)
+                self.assertEqual({item["id"] for item in snap["candidates"]}, expected)
+                self.assertTrue(all(item["is_infringing"] == (item["id"] <= 10) for item in snap["candidates"]))
+            self.request("POST", f"/supply/jobs/{identity}/cancel", uid=4)
+        with self.sessions() as db:
+            for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.id <= 6)):
+                asset.is_infringing = False
+            db.commit()
+        strategy = self.create_strategy(infringement_filter="only")
+        response = self.request("POST", "/supply/jobs", uid=4,
+            json={"strategy_id": strategy, "idempotency_key": "insufficient-only"})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("侵权筛选", response.json()["detail"])
+        self.assertEqual(self.request("POST", "/supply/strategies", uid=4,
+            json=self.strategy_input(infringement_filter="bad")).status_code, 422)
+
+    def test_new_defaults_and_legacy_strategy_compatibility(self):
+        identity = self.create_strategy()
+        with self.sessions() as db:
+            strategy = db.get(SupplyStrategy, identity)
+            self.assertEqual(strategy.parameters["infringement_filter"], "exclude")
+            strategy.parameters = {key: value for key, value in strategy.parameters.items() if key != "infringement_filter"}
+            db.get(MaterialAsset, 1).is_infringing = True
+            db.commit()
+        rows = self.request("GET", "/supply/strategies", uid=4).json()
+        self.assertEqual(rows[0]["infringement_filter"], "include")
+        job_id = self.submit(identity)
+        with self.sessions() as db:
+            snap = db.get(SupplyJob, job_id).snapshot
+            self.assertEqual(snap["strategy"]["infringement_filter"], "include")
+            self.assertIn(1, [item["id"] for item in snap["candidates"]])
+        edited = self.request("PATCH", f"/supply/strategies/{identity}", uid=4, json=self.strategy_input())
+        self.assertEqual(edited.json()["infringement_filter"], "include")
+        # 已有显式设置也不能被旧客户端省略字段的更新覆盖。
+        self.request("PATCH", f"/supply/strategies/{identity}", uid=4,
+            json=self.strategy_input(infringement_filter="only"))
+        edited = self.request("PATCH", f"/supply/strategies/{identity}", uid=4, json=self.strategy_input())
+        self.assertEqual(edited.json()["infringement_filter"], "only")
+
     def test_material_pagination_supports_up_to_1500_without_cross_company_rows(self):
         with self.sessions() as db:
             db.add_all([MaterialAsset(id=identity, company_id=1, template_id=1, claimed_by=2,

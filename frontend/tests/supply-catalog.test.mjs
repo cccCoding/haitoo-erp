@@ -3,6 +3,19 @@ import { test } from 'node:test'
 import { createSupplyRequestScope, createSupplySubmissionKeys, emptySupplyStrategy, supplyFileStatus, supplyStrategyPayload, supplyTime, unfinishedSupplyJob, validateSupplyStrategy } from '../src/supply-catalog.ts'
 const valid = () => ({ ...emptySupplyStrategy(), name: '日常女装', category_catalog_id: 1, category_name: 'Dresses', template_id: 1, price: '39.90' })
 
+test('New strategies filter infringement and legacy payloads preserve unrestricted selection', () => {
+  assert.equal(emptySupplyStrategy().infringement_filter, 'exclude')
+  const legacy = valid()
+  delete legacy.infringement_filter
+  assert.equal(supplyStrategyPayload(legacy).infringement_filter, 'include')
+  for (const mode of ['exclude', 'include', 'only']) {
+    const form = {...valid(), infringement_filter: mode}
+    assert.equal(supplyStrategyPayload(form).infringement_filter, mode)
+    assert.equal(validateSupplyStrategy(form, 2), '')
+  }
+  assert.match(validateSupplyStrategy({...valid(), infringement_filter:'invalid'}, 2), /侵权筛选/)
+})
+
 test('Statistics refreshes and closed dialogs reject late responses independently', async () => {
   const statistics = createSupplyRequestScope(), detail = createSupplyRequestScope()
   const oldStatistics = statistics.start(), activeDetail = detail.start()

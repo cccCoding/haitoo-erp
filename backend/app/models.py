@@ -379,6 +379,7 @@ class MaterialAsset(Base):
     sku: Mapped[str | None] = mapped_column(String(24), nullable=True)
     # 仅记录是否曾被成功用于创建草稿；已使用素材仍可用于单条草稿复用。
     usage_status: Mapped[str] = mapped_column(String(12), default="unused", nullable=False, index=True)
+    is_infringing: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     supply_listed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     # 首次上架后保留时间，避免将从未上架的素材视为已下架。
     supply_listed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -120,14 +120,20 @@ def validate_template(template):
 
 def material_snapshot(asset, version, url=None):
     value = {"id": asset.id, "template_id": asset.template_id, "sku": (asset.sku or "").strip(),
-             "url": (url if url is not None else asset.url or "").strip(), "name": asset.name, "template_version": version}
+             "url": (url if url is not None else asset.url or "").strip(), "name": asset.name, "template_version": version,
+             "is_infringing": bool(asset.is_infringing)}
     value["version_hash"] = digest(value)
     return value
 
 
-def eligible_materials(db, company_id, template_id, version):
-    assets = db.scalars(select(MaterialAsset).where(MaterialAsset.company_id == company_id,
-        MaterialAsset.template_id == template_id, MaterialAsset.supply_listed.is_(True)).order_by(MaterialAsset.id)).all()
+def eligible_materials(db, company_id, template_id, version, infringement_filter="include"):
+    query = select(MaterialAsset).where(MaterialAsset.company_id == company_id,
+        MaterialAsset.template_id == template_id, MaterialAsset.supply_listed.is_(True))
+    if infringement_filter not in ("exclude", "include", "only"):
+        raise HTTPException(422, "不支持的侵权筛选条件")
+    if infringement_filter != "include":
+        query = query.where(MaterialAsset.is_infringing.is_(infringement_filter == "only"))
+    assets = db.scalars(query.order_by(MaterialAsset.id)).all()
     files = {}
     ids = list({asset.image_file_id for asset in assets if asset.image_file_id})
     for offset in range(0, len(ids), 400):

@@ -6,6 +6,9 @@ import SearchableSelect from './SearchableSelect.vue'
 import ShopDataHeading from './ShopDataHeading.vue'
 import CrossCompanyCollection from './CrossCompanyCollection.vue'
 import MaterialTransferDialog from './MaterialTransferDialog.vue'
+import InfringementToggle from './InfringementToggle.vue'
+import InfringementBadge from './InfringementBadge.vue'
+import InfringementActions from './InfringementActions.vue'
 import { deduplicatedImageUpload, imageSha256, transferItem, type MaterialTransferItem } from './material-transfer'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
 import { batchTitleRequest, createBatchTitleGenerator, emptyTitleGenerationProgress, hasValidBatchTitles, isUnfinishedTitle, titleGenerationStatusLabels, type BatchTitleGroup } from './batch-title-generation'
@@ -79,10 +82,9 @@ const showTiktokCatalogDialog = ref(false), tiktokCatalogName = ref(''), tiktokC
 const tiktokCatalogTypeTab = ref<'tiktok_local'|'tiktok_cross_border'|'shopee_basic'>('tiktok_local')
 const showTiktokCatalogDetailDialog = ref(false), managingTiktokCatalog = ref<any>(null), managingTiktokCatalogOptions = ref<any>(null), managingTiktokCategory = ref('')
 const materialUploading = ref(false), materialUploadError = ref('')
-const materialDownloading = ref(false)
 const materialTemplateDownloading = ref(false), materialImportPreviewing = ref(false), materialImportSaving = ref(false)
 const materialImportFileInput = ref<HTMLInputElement | null>(null), showMaterialImportDialog = ref(false)
-const materialImportItems = ref<{url:string; exists:boolean; selected:boolean; failed?:boolean}[]>([])
+const materialImportItems = ref<{url:string; exists:boolean; selected:boolean; is_infringing:boolean; failed?:boolean}[]>([])
 const materialImportTemplateId = ref<number | null>(null), materialImportError = ref('')
 const materialImportSelectedCount = computed(() => materialImportItems.value.filter(item => item.selected).length)
 function materialSourceLabel(source:string) { return ({ai_created:'AI创作',local_upload:'本地上传',imported:'导入',cross_company:'采集'} as Record<string,string>)[source] || '本地上传' }
@@ -118,7 +120,31 @@ watch(showMaterialBatchDraftDialog, visible => {
   if (!visible) materialBatchTitleGenerator.reset()
   for (const group of materialBatchGroups.value) { group.additionalRequirements = ''; group.showAdditionalRequirements = false; group.showTitleHelp = false }
 }, { flush: 'sync' })
-const pendingMaterialUploadFiles = ref<File[]>([]), showMaterialUploadDialog = ref(false), materialUploadTemplateId = ref<number | null>(null)
+const pendingMaterialUploadFiles = ref<{file:File; preview:string; selected:boolean; is_infringing:boolean}[]>([]), showMaterialUploadDialog = ref(false), materialUploadTemplateId = ref<number | null>(null)
+watch(showMaterialUploadDialog, visible => {
+  if (!visible) clearMaterialUploadPreviews()
+}, { flush: 'sync' })
+function clearMaterialUploadPreviews() {
+  pendingMaterialUploadFiles.value.forEach(item => URL.revokeObjectURL(item.preview))
+  pendingMaterialUploadFiles.value = []
+}
+onUnmounted(clearMaterialUploadPreviews)
+const materialInfringementSaving = ref(false)
+const batchClaimInfringement = ref<Record<string, boolean>>({})
+function setImportInfringement(value:boolean) { materialImportItems.value.forEach(item => { if(item.selected) item.is_infringing=value }) }
+function setUploadInfringement(value:boolean) { pendingMaterialUploadFiles.value.forEach(item => { if(item.selected) item.is_infringing=value }) }
+function setBatchClaimInfringement(value:boolean) { selectedBatchClaimImages.value.forEach(key => { batchClaimInfringement.value[key]=value }) }
+async function saveMaterialInfringement(ids:number[], value:boolean) {
+  if (!ids.length || materialInfringementSaving.value) return
+  materialInfringementSaving.value=true
+  try {
+    await api.patch(ids.length===1 ? `/material-assets/${ids[0]}/infringement` : '/material-assets/infringement',
+      {is_infringing:value, ...(ids.length===1 ? {} : {material_asset_ids:ids})}, {headers:headers.value})
+    await refreshMaterialList()
+    showToast(`已将 ${ids.length} 张素材设为${value ? '侵权' : '不侵权'}`)
+  } catch(e:any) { showToast(e.response?.data?.detail || '修改侵权标记失败') }
+  finally { materialInfringementSaving.value=false }
+}
 const MATERIAL_UPLOAD_MAX_FILES = 100, IMAGE_UPLOAD_RETRY = 2
 const templateSaving = ref(false)
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'], MAX_IMAGE_BYTES = 3 * 1024 * 1024
@@ -237,7 +263,6 @@ const showMainApplyDialog = ref(false), pendingMainApply = ref<{task:any;url:str
 const showShopManagersDialog = ref(false), managingShop = ref<any>(null), selectedManagerIds = ref<number[]>([]), shopManagersSaving = ref(false)
 const showTaskDetailDialog = ref(false), viewingTask = ref<any>(null), taskDetailLoading = ref(false)
 const taskListRefreshing = ref(false), retryingTaskId = ref<number | null>(null), batchRetryingTasks = ref(false), retryingWorkspaceTaskId = ref<number | null>(null)
-const showClaimMaterialsDialog = ref(false), claimingTask = ref<any>(null), selectedClaimResultUrls = ref<string[]>([]), claimingMaterials = ref(false)
 type CreativeAsset = { id: string; file: File; preview: string; uploadedUrl?: string }
 const defaultSkuSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL']
 const defaultPackageLogistics = { weight: 0.28, length: 30, width: 16, height: 2 }
@@ -2096,27 +2121,12 @@ async function deleteTiktokCatalog(catalog:any) {
   } catch (e:any) { tiktokCatalogError.value = e.response?.data?.detail || '删除类目库失败' }
   finally { tiktokCatalogLoading.value = false }
 }
-async function openClaimMaterialsDialog(task: any) { try { claimingTask.value = (await api.get(`/tasks/${task.id}`, { headers: headers.value })).data; selectedClaimResultUrls.value = []; showClaimMaterialsDialog.value = true } catch (e:any) { showToast(e.response?.data?.detail || '加载任务结果失败') } }
-function toggleClaimResult(url: string) { selectedClaimResultUrls.value = selectedClaimResultUrls.value.includes(url) ? selectedClaimResultUrls.value.filter(item => item !== url) : [...selectedClaimResultUrls.value, url] }
-async function claimMaterials() {
-  if (!claimingTask.value || !selectedClaimResultUrls.value.length) { showToast('请至少选择一张图片'); return }
-  const taskId = claimingTask.value.id, requestHeaders={...headers.value}
-  const items = selectedClaimResultUrls.value.map(url=>transferItem(`任务 #${taskId}`, async (force,requestKey)=>{
-    const {data}=await api.post(`/tasks/${taskId}/claim-materials`,{
-      result_urls:[url],force_create:force,request_key:requestKey,
-    },{headers:requestHeaders})
-    return data.items[0]
-  },imageUrl(url)))
-  showClaimMaterialsDialog.value=false
-  selectedTaskIds.value=[]
-  openMaterialTransfers(items)
-}
 function toggleTaskSelection(taskId: number) { selectedTaskIds.value = selectedTaskIds.value.includes(taskId) ? selectedTaskIds.value.filter(id => id !== taskId) : [...selectedTaskIds.value, taskId] }
 function taskCanBeSelected(task:any) { return task.status === 'failed' || activeTaskType.value === 'sku_image' && ['awaiting_selection','completed'].includes(task.status) && Boolean(task.result_count || task.result_urls?.length) }
 function toggleAllSelectableTasks() { selectedTaskIds.value = allSelectableTasksSelected.value ? [] : selectablePagedTasks.value.map(task => task.id) }
 async function openBatchClaimDialog() {
   if (!selectedClaimableTaskIds.value.length) { showToast('请至少选择一个可审核任务'); return }
-  showBatchClaimDialog.value = true; batchClaimLoading.value = true; batchClaimItems.value = []; selectedBatchClaimImages.value = new Set(); batchClaimCompleted.value = 0; batchClaimTotal.value = 0; batchClaimFailed.value = 0
+  showBatchClaimDialog.value = true; batchClaimLoading.value = true; batchClaimItems.value = []; batchClaimInfringement.value = {}; selectedBatchClaimImages.value = new Set(); batchClaimCompleted.value = 0; batchClaimTotal.value = 0; batchClaimFailed.value = 0
   try {
     const details = await Promise.all(selectedClaimableTaskIds.value.map(id => api.get(`/tasks/${id}`, { headers: headers.value }).then(response => response.data)))
     batchClaimItems.value = details.flatMap(task => (task.result_urls || []).map((url: string) => ({ taskId: task.id, taskLabel: `任务 #${task.id}`, url })))
@@ -2129,12 +2139,12 @@ async function confirmBatchClaim() {
   if (batchClaimLoading.value || batchClaiming.value) return
   const groups=groupedBatchClaimItems.value.map(group=>({...group,urls:group.urls.filter(url=>selectedBatchClaimImages.value.has(batchClaimImageKey(group.taskId,url)))}))
   const requestHeaders={...headers.value}
-  const items=groups.flatMap(group=>(group.urls.length ? group.urls : [null]).map(url=>transferItem(`任务 #${group.taskId}${url ? '' : '（不采用图片）'}`,async(force,requestKey)=>{
+  const items=groups.flatMap(group=>(group.urls.length ? group.urls : [null]).map(url=>{ const isInfringing=url ? Boolean(batchClaimInfringement.value[batchClaimImageKey(group.taskId,url)]) : false; return transferItem(`任务 #${group.taskId}${url ? '' : '（不采用图片）'}`,async(force,requestKey)=>{
     const {data}=await api.post(`/tasks/${group.taskId}/claim-materials`,{
-      result_urls:url ? [url] : [],force_create:force,request_key:requestKey,
+      result_urls:url ? [url] : [],force_create:force,request_key:requestKey,is_infringing:isInfringing,
     },{headers:requestHeaders})
     return data.items[0] || {outcome:'created'}
-  },url ? imageUrl(url) : undefined)))
+  },url ? imageUrl(url) : undefined) }))
   showBatchClaimDialog.value=false
   selectedTaskIds.value=[]
   openMaterialTransfers(items)
@@ -2198,7 +2208,7 @@ async function previewMaterialImport(event:Event) {
     materialImportPreviewing.value = true
     const form = new FormData(); form.append('file', file)
     const { data } = await api.post('/material-assets/import-preview', form, {headers:headers.value})
-    materialImportItems.value = data.items.map((item:{url:string; exists:boolean}) => ({...item, selected:!item.exists}))
+    materialImportItems.value = data.items.map((item:{url:string; exists:boolean}) => ({...item, selected:!item.exists, is_infringing:false}))
     materialImportTemplateId.value = null
     materialImportError.value = ''
     showMaterialImportDialog.value = true
@@ -2216,14 +2226,14 @@ async function refreshAfterMaterialTransfer() {
 }
 async function confirmMaterialImport() {
   if (!materialImportTemplateId.value) { materialImportError.value = '请选择产品模板'; return }
-  const selected = materialImportItems.value.filter(item=>item.selected)
+  const selected = materialImportItems.value.filter(item=>item.selected).map(item=>({...item}))
   if (!selected.length) { materialImportError.value = '请至少选择一张素材'; return }
   const templateId = materialImportTemplateId.value, requestHeaders = {...headers.value}
   const items = selected.map(source => {
     let fileToken: string | undefined
     return transferItem(source.url, async (force, requestKey) => {
       const {data} = await api.post('/material-assets/import-confirm', {
-        template_id:templateId, urls:fileToken ? [] : [source.url], file_token:fileToken,
+        is_infringing:source.is_infringing, template_id:templateId, urls:fileToken ? [] : [source.url], file_token:fileToken,
         force_create:force || source.exists, request_key:requestKey,
       }, {headers:requestHeaders})
       const result = data.items[0]
@@ -2242,16 +2252,18 @@ function chooseMaterialUploadFiles(event: Event) {
   if (!files.length) return
   if (files.length > MATERIAL_UPLOAD_MAX_FILES) { showToast(`单次最多上传 ${MATERIAL_UPLOAD_MAX_FILES} 张图片`); return }
   if (files.some(file => !ALLOWED_IMAGE_TYPES.includes(file.type) || !file.size || file.size > MAX_IMAGE_BYTES)) { showToast('仅支持 JPG、PNG、WebP，且单张不能超过 3MB'); return }
-  pendingMaterialUploadFiles.value = files
+  clearMaterialUploadPreviews()
+  pendingMaterialUploadFiles.value = files.map(file=>({file, preview:URL.createObjectURL(file), selected:true, is_infringing:false}))
+  materialUploadError.value = ''
   materialUploadTemplateId.value = null
   showMaterialUploadDialog.value = true
 }
 async function uploadMaterialAssets() {
-  const files = [...pendingMaterialUploadFiles.value], templateId = materialUploadTemplateId.value
-  if (!files.length || !templateId) { materialUploadError.value='请选择产品模板'; return }
+  const files = pendingMaterialUploadFiles.value.filter(item=>item.selected).map(item=>({...item})), templateId = materialUploadTemplateId.value
+  if (!files.length || !templateId) { materialUploadError.value='请选择产品模板和至少一张图片'; return }
   const requestHeaders = {...headers.value}
   const prepared = new Map<string, Promise<any>>()
-  const items = files.map(file => {
+  const items = files.map(({file,is_infringing}) => {
     let target: any, fileHash: string | undefined
     return transferItem(file.name, async (force, requestKey) => {
       if (!target) {
@@ -2280,7 +2292,7 @@ async function uploadMaterialAssets() {
       }
       const {data} = await api.post('/material-assets/commit', {
         template_id:templateId, items:[{upload_token:target.upload_token,file_token:target.file_token,
-          name:file.name,request_key:requestKey,force_create:force}],
+          name:file.name,request_key:requestKey,force_create:force,is_infringing}],
       }, {headers:requestHeaders})
       const result = data.items[0]
       if (result.file_token) { target.file_token=result.file_token; target.upload_token=undefined }
@@ -2302,32 +2314,6 @@ async function deleteSelectedMaterialAssets() {
   } catch (e: any) {
     await refreshMaterialList()
     showToast(e.response?.data?.detail || '删除素材失败，请稍后重试')
-  }
-}
-async function downloadSelectedMaterialAssets() {
-  if (!selectedMaterialAssetIds.value.length) return
-  try {
-    materialDownloading.value = true
-    const response = await api.post('/material-assets/download', {
-      material_asset_ids: selectedMaterialAssetIds.value,
-    }, { headers: headers.value, responseType: 'blob' })
-    const disposition = String(response.headers['content-disposition'] || '')
-    const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
-    const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1]
-    const filename = utf8Name ? decodeURIComponent(utf8Name) : plainName || (selectedMaterialAssetIds.value.length === 1 ? 'material.jpg' : 'haitoro-materials.zip')
-    const url = URL.createObjectURL(response.data)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = filename
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
-    showToast(`已开始下载 ${selectedMaterialAssetIds.value.length} 张素材`)
-  } catch (e: any) {
-    showToast(e.response?.data?.detail || '下载素材失败，请稍后重试')
-  } finally {
-    materialDownloading.value = false
   }
 }
 async function refreshMemberList() {
@@ -2416,7 +2402,7 @@ function openHubstudioDialog() { hubstudioForm.value={app_id:'',app_secret:'',gr
 async function saveHubstudioAccount() { try { hubstudioSaving.value=true; await api.put('/hubstudio/account',hubstudioForm.value,{headers:headers.value}); showHubstudioDialog.value=false; await refresh(); showToast('HubStudio API 凭据已保存') } catch(e:any) { shopError.value=e.response?.data?.detail || '保存 HubStudio 配置失败' } finally { hubstudioSaving.value=false } }
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 function showToast(message: string) { toast.value = message; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = '' }, 3000) }
-function logout(){ showMaterialTransferResults.value=false; crossCompanyCollectionEnabled.value=false; materialCollectionDetail.value=null; hubUploadTemplateId.value=null; hubUploadTemplates.value=[]; hubUploadRequestId++; hubUploadTasks.value=[]; hubUploadTotal.value=0; hubUploadPage.value=1; hubUploadCreatorId.value=null; hubUploadLoading.value=false; hubUploadError.value=''; showHubstudioDialog.value=false; localStorage.removeItem('haitoro_token'); token.value=''; user.value=null; taskCreatorFilterId.value=null; materialCreatorFilterId.value=null; materialTemplateFilterId.value=null; materialSourceTypeFilter.value=''; materialCreatedFrom.value=''; materialCreatedTo.value=''; appliedMaterialFilters.value={template_id:null,creator_id:null,source_type:'',created_from:'',created_to:''}; draftCreatorFilterId.value=null; creatorFiltersInitialized.value=false; productLibraryItems.value=[]; productLibraryTotal.value=0; productLibraryPage.value=1; productLibraryRankingRequestId++; productLibraryRankingItems.value=[]; productLibraryRankingTotal.value=0; productLibraryRankingDate.value=null; productLibraryRankingThroughDate.value=null; productLibraryShops.value=[]; rankingShopFilters.value={}; rankingCreatorFilters.value={}; productLibraryCreatorId.value=null; stagnantRequestId++; stagnantMaterials.value=[]; stagnantTotal.value=0; stagnantPage.value=1; stagnantCreatorId.value=null; stagnantError.value=''; stagnantLoading.value=false; newImagesRequestId++; newImages.value=[]; newImagesTotal.value=0; newImagesPage.value=1; newImagesCreatorId.value=null; newImagesUsageStatus.value='all'; newImagesError.value=''; newImagesLoading.value=false; productLibraryStatisticsTask.value=null; activeProductLibraryTab.value='products'; productLibrarySelectedShopIds.value=[]; productLibraryShopSearch.value=''; productLibraryTemplateFilter.value=''; productLibrarySku.value=''; appliedProductLibraryFilters.value={sourceIds:[],template:'',sku:'',creatorId:null}; selectedProductLibraryIds.value=[]; productLibraryFilters.value={shops:[]} }
+function logout(){ showMaterialUploadDialog.value=false; showMaterialTransferResults.value=false; crossCompanyCollectionEnabled.value=false; materialCollectionDetail.value=null; hubUploadTemplateId.value=null; hubUploadTemplates.value=[]; hubUploadRequestId++; hubUploadTasks.value=[]; hubUploadTotal.value=0; hubUploadPage.value=1; hubUploadCreatorId.value=null; hubUploadLoading.value=false; hubUploadError.value=''; showHubstudioDialog.value=false; localStorage.removeItem('haitoro_token'); token.value=''; user.value=null; taskCreatorFilterId.value=null; materialCreatorFilterId.value=null; materialTemplateFilterId.value=null; materialSourceTypeFilter.value=''; materialCreatedFrom.value=''; materialCreatedTo.value=''; appliedMaterialFilters.value={template_id:null,creator_id:null,source_type:'',created_from:'',created_to:''}; draftCreatorFilterId.value=null; creatorFiltersInitialized.value=false; productLibraryItems.value=[]; productLibraryTotal.value=0; productLibraryPage.value=1; productLibraryRankingRequestId++; productLibraryRankingItems.value=[]; productLibraryRankingTotal.value=0; productLibraryRankingDate.value=null; productLibraryRankingThroughDate.value=null; productLibraryShops.value=[]; rankingShopFilters.value={}; rankingCreatorFilters.value={}; productLibraryCreatorId.value=null; stagnantRequestId++; stagnantMaterials.value=[]; stagnantTotal.value=0; stagnantPage.value=1; stagnantCreatorId.value=null; stagnantError.value=''; stagnantLoading.value=false; newImagesRequestId++; newImages.value=[]; newImagesTotal.value=0; newImagesPage.value=1; newImagesCreatorId.value=null; newImagesUsageStatus.value='all'; newImagesError.value=''; newImagesLoading.value=false; productLibraryStatisticsTask.value=null; activeProductLibraryTab.value='products'; productLibrarySelectedShopIds.value=[]; productLibraryShopSearch.value=''; productLibraryTemplateFilter.value=''; productLibrarySku.value=''; appliedProductLibraryFilters.value={sourceIds:[],template:'',sku:'',creatorId:null}; selectedProductLibraryIds.value=[]; productLibraryFilters.value={shops:[]} }
 api.interceptors.response.use(
   response => response,
   requestError => {
@@ -2476,7 +2462,7 @@ onUnmounted(() => {
         <div v-if="selectedTaskIds.length" class="task-batch-bar"><strong>已选择 {{selectedTaskIds.length}} 个任务</strong><span class="task-batch-actions"><button v-if="selectedRetryTaskIds.length" class="primary" :disabled="batchRetryingTasks || taskListRefreshing" @click="retrySelectedTasks">{{batchRetryingTasks ? '批量重试中…' : `批量重试（${selectedRetryTaskIds.length}）`}}</button><button v-if="activeTaskType==='sku_image' && selectedClaimableTaskIds.length" class="primary" :disabled="batchClaimLoading || batchClaiming || batchRetryingTasks" @click="openBatchClaimDialog">批量审核（{{selectedClaimableTaskIds.length}}）</button></span></div>
         <section class="draft-table task-table refreshable-list" :aria-busy="taskListRefreshing">
           <div class="thead task-list-grid"><label class="material-checkbox material-select-all"><input type="checkbox" :checked="allSelectableTasksSelected" :indeterminate="someSelectableTasksSelected" :disabled="!selectablePagedTasks.length" aria-label="全选本页可批量操作任务" @change="toggleAllSelectableTasks"/><span>选择</span></label><span>任务编号</span><span>任务类型</span><span>创作素材</span><span>产品模版</span><span>AI模型</span><span>创建时间</span><span>创建人</span><span>外部任务 ID</span><span>状态</span><span>结果</span><span>处理信息</span><span>操作</span></div>
-          <div v-for="task in pagedTasks" :key="task.id" class="trow task-list-grid" :class="{selected:selectedTaskIds.includes(task.id)}"><label class="material-checkbox"><input v-if="taskCanBeSelected(task)" type="checkbox" :checked="selectedTaskIds.includes(task.id)" :aria-label="`选择任务 ${task.id}`" @change="toggleTaskSelection(task.id)"/></label><strong>#{{task.id}}</strong><span>{{taskTypeLabel(task)}}</span><button v-if="task.parameters?.print_url" type="button" class="task-material-thumbnail" title="查看创作素材" aria-label="查看创作素材大图" @click.stop.prevent="openImagePreview(task.parameters.print_url, '创作素材')"><img :src="imageUrl(task.parameters.print_url)" alt="创作素材"/></button><span v-else>—</span><span>{{task.template_name || '—'}}</span><span class="ai-model-cell"><b>{{task.provider === 'grsai' ? 'Grsai' : task.provider || '默认模型'}}</b><small v-if="task.provider_model">{{task.provider_model}}</small></span><span>{{new Date(task.created_at).toLocaleString()}}</span><span>{{task.created_by_name || '历史记录缺失'}}</span><span class="provider-task-id"><code>{{task.provider_task_id || '—'}}</code><button v-if="task.provider_task_id" class="copy-icon-button" title="复制外部任务 ID" aria-label="复制外部任务 ID" @click="copyProviderTaskId(task)">⧉</button></span><span class="task-progress-cell"><span class="chip" :class="taskStatusClass(task.status)">{{taskStatusLabel[task.status] || task.status || '—'}}</span><small>{{task.progress?.total_prints || 0}} 张参考图 · 已提交 {{task.submit_attempts || 0}} 次</small></span><button v-if="task.result_urls?.[0]" type="button" class="task-material-thumbnail" title="查看结果图" aria-label="查看首张结果图" @click.stop.prevent="openImagePreview(task.result_urls[0], `任务 #${task.id} 结果图`)"><img :src="imageUrl(task.result_urls[0])" :alt="`任务 #${task.id} 结果图`"/></button><span v-else>—</span><span :class="{error: task.status==='failed'}">{{task.failure_reason || '—'}}</span><span class="task-actions"><button class="secondary" @click="openTaskDetail(task)">查看详情</button><button v-if="activeTaskType!=='sku_image'" class="secondary" @click="openImageWorkspaceFromTask(task)">打开草稿</button><button v-if="task.status==='failed'" class="secondary" :disabled="retryingTaskId===task.id || batchRetryingTasks" @click="retryTaskResult(task)">{{retryingTaskId===task.id ? '重试中…' : '重试任务'}}</button><button v-if="activeTaskType==='sku_image' && (task.result_count || task.result_urls?.length)" class="secondary" @click="openClaimMaterialsDialog(task)">领取素材</button></span></div>
+          <div v-for="task in pagedTasks" :key="task.id" class="trow task-list-grid" :class="{selected:selectedTaskIds.includes(task.id)}"><label class="material-checkbox"><input v-if="taskCanBeSelected(task)" type="checkbox" :checked="selectedTaskIds.includes(task.id)" :aria-label="`选择任务 ${task.id}`" @change="toggleTaskSelection(task.id)"/></label><strong>#{{task.id}}</strong><span>{{taskTypeLabel(task)}}</span><button v-if="task.parameters?.print_url" type="button" class="task-material-thumbnail" title="查看创作素材" aria-label="查看创作素材大图" @click.stop.prevent="openImagePreview(task.parameters.print_url, '创作素材')"><img :src="imageUrl(task.parameters.print_url)" alt="创作素材"/></button><span v-else>—</span><span>{{task.template_name || '—'}}</span><span class="ai-model-cell"><b>{{task.provider === 'grsai' ? 'Grsai' : task.provider || '默认模型'}}</b><small v-if="task.provider_model">{{task.provider_model}}</small></span><span>{{new Date(task.created_at).toLocaleString()}}</span><span>{{task.created_by_name || '历史记录缺失'}}</span><span class="provider-task-id"><code>{{task.provider_task_id || '—'}}</code><button v-if="task.provider_task_id" class="copy-icon-button" title="复制外部任务 ID" aria-label="复制外部任务 ID" @click="copyProviderTaskId(task)">⧉</button></span><span class="task-progress-cell"><span class="chip" :class="taskStatusClass(task.status)">{{taskStatusLabel[task.status] || task.status || '—'}}</span><small>{{task.progress?.total_prints || 0}} 张参考图 · 已提交 {{task.submit_attempts || 0}} 次</small></span><button v-if="task.result_urls?.[0]" type="button" class="task-material-thumbnail" title="查看结果图" aria-label="查看首张结果图" @click.stop.prevent="openImagePreview(task.result_urls[0], `任务 #${task.id} 结果图`)"><img :src="imageUrl(task.result_urls[0])" :alt="`任务 #${task.id} 结果图`"/></button><span v-else>—</span><span :class="{error: task.status==='failed'}">{{task.failure_reason || '—'}}</span><span class="task-actions"><button class="secondary" @click="openTaskDetail(task)">查看详情</button><button v-if="activeTaskType!=='sku_image'" class="secondary" @click="openImageWorkspaceFromTask(task)">打开草稿</button><button v-if="task.status==='failed'" class="secondary" :disabled="retryingTaskId===task.id || batchRetryingTasks" @click="retryTaskResult(task)">{{retryingTaskId===task.id ? '重试中…' : '重试任务'}}</button></span></div>
           <p v-if="!tasks.length && !taskListRefreshing" class="empty">暂无 AI 创作任务。</p><footer v-if="taskTotal" class="draft-pagination"><span>共 {{taskTotal}} 条</span><label>每页 <select v-model.number="taskPageSize" :disabled="taskListRefreshing" @change="changeTaskPageSize"><option v-for="size in pageSizeOptions" :key="size" :value="size">{{size}}</option></select> 条</label><button :disabled="taskListRefreshing || visibleTaskPage===1" @click="changeTaskPage(visibleTaskPage-1)">上一页</button><span>第 {{visibleTaskPage}} / {{taskPageCount}} 页</span><button :disabled="taskListRefreshing || visibleTaskPage===taskPageCount" @click="changeTaskPage(visibleTaskPage+1)">下一页</button></footer>
           <div v-if="taskListRefreshing" class="list-refresh-overlay" role="status"><i></i><span>正在刷新列表…</span></div>
         </section>
@@ -2486,10 +2472,10 @@ onUnmounted(() => {
         <div class="section-heading material-heading"><div><span>素材入库后将永久绑定产品模板和 SKU；请选择同一模板的素材创建商品草稿。</span><div class="material-usage-tabs"><button v-for="tab in materialUsageTabs" :key="tab.key" :class="{active:activeMaterialUsageTab===tab.key}" @click="changeMaterialUsageTab(tab.key)">{{tab.label}}</button></div></div><div class="material-import-actions"><button v-if="crossCompanyCollectionEnabled && user?.role==='company_admin'" class="secondary" @click="page='collection'">采集</button><button class="secondary" :disabled="materialTemplateDownloading" @click="downloadMaterialImportTemplate">{{materialTemplateDownloading ? '下载中…' : '下载模版'}}</button><button class="secondary" :disabled="materialImportPreviewing || materialImportSaving" @click="materialImportFileInput?.click()">{{materialImportPreviewing ? '解析中…' : '导入模版'}}</button><input ref="materialImportFileInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden @change="previewMaterialImport"/><label class="secondary material-upload-button" :class="{disabled: materialUploading}"><input type="file" multiple accept="image/png,image/jpeg,image/webp" :disabled="materialUploading" @change="chooseMaterialUploadFiles"/>{{materialUploading ? '上传中…' : '上传本地素材'}}</label></div></div>
         <div class="material-filter-row material-search-filters"><label class="material-template-filter">产品模板<select v-model="materialTemplateFilterId"><option :value="null">全部模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><label v-if="user?.role==='company_admin'" class="material-template-filter">创作人<select v-model="materialCreatorFilterId"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label><label class="material-template-filter">类型<select v-model="materialSourceTypeFilter"><option value="">全部类型</option><option value="ai_created">AI创作</option><option value="local_upload">本地上传</option><option value="imported">导入</option><option v-if="crossCompanyCollectionEnabled" value="cross_company">采集</option></select></label><label class="material-template-filter material-time-filter">创建开始时间<input v-model="materialCreatedFrom" type="datetime-local"/></label><label class="material-template-filter material-time-filter">创建结束时间<input v-model="materialCreatedTo" type="datetime-local"/></label><button class="primary material-search-button" :disabled="materialListRefreshing" @click="searchMaterials">{{materialListRefreshing ? '搜索中…' : '搜索'}}</button></div>
         <p v-if="materialUploadError" class="error material-upload-error">{{materialUploadError}}</p>
-        <section v-if="selectedMaterialAssetIds.length" class="material-draft-bar"><strong>已选 {{selectedMaterialAssetIds.length}} 张素材</strong><button class="primary" @click="openMaterialDraftDialog">创建商品草稿</button><button class="primary" @click="openMaterialBatchDraftDialog">组合创建草稿</button><button class="secondary" :disabled="materialDownloading" @click="downloadSelectedMaterialAssets">{{materialDownloading ? '下载中…' : '下载到本地'}}</button><button class="negative" :disabled="materialDownloading" @click="deleteSelectedMaterialAssets">删除选中素材</button><button class="ghost" :disabled="materialDownloading" @click="selectedMaterialAssetIds=[]">取消选择</button></section>
+        <section v-if="selectedMaterialAssetIds.length" class="material-draft-bar"><strong>已选 {{selectedMaterialAssetIds.length}} 张素材</strong><button class="primary" @click="openMaterialDraftDialog">创建商品草稿</button><button class="primary" @click="openMaterialBatchDraftDialog">组合创建草稿</button><button class="secondary" :disabled="materialInfringementSaving" @click="saveMaterialInfringement([...selectedMaterialAssetIds],true)">设为侵权</button><button class="secondary" :disabled="materialInfringementSaving" @click="saveMaterialInfringement([...selectedMaterialAssetIds],false)">设为不侵权</button><button class="negative" :disabled="materialInfringementSaving" @click="deleteSelectedMaterialAssets">删除选中素材</button><button class="ghost" @click="selectedMaterialAssetIds=[]">取消选择</button></section>
         <section class="draft-table material-list refreshable-list" :aria-busy="materialListRefreshing">
-          <div class="thead material-thead"><label class="material-checkbox material-select-all"><input type="checkbox" :checked="allCurrentMaterialAssetsSelected" :indeterminate="someCurrentMaterialAssetsSelected" :disabled="!filteredMaterialAssets.some(asset=>asset.sku)" aria-label="全选本页可用素材" @change="toggleAllCurrentMaterialAssets"/><span>全选</span></label><span>缩略图</span><span>SKU</span><span>模板</span><span>类型</span><span>创建时间</span><span>创建人</span></div>
-          <div v-for="asset in filteredMaterialAssets" :key="asset.id" class="trow material-trow" :class="{selected: selectedMaterialAssetIds.includes(asset.id)}"><label class="material-checkbox" :aria-label="`选择素材 ${asset.name}`"><input type="checkbox" :checked="selectedMaterialAssetIds.includes(asset.id)" :disabled="!asset.sku" @change="toggleMaterialAsset(asset.id)"/></label><button type="button" class="material-list-thumbnail" :title="asset.name" :aria-label="`预览素材 ${asset.name}`" @click="openImagePreview(asset.url, asset.name)"><img :src="imageUrl(asset.url)" :alt="asset.name"/></button><code :class="{error:!asset.sku}">{{asset.sku || '无 SKU，请重新上传或领取'}}</code><span>{{asset.template_name || materialTemplateName(asset)}}</span><span class="material-type-cell"><i class="chip" :class="asset.source_type === 'ai_created' ? 'purple' : 'blue'">{{materialSourceLabel(asset.source_type)}}</i><button v-if="asset.collection_source" type="button" class="material-detail-icon" title="素材采集来源" aria-label="素材采集来源" @click.stop="materialCollectionDetail=asset"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7.5" r=".8" fill="currentColor" stroke="none"/></svg></button><small v-if="asset.source_task_id" class="material-source-task">任务 #{{asset.source_task_id}}</small></span><span>{{new Date(asset.created_at).toLocaleString()}}</span><span>{{asset.created_by_name || '历史记录缺失'}}</span></div>
+          <div class="thead material-thead"><label class="material-checkbox material-select-all"><input type="checkbox" :checked="allCurrentMaterialAssetsSelected" :indeterminate="someCurrentMaterialAssetsSelected" :disabled="!filteredMaterialAssets.some(asset=>asset.sku)" aria-label="全选本页可用素材" @change="toggleAllCurrentMaterialAssets"/><span>全选</span></label><span>缩略图</span><span>SKU</span><span>模板</span><span>类型</span><span>是否侵权</span><span>创建时间</span><span>创建人</span></div>
+          <div v-for="asset in filteredMaterialAssets" :key="asset.id" class="trow material-trow" :class="{selected: selectedMaterialAssetIds.includes(asset.id)}"><label class="material-checkbox" :aria-label="`选择素材 ${asset.name}`"><input type="checkbox" :checked="selectedMaterialAssetIds.includes(asset.id)" :disabled="!asset.sku" @change="toggleMaterialAsset(asset.id)"/></label><button type="button" class="material-list-thumbnail" :title="asset.name" :aria-label="`预览素材 ${asset.name}`" @click="openImagePreview(asset.url, asset.name)"><img :src="imageUrl(asset.url)" :alt="asset.name"/></button><code :class="{error:!asset.sku}">{{asset.sku || '无 SKU，请重新上传或领取'}}</code><span>{{asset.template_name || materialTemplateName(asset)}}</span><span class="material-type-cell"><i class="chip" :class="asset.source_type === 'ai_created' ? 'purple' : 'blue'">{{materialSourceLabel(asset.source_type)}}</i><button v-if="asset.collection_source" type="button" class="material-detail-icon" title="素材采集来源" aria-label="素材采集来源" @click.stop="materialCollectionDetail=asset"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7.5" r=".8" fill="currentColor" stroke="none"/></svg></button><small v-if="asset.source_task_id" class="material-source-task">任务 #{{asset.source_task_id}}</small></span><span><InfringementBadge :is-infringing="!!asset.is_infringing"/></span><span>{{new Date(asset.created_at).toLocaleString()}}</span><span>{{asset.created_by_name || '历史记录缺失'}}</span></div>
           <div v-if="!filteredMaterialAssets.length && !materialListRefreshing" class="empty">{{materialTotal ? '没有符合筛选条件的素材。' : '暂无素材。可上传本地图片，或在任务中心领取生成图片。'}}</div><footer v-if="materialTotal" class="draft-pagination"><span>共 {{materialTotal}} 条</span><label>每页 <select v-model.number="materialPageSize" :disabled="materialListRefreshing" @change="changeMaterialPageSize"><option v-for="size in pageSizeOptions" :key="size" :value="size">{{size}}</option></select> 条</label><button :disabled="materialListRefreshing || visibleMaterialPage===1" @click="changeMaterialPage(visibleMaterialPage-1)">上一页</button><span>第 {{visibleMaterialPage}} / {{materialPageCount}} 页</span><button :disabled="materialListRefreshing || visibleMaterialPage===materialPageCount" @click="changeMaterialPage(visibleMaterialPage+1)">下一页</button></footer>
           <div v-if="materialListRefreshing" class="list-refresh-overlay" role="status"><i></i><span>正在刷新列表…</span></div>
         </section>
@@ -2660,8 +2646,7 @@ onUnmounted(() => {
     </section>
   </main>
   <div v-if="materialCollectionDetail" class="modal-backdrop" @click.self="materialCollectionDetail=null"><section v-dialog-focus="{close:()=>{materialCollectionDetail=null}}" class="modal-card" role="dialog" aria-modal="true" aria-labelledby="collection-detail-title"><h2 id="collection-detail-title">素材采集来源</h2><p>来源公司：{{materialCollectionDetail.collection_source.source_company_name}}</p><p>来源库：{{materialCollectionDetail.collection_source.source_library==='material'?'素材库':'产品库'}}</p><p>原 SKU：{{materialCollectionDetail.collection_source.source_sku || '无 SKU'}}</p><p>采集时间：{{new Date(materialCollectionDetail.collection_source.collected_at).toLocaleString()}}</p><p>本公司 SKU：{{materialCollectionDetail.sku}}</p></section></div>
-  <div v-if="showMaterialImportDialog" class="modal-backdrop" @click.self="!materialImportSaving && (showMaterialImportDialog=false)"><section class="modal-card material-draft-dialog claim-materials-dialog material-import-dialog" role="dialog" aria-modal="true" aria-labelledby="material-import-title"><button class="modal-close" :disabled="materialImportSaving" aria-label="关闭导入弹窗" @click="showMaterialImportDialog=false">×</button><h2 id="material-import-title">导入素材</h2><p>新链接默认选中；勾选已存在的链接表示仍创建新素材和新 SKU，图片共用已保存文件。</p><label>产品模板<select v-model="materialImportTemplateId" :disabled="materialImportSaving" @change="materialImportError=''"><option :value="null">请选择产品模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><div class="material-import-toolbar"><strong>共 {{materialImportItems.length}} 张 · 已选 {{materialImportSelectedCount}} 张</strong><button class="secondary" :disabled="materialImportSaving" @click="materialImportItems.forEach(item => item.selected=true)">全选</button><button class="secondary" :disabled="materialImportSaving" @click="materialImportItems.forEach(item => item.selected=false)">取消全选</button></div><div class="material-grid claim-result-grid material-import-grid"><label v-for="item in materialImportItems" :key="item.url" class="material-card" :class="{selected:item.selected}"><input v-model="item.selected" class="material-import-checkbox" type="checkbox" :disabled="materialImportSaving" :aria-label="`选择图片 ${item.url}`"/><img v-if="!item.failed" :src="item.url" alt="待导入图片" loading="lazy" @error="item.failed=true"/><span v-else class="material-import-image-error">图片预览失败<br/>仍可导入此链接</span><div><b>{{item.exists ? '已存在 · 勾选仍创建新 SKU' : '新素材'}}</b><small :title="item.url">{{item.url}}</small></div></label></div><p v-if="materialImportError" class="error material-draft-error" role="alert">{{materialImportError}}</p><div class="modal-actions"><button class="ghost" :disabled="materialImportSaving" @click="showMaterialImportDialog=false">取消</button><button class="primary" :disabled="materialImportSaving" @click="confirmMaterialImport">{{materialImportSaving ? '导入中…' : `确认导入（${materialImportSelectedCount}）`}}</button></div></section></div>
-  <div v-if="showClaimMaterialsDialog" class="modal-backdrop" @click.self="showClaimMaterialsDialog=false"><section class="modal-card material-draft-dialog claim-materials-dialog"><button class="modal-close" @click="showClaimMaterialsDialog=false">×</button><h2>领取素材</h2><p>请选择要领取到素材库的图片。</p><div class="material-grid claim-result-grid"><button v-for="url in claimingTask?.result_urls || []" :key="url" class="material-card" :class="{selected:selectedClaimResultUrls.includes(url)}" @click="toggleClaimResult(url)"><span class="material-select-mark">{{selectedClaimResultUrls.includes(url) ? '✓' : ''}}</span><img :src="imageUrl(url)" alt="生成结果图"/></button></div><p v-if="!(claimingTask?.result_urls?.length)" class="empty">暂无可领取图片。</p><div class="modal-actions"><button class="ghost" @click="showClaimMaterialsDialog=false">取消</button><button class="primary" :disabled="claimingMaterials || !selectedClaimResultUrls.length" @click="claimMaterials">{{claimingMaterials ? '领取中…' : '领取'}}</button></div></section></div>
+  <div v-if="showMaterialImportDialog" class="modal-backdrop" @click.self="!materialImportSaving && (showMaterialImportDialog=false)"><section class="modal-card material-draft-dialog claim-materials-dialog material-import-dialog" role="dialog" aria-modal="true" aria-labelledby="material-import-title"><button class="modal-close" :disabled="materialImportSaving" aria-label="关闭导入弹窗" @click="showMaterialImportDialog=false">×</button><h2 id="material-import-title">导入素材</h2><p>新链接默认选中；勾选已存在的链接表示仍创建新素材和新 SKU，图片共用已保存文件。</p><label>产品模板<select v-model="materialImportTemplateId" :disabled="materialImportSaving" @change="materialImportError=''"><option :value="null">请选择产品模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><div class="material-import-toolbar"><strong>共 {{materialImportItems.length}} 张 · 已选 {{materialImportSelectedCount}} 张</strong><button class="secondary" :disabled="materialImportSaving" @click="materialImportItems.forEach(item => item.selected=true)">全选</button><button class="secondary" :disabled="materialImportSaving" @click="materialImportItems.forEach(item => item.selected=false)">取消全选</button></div><InfringementActions :disabled="!materialImportSelectedCount || materialImportSaving" @set="setImportInfringement"/><div class="material-grid claim-result-grid material-import-grid"><article v-for="item in materialImportItems" :key="item.url" class="material-card" :class="{selected:item.selected}"><input v-model="item.selected" class="material-import-checkbox" type="checkbox" :disabled="materialImportSaving" :aria-label="`选择图片 ${item.url}`"/><img v-if="!item.failed" :src="item.url" alt="待导入图片" loading="lazy" @error="item.failed=true"/><span v-else class="material-import-image-error">图片预览失败<br/>仍可导入此链接</span><div><b>{{item.exists ? '已存在 · 勾选仍创建新 SKU' : '新素材'}}</b><small :title="item.url">{{item.url}}</small><InfringementToggle v-model="item.is_infringing" :disabled="materialImportSaving"/></div></article></div><p v-if="materialImportError" class="error material-draft-error" role="alert">{{materialImportError}}</p><div class="modal-actions"><button class="ghost" :disabled="materialImportSaving" @click="showMaterialImportDialog=false">取消</button><button class="primary" :disabled="materialImportSaving" @click="confirmMaterialImport">{{materialImportSaving ? '导入中…' : `确认导入（${materialImportSelectedCount}）`}}</button></div></section></div>
   <div v-if="showBatchClaimDialog" class="modal-backdrop" @click.self="!batchClaiming && (showBatchClaimDialog=false)">
     <section class="modal-card batch-claim-dialog" @scroll="batchClaimHoverPreview=null">
       <button class="modal-close" :disabled="batchClaiming" @click="showBatchClaimDialog=false">×</button>
@@ -2670,16 +2655,20 @@ onUnmounted(() => {
       <div v-if="batchClaimLoading" class="empty">正在加载任务结果…</div>
       <template v-else>
         <button type="button" class="ghost batch-claim-select-all" :disabled="batchClaiming || !batchClaimItems.length" @click="toggleAllBatchClaimImages">{{allBatchClaimImagesSelected ? '全部取消' : '全选'}}</button>
-        <div class="batch-claim-table">
-          <div class="batch-claim-head"><span>任务</span><span>图</span></div>
-          <div v-for="group in groupedBatchClaimItems" :key="group.taskId" class="batch-claim-row">
-            <strong>{{group.taskLabel}}</strong>
-            <div class="batch-claim-images">
-              <button v-for="(url,index) in group.urls" :key="url" type="button" class="batch-claim-image" :class="{selected:selectedBatchClaimImages.has(batchClaimImageKey(group.taskId,url))}" :disabled="batchClaiming" :aria-pressed="selectedBatchClaimImages.has(batchClaimImageKey(group.taskId,url))" :aria-label="`采用${group.taskLabel}结果图 ${index+1}`" @click="toggleBatchClaimImage(group.taskId,url)" @pointerenter="showBatchClaimHoverPreview($event,url,`${group.taskLabel} 结果图 ${index+1}`)" @pointerleave="batchClaimHoverPreview=null" @focus="showBatchClaimHoverPreview($event,url,`${group.taskLabel} 结果图 ${index+1}`)" @blur="batchClaimHoverPreview=null">
-                <img :src="imageUrl(url)" :alt="`${group.taskLabel} 结果图 ${index+1}`"/>
-              </button>
-            </div>
-          </div>
+        <InfringementActions :disabled="!selectedBatchClaimImages.size || batchClaiming" @set="setBatchClaimInfringement"/><div class="batch-claim-table">
+          <table aria-label="AI 图片批量审核">
+            <colgroup><col class="batch-claim-task-column"/><col/><col class="batch-claim-infringement-column"/></colgroup>
+            <thead><tr><th scope="col">任务</th><th scope="col">图</th><th scope="col">是否侵权</th></tr></thead>
+            <tbody v-for="group in groupedBatchClaimItems" :key="group.taskId">
+              <tr v-for="(url,index) in group.urls" :key="url" class="batch-claim-row">
+                <th v-if="index===0" scope="rowgroup" :rowspan="group.urls.length">{{group.taskLabel}}</th>
+                <td><button type="button" class="batch-claim-image" :class="{selected:selectedBatchClaimImages.has(batchClaimImageKey(group.taskId,url))}" :disabled="batchClaiming" :aria-pressed="selectedBatchClaimImages.has(batchClaimImageKey(group.taskId,url))" :aria-label="`采用${group.taskLabel}结果图 ${index+1}`" @click="toggleBatchClaimImage(group.taskId,url)" @pointerenter="showBatchClaimHoverPreview($event,url,`${group.taskLabel} 结果图 ${index+1}`)" @pointerleave="batchClaimHoverPreview=null" @focus="showBatchClaimHoverPreview($event,url,`${group.taskLabel} 结果图 ${index+1}`)" @blur="batchClaimHoverPreview=null">
+                  <img :src="imageUrl(url)" :alt="`${group.taskLabel} 结果图 ${index+1}`"/>
+                </button></td>
+                <td><InfringementToggle :model-value="!!batchClaimInfringement[batchClaimImageKey(group.taskId,url)]" :disabled="batchClaiming" @update:model-value="batchClaimInfringement[batchClaimImageKey(group.taskId,url)]=$event"/></td>
+              </tr>
+            </tbody>
+          </table>
           <p v-if="!groupedBatchClaimItems.length" class="empty">没有待审核任务。</p>
         </div>
       </template>
@@ -3081,7 +3070,19 @@ onUnmounted(() => {
   <div v-if="productLibraryOrderProduct" class="modal-backdrop" @click.self="closeProductLibraryOrders"><section class="modal-card product-library-orders-dialog" role="dialog" aria-modal="true" aria-labelledby="product-library-orders-heading"><button class="modal-close" aria-label="关闭订单详情" @click="closeProductLibraryOrders">×</button><h2 id="product-library-orders-heading">订单详情</h2><p>{{productLibraryOrderProduct.sku}}</p><div class="product-library-orders-table" :aria-busy="productLibraryOrderLoading"><div class="product-library-orders-head"><span>下单时间</span><span>订单编号</span><span>店铺</span><span>产品 ID</span><span>数量</span></div><div v-for="(order, index) in productLibraryOrders" :key="index" class="product-library-orders-row"><span>{{new Date(order.ordered_at).toLocaleString()}}</span><span :title="order.order_number">{{order.order_number}}</span><span :title="order.shop_name">{{order.shop_name}}</span><span :title="order.product_id">{{order.product_id}}</span><strong>{{order.quantity}}</strong></div><div v-if="!productLibraryOrders.length && !productLibraryOrderLoading" class="empty">暂无订单</div><div v-if="productLibraryOrderLoading" class="product-library-orders-loading" role="status">正在加载订单…</div></div><footer class="draft-pagination product-library-orders-pagination"><span>共 {{productLibraryOrderCount}} 单 · {{productLibraryOrderTotal}} 条明细</span><label>每页 <select v-model.number="productLibraryOrderPageSize" :disabled="productLibraryOrderLoading" @change="changeProductLibraryOrderPageSize"><option v-for="size in pageSizeOptions" :key="size" :value="size">{{size}}</option></select> 条</label><button :disabled="productLibraryOrderLoading || productLibraryOrderPage===1" @click="changeProductLibraryOrderPage(productLibraryOrderPage-1)">上一页</button><span>第 {{productLibraryOrderPage}} / {{productLibraryOrderPageCount}} 页</span><button :disabled="productLibraryOrderLoading || productLibraryOrderPage===productLibraryOrderPageCount" @click="changeProductLibraryOrderPage(productLibraryOrderPage+1)">下一页</button></footer></section></div>
   <div v-if="showProductLibraryTemplateDialog" class="modal-backdrop" @click.self="!productLibraryTemplateSaving && (showProductLibraryTemplateDialog=false)"><section class="modal-card product-library-template-dialog"><button class="modal-close" :disabled="productLibraryTemplateSaving" aria-label="关闭批量设置模版" @click="showProductLibraryTemplateDialog=false">×</button><h2>批量设置模版</h2><p>将为 {{selectedProductLibraryIds.length}} 条数据设置同一模版，原模版将被替换，SKU 和使用状态保持不变。</p><label>目标模版<select v-model="productLibraryTargetTemplateId" :disabled="productLibraryTemplateSaving"><option :value="null" disabled>请选择模版</option><option v-for="item in templates" :key="item.id" :value="item.id">{{item.name}}</option></select></label><div class="modal-actions"><button class="ghost" :disabled="productLibraryTemplateSaving" @click="showProductLibraryTemplateDialog=false">取消</button><button class="primary" :disabled="productLibraryTemplateSaving || !productLibraryTargetTemplateId" @click="saveProductLibraryTemplate">{{productLibraryTemplateSaving ? '保存中…' : '确认设置'}}</button></div></section></div>
   <div v-if="toast" class="toast" role="alert" style="position:fixed;top:24px;left:50%;z-index:1000;transform:translateX(-50%);padding:12px 18px;border-radius:10px;background:#302954;color:#fff;box-shadow:0 10px 28px #30295440;font-size:14px">{{ toast }}</div>
-  <div v-if="showMaterialUploadDialog" class="modal-backdrop" @click.self="showMaterialUploadDialog=false"><section class="modal-card material-template-dialog"><button class="modal-close" @click="showMaterialUploadDialog=false">×</button><h2>上传本地素材</h2><p>已选择 {{pendingMaterialUploadFiles.length}} 张图片，请先选择产品模板。</p><label>产品模板<select v-model="materialUploadTemplateId" :disabled="materialUploading"><option :value="null" disabled>请选择产品模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><p v-if="materialUploadError" style="margin:14px 0 0;color:#d34b5f">{{materialUploadError}}</p><div class="modal-actions"><button class="ghost" :disabled="materialUploading" @click="showMaterialUploadDialog=false">取消</button><button class="primary" :disabled="materialUploading" @click="uploadMaterialAssets">{{materialUploading ? '上传中…' : '确认上传'}}</button></div></section></div>
+  <div v-if="showMaterialUploadDialog" class="modal-backdrop" @click.self="showMaterialUploadDialog=false">
+    <section class="modal-card material-draft-dialog claim-materials-dialog material-upload-dialog" role="dialog" aria-modal="true" aria-labelledby="material-upload-title">
+      <button class="modal-close" @click="showMaterialUploadDialog=false">×</button><h2 id="material-upload-title">上传本地素材</h2>
+      <p>共 {{pendingMaterialUploadFiles.length}} 张图片，默认不侵权，可逐张或批量修改。</p>
+      <label>产品模板<select v-model="materialUploadTemplateId"><option :value="null" disabled>请选择产品模板</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label>
+      <div class="material-import-toolbar"><button type="button" class="secondary" @click="pendingMaterialUploadFiles.forEach(item=>item.selected=true)">全选</button><button type="button" class="secondary" @click="pendingMaterialUploadFiles.forEach(item=>item.selected=false)">取消全选</button></div>
+      <InfringementActions :disabled="!pendingMaterialUploadFiles.some(item=>item.selected)" @set="setUploadInfringement"/>
+      <div class="material-grid claim-result-grid material-import-grid"><article v-for="(item,index) in pendingMaterialUploadFiles" :key="index" class="material-card infringement-card" :class="{selected:item.selected}">
+        <label class="upload-image-choice"><input v-model="item.selected" type="checkbox" :aria-label="`选择图片 ${item.file.name}`"/><img :src="item.preview" :alt="item.file.name"/></label><small>{{item.file.name}}</small><InfringementToggle v-model="item.is_infringing"/>
+      </article></div>
+      <p v-if="materialUploadError" class="error">{{materialUploadError}}</p><div class="modal-actions"><button class="ghost" @click="showMaterialUploadDialog=false">取消</button><button class="primary" @click="uploadMaterialAssets">确认上传</button></div>
+    </section>
+  </div>
   <footer class="site-footer">
     <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">粤ICP备2026142752号-1</a>
   </footer>

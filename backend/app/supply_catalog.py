@@ -87,6 +87,7 @@ class BatchListingInput(ListingInput):
 
 
 class StrategyInput(Input):
+    infringement_filter: Literal["exclude", "include", "only"] = "exclude"
     name: str = Field(min_length=1, max_length=120)
     category_catalog_id: int = Field(gt=0)
     category_name: str = Field(min_length=1, max_length=255)
@@ -377,6 +378,7 @@ def materials(template_id: int | None = None,
         None if is_manager(user) else user.id)
     return {"items": [{"id": asset.id, "name": asset.name, "sku": asset.sku, "url": asset.url,
         "template_id": asset.template_id, "template_name": names.get(asset.template_id),
+        "is_infringing": asset.is_infringing,
         "supply_listed": asset.supply_listed,
         **counts.get(asset.id, {"use_count": 0, "user_count": 0, "job_count": 0})} for asset in assets],
         "total": total, "page": page, "page_size": page_size}
@@ -453,7 +455,7 @@ def catalog_options(identity: int, user=Depends(supply_actor), db: Session = Dep
 
 
 def strategy_payload(item):
-    return {**item.parameters, "id": item.id, "name": item.name, "created_at": timestamp(item.created_at)}
+    return {"infringement_filter": "include", **item.parameters, "id": item.id, "name": item.name, "created_at": timestamp(item.created_at)}
 
 
 @router.get("/strategies")
@@ -465,10 +467,12 @@ def strategies(user=Depends(supply_actor), db: Session = Depends(get_db)):
 def save_strategy(payload, user, db, identity=None):
     lock_actor(db, user)
     parameters = payload.model_dump(mode="json")
-    validate_strategy(db, user, parameters)
     item = owned(db, SupplyStrategy, identity, user) if identity else SupplyStrategy(company_id=user.company_id, user_id=user.id)
     if item.user_id != user.id:
         raise HTTPException(404, "策略不存在")
+    if identity and "infringement_filter" not in payload.model_fields_set:
+        parameters["infringement_filter"] = item.parameters.get("infringement_filter", "include")
+    validate_strategy(db, user, parameters)
     item.name, item.parameters = payload.name, parameters
     db.add(item)
     db.commit()
@@ -515,14 +519,15 @@ def submit_job(payload: JobInput, user=Depends(supply_actor), db: Session = Depe
     if strategy.user_id != user.id:
         raise HTTPException(404, "策略不存在")
     parameters = copy.deepcopy(strategy.parameters)
+    parameters.setdefault("infringement_filter", "include")
     template, catalog, snapshot, rows = validate_strategy(db, user, parameters)
     version = template_version(snapshot)
-    candidates = eligible_materials(db, user.company_id, template.id, version)
+    candidates = eligible_materials(db, user.company_id, template.id, version, parameters["infringement_filter"])
     # URL 或源 SKU 重复的素材不能用于同一链接，提交时即验证可形成完整组。
     from .supply_worker import distinct_sample
     import random
     if len(distinct_sample(candidates, parameters["sku_count"], random.Random(0))) < parameters["sku_count"]:
-        raise HTTPException(400, "可用素材不足以组成指定 SKU 数量")
+        raise HTTPException(400, "当前侵权筛选条件下，可用素材不足以组成指定 SKU 数量")
     agent = db.get(SupplyAgent, actor.supply_agent_id) if actor.role == Role.SUPPLY_USER else None
     if actor.role == Role.SUPPLY_USER and (not agent or agent.company_id != actor.company_id):
         raise HTTPException(400, "货盘账号缺少有效代理，请联系公司管理员")

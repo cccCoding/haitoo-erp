@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Literal
-from pydantic import ConfigDict, BaseModel, EmailStr, Field, field_serializer, field_validator, model_validator
+from pydantic import ConfigDict, BaseModel, EmailStr, Field, PositiveInt, field_serializer, field_validator, model_validator
 from .models import Role, TaskStatus
 
 
@@ -251,6 +251,7 @@ class ImageUploadCompleteInput(BaseModel):
 
 
 class MaterialUploadCommitItem(BaseModel):
+    is_infringing: bool = False
     upload_token: str | None = None
     file_token: str | None = None
     request_key: str = Field(min_length=8, max_length=96)
@@ -263,8 +264,12 @@ class MaterialUploadCommitInput(BaseModel):
     items: list[MaterialUploadCommitItem] = Field(min_length=1, max_length=100)
 
 
-class MaterialDownloadInput(BaseModel):
-    material_asset_ids: list[int] = Field(min_length=1, max_length=100)
+class MaterialInfringementInput(BaseModel):
+    is_infringing: bool
+
+
+class MaterialInfringementBatchInput(MaterialInfringementInput):
+    material_asset_ids: list[PositiveInt] = Field(min_length=1, max_length=1000)
 
 
 MAX_PRODUCT_LIBRARY_SELECTION = 2000
@@ -333,6 +338,7 @@ class AIProviderCredentialUpdate(BaseModel):
 
 
 class ClaimMaterials(BaseModel):
+    is_infringing: bool = False
     result_urls: list[str] = Field(min_length=0, max_length=1000)
     force_create: bool = False
     request_key: str = Field(min_length=8, max_length=96)
@@ -672,6 +678,7 @@ class ProductLibraryDraftSource(BaseModel):
 
 
 class MaterialImportConfirmInput(BaseModel):
+    is_infringing: bool = False
     template_id: int = Field(gt=0)
     urls: list[str] = Field(default_factory=list, max_length=10000)
     file_token: str | None = None

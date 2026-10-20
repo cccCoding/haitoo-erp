@@ -5,13 +5,12 @@ import hmac
 from io import BytesIO
 import json
 import logging
-import mimetypes
 import re
 import random
 import secrets
 import string
 import time
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote
 from uuid import uuid4
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -32,10 +31,11 @@ from .product_library_statistics import order_facts, sku_statistics
 from .product_library import parse_order_workbook
 from .material_import import MAX_IMPORT_BYTES, build_import_template, parse_import_workbook, validate_image_link
 from .schemas import MaterialImportConfirmInput, ImageUploadCompleteInput
+from .schemas import MaterialInfringementInput, MaterialInfringementBatchInput
 from .product_library_rankings import SnapshotAlreadyRunning, company_run_lock, create_daily_snapshot, enqueue_ranking_task, task_payload
 from .schemas import MAX_PRODUCT_LIBRARY_SELECTION, HubEnvironmentSync, HubEnvironmentToggle, HubTaskClaimInput, HubTaskAction, ProductLibraryShopAssignment, ProductLibraryTitleGenerate, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
-from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDownloadInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, OperatorGroupCreate, OperatorGroupUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
+from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, OperatorGroupCreate, OperatorGroupUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import (create_access_token, current_internal_user as current_user,
                        current_user as authenticated_user, hash_password, require_roles,
                        validate_supply_user_access, verify_password)
@@ -2093,6 +2093,7 @@ def commit_material_assets(payload: MaterialUploadCommitInput, user: User = Depe
         try:
             image_file = finish_upload(db, user, upload_token=item.upload_token, file_token=item.file_token)
             result = create_material(db, image_file=image_file, template=template, owner=user,
+                is_infringing=item.is_infringing,
                 request_key=f"{user.id}:{item.request_key}", force_create=item.force_create,
                 name=(Path(item.name).name.rsplit(".", 1)[0] or "本地素材")[:180])
             results.append({**result, "file_token": file_ticket(user, image_file), "request_key": item.request_key})
@@ -2272,6 +2273,7 @@ def confirm_material_import(payload: MaterialImportConfirmInput, user: User = De
             image_file = ticket_file(db, user, payload.file_token) if payload.file_token else ingest_url(
                 db, user.company_id, validate_image_link(url, index + 2))
             result = create_material(db, image_file=image_file, template=template, owner=user,
+                is_infringing=payload.is_infringing,
                 request_key=f"{user.id}:" + hashlib.sha256(f"{payload.request_key}:{index}".encode()).hexdigest(),
                 force_create=payload.force_create, source_type="imported", name=f"导入素材 {index + 1}")
             results.append({**result, "url": url, "file_token": file_ticket(user, image_file)})
@@ -2376,6 +2378,39 @@ def query_material_assets(*, db, user, page, page_size, creator_id=None, templat
     }
 
 
+def update_material_infringement(db, user, asset_ids, is_infringing):
+    from .supply_common import lock_company
+    if user.role not in {Role.SUPER_ADMIN, Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER}:
+        raise HTTPException(403, "当前账号不能修改素材")
+    if user.role != Role.SUPER_ADMIN:
+        lock_company(db, user.company_id)
+    ids = list(dict.fromkeys(asset_ids))
+    query = select(MaterialAsset).where(MaterialAsset.id.in_(ids))
+    if user.role != Role.SUPER_ADMIN:
+        query = query.where(MaterialAsset.company_id == user.company_id)
+    if is_operator(user):
+        query = query.where(MaterialAsset.claimed_by == user.id)
+    assets = db.scalars(query.with_for_update()).all()
+    if len(assets) != len(ids):
+        raise HTTPException(404, "素材不存在或无权修改，整批操作未执行")
+    for asset in assets:
+        asset.is_infringing = is_infringing
+    db.commit()
+    return {"ids": ids, "count": len(ids), "is_infringing": is_infringing}
+
+
+@app.patch("/material-assets/infringement")
+def batch_material_infringement(payload: MaterialInfringementBatchInput,
+    user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return update_material_infringement(db, user, payload.material_asset_ids, payload.is_infringing)
+
+
+@app.patch("/material-assets/{asset_id}/infringement")
+def patch_material_infringement(asset_id: int, payload: MaterialInfringementInput,
+    user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return update_material_infringement(db, user, [asset_id], payload.is_infringing)
+
+
 @app.delete("/material-assets/{asset_id}")
 def delete_material_asset(asset_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """从当前公司的素材库移除一张图片。"""
@@ -2394,64 +2429,6 @@ def delete_material_asset(asset_id: int, user: User = Depends(current_user), db:
     db.delete(asset)
     db.commit()
     return {"deleted": True}
-
-
-def _download_filename(asset: MaterialAsset, content_type: str | None = None) -> str:
-    """使用永久唯一的素材 SKU 生成下载文件名。"""
-    name = re.sub(r'[^A-Za-z0-9_-]', "_", asset.sku or "") or f"material-{asset.id}"
-    url_suffix = Path(unquote(urlsplit(asset.url).path)).suffix
-    guessed_suffix = mimetypes.guess_extension((content_type or "").split(";", 1)[0].strip()) or ""
-    suffix = url_suffix if url_suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} else guessed_suffix
-    return f"{name}{suffix or '.jpg'}"
-
-
-@app.post("/material-assets/download")
-async def download_material_assets(
-    payload: MaterialDownloadInput,
-    user: User = Depends(current_user),
-    db: Session = Depends(get_db),
-):
-    """下载有权限访问的素材；单张返回原图，多张打包为 ZIP。"""
-    requested_ids = list(dict.fromkeys(payload.material_asset_ids))
-    stmt = select(MaterialAsset).where(MaterialAsset.id.in_(requested_ids))
-    if user.role != Role.SUPER_ADMIN:
-        stmt = stmt.where(MaterialAsset.company_id == user.company_id)
-    if is_operator(user):
-        stmt = stmt.where(MaterialAsset.claimed_by == user.id)
-    assets_by_id = {asset.id: asset for asset in db.scalars(stmt).all()}
-    if len(assets_by_id) != len(requested_ids):
-        raise HTTPException(404, "素材不存在或无权下载")
-    assets = [assets_by_id[asset_id] for asset_id in requested_ids]
-
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
-            downloads = []
-            for asset in assets:
-                remote = await client.get(asset.url)
-                remote.raise_for_status()
-                downloads.append((asset, remote.content, remote.headers.get("content-type")))
-    except httpx.HTTPError as exc:
-        logger.warning("下载素材源文件失败：%s", exc)
-        raise HTTPException(502, "读取素材源文件失败，请稍后重试") from exc
-
-    if len(downloads) == 1:
-        asset, content, content_type = downloads[0]
-        filename = _download_filename(asset, content_type)
-        return Response(
-            content=content,
-            media_type=(content_type or "application/octet-stream").split(";", 1)[0],
-            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
-        )
-
-    archive = BytesIO()
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
-        for asset, content, content_type in downloads:
-            bundle.writestr(_download_filename(asset, content_type), content)
-    return Response(
-        content=archive.getvalue(),
-        media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=haitoro-materials.zip"},
-    )
 
 
 @app.get("/admin/ai-providers")
@@ -2943,6 +2920,7 @@ def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Dep
         for url in selected_urls:
             image_file = ingest_url(db, task.company_id, url)
             result = create_material(db, image_file=image_file, template=template, owner=owner,
+                is_infringing=payload.is_infringing,
                 request_key=hashlib.sha256(f"claim:{user.id}:{task_id}:{payload.request_key}:{url}".encode()).hexdigest(),
                 force_create=payload.force_create, source_type="ai_created", source_task_id=task.id,
                 name=f"AI 创作 #{task.id}")

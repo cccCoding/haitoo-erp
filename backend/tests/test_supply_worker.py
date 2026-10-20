@@ -23,6 +23,27 @@ else:
 
 
 class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
+    def test_each_generated_link_obeys_snapshot_filter_after_flags_change(self):
+        for mode in ("exclude", "include", "only"):
+            with self.sessions() as db:
+                for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.company_id == 1)):
+                    asset.is_infringing = asset.id <= 10
+                db.commit()
+            identity = self.submit(self.create_strategy(infringement_filter=mode), key=f"filter-{mode}-job")
+            # 提交后反转标记，执行仍须使用原候选和标记快照。
+            with self.sessions() as db:
+                for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.company_id == 1)):
+                    asset.is_infringing = not asset.is_infringing
+                db.commit()
+            self.run_job(identity)
+            checkpoint = self.assert_completed(identity)
+            for link in checkpoint["links"]:
+                self.assertEqual(len(link["materials"]), 5)
+                for item in link["materials"]:
+                    self.assertEqual(item["is_infringing"], item["id"] <= 10)
+                    if mode != "include":
+                        self.assertEqual(item["is_infringing"], mode == "only")
+
     def setUp(self):
         super().setUp()
         from app import supply_worker
