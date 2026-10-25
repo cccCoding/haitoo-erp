@@ -285,17 +285,71 @@ class TaskJobTests(unittest.TestCase):
         self.assertEqual(task.parameters["quality"], "1K")
         self.assertEqual(task.parameters["ratio"], "3:4")
 
-    def test_legacy_gpt_image_2_print_task_request_uses_1k_square(self) -> None:
-        task = PodTask(
-            id=123, company_id=1, task_type="sku_image", provider_model="gpt-image-2",
-            parameters={"quality": "auto", "ratio": "3:4", "creative_requirement": "保持版型",
-                        "white_image_url": "https://img.example/white.png", "print_urls": []},
-        )
-        request = task_jobs._request_for(task, ProductTemplate(name="M05L"))
-        self.assertEqual(request.quality, "1K")
-        self.assertEqual(request.ratio, "1:1")
-        self.assertEqual(request.prompt, "保持版型。输出带指定印花的 SKU 商品图，比例 1:1，清晰度 1K。")
-        self.assertEqual(task.parameters["quality"], "auto")
+    def test_legacy_gpt_image_2_requests_use_1k_square_for_all_task_types(self) -> None:
+        for task_type in ("sku_image", "carousel", "main_image"):
+            with self.subTest(task_type=task_type):
+                task = PodTask(
+                    id=123, company_id=1, task_type=task_type, provider_model="gpt-image-2",
+                    parameters={"task_type": task_type, "quality": "auto", "ratio": "3:4",
+                                "creative_requirement": "保持版型", "white_image_url": "https://img.example/white.png",
+                                "reference_urls": ["https://img.example/sku.png"], "print_urls": []},
+                )
+                request = task_jobs._request_for(task, ProductTemplate(name="M05L"))
+                self.assertEqual(request.quality, "1K")
+                self.assertEqual(request.ratio, "1:1")
+                self.assertTrue(request.prompt.endswith("比例 1:1，清晰度 1K。"))
+                self.assertEqual(task.parameters["quality"], "auto")
+
+    def test_single_and_batch_draft_image_tasks_use_1k_and_model_ratio(self) -> None:
+        from app.schemas import BatchCarouselTaskCreate
+
+        for provider in ("grsai", "grsai-gpt-image-2"):
+            for task_type in ("carousel", "main_image"):
+                for batch in (False, True):
+                    with self.subTest(provider=provider, task_type=task_type, batch=batch), self.session_factory() as db:
+                        draft = ProductDraft(
+                            company_id=1, template_id=1, title="T" * 25, created_by=1, updated_by=1,
+                            workflow_stage="carousel_pending" if task_type == "carousel" else "main_image_pending",
+                            image_urls=["https://img.example/sku.png"],
+                            sku_items=[{"sku": "M05LAA000001", "image_url": "https://img.example/sku.png"}],
+                        )
+                        db.add(draft); db.commit(); db.refresh(draft)
+                        options = {"provider": provider, "quality": "2K", "ratio": "3:4", "creative_requirement": "保持版型"}
+                        if not batch:
+                            result = main.create_draft_image_tasks(
+                                draft.id, DraftImageTaskCreate(task_type=task_type, source_skus=["M05LAA000001"], **options),
+                                user=db.get(User, 1), db=db,
+                            )
+                        elif task_type == "carousel":
+                            result = main.create_batch_carousel_tasks(
+                                BatchCarouselTaskCreate(drafts=[{"draft_id": draft.id, "source_skus": ["M05LAA000001"]}], **options),
+                                user=db.get(User, 1), db=db,
+                            )
+                        else:
+                            result = main.create_batch_main_image_tasks(
+                                BatchMainImageTaskCreate(drafts=[{"draft_id": draft.id}], **options),
+                                user=db.get(User, 1), db=db,
+                            )
+                        self.assertEqual(result["total"], 1)
+                        task = db.scalar(select(PodTask).where(PodTask.draft_id == draft.id, PodTask.task_type == task_type))
+                        ratio = "1:1" if provider == "grsai-gpt-image-2" else "3:4"
+                        self.assertEqual(task.parameters["quality"], "1K")
+                        self.assertEqual(task.parameters["ratio"], ratio)
+                        request = task_jobs._request_for(task, db.get(ProductTemplate, 1))
+                        self.assertTrue(request.prompt.endswith(f"比例 {ratio}，清晰度 1K。"))
+                        client = AsyncMock()
+                        client.post.return_value = httpx.Response(
+                            200, request=httpx.Request("POST", "https://grsai.example/generate"), json={"id": "provider-1"},
+                        )
+                        asyncio.run(GrsaiProvider().submit(request, "test-key", Settings(grsai_base_url="https://grsai.example"), client))
+                        payload = client.post.call_args.kwargs["json"]
+                        if provider == "grsai-gpt-image-2":
+                            self.assertEqual(payload["aspectRatio"], "1024x1024")
+                            self.assertEqual(payload["quality"], "auto")
+                            self.assertNotIn("imageSize", payload)
+                        else:
+                            self.assertEqual(payload["aspectRatio"], "3:4")
+                            self.assertEqual(payload["imageSize"], "1K")
 
     def test_gpt_image_2_task_view_shows_grsai_platform_name(self) -> None:
         task_id = self.add_task()
@@ -322,12 +376,6 @@ class TaskJobTests(unittest.TestCase):
             "images": ["https://img.example/template.png", "https://img.example/print.png"],
             "aspectRatio": "1024x1024", "quality": "auto", "replyType": "async",
         })
-
-        for task_type in ("carousel", "main_image"):
-            with self.subTest(task_type=task_type):
-                request.task_type = task_type
-                asyncio.run(GrsaiProvider().submit(request, "test-key", Settings(grsai_base_url="https://grsai.example"), client))
-                self.assertEqual(client.post.call_args.kwargs["json"]["aspectRatio"], "3:4")
 
     def test_three_submit_failures_are_terminal(self) -> None:
         task_id = self.add_task()

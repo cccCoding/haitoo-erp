@@ -2868,7 +2868,7 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
         "white_image_name": white_image.name,
         "white_image_url": white_image.image_url,
         "quality": "1K",
-        "ratio": "1:1" if provider.model == "gpt-image-2" else payload.ratio,
+        "ratio": image_task_ratio(provider, payload.ratio),
     }
     tasks = [
         PodTask(
@@ -3213,9 +3213,9 @@ def image_task_provider(db: Session, user: User, provider_name: str | None) -> A
     return provider
 
 
-def image_task_quality(provider: AIProviderSetting, requested_quality: str) -> str:
-    """按模型能力固化任务质量，避免旧客户端将 1K/2K 传给 gpt-image-2。"""
-    return "auto" if provider.provider == "grsai-gpt-image-2" else requested_quality
+def image_task_ratio(provider: AIProviderSetting, requested_ratio: str) -> str:
+    """GPT Image 2 固定生成 1024 方图，任务与提示词使用对应比例。"""
+    return "1:1" if provider.model == "gpt-image-2" else requested_ratio
 
 
 def draft_sku_carousel_items(draft: ProductDraft) -> list[dict]:
@@ -3429,7 +3429,8 @@ def create_draft_image_tasks(draft_id: int, payload: DraftImageTaskCreate, user:
     if not draft.template_id:
         raise HTTPException(400, "商品草稿缺少产品模板")
     provider = image_task_provider(db, user, payload.provider)
-    quality = image_task_quality(provider, payload.quality)
+    quality = "1K"
+    ratio = image_task_ratio(provider, payload.ratio)
     tasks: list[PodTask] = []
     if payload.task_type == "carousel":
         source_skus = list(dict.fromkeys(sku.strip() for sku in payload.source_skus if sku.strip()))
@@ -3450,7 +3451,7 @@ def create_draft_image_tasks(draft_id: int, payload: DraftImageTaskCreate, user:
                 parameters={
                     "task_type": "carousel", "draft_id": draft.id, "source_sku": sku,
                     "source_image_url": source_url, "reference_urls": [source_url],
-                    "ratio": payload.ratio, "quality": quality,
+                    "ratio": ratio, "quality": quality,
                     "creative_requirement": payload.creative_requirement,
                 }, result_urls=[], result_map=[],
             ))
@@ -3485,7 +3486,7 @@ def create_draft_image_tasks(draft_id: int, payload: DraftImageTaskCreate, user:
             task_type="main_image", status=TaskStatus.QUEUED, provider=provider.provider, provider_model=provider.model,
             parameters={
                 "task_type": "main_image", "draft_id": draft.id, "reference_mode": effective_mode,
-                "reference_urls": references, "ratio": payload.ratio, "quality": quality,
+                "reference_urls": references, "ratio": ratio, "quality": quality,
                 "creative_requirement": payload.creative_requirement,
             }, result_urls=[], result_map=[],
         ))
@@ -3516,7 +3517,8 @@ def create_batch_carousel_tasks(payload: BatchCarouselTaskCreate, user: User = D
     if existing_task_drafts:
         raise HTTPException(400, "所选草稿中存在已创建轮播图任务的记录")
     provider = image_task_provider(db, user, payload.provider)
-    quality = image_task_quality(provider, payload.quality)
+    quality = "1K"
+    ratio = image_task_ratio(provider, payload.ratio)
     tasks: list[PodTask] = []
     for selection in payload.drafts:
         draft = drafts[selection.draft_id]
@@ -3534,7 +3536,7 @@ def create_batch_carousel_tasks(payload: BatchCarouselTaskCreate, user: User = D
                 company_id=draft.company_id, template_id=draft.template_id, created_by=user.id, draft_id=draft.id,
                 task_type="carousel", status=TaskStatus.QUEUED, provider=provider.provider, provider_model=provider.model,
                 parameters={"task_type": "carousel", "draft_id": draft.id, "source_sku": sku, "source_image_url": source_url,
-                            "reference_urls": [source_url], "ratio": payload.ratio, "quality": quality,
+                            "reference_urls": [source_url], "ratio": ratio, "quality": quality,
                             "creative_requirement": payload.creative_requirement}, result_urls=[], result_map=[],
             ))
     db.add_all(tasks); db.commit()
@@ -3563,7 +3565,8 @@ def create_batch_main_image_tasks(payload: BatchMainImageTaskCreate, user: User 
     if existing_task_drafts:
         raise HTTPException(400, "所选草稿中存在已创建首图任务的记录")
     provider = image_task_provider(db, user, payload.provider)
-    quality = image_task_quality(provider, payload.quality)
+    quality = "1K"
+    ratio = image_task_ratio(provider, payload.ratio)
     carousel_results_by_draft: dict[int, set[str]] = {draft_id: set() for draft_id in draft_ids}
     for task in db.scalars(select(PodTask).where(PodTask.draft_id.in_(draft_ids), PodTask.task_type == "carousel")).all():
         carousel_results_by_draft.setdefault(task.draft_id, set()).update(task.result_urls or [])
@@ -3595,7 +3598,7 @@ def create_batch_main_image_tasks(payload: BatchMainImageTaskCreate, user: User 
             company_id=draft.company_id, template_id=draft.template_id, created_by=user.id, draft_id=draft.id,
             task_type="main_image", status=TaskStatus.QUEUED, provider=provider.provider, provider_model=provider.model,
             parameters={"task_type": "main_image", "draft_id": draft.id, "reference_mode": effective_mode,
-                        "reference_urls": references, "ratio": payload.ratio, "quality": quality,
+                        "reference_urls": references, "ratio": ratio, "quality": quality,
                         "creative_requirement": payload.creative_requirement}, result_urls=[], result_map=[],
         ))
     db.add_all(tasks); db.commit()
