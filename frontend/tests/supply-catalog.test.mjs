@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createSupplyRequestScope, createSupplySubmissionKeys, emptySupplyStrategy, supplyFileStatus, supplyStrategyPayload, supplyTime, unfinishedSupplyJob, validateSupplyStrategy } from '../src/supply-catalog.ts'
+import { createSupplyRequestScope, createSupplySubmissionKeys, emptySupplyStrategy, supplyExpiryInput, supplyExpiryPayload, supplyFileStatus, supplyStrategyPayload, supplyTime, unfinishedSupplyJob, validateSupplyStrategy } from '../src/supply-catalog.ts'
 const valid = () => ({ ...emptySupplyStrategy(), name: '日常女装', category_catalog_id: 1, category_name: 'Dresses', template_id: 1, price: '39.90' })
+
+test('Expiry editing uses Hong Kong time across day boundaries and validates calendar dates', () => {
+  const expiry = Date.parse('2027-01-31T16:00:37Z')
+  assert.equal(supplyExpiryInput(expiry), '2027-02-01T00:00:37')
+  assert.equal(supplyExpiryPayload(supplyExpiryInput(expiry)), '2027-01-31T16:00:37.000Z')
+  assert.equal(supplyExpiryPayload('2028-02-29T12:30'), '2028-02-29T04:30:00.000Z')
+  assert.equal(supplyExpiryInput(null), '')
+  for (const value of ['', 'not a date', '2027-02-29T12:30', '2027-04-31T12:30', '2027-01-01T24:00', '0000-01-01T00:00']) {
+    assert.equal(supplyExpiryPayload(value), null, value)
+  }
+})
 
 test('New strategies filter infringement and legacy payloads preserve unrestricted selection', () => {
   assert.equal(emptySupplyStrategy().infringement_filter, 'exclude')

@@ -551,6 +551,78 @@ class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(self.request("POST", "/supply/users", json={**payload, "email": "other@example.com", "agent_id": 2}).status_code, 404)
         self.assertEqual(self.request("POST", "/supply/users", json={**payload, "email": "other@example.com", "months": 0}).status_code, 422)
 
+    def test_direct_expiry_edit_stores_utc_audits_and_preserves_running_job(self):
+        identity = self.submit()
+        with self.sessions() as db:
+            previous_expiry = db.get(User, 4).supply_expires_at
+            previous_version = db.get(User, 4).token_version
+        # 缩短仍有效的期限，任务继续运行；日期跨午夜后仍准确按 UTC 保存。
+        expiry = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0)
+        response = self.request("PATCH", "/supply/users/4", json={
+            "supply_expires_at": expiry.astimezone(timezone(timedelta(hours=8))).isoformat()})
+        self.assertEqual(response.status_code, 200, response.text)
+        expected = int(expiry.timestamp() * 1000)
+        self.assertEqual(response.json()["supply_expires_at"], expected)
+        self.assertFalse(response.json()["expired"])
+        with self.sessions() as db:
+            user = db.get(User, 4)
+            self.assertEqual(user.supply_expires_at, expiry.replace(tzinfo=None))
+            self.assertEqual(user.token_version, previous_version + 1)
+            self.assertEqual(db.get(SupplyJob, identity).state, "queued")
+            audit = db.scalar(select(SupplyAudit).where(SupplyAudit.action == "edit_user"))
+            self.assertEqual(audit.details, {"fields": ["supply_expires_at"],
+                "previous_supply_expires_at": int(previous_expiry.replace(tzinfo=timezone.utc).timestamp() * 1000),
+                "supply_expires_at": expected})
+            self.tokens[4], old_token = create_access_token(user), self.tokens[4]
+        self.assertEqual(self.client.get("/supply/context", headers={"Authorization": f"Bearer {old_token}"}).status_code, 401)
+        self.assertEqual(self.request("GET", "/supply/context", uid=4).status_code, 200)
+
+    def test_setting_expiry_to_now_cancels_jobs_and_later_extension_does_not_restore_them(self):
+        identity = self.submit()
+        fixed = datetime.now(timezone.utc).replace(microsecond=0)
+        with patch("app.supply_accounts.datetime") as clock:
+            clock.now.return_value = fixed
+            response = self.request("PATCH", "/supply/users/4", json={"supply_expires_at": fixed.isoformat()})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["expired"])
+        with self.sessions() as db:
+            self.assertEqual(db.get(SupplyJob, identity).state, "cancelled")
+            self.tokens[4] = create_access_token(db.get(User, 4))
+        self.assertEqual(self.request("GET", "/supply/context", uid=4).status_code, 401)
+        future = (fixed + timedelta(days=30)).isoformat()
+        response = self.request("PATCH", "/supply/users/4", json={"supply_expires_at": future})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["expired"])
+        with self.sessions() as db:
+            self.assertEqual(db.get(SupplyJob, identity).state, "cancelled")
+
+    def test_direct_expiry_extension_cancels_old_expired_jobs_and_preserves_suspension(self):
+        identity = self.submit()
+        with self.sessions() as db:
+            db.get(User, 4).supply_expires_at = datetime.utcnow() - timedelta(days=1)
+            db.commit()
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        response = self.request("PATCH", "/supply/users/4", json={"supply_expires_at": future})
+        self.assertEqual(response.status_code, 200, response.text)
+        with self.sessions() as db:
+            self.assertEqual(db.get(SupplyJob, identity).state, "cancelled")
+            self.assertEqual(db.get(SupplyJob, identity).error, "原账号期限已结束")
+        self.assertEqual(self.request("PATCH", "/supply/users/4", json={"is_active": False}).status_code, 200)
+        response = self.request("PATCH", "/supply/users/4", json={"supply_expires_at": future})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["is_active"])
+
+    def test_direct_expiry_requires_company_admin_target_and_valid_timezone(self):
+        payload = {"supply_expires_at": "2027-01-01T12:30:00+08:00"}
+        for uid in (2, 3, 4):
+            self.assertEqual(self.request("PATCH", "/supply/users/7", uid=uid, json=payload).status_code, 403)
+        for identity in (2, 6):
+            self.assertEqual(self.request("PATCH", f"/supply/users/{identity}", json=payload).status_code, 404)
+        for value, status in ((None, 400), ("", 422), ("not a date", 422),
+                              ("2027-02-30T12:30:00+08:00", 422), ("2027-01-01T12:30:00", 422)):
+            with self.subTest(value=value):
+                self.assertEqual(self.request("PATCH", "/supply/users/4", json={"supply_expires_at": value}).status_code, status)
+
     def test_duplicate_agent_is_conflict(self):
         self.assertEqual(self.request("POST", "/supply/agents", json={"name": "原代理"}).status_code, 409)
 

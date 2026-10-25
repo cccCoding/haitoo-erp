@@ -33,6 +33,23 @@ export function supplyTime(value: string | number | null | undefined): string {
   const date = new Date(typeof value === 'string' && !/[zZ]|[+-]\d\d:\d\d$/.test(value) && value.includes('T') ? `${value}Z` : value)
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { timeZone: 'Asia/Hong_Kong' })
 }
+export function supplyExpiryInput(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === '') return ''
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return ''
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Hong_Kong', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date).map(part => [part.type, part.value]))
+  return `${parts.year.padStart(4, '0')}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`
+}
+export function supplyExpiryPayload(value: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(value) || value.startsWith('0000')) return null
+  const normalized = value.length === 16 ? `${value}:00` : value
+  const date = new Date(`${normalized}+08:00`)
+  if (!Number.isFinite(date.getTime()) || supplyExpiryInput(date.getTime()) !== normalized) return null
+  return date.toISOString()
+}
 export function supplyFileStatus(job: { state: string; file_expired?: boolean; output_expires_at?: string | number | null }, now = Date.now()): string {
   if (job.file_expired) return '文件已过期'
   if (job.output_expires_at) {

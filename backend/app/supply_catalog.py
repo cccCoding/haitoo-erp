@@ -6,7 +6,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, PositiveInt, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, EmailStr, Field, PositiveInt, field_validator
 from sqlalchemy import case, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -18,7 +18,7 @@ from .models import (Company, MaterialAsset, OperatorGroup, ProductTemplate, Rol
                      SupplyJob, SupplyJobMaterial, SupplyStrategy,
                      TemplateGroup, TiktokCategoryCatalog, User)
 from .security import current_user, hash_password
-from .supply_accounts import add_calendar_months, supply_user_is_expired
+from .supply_accounts import add_calendar_months, as_utc_naive, supply_user_is_expired
 from .supply_common import (ACTIVE_STATES, audit, cancel_user_jobs,
     digest, eligible_materials, is_manager, job_payload,
     lock_company, now, require_admin, require_manager, sizes, template_snapshot,
@@ -56,6 +56,7 @@ class UserPatch(Input):
     password: str | None = Field(default=None, min_length=8, max_length=72)
     agent_id: int | None = Field(default=None, gt=0)
     is_active: bool | None = None
+    supply_expires_at: AwareDatetime | None = None
 
     @field_validator("password")
     @classmethod
@@ -246,6 +247,12 @@ def edit_user(identity: int, payload: UserPatch, user=Depends(supply_actor), db:
     changes = payload.model_dump(exclude_unset=True)
     if any(value is None for value in changes.values()):
         raise HTTPException(400, "账号字段不能清空")
+    expiry_audit = {}
+    was_expired = supply_user_is_expired(item)
+    if "supply_expires_at" in changes:
+        changes["supply_expires_at"] = as_utc_naive(changes["supply_expires_at"])
+        expiry_audit = {"previous_supply_expires_at": timestamp(item.supply_expires_at),
+                        "supply_expires_at": timestamp(changes["supply_expires_at"])}
     if "agent_id" in changes:
         owned(db, SupplyAgent, changes["agent_id"], user)
         item.supply_agent_id = changes.pop("agent_id")
@@ -256,7 +263,9 @@ def edit_user(identity: int, payload: UserPatch, user=Depends(supply_actor), db:
     item.token_version += 1
     if not item.is_active:
         cancel_user_jobs(db, item.id, "账号已停用")
-    audit(db, user, "edit_user", "user", identity, {"fields": sorted(payload.model_fields_set)})
+    elif expiry_audit and (was_expired or supply_user_is_expired(item)):
+        cancel_user_jobs(db, item.id, "原账号期限已结束" if was_expired else "账号已到期")
+    audit(db, user, "edit_user", "user", identity, {"fields": sorted(payload.model_fields_set), **expiry_audit})
     commit_unique(db, "邮箱已被使用")
     return user_payload(db, item)
 
