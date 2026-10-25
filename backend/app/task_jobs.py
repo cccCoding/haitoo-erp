@@ -52,6 +52,9 @@ def task_snapshot(status: TaskStatus) -> list[int]:
 def _request_for(task: PodTask, template: ProductTemplate) -> GenerationRequest:
     parameters = task.parameters or {}
     if task.task_type == "sku_image":
+        parameters = parameters | {"quality": "1K"}
+        if task.provider_model == "gpt-image-2":
+            parameters["ratio"] = "1:1"
         print_urls = list(parameters.get("print_urls") or ([parameters["print_url"]] if parameters.get("print_url") else []))
         template_url = parameters.get("white_image_url") or template.cover_url or ""
     else:
@@ -68,6 +71,7 @@ def _request_for(task: PodTask, template: ProductTemplate) -> GenerationRequest:
         company_id=task.company_id,
         task_id=task.id,
         idempotency_key=f"haitoro-task-{task.id}",
+        task_type=task.task_type,
     )
 
 

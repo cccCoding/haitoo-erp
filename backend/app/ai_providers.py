@@ -57,6 +57,7 @@ class GenerationRequest:
     company_id: int
     task_id: int
     idempotency_key: str
+    task_type: str = "sku_image"
 
 
 def build_prompt(parameters: dict, template_name: str) -> str:
@@ -94,6 +95,8 @@ class GrsaiProvider:
         }
         if request.model == "gpt-image-2":
             payload["quality"] = "auto"
+            if request.task_type == "sku_image":
+                payload["aspectRatio"] = "1024x1024"
         else:
             payload["imageSize"] = request.quality
         response = await client.post(

@@ -261,9 +261,9 @@ class TaskJobTests(unittest.TestCase):
         self.assertIsNone(hidden["parameters"]["creative_requirement"])
         self.assertEqual(visible["parameters"]["creative_requirement"], "private prompt")
 
-    def test_gpt_image_2_uses_shared_grsai_credential_and_auto_quality(self) -> None:
+    def test_gpt_image_2_print_task_uses_shared_credential_and_1k_square(self) -> None:
         payload = PodTaskCreate(
-            template_id=1, white_image_id=1, provider="grsai-gpt-image-2", quality="2K", creative_requirement="test",
+            template_id=1, white_image_id=1, provider="grsai-gpt-image-2", quality="2K", ratio="3:4", creative_requirement="test",
             print_urls=["https://img.example/creative/1.png"],
         )
         with self.session_factory() as db, patch.object(main, "registered_image_url", return_value=True):
@@ -271,6 +271,30 @@ class TaskJobTests(unittest.TestCase):
             task = db.get(PodTask, response["items"][0]["id"])
         self.assertEqual(task.provider, "grsai-gpt-image-2")
         self.assertEqual(task.provider_model, "gpt-image-2")
+        self.assertEqual(task.parameters["quality"], "1K")
+        self.assertEqual(task.parameters["ratio"], "1:1")
+
+    def test_print_task_forces_1k_for_other_models_and_keeps_ratio(self) -> None:
+        payload = PodTaskCreate(
+            template_id=1, white_image_id=1, provider="grsai", quality="2K", ratio="3:4",
+            creative_requirement="test", print_urls=["https://img.example/creative/1.png"],
+        )
+        with self.session_factory() as db, patch.object(main, "registered_image_url", return_value=True):
+            response = main.create_task(payload, user=db.get(User, 1), db=db)
+            task = db.get(PodTask, response["items"][0]["id"])
+        self.assertEqual(task.parameters["quality"], "1K")
+        self.assertEqual(task.parameters["ratio"], "3:4")
+
+    def test_legacy_gpt_image_2_print_task_request_uses_1k_square(self) -> None:
+        task = PodTask(
+            id=123, company_id=1, task_type="sku_image", provider_model="gpt-image-2",
+            parameters={"quality": "auto", "ratio": "3:4", "creative_requirement": "保持版型",
+                        "white_image_url": "https://img.example/white.png", "print_urls": []},
+        )
+        request = task_jobs._request_for(task, ProductTemplate(name="M05L"))
+        self.assertEqual(request.quality, "1K")
+        self.assertEqual(request.ratio, "1:1")
+        self.assertEqual(request.prompt, "保持版型。输出带指定印花的 SKU 商品图，比例 1:1，清晰度 1K。")
         self.assertEqual(task.parameters["quality"], "auto")
 
     def test_gpt_image_2_task_view_shows_grsai_platform_name(self) -> None:
@@ -296,8 +320,14 @@ class TaskJobTests(unittest.TestCase):
         self.assertEqual(payload, {
             "model": "gpt-image-2", "prompt": "test",
             "images": ["https://img.example/template.png", "https://img.example/print.png"],
-            "aspectRatio": "3:4", "quality": "auto", "replyType": "async",
+            "aspectRatio": "1024x1024", "quality": "auto", "replyType": "async",
         })
+
+        for task_type in ("carousel", "main_image"):
+            with self.subTest(task_type=task_type):
+                request.task_type = task_type
+                asyncio.run(GrsaiProvider().submit(request, "test-key", Settings(grsai_base_url="https://grsai.example"), client))
+                self.assertEqual(client.post.call_args.kwargs["json"]["aspectRatio"], "3:4")
 
     def test_three_submit_failures_are_terminal(self) -> None:
         task_id = self.add_task()

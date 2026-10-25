@@ -2867,7 +2867,8 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
         "white_image_id": white_image.id,
         "white_image_name": white_image.name,
         "white_image_url": white_image.image_url,
-        "quality": "auto" if provider.provider == "grsai-gpt-image-2" else payload.quality,
+        "quality": "1K",
+        "ratio": "1:1" if provider.model == "gpt-image-2" else payload.ratio,
     }
     tasks = [
         PodTask(
