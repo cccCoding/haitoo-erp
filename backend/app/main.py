@@ -2789,6 +2789,8 @@ def update_task_queue_settings(payload: TaskQueueSettingUpdate, user: User = Dep
     setting = db.get(TaskQueueSetting, 1) or TaskQueueSetting(id=1)
     setting.submit_interval_ms = payload.submit_interval_ms
     setting.result_interval_ms = payload.result_interval_ms
+    if payload.result_concurrency is not None:
+        setting.result_concurrency = payload.result_concurrency
     db.add(setting); db.commit(); db.refresh(setting)
     return serialize_record(setting)
 
@@ -2815,7 +2817,7 @@ async def persist_generated_images(urls: list[str], company_id: int, task_id: in
     """所有最终结果保存到自有图片存储，按内容复用。"""
     def persist():
         with SessionLocal() as db:
-            return [ingest_url(db, company_id, url).url for url in urls]
+            return [ingest_url(db, company_id, url, release_before_storage=True).url for url in urls]
     return await asyncio.to_thread(persist)
 
 

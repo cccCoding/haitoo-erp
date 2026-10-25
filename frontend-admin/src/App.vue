@@ -9,7 +9,7 @@ const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://loca
 const token = ref(localStorage.getItem('haitoro_admin_token') || '')
 const email = ref(''), password = ref('')
 const user = ref<any>(null), overview = ref<any>(null), providers = ref<any[]>([]), companies = ref<any[]>([])
-const queueSettings = ref({ submit_interval_ms: 1000, result_interval_ms: 5000 })
+const queueSettings = ref({ submit_interval_ms: 1000, result_interval_ms: 5000, result_concurrency: 5 })
 const loading = ref(false), saving = ref(''), error = ref('')
 const toast = ref('')
 const refreshing = ref(false)
@@ -92,7 +92,7 @@ async function setDefault(provider: any) {
 }
 function openProviderForm(provider: any) { error.value = ''; providerForm.value = { provider: provider.provider, display_name: provider.display_name, model: provider.model, enabled: provider.enabled, is_default: provider.is_default, images_per_task: provider.images_per_task }; showProviderForm.value = true }
 async function saveProviderForm() { try { saving.value = providerForm.value.provider; error.value = ''; await api.put(`/admin/ai-providers/${providerForm.value.provider}`, { model: providerForm.value.model, enabled: providerForm.value.enabled, is_default: providerForm.value.is_default, images_per_task: providerForm.value.images_per_task }, { headers: headers.value }); showProviderForm.value = false; await loadAdmin(); showToast('模型配置已保存') } catch (e: any) { error.value = e.response?.data?.detail || '保存失败' } finally { saving.value = '' } }
-async function saveQueueSettings() { try { saving.value = 'queue'; error.value = ''; await api.put('/admin/task-queue-settings', queueSettings.value, { headers: headers.value }); await loadAdmin(); showToast('任务间隔已保存') } catch (e: any) { error.value = e.response?.data?.detail || '保存失败' } finally { saving.value = '' } }
+async function saveQueueSettings() { if (saving.value === 'queue') return; try { saving.value = 'queue'; error.value = ''; await api.put('/admin/task-queue-settings', queueSettings.value, { headers: headers.value }); await loadAdmin(); showToast('任务队列配置已保存') } catch (e: any) { error.value = e.response?.data?.detail || '保存失败' } finally { saving.value = '' } }
 async function createCompany() { if (companyForm.value.admin_password.length < 8) { error.value = '公司管理员密码至少需要 8 个字符'; return } try { saving.value = 'company'; error.value = ''; await api.post('/admin/companies', companyForm.value, { headers: headers.value }); companyForm.value = { name: '', admin_name: '', admin_email: '', admin_password: '' }; showCompanyForm.value = false; await loadAdmin() } catch (e: any) { error.value = e.response?.data?.detail || '创建公司失败' } finally { saving.value = '' } }
 function openPasswordForm(company: any, admin: any) {
   passwordTarget.value = { companyId: company.id, adminId: admin.id, name: admin.name, email: admin.email }
@@ -151,7 +151,15 @@ onMounted(() => token.value && loadAdmin().catch((e: any) => {
         <template v-else-if="activePage==='companies'"><section class="panel companies"><div class="heading heading-actions"><div><h2>公司与账号</h2><p>开通公司并管理公司管理员账号；业务配置由各公司管理员自行维护。</p></div><button class="primary compact" @click="showCompanyForm=true">开通公司</button></div><div class="company-table"><div class="company-head"><span>ID</span><span>公司</span><span>管理员账号</span><span>采集</span><span>开通时间</span></div><div v-for="company in companies" :key="company.id" class="company-row"><span>{{company.id}}</span><span><b>{{company.name}}</b></span><div class="company-admin-list"><div v-for="admin in company.admin_users" :key="admin.id" class="company-admin"><b>{{admin.name}}</b><small>{{admin.email}}</small><button class="secondary" type="button" @click="openPasswordForm(company, admin)">修改密码</button></div><small v-if="!company.admin_users.length">未配置管理员</small></div><div class="company-collection"><b>{{company.cross_company_collect_enabled?'已开启':'未开启'}}</b><button class="secondary" @click="openCollectionSettings(company)">设置</button></div><span>{{new Date(company.created_at).toLocaleDateString()}}</span></div></div><p v-if="!companies.length" class="empty">暂无公司，点击“开通公司”创建企业账号。</p></section></template>
         <DataManagement v-else-if="activePage==='data'" ref="dataManagement" :token="token" :companies="companies" @unauthorized="logout" />
         <section v-else class="panel model-panel">
-          <div class="heading model-heading"><div><p class="section-kicker">AI CONFIGURATION</p><h2>印花贴合模型</h2><p>每条任务按配置携带一组印花，提交和取结果分别串行处理。</p></div><div class="queue-setting-form"><label>提交间隔（毫秒）<input v-model.number="queueSettings.submit_interval_ms" type="number" min="1" max="3600000" step="1" /></label><label>取结果间隔（毫秒）<input v-model.number="queueSettings.result_interval_ms" type="number" min="1" max="3600000" step="1" /></label><button class="secondary" :disabled="saving==='queue'" @click="saveQueueSettings">{{saving==='queue'?'保存中…':'保存任务间隔'}}</button></div></div>
+          <div class="heading model-heading">
+            <div><p class="section-kicker">AI CONFIGURATION</p><h2>印花贴合模型</h2><p>提交串行，结果按并发数处理；查询启动间隔限制全局请求频率。</p></div>
+            <form class="queue-setting-form" @submit.prevent="saveQueueSettings">
+              <label>提交间隔（毫秒）<input v-model.number="queueSettings.submit_interval_ms" type="number" min="1" max="3600000" step="1" required :disabled="saving==='queue'" /></label>
+              <label>查询启动间隔（毫秒）<input v-model.number="queueSettings.result_interval_ms" type="number" min="1" max="3600000" step="1" required :disabled="saving==='queue'" /></label>
+              <label>结果查询并发数<input v-model.number="queueSettings.result_concurrency" type="number" min="1" max="20" step="1" required :disabled="saving==='queue'" /></label>
+              <button type="submit" class="secondary" :disabled="saving==='queue'">{{saving==='queue'?'保存中…':'保存队列配置'}}</button>
+            </form>
+          </div>
           <div class="provider-list"><div class="provider-list-head"><span>平台</span><span>模型标识</span><span>单个任务</span><span>启用状态</span><span>操作</span></div><article v-for="provider in providers" :key="provider.provider" class="provider-row"><div><div class="provider-platform-name"><em v-if="provider.is_default">默认</em><b>{{ provider.display_name }}</b></div></div><code>{{ provider.model }}</code><span>{{ provider.images_per_task }} 张图</span><div class="provider-enabled"><span :class="provider.enabled ? 'ok' : 'bad'">{{ provider.enabled ? '已启用' : '已停用' }}</span></div><div class="provider-row-actions"><button class="secondary" :disabled="!provider.enabled || provider.is_default || Boolean(saving)" @click="setDefault(provider)">设为默认</button><button class="primary compact" @click="openProviderForm(provider)">修改</button></div></article></div>
           <p v-if="!overview?.storage_ready" class="notice">需要配置 R2 存储和公网访问地址。未配置时，图片无法上传，AI 任务将失败。</p>
         </section>

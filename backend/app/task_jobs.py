@@ -163,68 +163,10 @@ async def process_submission_task(task_id: int, sleep: SleepCallable = asyncio.s
         await sleep(queue_interval("submit"))
 
 
-async def process_result_task(task_id: int) -> None:
-    """只查询一次外部结果；未完成或临时异常时保留运行状态。"""
-    db = next(get_db())
-    try:
-        task = db.get(PodTask, task_id)
-        if not task or task.status != TaskStatus.RUNNING or not task.provider_task_id:
-            return
-        provider, provider_task_id = task.provider or "", task.provider_task_id
-        company_id = task.company_id
-        try:
-            api_key = _task_api_key(db, task)
-            urls = await poll_async_generation(provider, provider_task_id, api_key)
-        except ProviderTaskTerminalError as exc:
-            task = db.get(PodTask, task_id)
-            if task and task.status == TaskStatus.RUNNING:
-                task.status = TaskStatus.FAILED
-                task.failure_reason = str(exc)[:500]
-                task.completed_at = datetime.utcnow()
-                db.commit()
-                logger.error("印花任务第三方处理失败 | task_id=%s reason=%s", task_id, exc)
-            return
-        except Exception as exc:
-            logger.warning("印花任务 #%s 查询临时失败：%s", task_id, exc)
-            task = db.get(PodTask, task_id)
-            if task and task.status == TaskStatus.RUNNING:
-                task.failure_reason = f"查询临时失败，下轮继续：{exc}"[:500]
-                db.commit()
-            return
-        if urls is None:
-            task = db.get(PodTask, task_id)
-            if task and task.status == TaskStatus.RUNNING:
-                task.failure_reason = None
-                db.commit()
-            return
-        urls = await persist_generated_images(urls, company_id, task_id)
-        task = db.get(PodTask, task_id)
-        if not task or task.status != TaskStatus.RUNNING:
-            return
-        try:
-            result_map = map_task_results(task, urls)
-        except ProviderError as exc:
-            task.status = TaskStatus.FAILED
-            task.failure_reason = str(exc)[:500]
-            task.completed_at = datetime.utcnow()
-            db.commit()
-            return
-        task.result_map = result_map
-        task.result_urls = urls
-        task.status = TaskStatus.AWAITING_SELECTION
-        task.failure_reason = None
-        task.completed_at = datetime.utcnow()
-        db.commit()
-        logger.info("印花任务异步生成完成 | task_id=%s image_count=%s", task_id, len(urls))
-    except Exception as exc:
-        db.rollback()
-        logger.exception("印花任务 #%s 结果处理异常", task_id)
-        task = db.get(PodTask, task_id)
-        if task and task.status == TaskStatus.RUNNING:
-            task.failure_reason = f"结果处理临时失败，下轮继续：{exc}"[:500]
-            db.commit()
-    finally:
-        db.close()
+async def process_result_task(task_id: int) -> str:
+    """兼容单次结果处理入口；生产调度使用 ResultScheduler。"""
+    from .result_worker import process_result
+    return await process_result(task_id)
 
 
 async def run_cycle(kind: str, sleep: SleepCallable = asyncio.sleep) -> int:

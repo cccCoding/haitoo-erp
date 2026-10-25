@@ -303,6 +303,7 @@ class AIProviderSettingUpdate(BaseModel):
 class TaskQueueSettingUpdate(BaseModel):
     submit_interval_ms: int = Field(default=1000, ge=1, le=3600000)
     result_interval_ms: int = Field(default=5000, ge=1, le=3600000)
+    result_concurrency: int | None = Field(default=None, ge=1, le=20, strict=True)
 
 
 class AdminCompanyCreate(BaseModel):

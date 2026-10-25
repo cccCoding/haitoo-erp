@@ -9,11 +9,28 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.pool import StaticPool
 
 from app.db_migrate import upgrade_database
-from app.models import ProductDraft
+from app.models import PodTask, ProductDraft, TaskStatus
 from app.schema_version import alembic_config, assert_schema_current, schema_heads
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_result_concurrency_preserves_intervals_and_tasks(self):
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, "20261020_43")
+            connection.execute(text("INSERT INTO task_queue_settings "
+                "(id, submit_interval_ms, result_interval_ms) VALUES (1, 125, 7)"))
+            connection.execute(PodTask.__table__.insert().values(id=900, company_id=1, template_id=1,
+                status=TaskStatus.RUNNING, created_by=1, parameters={}, result_urls=[], result_map=[]))
+            command.upgrade(config, "head")
+            row = connection.execute(text("SELECT submit_interval_ms, result_interval_ms, "
+                "result_concurrency FROM task_queue_settings WHERE id=1")).one()
+            self.assertEqual(tuple(row), (125, 7, 5))
+            self.assertEqual(connection.execute(text("SELECT status FROM pod_tasks WHERE id=900")).scalar_one(), TaskStatus.RUNNING.name)
+            command.downgrade(config, "20261020_43")
+            self.assertEqual(tuple(connection.execute(text("SELECT submit_interval_ms, result_interval_ms "
+                "FROM task_queue_settings WHERE id=1")).one()), (125, 7))
+
     def setUp(self) -> None:
         self.engine = create_engine("sqlite://", poolclass=StaticPool)
 

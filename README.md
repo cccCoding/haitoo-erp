@@ -516,7 +516,36 @@ Docker 内部网络开放端口，只有边缘 Nginx 映射宿主机的 80 和 4
 
 超级管理员登录后可在“AI 模型管理”中启用并切换印花贴合模型，并为每个平台模型设置“单个任务印花图数量”。批量快捷操作会按该数量创建多条独立任务；只有服务商保证输出顺序与输入一致时才能把数量设为大于 1，否则必须保持默认值 1。
 
-默认生产模型为 Grsai 的 `nano-banana-fast`，可在后台启用并选择同平台的 `gpt-image-2`。两个模型共用同一份 Grsai API Key。MySQL 中的任务记录就是队列状态源，`submit-worker` 按创建时间串行提交第三方 API，`result-worker` 独立串行查询异步结果。提交失败最多再重试 2 次，查询未完成或临时失败时留到下一轮。启动生产服务时需要同时运行 `api`、两个 Worker 和 MySQL；任务间隔可由超级管理员在线配置。每个新任务会记录实际使用的提供方、模型版本和创建人。模型平台密钥由公司管理员在“成员管理”中为每位员工单独配置，经加密保存后仅由后端按任务创建人读取，不再使用平台级共享模型密钥。
+默认生产模型为 Grsai 的 `nano-banana-fast`，可在后台启用并选择同平台的 `gpt-image-2`。两个模型共用同一份 Grsai API Key。MySQL 中的任务记录就是队列状态源，`submit-worker` 按创建时间串行提交第三方 API，`result-worker` 独立持续查询异步结果，默认最多并发处理 5 项（包括查询、图片转存和落库），空位立即补入下一项。提交失败最多再重试 2 次，查询未完成或临时失败时重新排到队尾。启动生产服务时需要同时运行 `api`、两个 Worker 和 MySQL；任务提交间隔、全局查询启动间隔和结果并发数（1～20）可由超级管理员在线配置，结果配置通常在 1 秒内生效；原有毫秒间隔在升级中保留。每个新任务会记录实际使用的提供方、模型版本和创建人。模型平台密钥由公司管理员在“成员管理”中为每位员工单独配置，经加密保存后仅由后端按任务创建人读取，不再使用平台级共享模型密钥。
+
+结果查询在单个 `result-worker` 内并发，复用 HTTP 连接；不要扩容此服务的容器数量，本期没有多实例领取锁。查询启动间隔限制所有查询的相邻启动时间，不代表每条任务固定多久重查一次。HTTP 429 按员工的平台凭据冷却，两个 Grsai 模型共享该凭据的冷却状态；有效 `Retry-After` 限制为 1～300 秒，缺失时 5 秒，其他员工可继续查询。
+
+日志每 60 秒输出“结果查询统计”：请求数、结果计数、吞吐量、队列与执行中数量，以及 `queue_wait_ms`（入队至请求启动）、`query_ms`（第三方响应）、`persist_ms`（图片转存）、`processing_ms`（槽位占用）、`poll_gap_ms`（同任务两次查询启动间隔）的平均值和 P95。P95 取窗口内最近最多 10,000 个样本，总次数和平均值完整累计；首次查询没有重查间隔，未转存时不计转存样本。普通 pending 明细为 DEBUG，超过 10 秒的查询会告警。正在执行的查询可能跨越统计窗口，因此窗口请求数和完成结果数不要求相等。统计只能反映本系统处理速度，不能精确推算第三方生成完成时间。
+
+本次版本要求数据库迁移 `20261025_44`。部署时先备份数据库，构建相关服务，停止后端进程后迁移，再更新服务；所有携带数据库版本检查的后端镜像均需包含新迁移文件。以下流程仅适用于已在正常使用版本化迁移和图片文件索引的环境；较早版本仍按前述历史图片升级流程处理。
+
+本机测试环境：
+
+```bash
+./deploy/local.sh build migrate api submit-worker result-worker product-library-rankings-worker supply-worker admin-web
+./deploy/local.sh stop api submit-worker result-worker product-library-rankings-worker supply-worker
+./deploy/local.sh run --rm migrate
+./deploy/local.sh up -d api submit-worker result-worker product-library-rankings-worker supply-worker admin-web
+./deploy/local.sh logs --since=10m result-worker
+```
+
+腾讯云环境（在服务器项目目录执行）：
+
+```bash
+sudo ./deploy/tencent.sh build migrate api submit-worker result-worker product-library-rankings-worker supply-worker admin-web
+sudo ./deploy/tencent.sh stop api submit-worker result-worker product-library-rankings-worker supply-worker
+sudo ./deploy/tencent.sh run --rm migrate
+sudo ./deploy/tencent.sh up -d api submit-worker result-worker product-library-rankings-worker supply-worker admin-web
+sudo ./deploy/tencent.sh logs --since=10m result-worker
+```
+
+迁移失败时停止流程，修复后再启动；不要直接执行后续启动命令。发布后观察至少 10 分钟，重点检查 429、查询 P95、轮询间隔、转存耗时和数据库连接异常。需要降低负载时，在后台把并发降为 1，必要时增大查询启动间隔，无需降级数据库；本期不自动调整并发，也不单独拆分转存队列。
+
 
 模型服务地址、标题生成服务及 R2 存储仍由部署环境配置：
 

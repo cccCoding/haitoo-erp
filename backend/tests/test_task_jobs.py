@@ -40,7 +40,7 @@ class TaskJobTests(unittest.TestCase):
             ])
             db.commit()
         from tests.image_file_helpers import index_urls
-        def indexed(db, company, url):
+        def indexed(db, company, url, **kwargs):
             return index_urls(db, company, [url])[0]
         self.enterContext(patch.object(main, "ingest_url", side_effect=indexed))
 

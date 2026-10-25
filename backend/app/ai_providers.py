@@ -5,7 +5,10 @@ Grsai 的模型差异集中在本模块，任务与选图流程只处理统一�
 """
 import logging
 import re
+import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -23,6 +26,24 @@ class ProviderError(Exception):
 
 class ProviderTaskTerminalError(ProviderError):
     """外部异步任务已明确结束且失败，不应作为查询故障自动重新提交。"""
+
+
+class ProviderRateLimitError(ProviderError):
+    """结果查询被限流；不携带可能包含签名地址的供应商响应正文。"""
+
+    def __init__(self, retry_after: str | None = None):
+        seconds = 5.0
+        if retry_after:
+            try:
+                seconds = float(retry_after)
+            except ValueError:
+                try:
+                    date = parsedate_to_datetime(retry_after)
+                    seconds = (date - datetime.now(timezone.utc)).total_seconds()
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        self.retry_after_seconds = min(300.0, max(1.0, seconds)) if math.isfinite(seconds) else 5.0
+        super().__init__("grsai 查询限流：HTTP 429")
 
 
 @dataclass
@@ -84,7 +105,7 @@ class GrsaiProvider:
         return self._response_data(response), base_url, headers
 
     @staticmethod
-    def _response_data(response: httpx.Response) -> dict[str, Any]:
+    def _response_data(response: httpx.Response, *, log_body: bool = True) -> dict[str, Any]:
         try:
             data = response.json()
         except ValueError as exc:
@@ -92,7 +113,7 @@ class GrsaiProvider:
                 "grsai 响应 JSON 解析失败 | status_code=%s content_type=%s raw_body=%r",
                 response.status_code,
                 response.headers.get("content-type"),
-                response.text,
+                response.text if log_body else "[查询响应正文已隐藏]",
             )
             raise ProviderError("grsai 返回了无效的 JSON 响应") from exc
         if not isinstance(data, dict):
@@ -106,10 +127,12 @@ class GrsaiProvider:
             headers={"Authorization": f"Bearer {api_key}"},
             params={"id": provider_task_id},
         )
+        if response.status_code == 429:
+            raise ProviderRateLimitError(response.headers.get("Retry-After"))
         if response.status_code == 404 and "result not exist, valid for 2 hours" in response.text.lower():
             raise ProviderTaskTerminalError(f"grsai 结果不存在或已超过 2 小时有效期：404 {response.text[:300]}")
         _raise_for_provider_error(self.name, response)
-        result = self._response_data(response)
+        result = self._response_data(response, log_body=False)
         status = str(result.get("status", "")).lower()
         if status == "succeeded":
             urls = [item["url"] for item in result.get("results", []) if isinstance(item, dict) and isinstance(item.get("url"), str)]
@@ -143,12 +166,14 @@ async def submit_async_generation(provider: str, request: GenerationRequest, api
         return await adapter.submit(request, api_key, get_settings(), client)
 
 
-async def poll_async_generation(provider: str, provider_task_id: str, api_key: str) -> list[str] | None:
+async def poll_async_generation(provider: str, provider_task_id: str, api_key: str, *, client: httpx.AsyncClient | None = None) -> list[str] | None:
     adapter = PROVIDERS.get(provider)
     if provider not in GRSAI_PROVIDER_KEYS or not isinstance(adapter, GrsaiProvider):
         raise ProviderError("当前模型不支持异步任务查询")
-    async with httpx.AsyncClient(timeout=120) as client:
+    if client is not None:
         return await adapter.poll_once(provider_task_id, api_key, get_settings(), client)
+    async with httpx.AsyncClient(timeout=120) as owned_client:
+        return await adapter.poll_once(provider_task_id, api_key, get_settings(), owned_client)
 
 
 TITLE_SYSTEM_PROMPT = (

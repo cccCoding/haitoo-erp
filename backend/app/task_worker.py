@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import logging
+import signal
 from datetime import datetime, timezone
 
 from .database import engine
@@ -12,6 +13,16 @@ from .product_library_rankings import cleanup_expired_snapshots, recover_interru
 
 
 async def run_forever(kind: str) -> None:
+    if kind == "result":
+        from .result_worker import run_result_worker
+        current = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGTERM, current.cancel)
+        try:
+            await run_result_worker()
+        finally:
+            loop.remove_signal_handler(signal.SIGTERM)
+        return
     if kind == "product-library-rankings":
         recover_interrupted_tasks()
         cleanup_expired_snapshots()
@@ -36,7 +47,10 @@ def main() -> None:
     configure_logging()
     assert_schema_current(engine)
     logging.getLogger(__name__).info("任务 Worker 启动 | kind=%s", args.kind)
-    asyncio.run(run_forever(args.kind))
+    try:
+        asyncio.run(run_forever(args.kind))
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        logging.getLogger(__name__).info("任务 Worker 已停止 | kind=%s", args.kind)
 
 
 if __name__ == "__main__":

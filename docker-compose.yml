@@ -135,6 +135,8 @@ services:
     restart: unless-stopped
 
   result-worker:
+    # SIGTERM 后给协程和已开始的短事务/转存线程留出清理时间。
+    stop_grace_period: 30s
     build:
       context: ./backend
       args:
