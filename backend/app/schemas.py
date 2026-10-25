@@ -349,7 +349,7 @@ class ClaimMaterials(BaseModel):
 
 
 class TaskBatchRetry(BaseModel):
-    task_ids: list[int] = Field(min_length=1, max_length=100)
+    task_ids: list[int] = Field(min_length=1, max_length=1000)
 
 
 class MaterialDraftCreate(BaseModel):

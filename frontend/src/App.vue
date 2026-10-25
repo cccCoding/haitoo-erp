@@ -16,6 +16,7 @@ import { applySelectedStyle, commonStyleTemplate, styleOptions, type MaterialSty
 import { deduplicatedImageUpload, imageSha256, transferItem, type MaterialTransferItem } from './material-transfer'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
 import { batchTitleRequest, createBatchTitleGenerator, emptyTitleGenerationProgress, hasValidBatchTitles, isUnfinishedTitle, titleGenerationStatusLabels, type BatchTitleGroup } from './batch-title-generation'
+import { createTaskBatchRetrier } from './task-batch-retry'
 
 const pageSizeOptions = [20, 50, 100, 500, 1000]
 const SupplyCatalog = defineAsyncComponent(() => import('./SupplyCatalog.vue'))
@@ -1491,13 +1492,16 @@ async function deleteTemplate(template:any) { if (!confirm(`确定删除模板�
 function imageUrl(url?: string) { return url ? (url.startsWith('/') ? `${api.defaults.baseURL}${url}` : url) : '' }
 const taskStatusLabel: Record<string, string> = { queued: '排队中', running: '处理中', awaiting_selection: '待审核', completed: '已完成', failed: '失败' }
 function taskStatusClass(status?: string) { return status === 'awaiting_selection' ? 'purple' : status === 'completed' ? 'blue' : status === 'failed' ? 'orange' : 'purple' }
-async function refreshTaskList() {
+async function refreshTaskList(options: { throwOnError?: boolean } = {}) {
   try {
     taskListRefreshing.value = true
     const { data } = await api.get('/tasks', { headers: headers.value, params: taskQueryParams() })
     applyTaskPage(data)
     if (showTaskDetailDialog.value && viewingTask.value) viewingTask.value = (await api.get(`/tasks/${viewingTask.value.id}`, { headers: headers.value })).data
-  } catch (e: any) { showToast(e.response?.data?.detail || '刷新任务列表失败') }
+  } catch (e: any) {
+    if (options.throwOnError) throw e
+    showToast(e.response?.data?.detail || '刷新任务列表失败')
+  }
   finally { taskListRefreshing.value = false }
 }
 async function copyProviderTaskId(task: any) { if (!task.provider_task_id) return; try { await navigator.clipboard.writeText(task.provider_task_id); showToast('外部任务 ID 已复制') } catch { showToast('复制失败，请手动复制') } }
@@ -2321,17 +2325,19 @@ async function retryTaskResult(task: any) {
   } catch (e: any) { showToast(e.response?.data?.detail || '重试任务失败') }
   finally { retryingTaskId.value = null }
 }
+const taskBatchRetrier = createTaskBatchRetrier({
+  submit: async taskIds => (await api.post('/tasks/batch-retry', { task_ids: taskIds }, { headers: headers.value })).data,
+  onSucceeded: taskIds => {
+    const succeededIds = new Set(taskIds)
+    selectedTaskIds.value = selectedTaskIds.value.filter(id => !succeededIds.has(id))
+  },
+  refresh: () => refreshTaskList({ throwOnError: true }),
+  onMessage: showToast,
+  onRunningChange: running => { batchRetryingTasks.value = running },
+})
 async function retrySelectedTasks() {
-  const taskIds = selectedRetryTaskIds.value
-  if (!taskIds.length) { showToast('请至少选择一个失败任务'); return }
-  try {
-    batchRetryingTasks.value = true
-    const { data } = await api.post('/tasks/batch-retry', { task_ids: taskIds }, { headers: headers.value })
-    selectedTaskIds.value = selectedTaskIds.value.filter(id => !taskIds.includes(id))
-    await refreshTaskList()
-    showToast(`已将 ${data.total} 个失败任务重新入队`)
-  } catch (e:any) { showToast(e.response?.data?.detail || '批量重试任务失败') }
-  finally { batchRetryingTasks.value = false }
+  if (taskListRefreshing.value) return
+  await taskBatchRetrier.run(selectedRetryTaskIds.value)
 }
 async function retryWorkspaceTask(task: any) {
   try {

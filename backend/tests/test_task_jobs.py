@@ -1013,6 +1013,43 @@ class TaskJobTests(unittest.TestCase):
         self.assertTrue(all(task.provider_task_id is None for task in tasks))
         self.assertTrue(all(task.failure_reason is None for task in tasks))
 
+    def test_batch_retry_api_accepts_1000_and_rejects_empty_or_1001(self) -> None:
+        with self.session_factory() as db:
+            tasks = [PodTask(
+                company_id=1, template_id=1, created_by=1, status=TaskStatus.FAILED,
+                parameters={}, result_urls=[], result_map=[], provider="grsai",
+                provider_task_id=f"provider-{index}", failure_reason="rejected", submit_attempts=3,
+            ) for index in range(1000)]
+            db.add_all(tasks)
+            db.commit()
+            task_ids = [task.id for task in tasks]
+
+        def fake_user():
+            with self.session_factory() as db:
+                yield db.get(User, 1)
+
+        async def exercise_api():
+            transport = httpx.ASGITransport(app=main.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                for selection in ([], [*task_ids, task_ids[-1] + 1]):
+                    response = await client.post("/tasks/batch-retry", json={"task_ids": selection})
+                    self.assertEqual(response.status_code, 422, response.text)
+                    with self.session_factory() as db:
+                        self.assertEqual(db.scalar(select(func.count()).select_from(PodTask).where(
+                            PodTask.status == TaskStatus.FAILED)), 1000)
+                response = await client.post("/tasks/batch-retry", json={"task_ids": task_ids})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json(), {"total": 1000, "task_ids": task_ids})
+
+        with patch.dict(main.app.dependency_overrides, {main.get_db: self.fake_get_db, main.current_user: fake_user}):
+            asyncio.run(exercise_api())
+        with self.session_factory() as db:
+            tasks = db.scalars(select(PodTask)).all()
+            self.assertTrue(all(task.status == TaskStatus.QUEUED for task in tasks))
+            self.assertTrue(all(task.submit_attempts == 0 for task in tasks))
+            self.assertTrue(all(task.provider_task_id is None for task in tasks))
+            self.assertTrue(all(task.failure_reason is None for task in tasks))
+
     def test_batch_retry_is_atomic_when_selection_contains_non_failed_task(self) -> None:
         failed_id = self.add_task(status=TaskStatus.FAILED, provider_task_id="provider-1")
         queued_id = self.add_task(status=TaskStatus.QUEUED)
@@ -1029,12 +1066,18 @@ class TaskJobTests(unittest.TestCase):
     def test_batch_retry_rejects_inaccessible_tasks(self) -> None:
         task_id = self.add_task(status=TaskStatus.FAILED, provider_task_id="provider-1")
         with self.session_factory() as db:
+            other_task = PodTask(company_id=1, template_id=1, created_by=3, status=TaskStatus.FAILED,
+                                 parameters={}, result_urls=[], result_map=[], provider="grsai")
+            db.add(other_task); db.commit()
+            other_task_id = other_task.id
+        with self.session_factory() as db:
             with self.assertRaises(HTTPException) as raised:
                 main.batch_retry_tasks(
-                    TaskBatchRetry(task_ids=[task_id]),
+                    TaskBatchRetry(task_ids=[other_task_id, task_id]),
                     user=db.get(User, 3), db=db,
                 )
             task = db.get(PodTask, task_id)
+            self.assertEqual(db.get(PodTask, other_task_id).status, TaskStatus.FAILED)
         self.assertEqual(raised.exception.status_code, 404)
         self.assertEqual(task.status, TaskStatus.FAILED)
         self.assertEqual(task.provider_task_id, "provider-1")
