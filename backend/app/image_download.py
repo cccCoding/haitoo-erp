@@ -192,6 +192,10 @@ class ImageDownloadError(ValueError):
         self.retryable = retryable
 
 
+class InvalidImageContentError(ImageDownloadError):
+    """文件内容无法通过图片结构校验或完整解码。"""
+
+
 def decode_image(content: bytes, *, max_bytes: int | None = MAX_IMAGE_BYTES) -> str:
     if not content:
         raise ImageDownloadError("图片为空")
@@ -209,7 +213,7 @@ def decode_image(content: bytes, *, max_bytes: int | None = MAX_IMAGE_BYTES) -> 
                 picture.load()
         return mime
     except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-        raise ImageDownloadError("图片内容损坏或不是有效图片") from exc
+        raise InvalidImageContentError("图片内容损坏或不是有效图片") from exc
 
 
 async def _download_once(url: str) -> bytes:

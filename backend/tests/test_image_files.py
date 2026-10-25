@@ -177,6 +177,55 @@ class ImageFileTests(unittest.TestCase):
             self.assertIn("upload_url", main.presign_creative_asset(payload, user=db.get(User, 2), db=db))
             presign.assert_called_once()
 
+    def test_creative_corrupt_upload_has_machine_readable_code_and_compatible_detail(self):
+        from app.credentials import encrypt_secret
+        # PNG 文件头与 IHDR 完整，但 IDAT 被截断，与下载测试文件相同。
+        content = picture()[:41]
+        value = {"user": 1, "company": 1, "purpose": "image-upload",
+            "key": "image-upload-tmp/company/1/corrupt.png", "sha256": image_files.digest(content),
+            "size": len(content), "mime": "image/png", "category": "creative", "exp": int(time.time()) + 100}
+        with self.sessions() as db, patch.object(image_files, "read_image_object", return_value=content):
+            user = db.get(User, 1)
+            result = main.complete_image_upload(ImageUploadCompleteInput(category="creative",
+                upload_token=encrypt_secret(json.dumps(value))), user=user, db=db)
+            self.assertEqual(result.status_code, 400)
+            self.assertEqual(json.loads(result.body), {"detail": "图片内容损坏或不是有效图片", "code": "invalid_image"})
+            self.assertEqual(db.scalar(select(func.count()).select_from(ImageFile)), 0)
+            # 其他用途仍保留 HTTPException/string detail 的旧协议。
+            value["category"] = "template"
+            with self.assertRaises(HTTPException) as caught:
+                main.complete_image_upload(ImageUploadCompleteInput(category="template",
+                    upload_token=encrypt_secret(json.dumps(value))), user=user, db=db)
+            self.assertEqual(caught.exception.status_code, 400)
+            self.assertEqual(caught.exception.detail, "图片内容损坏或不是有效图片")
+        self.save.assert_not_called()
+
+    def test_creative_upload_integrity_storage_and_token_failures_are_not_skippable(self):
+        from app.credentials import encrypt_secret
+        from app.storage import StorageError
+        content = picture()
+        value = {"user": 1, "company": 1, "purpose": "image-upload",
+            "key": "image-upload-tmp/company/1/valid.png", "sha256": image_files.digest(content),
+            "size": len(content), "mime": "image/png", "category": "creative", "exp": int(time.time()) + 100}
+        cases = [({"sha256": "0" * 64}, content, "图片实际内容与上传信息不一致"),
+            ({"size": len(content) + 1}, content, "图片实际内容与上传信息不一致"),
+            ({"mime": "image/jpeg"}, content, "图片实际内容与上传信息不一致"),
+            ({"exp": 0}, content, "图片授权无效或已过期，请重新选择文件"),
+            ({}, StorageError("存储暂时不可用"), "存储暂时不可用")]
+        for changes, read_result, reason in cases:
+            with self.subTest(changes=changes, reason=reason), self.sessions() as db, \
+                    patch.object(image_files, "read_image_object") as read:
+                if isinstance(read_result, Exception):
+                    read.side_effect = read_result
+                else:
+                    read.return_value = read_result
+                with self.assertRaises(HTTPException) as caught:
+                    main.complete_image_upload(ImageUploadCompleteInput(category="creative",
+                        upload_token=encrypt_secret(json.dumps({**value, **changes}))), user=db.get(User, 1), db=db)
+                self.assertNotIsInstance(caught.exception, image_files.InvalidImageUploadError)
+                self.assertEqual(caught.exception.detail, reason)
+        self.save.assert_not_called()
+
     def test_order_original_urls_export_only_for_own_company_and_backfill_skips_drafts(self):
         from app.models import ProductDraft
         from scripts.backfill_image_files import references

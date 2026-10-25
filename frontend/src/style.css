@@ -240,3 +240,9 @@ nav button.subnav{width:calc(100% - 14px);margin:-3px 0 4px 14px;padding:10px 14
 @media(max-width:640px){.creative-resource-toolbar{flex-wrap:wrap}.creative-resource-dialog{padding:24px 20px}}
 .creative-resources-page>.material-usage-tabs{overflow-x:auto}.creative-resources-page>.material-usage-tabs>button{flex:none;white-space:nowrap}
 .style-resource-table{min-width:940px}.style-resource-table th:nth-child(3){width:110px}.style-resource-table th:nth-child(4){width:110px}.style-resource-table th:nth-child(5){width:140px}.style-resource-table th:nth-child(6){width:120px}.style-resource-table th:last-child{width:190px}.resource-image-unavailable{color:#9a93a7;font-size:12px}.creative-resource-pagination{flex-wrap:wrap;margin-top:16px}
+.asset-row.asset-skipped{background:#fffbee;border-color:#e2d8b4}
+.asset-dialog .asset-summary{gap:12px;flex-wrap:wrap}
+.asset-dialog .add-assets{flex-shrink:0;white-space:nowrap}
+.asset-row>div{min-width:0;flex:1}
+.asset-broken-preview{display:grid;place-items:center;flex-shrink:0;width:74px;height:74px;border-radius:9px;background:#f3e9ce;color:#765a1d;font-size:12px}
+.asset-row .asset-skip-reason{color:#765a1d;overflow-wrap:anywhere;white-space:normal}

@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from .credentials import decrypt_secret, encrypt_secret
-from .image_download import MAX_IMAGE_BYTES, ImageDownloadError, decode_image, download_image
+from .image_download import MAX_IMAGE_BYTES, ImageDownloadError, InvalidImageContentError, decode_image, download_image
 from .models import Company, ImageAddress, ImageFile, MaterialAsset, ProductLibraryProduct, ProductLibrarySource
 from .storage import (StorageError, create_temporary_image_upload, r2_object_key,
     read_image_object, save_content_image)
@@ -155,6 +155,11 @@ def prepare_upload(db, user, *, sha256: str, mime_type: str, size: int, category
     return {"upload_url": target["upload_url"], "upload_token": token, "duplicate": False}
 
 
+class InvalidImageUploadError(HTTPException):
+    def __init__(self, detail: str):
+        super().__init__(400, detail)
+
+
 def finish_upload(db, user, *, upload_token: str | None, file_token: str | None,
                   category: str = "material") -> ImageFile:
     if bool(file_token) == bool(upload_token):
@@ -169,6 +174,8 @@ def finish_upload(db, user, *, upload_token: str | None, file_token: str | None,
         if len(content) != value["size"] or digest(content) != value["sha256"] or decode_image(content) != value["mime"]:
             raise HTTPException(400, "图片实际内容与上传信息不一致")
         return register_bytes(db, user.company_id, content)
+    except InvalidImageContentError as exc:
+        raise InvalidImageUploadError(str(exc)) from exc
     except (StorageError, ImageDownloadError) as exc:
         raise HTTPException(400, str(exc)) from exc
 

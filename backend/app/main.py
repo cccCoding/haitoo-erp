@@ -20,6 +20,7 @@ from typing import Annotated, Literal
 from types import SimpleNamespace
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import and_, case, delete, func, inspect, or_, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -44,7 +45,7 @@ from .ai_providers import ProviderError, generate_draft_title, provider_supports
 from .credentials import decrypt_secret, encrypt_secret
 from .creative_resource_sizes import read_white_image_sizes
 from .storage import ExportMissingError, upload_hub_export, read_hub_export, delete_hub_export, StorageError
-from .image_files import (by_url, create_material, file_ticket, finish_upload, ingest_url, prepare_upload, resolve_export_images, ticket_file)
+from .image_files import (InvalidImageUploadError, by_url, create_material, file_ticket, finish_upload, ingest_url, prepare_upload, resolve_export_images, ticket_file)
 from .logging_config import configure_logging
 from .tiktok_export import build_workbook as build_tiktok_workbook, category_base_requirements, parse_listing_options, validate_attributes
 from .shopee_export import build_workbook as build_shopee_workbook, parse_listing_options as parse_shopee_listing_options
@@ -2081,8 +2082,13 @@ def presign_image_upload(payload: ImageUploadPresignInput, user: User = Depends(
 def complete_image_upload(payload: ImageUploadCompleteInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
     if payload.category not in DIRECT_UPLOAD_CATEGORIES:
         raise HTTPException(400, "不支持的上传目录")
-    image_file = finish_upload(db, user, upload_token=payload.upload_token,
-        file_token=payload.file_token, category=payload.category)
+    try:
+        image_file = finish_upload(db, user, upload_token=payload.upload_token,
+            file_token=payload.file_token, category=payload.category)
+    except InvalidImageUploadError as exc:
+        if payload.category != "creative":
+            raise
+        return JSONResponse(status_code=400, content={"detail": exc.detail, "code": "invalid_image"})
     return {"url": image_file.url}
 
 
