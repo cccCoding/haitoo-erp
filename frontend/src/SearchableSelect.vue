@@ -11,6 +11,7 @@ const props = withDefaults(defineProps<{
   placeholder?: string
   searchPlaceholder?: string
   disabled?: boolean
+  ariaLabel?: string
   maxVisible?: number
   emptyLabel?: string
   noMatchLabel?: string
@@ -140,7 +141,7 @@ function onSearchKeydown(event: KeyboardEvent) {
     if (option) selectOption(option.value)
     return
   }
-  if (event.key === 'Escape') { event.preventDefault(); closePanel() }
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closePanel() }
 }
 
 function onTriggerKeydown(event: KeyboardEvent) {
@@ -164,6 +165,9 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
     <button
       type="button"
       class="search-select-trigger"
+      :aria-label="ariaLabel"
+      :aria-expanded="open"
+      aria-haspopup="listbox"
       :disabled="disabled"
       @click="togglePanel"
       @keydown="onTriggerKeydown"

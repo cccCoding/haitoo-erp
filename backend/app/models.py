@@ -1,6 +1,7 @@
 import enum
+from decimal import Decimal
 from datetime import date, datetime
-from sqlalchemy import Boolean, Date, DateTime, Enum, Float, Index, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Enum, Float, Index, Integer, JSON, LargeBinary, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import DATETIME as MYSQL_DATETIME, MEDIUMBLOB
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
@@ -757,3 +758,112 @@ class TaskQueueSetting(Base):
     submit_interval_ms: Mapped[int] = mapped_column(Integer, default=1000)
     result_interval_ms: Mapped[int] = mapped_column(Integer, default=5000)
     result_concurrency: Mapped[int] = mapped_column(Integer, default=5, server_default="5")
+
+
+class FinanceShop(Base):
+    __tablename__ = "finance_shops"
+    __table_args__ = (UniqueConstraint("company_id", "name", name="uq_finance_shop_name"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    shop_type: Mapped[str] = mapped_column(String(20), server_default="cross_border")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class FinanceOrder(Base):
+    __tablename__ = "finance_orders"
+    __table_args__ = (
+        UniqueConstraint("shop_id", "order_number", name="uq_finance_order"),
+        Index("ix_finance_order_scope_time", "company_id", "shop_id", "paid_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(Integer)
+    shop_id: Mapped[int] = mapped_column(Integer)
+    order_number: Mapped[str] = mapped_column(String(120))
+    # 财务筛选使用 ERP 的「下单时间」；保留旧列名以兼容已有数据库和接口。
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class FinanceBill(Base):
+    __tablename__ = "finance_bills"
+    __table_args__ = (UniqueConstraint("order_id", "settlement_id", "sku_id", name="uq_finance_bill"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(index=True)
+    settlement_id: Mapped[str] = mapped_column(String(120))
+    # 跨境店保存结算单和 SKU；本土店两列固定为空，以订单唯一。
+    sku_id: Mapped[str] = mapped_column(String(120).with_variant(String(120, collation="utf8mb4_bin"), "mysql", "mariadb"), default="")
+    source_details: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    currency: Mapped[str] = mapped_column(String(3))
+    settlement: Mapped[Decimal] = mapped_column(Numeric(24, 6))
+    revenue: Mapped[Decimal] = mapped_column(Numeric(24, 6))
+
+
+class FinanceErpItem(Base):
+    __tablename__ = "finance_erp_items"
+    __table_args__ = (UniqueConstraint("order_id", "platform_sku", name="uq_finance_erp_item"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(index=True)
+    platform_sku: Mapped[str] = mapped_column(String(120).with_variant(String(120, collation="utf8mb4_bin"), "mysql", "mariadb"))
+    base_sku: Mapped[str] = mapped_column(String(120).with_variant(String(120, collation="utf8mb4_bin"), "mysql", "mariadb"), index=True)
+    quantity: Mapped[int] = mapped_column(Integer)
+
+
+class FinanceSkuMapping(Base):
+    """旧财务配置留档，仅用于历史数据迁移和恢复。"""
+    __tablename__ = "finance_sku_mappings"
+    __table_args__ = (UniqueConstraint("company_id", "base_sku", name="uq_finance_sku_mapping"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    base_sku: Mapped[str] = mapped_column(String(120))
+    template_id: Mapped[int] = mapped_column(Integer)
+
+
+class FinanceTemplateCost(Base):
+    """旧财务配置留档，核算已改用 FinanceSkuCost。"""
+    __tablename__ = "finance_template_costs"
+    __table_args__ = (UniqueConstraint("company_id", "template_id", name="uq_finance_template_cost"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    template_id: Mapped[int] = mapped_column(Integer)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+
+
+class FinanceSkuCost(Base):
+    """旧公司级 SKU 成本留档；核算使用店铺级 FinanceShopSkuCost。"""
+    __tablename__ = "finance_sku_costs"
+    __table_args__ = (UniqueConstraint("company_id", "base_sku", name="uq_finance_sku_cost"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    base_sku: Mapped[str] = mapped_column(String(120).with_variant(String(120, collation="utf8mb4_bin"), "mysql", "mariadb"))
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+
+
+class FinanceShopSkuCost(Base):
+    __tablename__ = "finance_shop_sku_costs"
+    __table_args__ = (UniqueConstraint("shop_id", "base_sku", name="uq_finance_shop_sku_cost"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    shop_id: Mapped[int] = mapped_column(index=True)
+    base_sku: Mapped[str] = mapped_column(String(120).with_variant(String(120, collation="utf8mb4_bin"), "mysql", "mariadb"))
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+
+
+class FinanceExchangeRate(Base):
+    __tablename__ = "finance_exchange_rates"
+    __table_args__ = (UniqueConstraint("shop_id", "currency", name="uq_finance_exchange_rate"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    shop_id: Mapped[int] = mapped_column(index=True)
+    currency: Mapped[str] = mapped_column(String(3))
+    rate: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+
+
+class FinanceImport(Base):
+    __tablename__ = "finance_imports"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    shop_id: Mapped[int] = mapped_column(index=True)
+    created_by: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(20))
+    filename: Mapped[str] = mapped_column(String(255))
+    counts: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

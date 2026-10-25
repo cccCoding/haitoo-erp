@@ -349,6 +349,8 @@ app.include_router(cross_company_collection_router)
 from .supply_catalog import router as supply_catalog_router
 app.include_router(supply_catalog_router)
 app.include_router(material_styles_router)
+from .finance import router as finance_router
+app.include_router(finance_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins.split(","),
