@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from .database import get_db
 from .finance_import import MAX_BYTES, SheetChoice, decimal_value, parse_workbook
+from .finance_export import export_workbook
 from .models import (Company, FinanceBill, FinanceErpItem, FinanceExchangeRate, FinanceImport,
     FinanceOrder, FinanceShop, FinanceShopSkuCost, Role, User)
 from .security import require_roles
@@ -482,9 +483,49 @@ def pending_time(shop_ids: list[int] = Query(..., min_length=1, max_length=500),
                  page_size: int = Query(20, ge=1, le=1000), user: User = Depends(admin), db: Session = Depends(get_db)):
     shops = shops_for(db, user, shop_ids)
     names = {s.id: s.name for s in shops}
-    condition = (FinanceOrder.company_id == user.company_id, FinanceOrder.shop_id.in_(names),
-        FinanceOrder.paid_at.is_(None), exists().where(FinanceBill.order_id == FinanceOrder.id))
-    total = db.scalar(select(func.count()).select_from(FinanceOrder).where(*condition))
-    rows = db.scalars(select(FinanceOrder).where(*condition).order_by(FinanceOrder.id.desc())
+    query = pending_order_query(user, shops)
+    total = db.scalar(select(func.count()).select_from(query.subquery()))
+    rows = db.scalars(query.order_by(FinanceOrder.id.desc())
         .offset((page - 1) * page_size).limit(page_size)).all()
     return {'total': total, 'items': [{'id': r.id, 'shop_name': names[r.shop_id], 'order_number': r.order_number} for r in rows]}
+
+
+def pending_order_query(user, shops):
+    return select(FinanceOrder).where(FinanceOrder.company_id == user.company_id,
+        FinanceOrder.shop_id.in_([s.id for s in shops]), FinanceOrder.paid_at.is_(None),
+        exists().where(FinanceBill.order_id == FinanceOrder.id))
+
+
+@router.get('/exports/missing-bills')
+def export_missing_bills(scope=Depends(query_scope), user: User = Depends(admin), db: Session = Depends(get_db)):
+    shops, start, end = scope
+    rows, _, _ = calculate(db, user, shops, start, end)
+    rows = [row for row in rows if not row['has_bill']]
+    def beijing(value):
+        return datetime.fromisoformat(value).astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
+    orders = [(row['shop_name'], row['order_number'], beijing(row['paid_at']),
+               Decimal(row['cost']) if row['cost'] is not None else None, '缺后台账单') for row in rows]
+    items = [(row['shop_name'], row['order_number'], item['platform_sku'], item['base_sku'], item['quantity'],
+              Decimal(item['unit_cost']) if item['unit_cost'] is not None else None,
+              Decimal(item['line_cost']) if item['line_cost'] is not None else None) for row in rows for item in row['items']]
+    return export_workbook('缺后台账单订单.xlsx', [
+        ('订单汇总', ['店铺', '订单编号', '下单时间（北京时间）', '衣服成本（人民币）', '状态'], orders),
+        ('商品明细', ['店铺', '订单编号', '平台 SKU', '基础 SKU', '商品数量', '单件成本（人民币）', '商品成本（人民币）'], items)])
+
+
+@router.get('/exports/pending-order-time')
+def export_pending_time(shop_ids: list[int] = Query(..., min_length=1, max_length=500),
+                        user: User = Depends(admin), db: Session = Depends(get_db)):
+    shops = shops_for(db, user, shop_ids)
+    names = {s.id: s.name for s in shops}
+    query = pending_order_query(user, shops)
+    orders = db.scalars(query.order_by(FinanceOrder.id.desc())).all()
+    lookup = {row.id: row for row in orders}
+    bills = db.scalars(select(FinanceBill).where(FinanceBill.order_id.in_(
+        query.with_only_columns(FinanceOrder.id))).order_by(FinanceBill.order_id.desc(), FinanceBill.id))
+    details = [(names[lookup[b.order_id].shop_id], lookup[b.order_id].order_number, b.settlement_id,
+        b.sku_id, b.currency, b.revenue, b.settlement) for b in bills]
+    return export_workbook('下单时间待补订单.xlsx', [
+        ('订单汇总', ['店铺', '订单编号', '待处理'],
+            [(names[row.shop_id], row.order_number, '补导 ERP 商品及下单时间') for row in orders]),
+        ('账单明细', ['店铺', '订单编号', '结算单 ID', 'SKU ID', '货币', '总收入（原币）', '结算金额（原币）'], details)])

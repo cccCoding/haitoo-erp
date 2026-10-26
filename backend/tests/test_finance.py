@@ -9,7 +9,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from alembic import command
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
@@ -230,6 +230,59 @@ class FinanceTests(TestCase):
         self.ok(self.upload('erp', [erp(), erp(order='old', paid='2026-08-01 12:00:00')]))
         self.assertEqual(self.ok(self.query())['total']['order_count'], 1)
         self.assertEqual(self.ok(self.request('GET', '/finance/pending-payment-time', params={'shop_ids': [self.shop]}))['total'], 0)
+
+    def test_missing_bill_export_uses_all_applied_orders_and_literal_identifiers(self):
+        malicious='=1+1'
+        self.ok(self.request('PATCH',f'/finance/shops/{self.shop}',json={'name':malicious,'shop_type':'cross_border'}))
+        numbers=[f'5862952074301615{i:02d}' for i in range(25)]
+        self.ok(self.upload('erp',[erp(order=n) for n in numbers]+[erp(order='old',paid='2026-08-01 12:00:00')]))
+        self.ok(self.upload('platform',[bill(order='with-bill')]))
+        self.ok(self.upload('erp',[erp(order='with-bill')]))
+        self.settings()
+        params={'shop_ids':[self.shop],'paid_from':'2026-10-01T00:00:00+08:00','paid_to':'2026-10-25T23:59:59+08:00'}
+        response=self.request('GET','/finance/exports/missing-bills',params=params)
+        self.assertEqual(response.status_code,200,response.text if response.status_code!=200 else '')
+        self.assertIn('attachment;',response.headers['content-disposition'])
+        self.assertEqual(response.headers['cache-control'],'no-store')
+        with BytesIO(response.content) as content:
+            book=load_workbook(content)
+            orders=book['订单汇总']
+            self.assertEqual(orders.max_row,26)
+            self.assertEqual({cell.value for cell in orders['B'][1:]},set(numbers))
+            self.assertEqual(orders['A2'].value,malicious)
+            self.assertEqual(orders['A2'].data_type,'s')
+            self.assertEqual(orders['B2'].data_type,'s')
+            self.assertEqual(orders['C2'].value,datetime(2026,10,20,12))
+            self.assertEqual(orders['D2'].value,5)
+            self.assertEqual(book['商品明细'].max_row,26)
+            self.assertEqual(book['商品明细']['C2'].value,'Y1AA001-S')
+            book.close()
+        self.assertEqual(self.request('GET','/finance/exports/missing-bills').status_code,422)
+        self.assertEqual(self.request('GET','/finance/exports/missing-bills',params=params,uid=2).status_code,403)
+        self.assertEqual(self.request('GET','/finance/exports/missing-bills',params=params,uid=4).status_code,404)
+
+    def test_pending_time_export_is_unpaged_and_scoped_to_all_selected_shops(self):
+        other=self.ok(self.request('POST','/finance/shops',json={'name':'另一店'}))['id']
+        foreign=self.ok(self.request('POST','/finance/shops',uid=4,json={'name':'外公司'}))['id']
+        self.ok(self.upload('platform',[bill(order=f'pending-{i}') for i in range(25)]))
+        self.ok(self.upload('platform',[bill(order='pending-other')],shop=other))
+        self.ok(self.upload('platform',[bill(order='foreign')],shop=foreign,uid=4))
+        self.ok(self.upload('erp',[erp(order='pending-0')]))
+        response=self.request('GET','/finance/exports/pending-order-time',params={'shop_ids':[self.shop,other]})
+        self.assertEqual(response.status_code,200)
+        book=load_workbook(BytesIO(response.content))
+        self.assertEqual(book['订单汇总'].max_row,26)
+        exported={cell.value for cell in book['订单汇总']['B'][1:]}
+        self.assertNotIn('pending-0',exported)
+        self.assertNotIn('foreign',exported)
+        self.assertIn('pending-other',exported)
+        self.assertEqual(book['账单明细'].max_row,26)
+        self.assertEqual(book['账单明细']['F2'].value,30)
+        self.assertEqual(book['账单明细']['G2'].value,20)
+        book.close()
+        for endpoint in ('missing-bills','pending-order-time'):
+            params={'shop_ids':[self.shop,foreign],'paid_from':'2026-10-01T00:00:00Z','paid_to':'2026-10-25T00:00:00Z'}
+            self.assertEqual(self.request('GET',f'/finance/exports/{endpoint}',params=params).status_code,404)
 
     def test_missing_settings_zero_cost_negative_settlement_and_history_recalculation(self):
         self.ok(self.upload('erp', [erp(), erp(order='erp-only')]))

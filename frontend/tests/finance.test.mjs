@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { defaultFinanceShop, financeDefaults, financeInstant, financeQueryKey, validateFinanceQuery, validateFinanceUnitCost } from '../src/finance.ts'
+import { defaultFinanceShop, financeDefaults, financeInstant, financeOverviewAmounts, financeQueryKey, validateFinanceQuery, validateFinanceUnitCost } from '../src/finance.ts'
 
 test('Default range is exactly thirty days and displayed in Beijing time',()=>{
   const range=financeDefaults(new Date('2026-10-25T04:15:16.900Z'))
@@ -26,4 +26,18 @@ test('Exactly one valid shop is restored, otherwise the earliest shop is selecte
 test('SKU unit cost distinguishes missing input from zero and accepts at most two decimals',()=>{
   for(const value of ['0','0.00','18.25',' 25 ','9999999999999999.99']) assert.equal(validateFinanceUnitCost(value),'')
   for(const value of ['', ' ', '-1','NaN','Infinity','0.001','10000000000000000']) assert.ok(validateFinanceUnitCost(value))
+})
+
+test('Temporary other costs subtract exact cents, sum shops and preserve unavailable profit',()=>{
+  assert.deepEqual(financeOverviewAmounts('100.00',['0.10','0.20']),{otherCost:'0.30',profit:'99.70',error:''})
+  assert.equal(financeOverviewAmounts('0.00',['1.01']).profit,'-1.01')
+  assert.equal(financeOverviewAmounts('-2.00',['3']).profit,'-5.00')
+  assert.deepEqual(financeOverviewAmounts(null,['0','']),{otherCost:'0.00',profit:null,error:''})
+  assert.equal(financeOverviewAmounts('9999999999999999.99',['0.01']).profit,'9999999999999999.98')
+  for(const cost of ['-1','1.001','NaN','10000000000000000']) {
+    const result=financeOverviewAmounts('10.00',[cost])
+    assert.ok(result.error)
+    assert.equal(result.profit,null)
+    assert.equal(result.otherCost,null)
+  }
 })

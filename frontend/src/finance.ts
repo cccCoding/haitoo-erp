@@ -40,3 +40,21 @@ export function validateFinanceUnitCost(value: string): string {
   if (text.split('.')[0].replace(/^0+/, '').length>16) return '成本超出支持范围'
   return ''
 }
+
+// 金额按整数分运算，避免临时成本和大额利润发生浮点误差。
+export function financeOverviewAmounts(profit: string|null, costs: string[]) {
+  const error = costs.map(value => value.trim() ? validateFinanceUnitCost(value) : '').find(Boolean) || ''
+  if (error) return {otherCost:null, profit:null, error}
+  function cents(value:string):bigint {
+    const text=value.trim() || '0', negative=text.startsWith('-')
+    const [whole, fraction='']=text.replace(/^-/, '').split('.')
+    const result=BigInt(whole)*100n + BigInt(fraction.padEnd(2,'0'))
+    return negative ? -result : result
+  }
+  function money(value:bigint):string {
+    const absolute=value<0n ? -value : value
+    return `${value<0n ? '-' : ''}${absolute/100n}.${String(absolute%100n).padStart(2,'0')}`
+  }
+  const total=costs.reduce((sum,value)=>sum+cents(value),0n)
+  return {otherCost:money(total),profit:profit===null ? null : money(cents(profit)-total),error:''}
+}
