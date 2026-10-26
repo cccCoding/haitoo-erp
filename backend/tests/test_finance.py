@@ -343,7 +343,7 @@ class FinanceTests(TestCase):
         self.assertEqual({r['order_number'] for r in pending},{'cost','erp-only','both','no-erp'})
         self.assertIn('缺后台账单',next(r for r in pending if r['order_number']=='erp-only')['statuses'])
 
-    def test_exact_time_boundaries_90_days_and_timezone(self):
+    def test_exact_time_boundaries_180_days_and_timezone(self):
         self.ok(self.upload('platform', [bill()]))
         self.ok(self.upload('erp', [erp()]))
         response = self.query(paid_from='2026-10-20T04:00:00Z', paid_to='2026-10-20T04:00:01Z')
@@ -351,10 +351,28 @@ class FinanceTests(TestCase):
         self.assertEqual(self.ok(self.query(paid_from='2026-10-20T11:59:59+08:00', paid_to='2026-10-20T12:00:00+08:00'))['total']['order_count'], 1)
         self.assertEqual(self.ok(self.query(paid_from='2026-10-20T12:00:01+08:00', paid_to='2026-10-20T12:00:02+08:00'))['total']['order_count'], 0)
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        self.assertEqual(self.query(paid_from=start.isoformat(), paid_to=(start+timedelta(days=90)).isoformat()).status_code, 200)
-        self.assertEqual(self.query(paid_from=start.isoformat(), paid_to=(start+timedelta(days=90,seconds=1)).isoformat()).status_code, 400)
+        self.assertEqual(self.query(paid_from=start.isoformat(), paid_to=(start+timedelta(days=180)).isoformat()).status_code, 200)
+        self.assertEqual(self.query(paid_from=start.isoformat(), paid_to=(start+timedelta(days=180,seconds=1)).isoformat()).status_code, 400)
         for start, end in [('2026-10-20T00:00:00', '2026-10-21T00:00:00'), ('2026-10-21T00:00:00Z','2026-10-20T00:00:00Z'), ('2026-10-20T00:00:00Z','2026-10-20T00:00:00Z')]:
             self.assertEqual(self.query(paid_from=start,paid_to=end).status_code, 400)
+
+    def test_calendar_date_filter_includes_full_beijing_days_for_results_and_exports(self):
+        self.ok(self.upload('erp',[
+            erp(order='before',paid='2026-10-19 23:59:59'),erp(order='start',paid='2026-10-20 00:00:00'),
+            erp(order='end',paid='2026-10-20 23:59:59'),erp(order='after',paid='2026-10-21 00:00:00')]))
+        params={'shop_ids':[self.shop],'paid_from':'2026-10-19T16:00:00.000Z',
+                'paid_to':'2026-10-20T15:59:59.999999Z'}
+        result=self.ok(self.request('GET','/finance/results',params=params))
+        self.assertEqual({r['order_number'] for r in result['orders']['items']},{'start','end'})
+        exported=self.request('GET','/finance/exports/missing-bills',params=params)
+        self.assertEqual(exported.status_code,200)
+        book=load_workbook(BytesIO(exported.content))
+        self.assertEqual({r[1] for r in book['订单汇总'].iter_rows(min_row=2,values_only=True)},{'start','end'})
+        book.close()
+        self.assertEqual(self.query(paid_from='2025-12-31T16:00:00Z',
+            paid_to='2026-06-29T15:59:59.999999Z').status_code,200)
+        self.assertEqual(self.query(paid_from='2025-12-31T16:00:00Z',
+            paid_to='2026-06-30T15:59:59.999999Z').status_code,400)
 
     def test_multishop_same_number_pagination_and_missing_rates_partial_summary(self):
         other = self.ok(self.request('POST', '/finance/shops', json={'name': '另一店铺'}))['id']

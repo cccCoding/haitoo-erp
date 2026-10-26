@@ -2,19 +2,25 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { defaultFinanceShop, financeDefaults, financeInstant, financeOverviewAmounts, financeQueryKey, validateFinanceQuery, validateFinanceUnitCost } from '../src/finance.ts'
 
-test('Default range is exactly thirty days and displayed in Beijing time',()=>{
+test('Default range includes thirty calendar days through today in Beijing time',()=>{
   const range=financeDefaults(new Date('2026-10-25T04:15:16.900Z'))
-  assert.deepEqual(range,{start:'2026-09-25T12:15:16',end:'2026-10-25T12:15:16'})
-  assert.equal(financeInstant(range.end),'2026-10-25T04:15:16.000Z')
-  assert.equal(financeInstant('2026-10-25T12:15'),'2026-10-25T04:15:00.000Z')
+  assert.deepEqual(range,{start:'2026-09-26',end:'2026-10-25'})
+  assert.deepEqual(financeDefaults(new Date('2026-10-24T16:00:00Z')),range)
+  assert.equal(financeInstant(range.start),'2026-09-25T16:00:00.000Z')
+  assert.equal(financeInstant(range.end,'end'),'2026-10-25T15:59:59.999999Z')
+  assert.equal(financeInstant('2024-02-29'),'2024-02-28T16:00:00.000Z')
+  assert.throws(()=>financeInstant('2026-10-25T12:15'))
 })
-test('A shop and both dates are required, and the inclusive window is limited to ninety days',()=>{
-  assert.ok(validateFinanceQuery([],'2026-01-01T00:00:00','2026-04-01T00:00:00'))
-  assert.ok(validateFinanceQuery([1],'','2026-04-01T00:00:00'))
-  assert.equal(validateFinanceQuery([1],'2026-01-01T00:00:00','2026-04-01T00:00:00'),'')
-  assert.ok(validateFinanceQuery([1],'2026-01-01T00:00:00','2026-04-01T00:00:01'))
-  assert.ok(validateFinanceQuery([1],'2026-01-01T00:00:00','2026-01-01T00:00:00'))
-  assert.ok(validateFinanceQuery([1],'2026-02-30T00:00:00','2026-04-01T00:00:00'))
+test('A shop and both dates are required, and the inclusive window is limited to 180 days',()=>{
+  assert.ok(validateFinanceQuery([],'2026-01-01','2026-06-29'))
+  assert.ok(validateFinanceQuery([1],'','2026-06-29'))
+  assert.equal(validateFinanceQuery([1],'2026-01-01','2026-06-29'),'')
+  assert.equal(validateFinanceQuery([1],'2026-01-01','2026-03-31'),'')
+  assert.ok(validateFinanceQuery([1],'2026-01-01','2026-06-30'))
+  assert.equal(validateFinanceQuery([1],'2026-01-01','2026-01-01'),'')
+  assert.ok(validateFinanceQuery([1],'2026-01-02','2026-01-01'))
+  assert.ok(validateFinanceQuery([1],'2026-02-30','2026-04-01'))
+  assert.ok(validateFinanceQuery([1],'2026-02-29','2026-04-01'))
 })
 test('Exactly one valid shop is restored, otherwise the earliest shop is selected',()=>{
   const shops=[{id:1},{id:5}]
