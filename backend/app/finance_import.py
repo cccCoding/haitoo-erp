@@ -165,11 +165,9 @@ def parse_workbook(data: bytes, kind: str, sheet_name: str | None = None, shop_t
                 key = (oid, settlement_id, sku_id)
                 if key in bills:
                     previous = bills[key]
-                    if shop_type == 'cross_border':
-                        if previous != item:
-                            raise ValueError(f"第 {row_number} 行同一订单、结算单和 SKU 的金额或货币冲突")
-                        continue
                     if previous[0] != currency:
+                        if shop_type == 'cross_border':
+                            raise ValueError(f"第 {row_number} 行同一订单、结算单和 SKU 的货币不一致，无法汇总")
                         raise ValueError(f"第 {row_number} 行同一订单的货币不一致，无法汇总")
                     with localcontext() as context:
                         context.prec = 64

@@ -59,7 +59,7 @@ const importShop = computed(() => shops.value.find(shop => shop.id===importShopI
 const importShopOptions = computed(() => shops.value.map(shop => ({value:shop.id,label:`${shop.name} · ${shopTypeLabel(shop.shop_type)}`})))
 const importRule = computed(() => importKind.value==='erp' ? '同订单重复 SKU 数量相加；重导将替换该订单全部商品。' :
   importShop.value?.shop_type==='local' ? '仅读取订单交易。同店铺、同订单的行先汇总；重导覆盖该订单金额，其他订单保留。重导须包含该订单的完整账单。' :
-  '仅读取订单交易。按店铺、订单 ID、结算单 ID、SKU ID 区分明细；重导更新相同明细，其他明细保留。')
+  '同一订单、结算单、SKU 的订单交易逐行汇总，金额相同的行也计入。重导覆盖对应组，其他组保留；重导须包含对应组的全部记录。')
 function shopTypeLabel(value:ShopType) { return value==='local' ? '本土店' : '跨境店' }
 function shopName(id:number) { return shops.value.find(s => s.id===id)?.name || '店铺已删除' }
 function amount(value:string|null) { if(value===null) return '—'; const [whole, cents='00']=value.split('.'); return `¥ ${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}.${cents.padEnd(2,'0')}` }

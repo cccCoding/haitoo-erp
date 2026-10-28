@@ -189,25 +189,112 @@ class FinanceTests(TestCase):
         self.assertEqual(conflict.status_code,400)
         self.assertEqual(self.request('PATCH',f'/finance/shops/{self.shop}/type',json={'shop_type':'cross_border'}).status_code,409)
 
-    def test_shop_types_and_cross_border_sku_validation_and_deduplication(self):
+    def test_shop_types_and_cross_border_sku_validation_and_aggregation(self):
         shops=self.ok(self.request('GET','/finance/shops'))
         self.assertEqual(shops[0]['shop_type'],'cross_border')
         self.assertFalse(shops[0]['has_platform_data'])
         for headers,record in ((BILL_HEADERS[:-1],bill()[:-1]),(BILL_HEADERS[:-2],bill()[:-2])):
             self.assertEqual(self.upload('platform',[record],headers=headers).status_code,400)
         self.assertEqual(self.upload('platform',[bill(sku=None)]).status_code,400)
-        self.assertEqual(self.upload('platform',[bill(),bill(amount='99')]).status_code,400)
+        self.assertEqual(self.upload('platform',[bill(),bill(currency='CNY')]).status_code,400)
         first=self.ok(self.upload('platform',[bill(),bill(),bill(sku='second',amount='4')]))
         self.assertEqual(first['created'],2)
+        with self.sessions() as db:
+            group=db.scalar(select(FinanceBill).where(FinanceBill.sku_id=='sku1'))
+            self.assertEqual((group.settlement,group.revenue),(Decimal('40'),Decimal('60')))
+            self.assertEqual(len(group.source_details),2)
         self.assertEqual(self.ok(self.upload('platform',[bill(sku='second',amount='9')]))['updated'],1)
         with self.sessions() as db:
-            self.assertEqual([b.settlement for b in db.scalars(select(FinanceBill).order_by(FinanceBill.id))],[Decimal('20'),Decimal('9')])
+            self.assertEqual([b.settlement for b in db.scalars(select(FinanceBill).order_by(FinanceBill.id))],[Decimal('40'),Decimal('9')])
         self.assertTrue(self.ok(self.request('GET','/finance/shops'))[0]['has_platform_data'])
         self.assertEqual(self.request('PATCH',f'/finance/shops/{self.shop}/type',json={'shop_type':'local'}).status_code,409)
         other=self.ok(self.request('POST','/finance/shops',uid=4,json={'name':'其他公司','shop_type':'local'}))['id']
         self.assertEqual(self.request('PATCH',f'/finance/shops/{other}/type',json={'shop_type':'cross_border'}).status_code,404)
         self.assertEqual(self.request('PATCH',f'/finance/shops/{self.shop}/type',uid=2,json={'shop_type':'local'}).status_code,403)
         self.assertEqual(self.request('POST','/finance/shops',json={'name':'无效','shop_type':'invalid'}).status_code,422)
+
+    def test_cross_border_fee_rows_aggregate_and_reimport_without_changing_erp_cost(self):
+        records=[bill(amount='-2.90',revenue='0'),bill(amount='-6.44',revenue='0')]
+        self.ok(self.upload('erp',[erp()]))
+        self.settings(rate='1')
+        first=self.ok(self.upload('platform',records))
+        self.assertEqual((first['source_rows'],first['created'],first['unit']),(2,1,'账单明细'))
+        for rows in (records,list(reversed(records))):
+            with self.subTest(rows=rows):
+                repeated=self.ok(self.upload('platform',rows))
+                self.assertEqual((repeated['created'],repeated['updated'],repeated['unchanged']),(0,0,1))
+                result=self.ok(self.query())
+                self.assertEqual((result['total']['settlement'],result['total']['sales'],
+                    result['total']['cost'],result['total']['profit']),('-9.34','0.00','5.00','-14.34'))
+                self.assertEqual(result['skus']['items'][0]['quantity'],1)
+                groups=result['orders']['items'][0]['bills']
+                self.assertEqual(len(groups),1)
+                self.assertEqual([source['settlement'] for source in groups[0]['source_details']],
+                    [record[3] for record in rows])
+
+    def test_cross_border_reimport_replaces_only_supplied_groups_and_sources(self):
+        def snapshot(db):
+            return {b.id:(b.order_id,b.settlement_id,b.sku_id,b.currency,b.settlement,b.revenue,b.source_details)
+                for b in db.scalars(select(FinanceBill))}
+        records=[bill(),bill(),bill(sku='second',amount='4'),
+            bill(settlement='s2',amount='7'),bill(order='o2',amount='8')]
+        self.assertEqual(self.ok(self.upload('platform',records))['created'],4)
+        with self.sessions() as db:
+            before=snapshot(db)
+        changed=[bill(amount='10',revenue='15'),bill(amount='5',revenue='10')]
+        self.assertEqual(self.ok(self.upload('platform',changed))['updated'],1)
+        with self.sessions() as db:
+            after=snapshot(db)
+            self.assertEqual(before.keys(),after.keys())
+            changed_ids=[key for key in before if before[key]!=after[key]]
+            self.assertEqual(len(changed_ids),1)
+            group=db.get(FinanceBill,changed_ids[0])
+            self.assertEqual((group.settlement_id,group.sku_id,group.settlement,group.revenue),
+                ('s1','sku1',Decimal('15'),Decimal('25')))
+            self.assertEqual(len(group.source_details),2)
+        # 合计未变时也要替换来源明细，不能保留上次上传的行。
+        self.assertEqual(self.ok(self.upload('platform',[bill(amount='15',revenue='25')]))['unchanged'],1)
+        with self.sessions() as db:
+            group=db.get(FinanceBill,changed_ids[0])
+            self.assertEqual(len(group.source_details),1)
+            self.assertEqual(group.source_details[0]['settlement'],'15')
+
+    def test_cross_border_currency_conflict_keeps_existing_data(self):
+        self.ok(self.upload('erp',[erp()]))
+        self.ok(self.upload('platform',[bill()]))
+        baseline=self.ok(self.query())
+        with self.sessions() as db:
+            imports_before=len(db.scalars(select(FinanceImport)).all())
+        response=self.upload('platform',[bill(order='new'),bill(amount='1'),bill(amount='2',currency='CNY')])
+        self.assertEqual(response.status_code,400)
+        self.assertEqual(response.json()['detail'],'第 4 行同一订单、结算单和 SKU 的货币不一致，无法汇总')
+        self.assertEqual(self.ok(self.query()),baseline)
+        with self.sessions() as db:
+            self.assertIsNone(db.scalar(select(FinanceOrder).where(FinanceOrder.order_number=='new')))
+            self.assertEqual(len(db.scalars(select(FinanceImport)).all()),imports_before)
+
+    def test_cross_border_aggregation_decimal_precision_and_limits(self):
+        records=[bill(amount='-2.900001',revenue='0.000001'),
+            bill(amount='-6.439999',revenue='-0.000001'),bill(amount='0',revenue='0')]
+        parsed=parse_workbook(workbook(BILL_HEADERS,records),'platform')
+        self.assertEqual(parsed['bills'][('o1','s1','sku1')],('MYR',Decimal('-9.340000'),Decimal('0')))
+        self.assertEqual(len(parsed['bill_sources'][('o1','s1','sku1')]),3)
+        normalized=parse_workbook(workbook(BILL_HEADERS,[bill(currency='RMB'),bill(currency='cny')]),'platform')
+        self.assertEqual(normalized['bills'][('o1','s1','sku1')],('CNY',Decimal('40'),Decimal('60')))
+        maximum='999999999999999999.999999'
+        for field,label in (('amount','结算总金额'),('revenue','总收入')):
+            for sign in ('','-'):
+                with self.subTest(field=field,sign=sign):
+                    rows=[bill(**{field:sign+maximum}),bill(**{field:sign+'0.000001'})]
+                    response=self.upload('platform',rows)
+                    self.assertEqual(response.status_code,400)
+                    self.assertIn(label+'合计',response.json()['detail'])
+            with self.subTest(field=field,precision=7):
+                self.assertEqual(self.upload('platform',[bill(**{field:'0.0000001'})]).status_code,400)
+        with self.sessions() as db:
+            self.assertEqual(len(db.scalars(select(FinanceBill)).all()),0)
+            self.assertEqual(len(db.scalars(select(FinanceOrder)).all()),0)
+            self.assertEqual(len(db.scalars(select(FinanceImport)).all()),0)
 
     def test_legacy_unidentified_cross_border_group_requires_matching_full_detail(self):
         self.ok(self.upload('erp',[erp()]))
