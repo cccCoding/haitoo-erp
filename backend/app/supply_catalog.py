@@ -97,6 +97,7 @@ class StrategyInput(Input):
     price: Decimal = Field(gt=0, le=999999, decimal_places=2)
     stock: int = Field(default=999, ge=0, le=999999)
     cod: Literal["Y", "N"] = "Y"
+    shipping_insurance: Literal["Optional", "Mandatory"] | None = None
     attributes: dict[str, str | list[str]] = Field(default_factory=dict)
     sku_count: int = Field(ge=5, le=9)
     link_count: int = Field(ge=10, le=50)

@@ -509,6 +509,7 @@ class TiktokDraftExportInput(BaseModel):
     default_price: float = Field(ge=0.01, le=999999)
     default_quantity: int = Field(default=999, ge=0, le=999999)
     cod: Literal["Y", "N"] = "Y"
+    shipping_insurance: Literal["Optional", "Mandatory"] | None = None
     attributes: dict[str, str | list[str]] = Field(default_factory=dict, max_length=14)
     product_overrides: list[TiktokDraftProductOverride] = Field(default_factory=list, max_length=100)
 

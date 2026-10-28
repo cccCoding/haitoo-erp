@@ -19,7 +19,7 @@ DATA_START_ROW = 7
 DATA_END_ROW = 5000
 MAX_DATA_ROWS = DATA_END_ROW - DATA_START_ROW + 1
 BASE_FIELD_START_COLUMN = 3  # C
-OPTIONS_PARSER_VERSION = 2
+OPTIONS_PARSER_VERSION = 3
 
 FIELD_CATEGORY = "category"
 FIELD_PRODUCT_NAME = "product_name"
@@ -40,6 +40,7 @@ FIELD_QUANTITY = "quantity"
 FIELD_SELLER_SKU = "seller_sku"
 FIELD_SIZE_CHART = "size_chart"
 FIELD_COD = "cod"
+FIELD_SHIPPING_INSURANCE = "shipping_insurance"
 FIELD_SPECIAL_PRODUCT_LISTING_TYPE = "special_product_listing_type"
 FIELD_AUCTION_STARTING_PRICE = "auction_starting_price"
 
@@ -107,6 +108,28 @@ def _template_version(sheet) -> str | None:
     """本土模板将版本放在 A2，跨境模板则将语言提示放在 A2、版本放在 B2。"""
     values = [_clean(sheet.cell(2, column).value) for column in range(1, sheet.max_column + 1)]
     return next((value for value in values if value.upper().startswith("V") and any(char.isdigit() for char in value)), values[0][:40] or None)
+
+
+def _shipping_insurance_options(workbook, fields: dict[str, int]) -> list[str]:
+    if FIELD_SHIPPING_INSURANCE not in fields:
+        return []
+    if "ShippingInsurance" not in workbook.sheetnames:
+        raise ValueError("双平台模板缺少 ShippingInsurance 工作表")
+    options = list(dict.fromkeys(_clean(row[0]) for row in workbook["ShippingInsurance"].iter_rows(values_only=True)
+                                if row and _clean(row[0])))
+    if "Optional" not in options:
+        raise ValueError("运输保险选项缺少默认值 Optional")
+    return options
+
+
+def resolve_shipping_insurance(value: str | None, options: list[str]) -> str | None:
+    """双平台默认选择 Optional；不含保险字段的模板不使用该参数。"""
+    if not options:
+        return None
+    selected = "Optional" if value is None else value
+    if selected not in options:
+        raise ValueError("运输保险必须从模板选项中选择")
+    return selected
 
 
 def tiktok_template_adapter(template_fields: set[str], expected_type: str | None = None) -> TiktokTemplateAdapter:
@@ -245,6 +268,7 @@ def parse_listing_options(template_bytes: bytes | None = None, template_type: st
         raise ValueError(f"TikTok 模板缺少导出字段：{', '.join(missing_fields)}")
     attribute_fields = _attribute_fields(template_sheet)
     attribute_options = _attribute_options_by_column(template_sheet, attribute_sheet, attribute_fields)
+    insurance_options = _shipping_insurance_options(workbook, template_fields)
 
     categories = [
         {"name": _clean(category_sheet.cell(row, 1).value), "id": category_sheet.cell(row, 2).value}
@@ -308,11 +332,14 @@ def parse_listing_options(template_bytes: bytes | None = None, template_type: st
         "capabilities": {
             "supports_cod": adapter.supports_cod,
             "supports_hubstudio_submit": adapter.supports_hubstudio_submit,
+            "supports_shipping_insurance": bool(insurance_options),
         },
         "categories": categories,
         "attributes_by_category": attributes_by_category,
         "base_requirements_by_category": base_requirements_by_category,
         "cod_options": ["Y", "N"],
+        "shipping_insurance_options": insurance_options,
+        "shipping_insurance_default": "Optional" if insurance_options else None,
         "price_limits": {"min": 0.01, "max": 999999},
         "quantity_limits": {"min": 0, "max": 999999},
         "multiple_value_separator": ",",
@@ -495,7 +522,7 @@ def _set_literal_value(cell, value) -> None:
         cell.data_type = "s"
 
 
-def build_workbook(*, template, category: str, cod: str, attributes: dict[str, str], products: list[dict], template_bytes: bytes | None = None, template_type: str | None = None) -> bytes:
+def build_workbook(*, template, category: str, cod: str, attributes: dict[str, str], products: list[dict], template_bytes: bytes | None = None, template_type: str | None = None, shipping_insurance: str | None = None) -> bytes:
     workbook = load_workbook(_template_source(template_bytes), data_only=False, read_only=False)
     sheet = workbook["Template"]
     field_columns = _field_columns(sheet)
@@ -503,6 +530,7 @@ def build_workbook(*, template, category: str, cod: str, attributes: dict[str, s
     missing_fields = sorted(adapter.required_fields - set(field_columns))
     if missing_fields:
         raise ValueError(f"TikTok 模板缺少导出字段：{', '.join(missing_fields)}")
+    insurance_value = resolve_shipping_insurance(shipping_insurance, _shipping_insurance_options(workbook, field_columns))
     sizes = [
         _clean(size)
         for size in ((template.sku_specifications or {}).get("size", {}).get("options", []))
@@ -557,6 +585,8 @@ def build_workbook(*, template, category: str, cod: str, attributes: dict[str, s
                     for field in (FIELD_SPECIAL_PRODUCT_LISTING_TYPE, FIELD_AUCTION_STARTING_PRICE):
                         if field in field_columns:
                             values[field] = None
+                if insurance_value is not None:
+                    values[FIELD_SHIPPING_INSURANCE] = insurance_value
                 for index, gallery_url in enumerate(gallery):
                     values[FIELD_MAIN_IMAGE if index == 0 else f"image_{index + 1}"] = gallery_url
                 for field, value in values.items():

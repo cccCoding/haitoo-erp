@@ -4,6 +4,7 @@ import copy
 import hashlib
 from datetime import datetime, timedelta
 from io import BytesIO
+from pathlib import Path
 import random
 import unittest
 from collections import Counter
@@ -113,6 +114,34 @@ class SupplyStyleSamplingTests(unittest.TestCase):
 
 
 class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
+    def test_bothplatforms_worker_writes_selected_and_legacy_default_insurance(self):
+        from app.tiktok_export import parse_listing_options
+
+        content = (Path(__file__).parent / "fixtures/tiktok/indonesia/bothplatforms_menswear_20261026.xlsx").read_bytes()
+        options = parse_listing_options(content, "tiktok_local")
+        with self.sessions() as db:
+            catalog = db.get(TiktokCategoryCatalog, 1)
+            catalog.template_blob, catalog.parsed_options = content, options
+            db.commit()
+        for insurance in (None, "Mandatory"):
+            with self.subTest(insurance=insurance):
+                job_id = self.make_job()
+                with self.sessions() as db:
+                    job = db.get(SupplyJob, job_id)
+                    snapshot = copy.deepcopy(job.snapshot)
+                    snapshot["strategy"].update(category_name=options["categories"][0]["name"], attributes={"product_property/100198": "Embroidery"})
+                    if insurance is not None:
+                        snapshot["strategy"]["shipping_insurance"] = insurance
+                    else:
+                        snapshot["strategy"].pop("shipping_insurance", None)
+                    job.snapshot = snapshot
+                    db.commit()
+                self.run_job(job_id)
+                self.assert_completed(job_id)
+                rows = self.export_rows()
+                self.assertEqual(len(rows), 100)
+                self.assertEqual({row["shipping_insurance"] for row in rows}, {insurance or "Optional"})
+
     def test_each_generated_link_obeys_snapshot_filter_after_flags_change(self):
         for mode in ("exclude", "include", "only"):
             with self.sessions() as db:

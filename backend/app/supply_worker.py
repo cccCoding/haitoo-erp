@@ -294,7 +294,8 @@ async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
                 category_blob = bytes(db.get(SupplyJob, job_id).category_blob)
             content = await asyncio.to_thread(build_workbook, template=SimpleNamespace(**template),
                 category=strategy["category_name"], cod=strategy["cod"], attributes=strategy["attributes"],
-                products=products, template_bytes=category_blob, template_type=snap["catalog_type"])
+                products=products, template_bytes=category_blob, template_type=snap["catalog_type"],
+                shipping_insurance=strategy.get("shipping_insurance"))
             mutate(job_id, epoch, owner, lambda db, job: setattr(job, "export_blob", content), session_factory)
         else:
             content = data["export_blob"]

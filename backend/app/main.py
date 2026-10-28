@@ -47,7 +47,7 @@ from .creative_resource_sizes import read_white_image_sizes
 from .storage import ExportMissingError, upload_hub_export, read_hub_export, delete_hub_export, StorageError
 from .image_files import (InvalidImageUploadError, by_url, create_material, file_ticket, finish_upload, ingest_url, prepare_upload, resolve_export_images, ticket_file)
 from .logging_config import configure_logging
-from .tiktok_export import build_workbook as build_tiktok_workbook, catalog_listing_options, category_base_requirements, parse_listing_options, validate_attributes
+from .tiktok_export import build_workbook as build_tiktok_workbook, catalog_listing_options, category_base_requirements, parse_listing_options, resolve_shipping_insurance, validate_attributes
 from .shopee_export import build_workbook as build_shopee_workbook, parse_listing_options as parse_shopee_listing_options
 import httpx
 
@@ -4159,6 +4159,7 @@ def build_tiktok_export_response(payload: TiktokDraftExportInput, user: User, db
         options = catalog_listing_options(catalog)
         attributes = validate_attributes(payload.category, payload.attributes, options)
         base_requirements = category_base_requirements(payload.category, options)
+        shipping_insurance = resolve_shipping_insurance(payload.shipping_insurance, options.get("shipping_insurance_options", []))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -4215,6 +4216,7 @@ def build_tiktok_export_response(payload: TiktokDraftExportInput, user: User, db
         workbook_bytes = build_tiktok_workbook(
             template=export_template, category=payload.category, cod=payload.cod,
             attributes=attributes, products=products, template_bytes=export_template_blob, template_type=export_template_type,
+            shipping_insurance=shipping_insurance,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

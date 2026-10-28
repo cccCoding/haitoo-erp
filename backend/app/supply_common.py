@@ -13,7 +13,7 @@ from .models import (Company, ImageFile, MaterialAsset, ProductTemplate, Role, S
                      SupplyJob, User)
 from .ai_providers import ProviderError, validate_generated_title
 from .supply_accounts import supply_user_is_expired
-from .tiktok_export import catalog_listing_options, category_base_requirements, validate_attributes
+from .tiktok_export import catalog_listing_options, category_base_requirements, resolve_shipping_insurance, validate_attributes
 
 ACTIVE_STATES = ("queued", "running", "retry_wait")
 TEMPLATE_FIELDS = ("id", "name", "sku_specifications", "product_description", "size_chart_url",
@@ -156,6 +156,7 @@ def validate_strategy(db, user, parameters):
     try:
         parameters["attributes"] = validate_attributes(parameters["category_name"], parameters["attributes"], options)
         requirements = category_base_requirements(parameters["category_name"], options)
+        parameters["shipping_insurance"] = resolve_shipping_insurance(parameters.get("shipping_insurance"), options.get("shipping_insurance_options", []))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if requirements.get("size_chart") == "Mandatory" and not snapshot["size_chart_url"]:

@@ -1,5 +1,6 @@
 """货盘 HTTP 权限、快照和账号管理行为；所有第三方能力使用替身。"""
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import copy
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -99,6 +100,38 @@ class SupplyFixture:
 
 
 class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
+    def test_bothplatforms_strategy_defaults_and_snapshot_keep_insurance(self):
+        from app.tiktok_export import parse_listing_options
+
+        content = (Path(__file__).parent / "fixtures/tiktok/indonesia/bothplatforms_menswear_20261026.xlsx").read_bytes()
+        options = parse_listing_options(content, "tiktok_local")
+        with self.sessions() as db:
+            catalog = db.get(TiktokCategoryCatalog, 1)
+            catalog.template_blob, catalog.parsed_options = content, options
+            db.commit()
+        for insurance in (None, "Mandatory"):
+            with self.subTest(insurance=insurance):
+                extra = {"category_name": options["categories"][0]["name"], "attributes": {"product_property/100198": "Embroidery"}}
+                if insurance is not None:
+                    extra["shipping_insurance"] = insurance
+                strategy_id = self.create_strategy(**extra)
+                if insurance is None:
+                    # 兼容已保存但没有保险字段的旧策略。
+                    with self.sessions() as db:
+                        strategy = db.get(SupplyStrategy, strategy_id)
+                        strategy.parameters = {key: value for key, value in strategy.parameters.items() if key != "shipping_insurance"}
+                        db.commit()
+                job_id = self.submit(strategy_id, key=f"insurance-{insurance}-request")
+                with self.sessions() as db:
+                    snapshot = db.get(SupplyJob, job_id).snapshot
+                    self.assertEqual(snapshot["strategy"]["shipping_insurance"], insurance or "Optional")
+                    self.assertEqual(snapshot["catalog_options"]["shipping_insurance_options"], ["Optional", "Mandatory"])
+                self.request("POST", f"/supply/jobs/{job_id}/cancel", uid=4)
+        response = self.request("POST", "/supply/strategies", uid=4,
+            json=self.strategy_input(**extra, shipping_insurance="Invalid") if "shipping_insurance" not in extra
+            else {**self.strategy_input(**extra), "shipping_insurance": "Invalid"})
+        self.assertEqual(response.status_code, 422, response.text)
+
     def test_material_list_exposes_infringement_to_managers_and_members(self):
         with self.sessions() as db:
             db.get(MaterialAsset, 1).is_infringing = True
