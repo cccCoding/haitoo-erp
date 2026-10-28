@@ -1,5 +1,10 @@
 # 项目约定
 
+## 文档与部署说明
+
+- README 只保存长期适用的通用逻辑、配置、使用方式及运维流程，不保存具体版本的部署步骤、迁移编号或一次性升级操作。
+- 具体版本的部署逻辑直接在回复中提供给用户，按实际改动说明需要更新的服务、迁移和验证步骤，并明确区分本机与腾讯云环境。
+
 ## Docker 环境选择
 
 - 本机测试的所有 Compose 操作必须使用 `./deploy/local.sh <子命令> [参数]`，固定为 `--env-file .env.local -p haitoo-test -f docker-compose.yml -f docker-compose.local.yml`。

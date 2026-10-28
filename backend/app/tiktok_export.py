@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from copy import copy
+from copy import copy, deepcopy
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
@@ -10,7 +10,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import load_workbook
 from openpyxl.formula import Tokenizer
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.worksheet.cell_range import CellRange, MultiCellRange
 
 
@@ -19,6 +19,7 @@ DATA_START_ROW = 7
 DATA_END_ROW = 5000
 MAX_DATA_ROWS = DATA_END_ROW - DATA_START_ROW + 1
 BASE_FIELD_START_COLUMN = 3  # C
+OPTIONS_PARSER_VERSION = 2
 
 FIELD_CATEGORY = "category"
 FIELD_PRODUCT_NAME = "product_name"
@@ -129,17 +130,64 @@ def tiktok_template_adapter(template_fields: set[str], expected_type: str | None
     return adapter
 
 
+def _default_attribute_input_mode(field: dict) -> str:
+    if not field.get("options"):
+        return "text"
+    if field.get("allow_custom"):
+        return "select_or_text"
+    return "select"
+
+
 def attribute_input_mode(field: dict) -> str:
     """返回属性的输入方式，并兼容尚未保存 input_mode 的旧类目库。"""
     if field.get("input_mode") in {"text", "select", "select_or_text"}:
         return field["input_mode"]
     if field.get("input_mode") in {"single", "multiple"}:
         return "select"
-    if not field.get("options"):
-        return "text"
-    if field.get("allow_custom"):
-        return "select_or_text"
-    return "select"
+    return _default_attribute_input_mode(field)
+
+
+def _attribute_options_by_column(template_sheet, attribute_sheet, attribute_fields) -> dict[int, dict[str, list[str]]]:
+    """按数据验证中的实际引用定位选项，属性列和 HiddenAttr 列对不一定一一对应。"""
+    references: dict[int, tuple[int, int, int]] = {}
+    columns = {column for column, _ in attribute_fields}
+    hidden_sheet = r"(?:'HiddenAttr'|HiddenAttr)!"
+    reference_pattern = re.compile(
+        rf"^=?\s*OFFSET\(\s*{hidden_sheet}\$?([A-Z]+)\$?1\s*,\s*"
+        rf"MATCH\([^,]+,\s*{hidden_sheet}\$?([A-Z]+)\$?1:\$?\2\$?(\d+)\s*,\s*0\s*\)",
+        re.I,
+    )
+    for validation in template_sheet.data_validations.dataValidation:
+        if validation.type != "list":
+            continue
+        targets = {column for area in validation.sqref.ranges
+                   if area.min_row <= DATA_START_ROW <= area.max_row
+                   for column in columns if area.min_col <= column <= area.max_col}
+        if not targets:
+            continue
+        match = reference_pattern.match(_clean(validation.formula1))
+        if not match:
+            raise ValueError(f"无法解析 TikTok 属性列 {', '.join(get_column_letter(column) for column in sorted(targets))} 的下拉引用")
+        value_column, key_column = (column_index_from_string(value.upper()) for value in match.group(1, 2))
+        end_row = int(match.group(3))
+        if max(key_column, value_column) > attribute_sheet.max_column or end_row > attribute_sheet.max_row:
+            raise ValueError("TikTok 属性下拉引用超出 HiddenAttr 数据范围")
+        reference = (key_column, value_column, end_row)
+        for column in targets:
+            if column in references and references[column] != reference:
+                raise ValueError(f"TikTok 属性列 {get_column_letter(column)} 存在冲突的下拉引用")
+            references[column] = reference
+
+    result = {}
+    for column, (key_column, value_column, end_row) in references.items():
+        options: dict[str, list[str]] = {}
+        for row in range(1, end_row + 1):
+            category = _clean(attribute_sheet.cell(row, key_column).value)
+            value = _clean(attribute_sheet.cell(row, value_column).value)
+            if category and value:
+                options.setdefault(category, []).append(value)
+        result[column] = {category: list(dict.fromkeys(values)) for category, values in options.items()}
+    return result
 
 
 def _template_sheet_part(package: ZipFile) -> str:
@@ -196,6 +244,7 @@ def parse_listing_options(template_bytes: bytes | None = None, template_type: st
     if missing_fields:
         raise ValueError(f"TikTok 模板缺少导出字段：{', '.join(missing_fields)}")
     attribute_fields = _attribute_fields(template_sheet)
+    attribute_options = _attribute_options_by_column(template_sheet, attribute_sheet, attribute_fields)
 
     categories = [
         {"name": _clean(category_sheet.cell(row, 1).value), "id": category_sheet.cell(row, 2).value}
@@ -224,22 +273,13 @@ def parse_listing_options(template_bytes: bytes | None = None, template_type: st
             and _clean(style_sheet.cell(style_row, column).value)
             and _clean(style_sheet.cell(style_row, column).value) != "Forbid"
         }
-        for attribute_index, (column, field) in enumerate(attribute_fields):
+        for column, field in attribute_fields:
             status = _clean(style_sheet.cell(style_row, column).value)
             if not status or status == "Forbid":
                 continue
             label = _clean(template_sheet.cell(3, column).value)
             description = _clean(template_sheet.cell(5, column).value)
-            options = []
-            key_column = 1 + attribute_index * 2
-            value_column = key_column + 1
-            if value_column <= attribute_sheet.max_column:
-                options = [
-                    _clean(attribute_sheet.cell(row, value_column).value)
-                    for row in range(1, attribute_sheet.max_row + 1)
-                    if _clean(attribute_sheet.cell(row, key_column).value) == category_name
-                    and _clean(attribute_sheet.cell(row, value_column).value)
-                ]
+            options = attribute_options.get(column, {}).get(category_name, [])
             allow_custom = "custom value" in description.lower() or "输入自定义值" in description
             if not options:
                 input_mode = "text"
@@ -261,6 +301,7 @@ def parse_listing_options(template_bytes: bytes | None = None, template_type: st
         attributes_by_category[category_name] = fields
 
     return {
+        "parser_version": OPTIONS_PARSER_VERSION,
         "template_version": _template_version(template_sheet),
         "template_type": adapter.key,
         "template_type_label": adapter.label,
@@ -282,6 +323,28 @@ def parse_listing_options(template_bytes: bytes | None = None, template_type: st
 def listing_options() -> dict:
     """兼容系统默认模板的只读选项。"""
     return parse_listing_options()
+
+
+@lru_cache(maxsize=8)
+def _reparsed_listing_options(template_bytes: bytes, template_type: str) -> dict:
+    return parse_listing_options(template_bytes, template_type)
+
+
+def catalog_listing_options(catalog) -> dict:
+    """读取旧类目库时从原始模板修正选项，不要求重新上传，也不在只读请求中写库。"""
+    options = catalog.parsed_options or {}
+    if catalog.template_type not in TIKTOK_TEMPLATE_ADAPTERS or options.get("parser_version") == OPTIONS_PARSER_VERSION:
+        return options
+    refreshed = deepcopy(_reparsed_listing_options(bytes(catalog.template_blob), catalog.template_type))
+    for category, fields in refreshed["attributes_by_category"].items():
+        previous = {field["field"]: field for field in options.get("attributes_by_category", {}).get(category, [])}
+        for field in fields:
+            old = previous.get(field["field"])
+            if old and (old.get("input_mode_overridden") or attribute_input_mode(old) != _default_attribute_input_mode(old)):
+                mode = attribute_input_mode(old)
+                field["input_mode"] = mode if field["options"] else "text"
+                field["input_mode_overridden"] = True
+    return refreshed
 
 
 def category_attributes(category: str, options: dict | None = None) -> list[dict]:

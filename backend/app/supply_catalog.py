@@ -18,6 +18,7 @@ from .models import (Company, MaterialAsset, OperatorGroup, ProductTemplate, Rol
                      SupplyJob, SupplyJobMaterial, SupplyStrategy,
                      TemplateGroup, TiktokCategoryCatalog, User)
 from .security import current_user, hash_password
+from .tiktok_export import catalog_listing_options
 from .supply_accounts import add_calendar_months, as_utc_naive, supply_user_is_expired
 from .supply_common import (ACTIVE_STATES, audit, cancel_user_jobs,
     digest, eligible_materials, is_manager, job_payload,
@@ -460,7 +461,7 @@ def catalog_options(identity: int, user=Depends(supply_actor), db: Session = Dep
     item = owned(db, TiktokCategoryCatalog, identity, user)
     if item.template_type not in ("tiktok_local", "tiktok_cross_border"):
         raise HTTPException(400, "类目库不可用于货盘")
-    return item.parsed_options
+    return catalog_listing_options(item)
 
 
 def strategy_payload(item):
@@ -545,7 +546,7 @@ def submit_job(payload: JobInput, user=Depends(supply_actor), db: Session = Depe
         template_id=template.id, category_catalog_id=catalog.id,
         idempotency_key=payload.idempotency_key, request_hash=request_hash,
         snapshot={"strategy": parameters, "template": snapshot, "template_version": version,
-            "catalog_options": copy.deepcopy(catalog.parsed_options), "catalog_type": catalog.template_type,
+            "catalog_options": copy.deepcopy(catalog_listing_options(catalog)), "catalog_type": catalog.template_type,
             "candidates": candidates, "seed": secrets.token_hex(16), "user_name": actor.name,
             "internal_usage": actor.role != Role.SUPPLY_USER, "expected_rows": rows},
         category_blob=bytes(catalog.template_blob), checkpoint={}, progress={"links_done": 0, "links_total": parameters["link_count"]})

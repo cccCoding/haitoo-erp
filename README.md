@@ -6,7 +6,7 @@
 - 产品模板、印花贴合模拟任务、人工选图和商品草稿 API。
 - Vue 3 运营端工作台，覆盖模板库、POD 工作台、任务与草稿。
 
-登录接口 `/auth/login` 共用于运营端和超级管理员后台。同一 IP 自首次尝试起 60 秒内可登录 20 次；同一邮箱自首次密码失败起 15 分钟内可失败 5 次。下一次请求返回 HTTP 429 和 `Retry-After`，到期后自动恢复；成功登录会清除该邮箱的失败计数。计数存于 MySQL，多个 API worker 共用。升级时先运行 `./deploy/local.sh run --rm migrate`，再重启 API；`20260929_18` 迁移会创建计数表。
+登录接口 `/auth/login` 共用于运营端和超级管理员后台。同一 IP 自首次尝试起 60 秒内可登录 20 次；同一邮箱自首次密码失败起 15 分钟内可失败 5 次。下一次请求返回 HTTP 429 和 `Retry-After`，到期后自动恢复；成功登录会清除该邮箱的失败计数。计数存于 MySQL，多个 API worker 共用。
 
 Docker 部署默认从内部代理获取客户端 IP：Cloudflare Tunnel 使用 `CF-Connecting-IP`，腾讯云 Nginx 使用其覆写的 `X-Real-IP`。直接运行后端时默认只使用连接地址。不要将 API 容器端口直接公开到互联网。
 
@@ -22,13 +22,13 @@ Docker 部署默认从内部代理获取客户端 IP：Cloudflare Tunnel 使用 
 | 环境 | 固定入口 | 环境文件 | 项目名 | Compose 配置 |
 | --- | --- | --- | --- | --- |
 | 本机测试 | `./deploy/local.sh` | `.env.local` | `haitoo-test` | `docker-compose.yml` + `docker-compose.local.yml` |
-| 腾讯云 | `./deploy/tencent.sh` | `.env` | `haitorok` | `docker-compose.yml` + `docker-compose.tencent.yml` |
+| 腾讯云 | `sudo ./deploy/tencent.sh` | `.env` | `haitorok` | `docker-compose.yml` + `docker-compose.tencent.yml` |
 
-例如，本机执行 `./deploy/local.sh ps`，服务器执行 `./deploy/tencent.sh ps`。
+例如，本机执行 `./deploy/local.sh ps`，服务器执行 `sudo ./deploy/tencent.sh ps`。
 脚本自动定位项目根目录，缺少文件时停止，并拒绝覆盖环境文件、项目名、配置文件及 profile。
 脚本也会清除外部设置的 `COMPOSE_FILE`、`COMPOSE_PROJECT_NAME`、`COMPOSE_PROFILES`、
 `COMPOSE_ENV_FILES`。后续通用运维示例采用本机入口；服务器执行时将入口替换为
-`./deploy/tencent.sh`，其余参数相同。不要直接使用省略环境参数的 Compose 命令。
+`sudo ./deploy/tencent.sh`，其余参数相同。不要直接使用省略环境参数的 Compose 命令。
 
 ### 基础镜像源切换
 
@@ -37,7 +37,7 @@ Docker 部署默认从内部代理获取客户端 IP：Cloudflare Tunnel 使用 
 腾讯云 CVM 服务器可尝试腾讯云镜像源（是否可用以服务器网络和镜像源服务状态为准）：
 
 ```bash
-DOCKER_REGISTRY=mirror.ccs.tencentyun.com ./deploy/tencent.sh build
+sudo DOCKER_REGISTRY=mirror.ccs.tencentyun.com ./deploy/tencent.sh build
 ```
 
 本机使用 DaoCloud 国内镜像源（是否可用以镜像源服务状态为准）：
@@ -78,8 +78,8 @@ VITE_API_URL=http://localhost:8001 npm --prefix frontend-admin run dev -- --host
 腾讯云服务器只更新运营端：
 
 ```bash
-./deploy/tencent.sh build --pull=false web
-./deploy/tencent.sh up -d --no-deps --no-build --pull never web
+sudo ./deploy/tencent.sh build --pull=false web
+sudo ./deploy/tencent.sh up -d --no-deps --no-build --pull never web
 ```
 
 管理端将 `web` 替换为 `admin-web`。上述命令适用于依赖服务已运行、仅修改前端的情况；后端或迁移也有改动时，仍需更新对应服务。
@@ -127,9 +127,8 @@ chmod 600 .env.local
 
 两个密码必须是至少 32 个字符的十六进制随机字符串。MySQL 只监听 Compose
 内部网络的 `3306` 端口，不映射到宿主机；API 和 Worker 使用应用密码连接数据库。
-已有部署升级时，将 `CREDENTIAL_ENCRYPTION_KEY` 设置为当前 `SECRET_KEY` 的值，
-确保数据库中已有的第三方凭据仍能解密。未配置新变量时，程序暂时沿用 `SECRET_KEY`；
-以后更换登录用 `SECRET_KEY` 时，需保留原加密密钥。
+第三方凭据使用 `CREDENTIAL_ENCRYPTION_KEY` 加密；未配置时沿用 `SECRET_KEY`。
+已有凭据的加密密钥必须保持不变，更换登录用 `SECRET_KEY` 时仍需保留原加密密钥。
 
 Compose 会以生产方式构建容器：API 使用两个 Uvicorn worker，两个 Vue 前端先由
 Vite 生成静态文件，再由 Nginx 提供服务。`VITE_API_URL` 是前端构建参数，修改后
@@ -145,109 +144,57 @@ Vite 生成静态文件，再由 Nginx 提供服务。`VITE_API_URL` 是前端�
 计算截至昨天的 7、15、30 天销量榜单与近 7 天销量档位。同一公司已有任务排队或运行时
 复用该任务。任务提交时固定香港本地统计日期；成功后替换当期快照，失败时保留旧快照。
 Worker 重启后会恢复中断任务，并定期清理超过最近 30 个统计日的快照；不会自动生成榜单。
-首次部署此功能需执行
-`./deploy/local.sh up -d --build`，以创建新的 Worker 服务。
+销量统计依赖 `product-library-rankings-worker` 服务正常运行。
 
-### 下线妙手公共采集箱数据同步
+### 产品库订单与统计
 
-`20261011_33` 删除公共采集箱同步缓存表和公司同步、清理时间字段；升级时会清除全部同步缓存。妙手管理仅保留管理员的 API Key 配置、店铺同步和人员分配，商品草稿发布至妙手、认领及分配店铺继续使用原有数据。回滚迁移只恢复空缓存表，无法恢复已删除的缓存。
+从产品库下载导入模板，填写必需的「数量」列，导入订单并分配店铺负责人后，点击「数据统计」生成榜单。数量填写每行完整平台 SKU（含尺码）的销售件数；同订单不同尺码相加，重导仅覆盖文件内尺码的数量，未出现的尺码保留，重复导入不累加。
 
-升级时使用 `--remove-orphans` 删除已下线的采集箱同步 Worker，避免旧容器继续调用妙手。启动入口会先执行数据库迁移，再启动 API 和其余 Worker。
+排行榜和榜单按公司、基础 SKU 汇总；订单数去重，销量累计，按销量降序排序。店铺多选仅汇总当前账号可见且选中的店铺，未选择表示全部可见店铺；榜单详情使用相同店铺范围及对应快照。
 
-本机隔离测试环境：
+### 数据库迁移与服务更新
 
-```bash
-./deploy/local.sh up -d --build --remove-orphans
-```
+Compose 会先运行 `migrate` 服务，将数据库升级到代码要求的 Alembic 版本；成功后才启动依赖迁移的服务。API 和 Worker 自身只检查版本，不会在启动时建表或执行 DDL。
 
-腾讯云生产环境：
+更新前备份数据库并保留原环境文件、密钥和数据卷。只构建和更新实际改动的服务，保留构建缓存；涉及数据库版本检查的后端服务应使用与迁移一致的代码。需要停写、数据清理或历史回填的发布，按该次发布单独提供的步骤执行，不能直接套用普通重启流程。迁移失败时停止后续启动操作，先修复问题。
 
-```bash
-./deploy/tencent.sh up -d --build --remove-orphans
-```
-
-### 产品库销量统计升级（20261005_25）
-
-本次迁移会一次性删除**所有公司**的产品库店铺（含负责人分配）、产品、订单及订单明细、
-快照和统计任务。素材、产品模板、商品草稿及其他业务店铺保留。执行前完成数据库备份，
-并停止 API 和产品库统计 Worker，防止旧程序在迁移期间写入数据。
-本机测试环境统一通过 `./deploy/local.sh` 执行以下升级步骤；每一步成功后才执行下一步：
-
-```bash
-./deploy/local.sh build migrate api product-library-rankings-worker web &&
-./deploy/local.sh stop api product-library-rankings-worker &&
-./deploy/local.sh run --rm migrate &&
-./deploy/local.sh up -d api product-library-rankings-worker web
-```
-
-腾讯云在已同步最新代码的项目目录执行：
-
-```bash
-./deploy/tencent.sh build migrate api product-library-rankings-worker web &&
-./deploy/tencent.sh stop api product-library-rankings-worker &&
-./deploy/tencent.sh run --rm migrate &&
-./deploy/tencent.sh up -d api product-library-rankings-worker web edge &&
-./deploy/tencent.sh exec edge nginx -t &&
-./deploy/tencent.sh exec edge nginx -s reload
-```
-
-升级后重新下载产品库导入模板，填写必需的「数量」列，再导入历史订单、分配店铺负责人，
-点击「数据统计」生成新榜单。数量填写每行完整平台 SKU（含尺码）的销售件数；同订单
-不同尺码相加，重导仅覆盖文件内尺码的数量，未出现的尺码保留，重复导入不累加。
-排行榜和榜单按公司、基础 SKU 汇总；订单数去重，销量累计，按销量降序排序。
-店铺多选仅汇总当前账号可见且选中的店铺，未选择表示全部可见店铺；榜单详情使用
-相同店铺范围及对应快照。数据库降级不会恢复已删除的数据。
-
-Compose 会先运行一次 `migrate` 服务，将数据库升级到代码要求的 Alembic 版本；成功后才启动 API。API 和 Worker 自身只检查版本，不会在启动时建表或执行 DDL。生产部署应在迁移前完成数据库备份，也可显式执行并检查迁移结果：
+本机测试环境执行迁移并查看数据库版本：
 
 ```bash
 ./deploy/local.sh run --rm migrate
-./deploy/local.sh run --rm api alembic current
+./deploy/local.sh run --rm --no-deps api alembic current
 ```
 
-### 代码更新后的数据库迁移
-
-升级到图片去重版本 `20261017_40` 时，需要额外处理历史图片。几万张图片应先在旧系统在线期间预缓存，再停写、备份、迁移并并发回填；不能直接套用普通重启流程。具体命令及中断恢复方式见[图片回填与两阶段部署](docs/image-file-dedup.md#部署与历史整理)。
-
-当 API 日志提示“数据库版本不匹配”时，表示代码已更新而 MySQL 还没执行对应迁移。按以下顺序处理：
+腾讯云环境在服务器项目目录执行：
 
 ```bash
-# 1. 在项目根目录执行版本化迁移（会升级 MySQL 表结构）
-./deploy/local.sh run --rm migrate
-
-# 2. 确认当前数据库已到代码要求的 head 版本
-./deploy/local.sh run --rm api alembic current
-
-# 3. 重启 API 与两个后台 Worker，使它们加载新代码与新表结构
-./deploy/local.sh restart api submit-worker result-worker
-
-# 4. 查看 API 启动结果；应出现“应用初始化完成”
-./deploy/local.sh logs --tail=50 api
+sudo ./deploy/tencent.sh run --rm migrate
+sudo ./deploy/tencent.sh run --rm --no-deps api alembic current
 ```
 
-如果 compose 服务尚未启动，可改用 `./deploy/local.sh up -d --build`；它会先执行 `migrate`。正常版本升级只运行 `./deploy/local.sh run --rm migrate`，**不要**附加 `--adopt-legacy`。
+迁移完成后，按实际改动更新对应服务并查看启动日志。API 提示“数据库版本不匹配”时，先确认运行镜像与迁移代码一致，再执行迁移；仅重启旧容器不会加载新镜像。更新后检查服务健康状态、错误日志和相关业务流程。
 
-全新数据库直接执行普通迁移，首次启动 `./deploy/local.sh up -d --build` 时也会自动执行同一流程：
-
-```bash
-./deploy/local.sh run --rm migrate
-```
-
-只有从旧版启动期自动建表流程升级，且数据库已有业务表但没有 `alembic_version` 时，迁移服务才会要求显式接管。确认数据库备份可恢复后执行一次：
+全新数据库和已纳入 Alembic 的数据库均使用普通迁移。只有数据库已有业务表且没有 `alembic_version`，并且迁移服务要求显式接管时，才在确认备份可恢复后使用 `--adopt-legacy`：
 
 ```bash
 ./deploy/local.sh run --rm migrate python -m app.db_migrate --adopt-legacy
 ```
 
-成功后再正常执行 `./deploy/local.sh up -d`。不要对全新数据库或已纳入 Alembic 的数据库使用 `--adopt-legacy`。
-
-以后每次修改 ORM 表结构，都必须创建新的版本文件，禁止继续修改已有基线迁移：
+修改 ORM 表结构时创建新的迁移文件，不修改已有迁移：
 
 ```bash
 ./deploy/local.sh run --rm api alembic revision --autogenerate -m "变更说明"
 ```
 
 API 文档地址为当前环境的 API 域名加 `/docs`。
+
+## 印尼 TikTok 本土店类目模板
+
+公司管理员进入“类目管理 → tk本土店 → 新增类目”，上传 TikTok Shop 下载的英文 `.xlsx` 批量上传模板。建议将穆斯林、男装和女装类目库分别命名为“印尼穆斯林”“印尼男装”“印尼女装”，在商品草稿导出时选择对应类目库。
+
+支持 Muslim Fashion、Menswear & Underwear 和 Womenswear & Underwear 英文模板。类目名称、属性名称和候选值保留模板中的英文；“属性设置”可以调整输入方式。导出使用上传的原始模板，按机器字段名定位列，并保留隐藏表、说明页和媒体。
+
+印尼模板沿用 `tiktok_local` 类型。系统不会自动导入类目库，仍由公司管理员上传模板。
 
 ## HubStudio 环境自动上品
 
@@ -259,21 +206,7 @@ HubStudio 环境可包含本土店和跨境店，当前自动上品只支持用�
 
 数据库只保存任务、执行尝试、实际执行目标及运行锁，不再保存新的环境目录或访问关系。同环境全公司串行运行、多电脑原子领取。独立心跳每 15 秒续租，90 秒失联后转人工处理，不自动重新提交。重试复用原 XLSX，使用领取电脑当前启用的环境，保留之前每次执行的目标和日志；请先核对原环境的平台结果。只有平台明确接受或人工确认后才标记草稿已发布，“已提交”不代表已上架。
 
-本功能要求数据库版本 `20261007_30`，并同时更新 ERP 前端和协议 3 的本地执行器。升级保留历史店铺、环境表、任务和 XLSX；历史环境表不再被同步写入。旧排队及运行任务转为待人工核对，旧领取凭证失效，原执行环境继续阻止新任务，直到人工处理。旧执行器收到 HTTP 426 升级提示后无法继续领取或报告。
-
-本机测试升级：
-
-```bash
-./deploy/local.sh run --rm migrate
-./deploy/local.sh up -d --build api web submit-worker result-worker
-```
-
-腾讯云升级：
-
-```bash
-./deploy/tencent.sh run --rm migrate
-./deploy/tencent.sh up -d --build api web submit-worker result-worker
-```
+ERP 与本地执行器需使用兼容的领取协议。执行器收到 HTTP 426 时应检查并更新执行器；已有活动任务先核对平台结果，再决定重试或人工确认。
 
 执行器构建、员工安装和测试说明见 [hub_agent/README.md](hub_agent/README.md)。
 
@@ -315,15 +248,15 @@ HubStudio 环境可包含本土店和跨境店，当前自动上品只支持用�
 腾讯云环境（`haitorok`，脚本随 API 镜像部署后，在服务器项目目录执行）：
 
 ```bash
-./deploy/tencent.sh exec -T api python scripts/image_task_statistics.py
+sudo ./deploy/tencent.sh exec -T api python scripts/image_task_statistics.py
 
 # 按公司、创建日期筛选；结束日期包含当天全天
-./deploy/tencent.sh exec -T api python scripts/image_task_statistics.py \
+sudo ./deploy/tencent.sh exec -T api python scripts/image_task_statistics.py \
   --company-id 3 \
   --start-date 2026-10-01 --end-date 2026-10-11
 
 # 导出 UTF-8 CSV，包含汇总及人员明细；文件保存在当前服务器目录
-./deploy/tencent.sh exec -T api python scripts/image_task_statistics.py \
+sudo ./deploy/tencent.sh exec -T api python scripts/image_task_statistics.py \
   --company-id 3 \
   --start-date 2026-10-01 --end-date 2026-10-11 \
   --format csv > image-task-statistics.csv
@@ -444,10 +377,10 @@ sudo ./deploy/tencent.sh exec -T api python scripts/r2_image_statistics.py \
 腾讯云环境（`haitorok`，在服务器项目目录执行）：
 
 ```bash
-./deploy/tencent.sh build api
-./deploy/tencent.sh stop api product-library-rankings-worker
-./deploy/tencent.sh run --rm --no-deps api python scripts/clear_product_library.py
-./deploy/tencent.sh start api product-library-rankings-worker
+sudo ./deploy/tencent.sh build api
+sudo ./deploy/tencent.sh stop api product-library-rankings-worker
+sudo ./deploy/tencent.sh run --rm --no-deps api python scripts/clear_product_library.py
+sudo ./deploy/tencent.sh start api product-library-rankings-worker
 ```
 
 ## 历史 Cloudflare Tunnel 配置
@@ -487,23 +420,23 @@ Docker 内部网络开放端口，只有边缘 Nginx 映射宿主机的 80 和 4
 4. 启动腾讯云部署：
 
    ```bash
-   ./deploy/tencent.sh up -d --build
+   sudo ./deploy/tencent.sh up -d --build
    ```
 
    如果重建 `web`、`admin-web` 或 `api` 后入口返回 502，先查看入口日志，
    再重新加载入口，让现有配置重新解析容器地址以恢复当前访问：
 
    ```bash
-   ./deploy/tencent.sh logs --tail=80 edge
-   ./deploy/tencent.sh exec edge nginx -t
-   ./deploy/tencent.sh exec edge nginx -s reload
+   sudo ./deploy/tencent.sh logs --tail=80 edge
+   sudo ./deploy/tencent.sh exec edge nginx -t
+   sudo ./deploy/tencent.sh exec edge nginx -s reload
    ```
 
-   新版入口配置通过 Docker DNS 动态解析上游容器。模板只在容器创建时生成
-   Nginx 配置，首次部署此配置时需重建 `edge`：
+   入口配置通过 Docker DNS 动态解析上游容器。模板只在容器创建时生成
+   Nginx 配置，修改入口模板或相关环境变量后需重建 `edge`：
 
    ```bash
-   ./deploy/tencent.sh up -d --no-deps --force-recreate edge
+   sudo ./deploy/tencent.sh up -d --no-deps --force-recreate edge
    ```
 
 5. 腾讯云安全组只开放 80、443，以及仅限管理员固定 IP 的 22。不要开放 3306、
@@ -522,30 +455,7 @@ Docker 内部网络开放端口，只有边缘 Nginx 映射宿主机的 80 和 4
 
 日志每 60 秒输出“结果查询统计”：请求数、结果计数、吞吐量、队列与执行中数量，以及 `queue_wait_ms`（入队至请求启动）、`query_ms`（第三方响应）、`persist_ms`（图片转存）、`processing_ms`（槽位占用）、`poll_gap_ms`（同任务两次查询启动间隔）的平均值和 P95。P95 取窗口内最近最多 10,000 个样本，总次数和平均值完整累计；首次查询没有重查间隔，未转存时不计转存样本。普通 pending 明细为 DEBUG，超过 10 秒的查询会告警。正在执行的查询可能跨越统计窗口，因此窗口请求数和完成结果数不要求相等。统计只能反映本系统处理速度，不能精确推算第三方生成完成时间。
 
-本次版本要求数据库迁移 `20261025_44`。部署时先备份数据库，构建相关服务，停止后端进程后迁移，再更新服务；所有携带数据库版本检查的后端镜像均需包含新迁移文件。以下流程仅适用于已在正常使用版本化迁移和图片文件索引的环境；较早版本仍按前述历史图片升级流程处理。
-
-本机测试环境：
-
-```bash
-./deploy/local.sh build migrate api submit-worker result-worker product-library-rankings-worker supply-worker admin-web
-./deploy/local.sh stop api submit-worker result-worker product-library-rankings-worker supply-worker
-./deploy/local.sh run --rm migrate
-./deploy/local.sh up -d api submit-worker result-worker product-library-rankings-worker supply-worker admin-web
-./deploy/local.sh logs --since=10m result-worker
-```
-
-腾讯云环境（在服务器项目目录执行）：
-
-```bash
-sudo ./deploy/tencent.sh build migrate api submit-worker result-worker product-library-rankings-worker supply-worker admin-web
-sudo ./deploy/tencent.sh stop api submit-worker result-worker product-library-rankings-worker supply-worker
-sudo ./deploy/tencent.sh run --rm migrate
-sudo ./deploy/tencent.sh up -d api submit-worker result-worker product-library-rankings-worker supply-worker admin-web
-sudo ./deploy/tencent.sh logs --since=10m result-worker
-```
-
-迁移失败时停止流程，修复后再启动；不要直接执行后续启动命令。发布后观察至少 10 分钟，重点检查 429、查询 P95、轮询间隔、转存耗时和数据库连接异常。需要降低负载时，在后台把并发降为 1，必要时增大查询启动间隔，无需降级数据库；本期不自动调整并发，也不单独拆分转存队列。
-
+运行期间关注 HTTP 429、查询 P95、轮询间隔、转存耗时和数据库连接异常。需要降低负载时，可在后台降低结果并发数或增大查询启动间隔。
 
 模型服务地址、标题生成服务及 R2 存储仍由部署环境配置：
 
@@ -580,13 +490,9 @@ SKU 图任务支持批量审核：弹窗默认选中全部结果图，可全选�
 - 最终预览确认后才更新草稿正式发布图片；未进入新版流程的历史草稿继续沿用原图片。
 - 已发布到妙手或 TikTok 的草稿仍可继续编辑、生成并重新编排本地图片；保存不会自动同步已发布的外部商品。
 
-发布和 TikTok 表格导出均使用同一套正式轮播顺序，第 1 张即首图；SKU 规格关联始终继续使用原 SKU 图，不会被轮播图覆盖。部署本版本前需运行数据库迁移：
+发布和 TikTok 表格导出均使用同一套正式轮播顺序，第 1 张即首图；SKU 规格关联始终继续使用原 SKU 图，不会被轮播图覆盖。
 
-```bash
-python -m app.db_migrate
-```
-
-用户上传的图片不经过 API 容器，直接上传至 Cloudflare R2，数据库保存完整公网 URL；单图上限 5MB，签名同时绑定文件大小、类型、公司目录和 15 分钟有效期。AI 模型、DeepSeek 标题生成和妙手均通过该地址读取图片。无需配置或持久化本地 `uploads` 目录。模板“AI生成标题要求”为选填，可保存商品品类、功能与默认写法，留空时仍可根据首图生成英文标题；单条或批量生成可展开“补充要求（选填）”，每个草稿独立填写，仅作用于对应商品，不写回模板，关闭弹窗或重新分组后清空。标题生成固定使用 `deepseek-flash`，显式关闭思考，仅输出 25～255 字符的英文标题，除非模板标题要求或本次补充要求明确要求，否则禁止提及材质、面料、纺织品名称或成分；明确要求时仅使用提示词提供的材质信息，不从图片推断。公司管理员在“成员管理”为每位员工（含管理员自己）单独配置 DeepSeek 标题密钥；密钥加密保存，调用时只使用当前用户自己的密钥，不再读取全局 `DEEPSEEK_API_KEY`。升级后须先配置个人密钥；旧环境文件中的全局密钥或标题模型配置不再生效。
+用户上传的图片不经过 API 容器，直接上传至 Cloudflare R2，数据库保存完整公网 URL；单图上限 5MB，签名同时绑定文件大小、类型、公司目录和 15 分钟有效期。AI 模型、DeepSeek 标题生成和妙手均通过该地址读取图片。无需配置或持久化本地 `uploads` 目录。模板“AI生成标题要求”为选填，可保存商品品类、功能与默认写法，留空时仍可根据首图生成英文标题；单条或批量生成可展开“补充要求（选填）”，每个草稿独立填写，仅作用于对应商品，不写回模板，关闭弹窗或重新分组后清空。标题生成固定使用 `deepseek-flash`，显式关闭思考，仅输出 25～255 字符的英文标题，除非模板标题要求或本次补充要求明确要求，否则禁止提及材质、面料、纺织品名称或成分；明确要求时仅使用提示词提供的材质信息，不从图片推断。公司管理员在“成员管理”为每位员工（含管理员自己）单独配置 DeepSeek 标题密钥；密钥加密保存，调用时只使用当前用户自己的密钥，不再读取全局 `DEEPSEEK_API_KEY`。使用前需配置个人密钥；环境文件中的全局密钥或标题模型配置不参与标题生成。
 
 标题请求由系统规则、标题要求、本次补充要求和一张首图组成，不发送商品确认信息、商品描述或其他图片。功能特性只能来自要求中的明确描述；品类未指定时可参考图片，可见颜色、印花和版型参考首图。补充要求在写法和侧重点上优先于默认要求，所有输入均受系统规则约束，冲突或不明确的商品属性应省略。请求参数固定为 `max_tokens=512`、`temperature=0.4`，图片使用 `detail=high`，超时为 45 秒。仅接受 `finish_reason=stop` 的完整响应；后端校验长度、ASCII 英文字符范围和部分格式错误，英文语义、功能真实性和条件式材质规则仍依赖模型遵循提示词，模拟测试不证明模型实际输出准确率。
 
@@ -638,4 +544,4 @@ R2 不会自动删除对象。可在 Bucket 的 **Settings → Object Lifecycle 
 
 > Docker Compose 中的密码仅用于本地开发。生产环境必须通过密钥管理服务配置数据库密码、JWT 密钥和妙手凭据加密密钥。
 
-HubStudio 自动上品 XLSX 已改为独立私有 R2 桶，数据库仅保存链接、校验信息和 7 天有效期。需要配置 `R2_HUB_EXPORT_BUCKET` 并迁移至 `20261007_30`，详见 [执行器部署说明](hub_agent/README.md#自动上品-excel-的-r2-存储)。
+HubStudio 自动上品 XLSX 使用独立私有 R2 桶，数据库仅保存链接、校验信息和 7 天有效期。通过 `R2_HUB_EXPORT_BUCKET` 配置私有桶，详见 [执行器部署说明](hub_agent/README.md#自动上品-excel-的-r2-存储)。

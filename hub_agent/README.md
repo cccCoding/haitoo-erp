@@ -6,7 +6,7 @@
 
 ## 部署前提
 
-在首次运行本地执行器前，生产 ERP 必须已经发布包含 Hub 执行器接口的后端，并已执行迁移至 `20261008_31`。本地登录使用现有 `/auth/login` 和 `/hub-agents/register` 接口；若返回 HTTP 404，需检查 API 地址和服务器发布版本。
+在首次运行本地执行器前，生产 ERP 必须已经发布包含 Hub 执行器接口的后端，且数据库已完成与后端代码匹配的迁移。本地登录使用现有 `/auth/login` 和 `/hub-agents/register` 接口；若返回 HTTP 404，需检查 API 地址和服务器发布版本。
 
 ## 使用方式与安全边界
 
@@ -157,7 +157,7 @@ HAITOO_BROWSER_TESTS=1 HAITOO_BROWSER_CHANNEL=chrome .venv/bin/python -m unittes
 
 新版使用 `X-Hub-Protocol: 4`，读取模版目录和按 ID 升序分页的排队任务；根据本机策略提交指定 task_id、目标环境 ID、名称及确认。数据库保存任务模版 ID、名称快照及每次执行目标，运行锁防止多电脑同时执行同环境。快照过期时不领取，失去访问权限的配置环境保留并显示不可用。旧协议返回 426，环境上传接口仍返回 410。ERP 自动上品记录提供模版筛选，可与创建人筛选组合。
 
-升级前退出旧执行器，后端迁移至 `20261008_31`，同步发布前端并重新打包执行器。旧活动任务必须先核对平台结果；重试复用原 XLSX 并固定原环境；原环境必须仍在本机模版策略中且可访问。历史尝试保留原目标。
+ERP 与执行器需保持协议兼容；收到 HTTP 426 时停止领取并检查执行器版本。重新打包与替换执行器前退出旧程序，已有活动任务先核对平台结果。具体发布步骤根据该次变更单独提供。
 
 ### 自动上品 Excel 的 R2 存储
 
@@ -165,22 +165,6 @@ HAITOO_BROWSER_TESTS=1 HAITOO_BROWSER_CHANNEL=chrome .venv/bin/python -m unittes
 
 部署前，在对应环境文件中添加 `R2_HUB_EXPORT_BUCKET=<私有桶名>`，已有 R2 endpoint 和访问密钥继续使用，密钥需具备该桶读写和删除权限。桶保持私有，禁止启用公网访问。在 Cloudflare R2 生命周期设置中新增仅匹配 `hub-exports/` 前缀的 7 天删除规则，保留其他规则；该规则同时清理服务停机期间过期文件及意外遗留对象。API 每分钟删除数据库关联的过期文件，失败会重试。任务和日志不随文件删除。
 
-本机部署（保留 `.env.local` 和数据库卷）：
+服务更新与数据库迁移遵循[项目通用部署流程](../README.md#数据库迁移与服务更新)，保留原环境文件、加密密钥和数据卷。
 
-```bash
-./deploy/local.sh build api migrate submit-worker result-worker product-library-rankings-worker
-./deploy/local.sh run --rm migrate
-./deploy/local.sh up -d api submit-worker result-worker product-library-rankings-worker
-```
-
-腾讯云部署（保留 `.env` 和数据库卷，先按项目运维流程备份数据库）：
-
-```bash
-./deploy/tencent.sh build api migrate submit-worker result-worker product-library-rankings-worker
-./deploy/tencent.sh run --rm migrate
-./deploy/tencent.sh up -d api submit-worker result-worker product-library-rankings-worker
-./deploy/tencent.sh exec edge nginx -t
-./deploy/tencent.sh exec edge nginx -s reload
-```
-
-数据库需迁移至 `20261008_31`。升级时同步重建其他后端 worker，避免旧容器继续使用旧模型。文件超时后禁止下载、领取和重试，排队任务显示“文件已过期”，需要重新生成。已提交或待人工处理的任务保留原状态；人工确认仍可用于记录已核对的平台结果。
+文件超时后禁止下载、领取和重试，排队任务显示“文件已过期”，需要重新生成。已提交或待人工处理的任务保留原状态；人工确认仍可用于记录已核对的平台结果。

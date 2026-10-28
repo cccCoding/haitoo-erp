@@ -13,7 +13,7 @@ from .models import (Company, ImageFile, MaterialAsset, ProductTemplate, Role, S
                      SupplyJob, User)
 from .ai_providers import ProviderError, validate_generated_title
 from .supply_accounts import supply_user_is_expired
-from .tiktok_export import category_base_requirements, validate_attributes
+from .tiktok_export import catalog_listing_options, category_base_requirements, validate_attributes
 
 ACTIVE_STATES = ("queued", "running", "retry_wait")
 TEMPLATE_FIELDS = ("id", "name", "sku_specifications", "product_description", "size_chart_url",
@@ -152,7 +152,7 @@ def validate_strategy(db, user, parameters):
     catalog = db.get(TiktokCategoryCatalog, parameters["category_catalog_id"])
     if not catalog or catalog.company_id != user.company_id or catalog.template_type not in ("tiktok_local", "tiktok_cross_border"):
         raise HTTPException(400, "请选择本公司 TikTok 类目库")
-    options = catalog.parsed_options
+    options = catalog_listing_options(catalog)
     try:
         parameters["attributes"] = validate_attributes(parameters["category_name"], parameters["attributes"], options)
         requirements = category_base_requirements(parameters["category_name"], options)

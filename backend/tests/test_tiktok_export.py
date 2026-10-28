@@ -24,6 +24,20 @@ def cross_border_template_without_auction_fields() -> bytes:
     workbook = load_workbook(CROSS_BORDER_TEMPLATE_PATH, data_only=False)
     workbook["Template"].delete_cols(27, 2)
     workbook["HiddenStyle"].delete_cols(27, 2)
+    # openpyxl 删除列不会同步数据验证范围；模拟平台新模板时也要移动属性下拉。
+    sheet = workbook["Template"]
+    for validation in list(sheet.data_validations.dataValidation):
+        ranges = []
+        for area in validation.sqref.ranges:
+            if area.min_col >= 29:
+                area.shift(col_shift=-2)
+            elif area.max_col >= 27:
+                continue
+            ranges.append(str(area))
+        if ranges:
+            validation.sqref = " ".join(ranges)
+        else:
+            sheet.data_validations.dataValidation.remove(validation)
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()

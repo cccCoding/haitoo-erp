@@ -47,7 +47,7 @@ from .creative_resource_sizes import read_white_image_sizes
 from .storage import ExportMissingError, upload_hub_export, read_hub_export, delete_hub_export, StorageError
 from .image_files import (InvalidImageUploadError, by_url, create_material, file_ticket, finish_upload, ingest_url, prepare_upload, resolve_export_images, ticket_file)
 from .logging_config import configure_logging
-from .tiktok_export import build_workbook as build_tiktok_workbook, category_base_requirements, parse_listing_options, validate_attributes
+from .tiktok_export import build_workbook as build_tiktok_workbook, catalog_listing_options, category_base_requirements, parse_listing_options, validate_attributes
 from .shopee_export import build_workbook as build_shopee_workbook, parse_listing_options as parse_shopee_listing_options
 import httpx
 
@@ -3975,7 +3975,7 @@ def serialize_tiktok_catalog(catalog: TiktokCategoryCatalog, *, include_options:
         "created_at": timestamp_ms(catalog.created_at), "updated_at": timestamp_ms(catalog.updated_at),
     }
     if include_options:
-        result["options"] = catalog.parsed_options
+        result["options"] = catalog_listing_options(catalog)
     return result
 
 
@@ -4050,7 +4050,7 @@ def update_tiktok_category_catalog(
         raise HTTPException(404, "类目库不存在")
     if payload.name is not None:
         catalog.name = payload.name
-    options = json.loads(json.dumps(catalog.parsed_options or {}))
+    options = json.loads(json.dumps(catalog_listing_options(catalog)))
     for change in payload.attribute_input_modes:
         fields = options.get("attributes_by_category", {}).get(change.category)
         if fields is None:
@@ -4061,6 +4061,7 @@ def update_tiktok_category_catalog(
         if change.input_mode in {"select", "select_or_text"} and not field.get("options"):
             raise HTTPException(400, f"{field.get('label') or change.field} 没有候选属性值，只能设为手动填写")
         field["input_mode"] = change.input_mode
+        field["input_mode_overridden"] = True
     catalog.parsed_options = options
     try:
         db.commit()
@@ -4095,7 +4096,7 @@ def get_tiktok_export_options(
     catalog = visible_tiktok_catalog(db, user, category_catalog_id)
     if not catalog:
         raise HTTPException(404, "类目库不存在")
-    options = catalog.parsed_options
+    options = catalog_listing_options(catalog)
     if catalog.template_type == "shopee_basic" and "dangerous_goods_options" not in options:
         # 已导入的 Shopee 类目库缺少模板选项元数据，读取原始模板以兼容旧记录。
         options = parse_shopee_listing_options(catalog.template_blob, "shopee_basic")
@@ -4155,8 +4156,9 @@ def build_tiktok_export_response(payload: TiktokDraftExportInput, user: User, db
     if catalog.template_type not in {"tiktok_local", "tiktok_cross_border"}:
         raise HTTPException(400, "所选类目库不是 TikTok 模板")
     try:
-        attributes = validate_attributes(payload.category, payload.attributes, catalog.parsed_options)
-        base_requirements = category_base_requirements(payload.category, catalog.parsed_options)
+        options = catalog_listing_options(catalog)
+        attributes = validate_attributes(payload.category, payload.attributes, options)
+        base_requirements = category_base_requirements(payload.category, options)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
