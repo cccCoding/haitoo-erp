@@ -1,5 +1,6 @@
 // 财务日期固定解释为 UTC+8，不能依赖运行浏览器的系统时区。
-export const financeWindowSeconds = 180 * 24 * 60 * 60
+export const financeWindowDays = 365
+export const financeWindowSeconds = financeWindowDays * 24 * 60 * 60
 export function beijingInput(value: Date): string {
   return new Date(value.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
 }
@@ -22,7 +23,7 @@ export function validateFinanceDateRange(start: string, end: string): string {
   try {
     const delta = (Date.parse(financeInstant(end,'end')) - Date.parse(financeInstant(start))) / 1000
     if (delta <= 0) return '开始日期不能晚于结束日期'
-    if (delta > financeWindowSeconds) return '查询范围最多 180 天（含开始和结束当天）'
+    if (delta > financeWindowSeconds) return `查询范围最多一年（${financeWindowDays} 天，含开始和结束当天）`
   } catch (error) { return (error as Error).message }
   return ''
 }
@@ -64,6 +65,7 @@ export function financeOverviewAmounts(profit: string|null, costs: string[]) {
 export const financeDatePresets = [
   {key:'today',label:'今天'}, {key:'yesterday',label:'昨天'},
   {key:'last7',label:'近7天'}, {key:'last30',label:'近30天'}, {key:'last90',label:'近90天'},
+  {key:'last180',label:'近半年'}, {key:'last365',label:'近一年'},
   {key:'thisWeek',label:'本周'}, {key:'lastWeek',label:'上周'},
   {key:'thisMonth',label:'本月'}, {key:'lastMonth',label:'上月'},
 ] as const
@@ -89,7 +91,7 @@ export function financeRangePreset(key:FinanceDatePreset, now=new Date()) {
   const today=beijingInput(now)
   let start=today,end=today
   if (key==='yesterday') start=end=shiftFinanceDate(today,-1)
-  if (key==='last7' || key==='last30' || key==='last90') start=shiftFinanceDate(today,-(Number(key.slice(4))-1))
+  if (key==='last7' || key==='last30' || key==='last90' || key==='last180' || key==='last365') start=shiftFinanceDate(today,-(Number(key.slice(4))-1))
   if (key==='thisWeek' || key==='lastWeek') {
     // 自然周按周一到周日；本周截至今天，上周为完整一周。
     const weekday=(new Date(`${today}T00:00:00Z`).getUTCDay()+6)%7

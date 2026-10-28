@@ -430,7 +430,7 @@ class FinanceTests(TestCase):
         self.assertEqual({r['order_number'] for r in pending},{'cost','erp-only','both','no-erp'})
         self.assertIn('缺后台账单',next(r for r in pending if r['order_number']=='erp-only')['statuses'])
 
-    def test_exact_time_boundaries_180_days_and_timezone(self):
+    def test_exact_time_boundaries_365_days_and_timezone(self):
         self.ok(self.upload('platform', [bill()]))
         self.ok(self.upload('erp', [erp()]))
         response = self.query(paid_from='2026-10-20T04:00:00Z', paid_to='2026-10-20T04:00:01Z')
@@ -438,8 +438,8 @@ class FinanceTests(TestCase):
         self.assertEqual(self.ok(self.query(paid_from='2026-10-20T11:59:59+08:00', paid_to='2026-10-20T12:00:00+08:00'))['total']['order_count'], 1)
         self.assertEqual(self.ok(self.query(paid_from='2026-10-20T12:00:01+08:00', paid_to='2026-10-20T12:00:02+08:00'))['total']['order_count'], 0)
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        self.assertEqual(self.query(paid_from=start.isoformat(), paid_to=(start+timedelta(days=180)).isoformat()).status_code, 200)
-        self.assertEqual(self.query(paid_from=start.isoformat(), paid_to=(start+timedelta(days=180,seconds=1)).isoformat()).status_code, 400)
+        self.assertEqual(self.query(paid_from=start.isoformat(), paid_to=(start+timedelta(days=365)).isoformat()).status_code, 200)
+        self.assertEqual(self.query(paid_from=start.isoformat(), paid_to=(start+timedelta(days=365,microseconds=1)).isoformat()).status_code, 400)
         for start, end in [('2026-10-20T00:00:00', '2026-10-21T00:00:00'), ('2026-10-21T00:00:00Z','2026-10-20T00:00:00Z'), ('2026-10-20T00:00:00Z','2026-10-20T00:00:00Z')]:
             self.assertEqual(self.query(paid_from=start,paid_to=end).status_code, 400)
 
@@ -457,9 +457,9 @@ class FinanceTests(TestCase):
         self.assertEqual({r[1] for r in book['订单汇总'].iter_rows(min_row=2,values_only=True)},{'start','end'})
         book.close()
         self.assertEqual(self.query(paid_from='2025-12-31T16:00:00Z',
-            paid_to='2026-06-29T15:59:59.999999Z').status_code,200)
+            paid_to='2026-12-31T15:59:59.999999Z').status_code,200)
         self.assertEqual(self.query(paid_from='2025-12-31T16:00:00Z',
-            paid_to='2026-06-30T15:59:59.999999Z').status_code,400)
+            paid_to='2027-01-01T15:59:59.999999Z').status_code,400)
 
     def test_multishop_same_number_pagination_and_missing_rates_partial_summary(self):
         other = self.ok(self.request('POST', '/finance/shops', json={'name': '另一店铺'}))['id']

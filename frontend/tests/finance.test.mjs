@@ -11,12 +11,16 @@ test('Default range includes thirty calendar days through today in Beijing time'
   assert.equal(financeInstant('2024-02-29'),'2024-02-28T16:00:00.000Z')
   assert.throws(()=>financeInstant('2026-10-25T12:15'))
 })
-test('A shop and both dates are required, and the inclusive window is limited to 180 days',()=>{
+test('A shop and both dates are required, and the inclusive window is limited to 365 days',()=>{
   assert.ok(validateFinanceQuery([],'2026-01-01','2026-06-29'))
   assert.ok(validateFinanceQuery([1],'','2026-06-29'))
   assert.equal(validateFinanceQuery([1],'2026-01-01','2026-06-29'),'')
   assert.equal(validateFinanceQuery([1],'2026-01-01','2026-03-31'),'')
-  assert.ok(validateFinanceQuery([1],'2026-01-01','2026-06-30'))
+  assert.equal(validateFinanceQuery([1],'2026-01-01','2026-06-30'),'')
+  assert.equal(validateFinanceQuery([1],'2026-01-01','2026-12-31'),'')
+  assert.ok(validateFinanceQuery([1],'2026-01-01','2027-01-01'))
+  assert.equal(validateFinanceQuery([1],'2024-01-01','2024-12-30'),'')
+  assert.ok(validateFinanceQuery([1],'2024-01-01','2024-12-31'))
   assert.equal(validateFinanceQuery([1],'2026-01-01','2026-01-01'),'')
   assert.ok(validateFinanceQuery([1],'2026-01-02','2026-01-01'))
   assert.ok(validateFinanceQuery([1],'2026-02-30','2026-04-01'))

@@ -344,8 +344,8 @@ def query_scope(shop_ids: list[int] = Query(..., min_length=1, max_length=500),
     if paid_from.tzinfo is None or paid_to.tzinfo is None:
         raise HTTPException(400, '开始和结束时间必须包含时区')
     start, end = [value.astimezone(timezone.utc).replace(tzinfo=None) for value in (paid_from, paid_to)]
-    if start >= end or end - start > timedelta(days=180):
-        raise HTTPException(400, '开始时间须早于结束时间，且查询范围不能超过 180 天')
+    if start >= end or end - start > timedelta(days=365):
+        raise HTTPException(400, '开始时间须早于结束时间，且查询范围不能超过一年（365 天）')
     return shops, start, end
 
 

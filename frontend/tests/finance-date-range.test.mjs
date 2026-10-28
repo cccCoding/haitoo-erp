@@ -7,12 +7,22 @@ const now=new Date('2026-10-25T16:15:00Z')
 test('Shortcuts use Beijing calendar days and inclusive rolling windows',()=>{
   const expected={today:['2026-10-26','2026-10-26'],yesterday:['2026-10-25','2026-10-25'],
     last7:['2026-10-20','2026-10-26'],last30:['2026-09-27','2026-10-26'],last90:['2026-07-29','2026-10-26'],
+    last180:['2026-04-30','2026-10-26'],last365:['2025-10-27','2026-10-26'],
     thisWeek:['2026-10-26','2026-10-26'],lastWeek:['2026-10-19','2026-10-25'],
     thisMonth:['2026-10-01','2026-10-26'],lastMonth:['2026-09-01','2026-09-30']}
-  assert.equal(financeDatePresets.length,9)
+  assert.equal(financeDatePresets.length,11)
   for (const {key} of financeDatePresets) {
     const range=financeRangePreset(key,now)
     assert.deepEqual([range.start,range.end],expected[key])
+    assert.equal(validateFinanceDateRange(range.start,range.end),'')
+  }
+})
+test('Half-year and year shortcuts preserve inclusive spans across leap days',()=>{
+  const leapNow=new Date('2024-03-01T00:00:00Z')
+  for (const [key,days,start] of [['last180',180,'2023-09-04'],['last365',365,'2023-03-03']]) {
+    const range=financeRangePreset(key,leapNow)
+    assert.deepEqual(range,{start,end:'2024-03-01'})
+    assert.equal(financeRangeSpan(range.start,range.end),days)
     assert.equal(validateFinanceDateRange(range.start,range.end),'')
   }
 })

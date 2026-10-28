@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { beijingInput, validateFinanceDateRange } from './finance'
-import { financeDatePresets, financeMonth, financeMonthGrid, financeRangePreset, financeRangeSpan, shiftFinanceDate } from './finance'
+import { financeDatePresets, financeMonth, financeMonthGrid, financeRangePreset, financeRangeSpan, financeWindowDays, shiftFinanceDate } from './finance'
 import type { FinanceDatePreset } from './finance'
 
 const props=defineProps<{start:string;end:string;disabled?:boolean}>()
@@ -59,7 +59,7 @@ function choose(date:string) {
   }
   hoverDate.value=''
 }
-function unavailable(date:string) { return pickingEnd.value && !!draftStart.value && financeRangeSpan(draftStart.value,date)>180 }
+function unavailable(date:string) { return pickingEnd.value && !!draftStart.value && financeRangeSpan(draftStart.value,date)>financeWindowDays }
 function inRange(date:string) { return previewRange.value[0] && date>=previewRange.value[0] && date<=previewRange.value[1] }
 function endpoint(date:string) { return date===draftStart.value || date===draftEnd.value }
 function presetActive(key:FinanceDatePreset) { return chosenPreset.value===key }
@@ -119,7 +119,7 @@ onBeforeUnmount(()=>{document.removeEventListener('pointerdown',outside);window.
             </div>
           </section>
         </div>
-        <footer><div class="finance-range-help" aria-live="polite"><span v-if="draftError && draftStart && draftEnd" class="finance-range-error">{{draftError}}</span><span v-else-if="pickingEnd">请选择结束日期</span><span v-else>北京时间 · 含首尾当天 · 最多180天</span></div><div class="finance-range-footer-actions"><button type="button" @click="clear">清空</button><button type="button" @click="close()">取消</button><button type="button" class="finance-range-confirm" :disabled="!!draftError" @click="confirm">确定</button></div></footer>
+        <footer><div class="finance-range-help" aria-live="polite"><span v-if="draftError && draftStart && draftEnd" class="finance-range-error">{{draftError}}</span><span v-else-if="pickingEnd">请选择结束日期</span><span v-else>北京时间 · 含首尾当天 · 最多一年（{{financeWindowDays}}天）</span></div><div class="finance-range-footer-actions"><button type="button" @click="clear">清空</button><button type="button" @click="close()">取消</button><button type="button" class="finance-range-confirm" :disabled="!!draftError" @click="confirm">确定</button></div></footer>
       </div>
     </div>
   </Teleport>
