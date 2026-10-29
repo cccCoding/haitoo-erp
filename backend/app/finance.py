@@ -2,15 +2,19 @@
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP, localcontext
+import hashlib
+import json
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import exists, func, select
+from jose import JWTError, jwt
+from sqlalchemy import delete, exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .database import get_db
+from .config import get_settings as app_settings
 from .finance_import import MAX_BYTES, SheetChoice, decimal_value, parse_workbook
 from .finance_export import export_workbook
 from .models import (Company, FinanceBill, FinanceErpItem, FinanceExchangeRate, FinanceImport,
@@ -131,6 +135,93 @@ def change_shop_type(shop_id: int, payload: ShopTypeInput, user: User = Depends(
     return update_shop_details(db, user, shop_id, shop_type=payload.shop_type)
 
 
+def deletion_state(db, user, shop):
+    """逐行计算预览摘要，包含金额和配置值，避免相同数量的更新绕过校验。"""
+    digest = hashlib.sha256()
+    def add(value):
+        digest.update(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode())
+        digest.update(b'\n')
+    add([user.company_id, shop.id, shop.name, shop.shop_type, shop.created_at])
+    order_ids = select(FinanceOrder.id).where(FinanceOrder.company_id == user.company_id,
+        FinanceOrder.shop_id == shop.id)
+    queries = {
+        'orders': select(FinanceOrder.__table__).where(FinanceOrder.id.in_(order_ids)),
+        'bills': select(FinanceBill.__table__).where(FinanceBill.order_id.in_(order_ids)),
+        'erp_items': select(FinanceErpItem.__table__).where(FinanceErpItem.order_id.in_(order_ids)),
+        'sku_costs': select(FinanceShopSkuCost.__table__).where(
+            FinanceShopSkuCost.company_id == user.company_id, FinanceShopSkuCost.shop_id == shop.id),
+        'exchange_rates': select(FinanceExchangeRate.__table__).where(FinanceExchangeRate.shop_id == shop.id),
+    }
+    counts = {}
+    for name, query in queries.items():
+        add(name)
+        counts[name] = 0
+        for row in db.execute(query.order_by(query.selected_columns.id).execution_options(yield_per=400)).mappings():
+            add(dict(row))
+            counts[name] += 1
+    add(db.scalar(select(func.max(FinanceImport.id)).where(
+        FinanceImport.company_id == user.company_id, FinanceImport.shop_id == shop.id)))
+    return counts, digest.hexdigest()
+
+
+@router.get('/shops/{shop_id}/deletion-preview')
+def preview_shop_deletion(shop_id: int, user: User = Depends(admin), db: Session = Depends(get_db)):
+    lock_company(db, user)
+    shop = shops_for(db, user, [shop_id])[0]
+    counts, digest = deletion_state(db, user, shop)
+    token = jwt.encode({'purpose': 'finance_shop_deletion', 'user_id': user.id,
+        'company_id': user.company_id, 'shop_id': shop.id, 'digest': digest,
+        'exp': datetime.now(timezone.utc) + timedelta(minutes=15)}, app_settings().secret_key, algorithm='HS256')
+    return {'shop': shop_payload(shop), 'counts': counts, 'preview_token': token}
+
+
+class ShopDeletionInput(BaseModel):
+    confirm_name: str = Field(min_length=1, max_length=120)
+    preview_token: str = Field(min_length=1, max_length=4096)
+
+
+@router.delete('/shops/{shop_id}')
+def delete_shop(shop_id: int, payload: ShopDeletionInput, user: User = Depends(admin), db: Session = Depends(get_db)):
+    lock_company(db, user)
+    shop = shops_for(db, user, [shop_id])[0]
+    if payload.confirm_name != shop.name:
+        raise HTTPException(400, '店铺名称不匹配，请输入完整店铺名称')
+    try:
+        preview = jwt.decode(payload.preview_token, app_settings().secret_key, algorithms=['HS256'])
+    except JWTError as exc:
+        raise HTTPException(409, '删除预览无效或已过期，请重新预览') from exc
+    counts, digest = deletion_state(db, user, shop)
+    if any(preview.get(key) != value for key, value in {
+            'purpose': 'finance_shop_deletion', 'user_id': user.id,
+            'company_id': user.company_id, 'shop_id': shop.id, 'digest': digest}.items()):
+        raise HTTPException(409, '店铺或关联数据已变化，请重新预览后确认删除')
+    name = shop.name
+    try:
+        # 历史记录独立于店铺存活；已归档记录不因测试库重用 ID 而被重新命名。
+        for record in db.scalars(select(FinanceImport).where(FinanceImport.company_id == user.company_id,
+                FinanceImport.shop_id == shop_id)):
+            if not record.counts.get('shop_deleted'):
+                record.counts = {**record.counts, 'shop_name': name, 'shop_deleted': True}
+        order_ids = select(FinanceOrder.id).where(FinanceOrder.company_id == user.company_id,
+            FinanceOrder.shop_id == shop_id)
+        for model in (FinanceBill, FinanceErpItem):
+            db.execute(delete(model).where(model.order_id.in_(order_ids)), execution_options={'synchronize_session': False})
+        db.execute(delete(FinanceOrder).where(FinanceOrder.company_id == user.company_id,
+            FinanceOrder.shop_id == shop_id), execution_options={'synchronize_session': False})
+        db.execute(delete(FinanceShopSkuCost).where(FinanceShopSkuCost.company_id == user.company_id,
+            FinanceShopSkuCost.shop_id == shop_id), execution_options={'synchronize_session': False})
+        db.execute(delete(FinanceExchangeRate).where(FinanceExchangeRate.shop_id == shop_id),
+            execution_options={'synchronize_session': False})
+        db.delete(shop)
+        db.add(FinanceImport(company_id=user.company_id, shop_id=shop_id, created_by=user.id,
+            kind='deletion', filename='', counts={**counts, 'shop_name': name, 'shop_deleted': True}))
+        commit(db)
+    except Exception:
+        db.rollback()
+        raise
+    return {'shop_id': shop_id, 'shop_name': name, 'counts': counts}
+
+
 @router.post('/shops/{shop_id}/imports/{kind}')
 def import_file(shop_id: int, kind: Literal['platform', 'erp'], file: UploadFile = File(...),
                 sheet_name: str | None = Form(None), user: User = Depends(admin), db: Session = Depends(get_db)):
@@ -240,9 +331,12 @@ def import_file(shop_id: int, kind: Literal['platform', 'erp'], file: UploadFile
 
 @router.get('/imports')
 def import_history(user: User = Depends(admin), db: Session = Depends(get_db)):
-    return [{'id': i.id, 'shop_id': i.shop_id, 'shop_name': name, 'kind': i.kind, 'filename': i.filename,
+    return [{'id': i.id, 'shop_id': i.shop_id,
+             'shop_name': i.counts.get('shop_name', '店铺已删除') if i.counts.get('shop_deleted') else name or i.counts.get('shop_name', '店铺已删除'),
+             'shop_deleted': bool(i.counts.get('shop_deleted') or name is None), 'kind': i.kind, 'filename': i.filename,
              'created_by': i.created_by, 'created_at': timestamp(i.created_at), 'counts': i.counts}
-        for i, name in db.execute(select(FinanceImport, FinanceShop.name).join(FinanceShop, FinanceShop.id == FinanceImport.shop_id)
+        for i, name in db.execute(select(FinanceImport, FinanceShop.name).outerjoin(FinanceShop,
+            (FinanceShop.id == FinanceImport.shop_id) & (FinanceShop.company_id == FinanceImport.company_id))
             .where(FinanceImport.company_id == user.company_id).order_by(FinanceImport.id.desc()).limit(100))]
 
 
@@ -283,6 +377,7 @@ def save_rates(payload: RatesInput, user: User = Depends(admin), db: Session = D
     if len({(i.shop_id, i.currency) for i, _ in values}) != len(values):
         raise HTTPException(400, '同店铺同币种不能重复提交')
     lock_company(db, user)
+    shops_for(db, user, [item.shop_id for item in payload.items])
     for item, rate in values:
         row = db.scalar(select(FinanceExchangeRate).where(FinanceExchangeRate.shop_id == item.shop_id,
             FinanceExchangeRate.currency == item.currency))

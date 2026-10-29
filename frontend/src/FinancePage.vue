@@ -6,6 +6,8 @@ import { dialogFocus as vDialogFocus } from './dialog-focus'
 import SearchableSelect from './SearchableSelect.vue'
 import FinanceDateRangePicker from './FinanceDateRangePicker.vue'
 
+type DeletionCounts = {orders:number; bills:number; erp_items:number; sku_costs:number; exchange_rates:number}
+type DeletionPreview = {shop:Shop; counts:DeletionCounts; preview_token:string}
 type ShopType = 'cross_border'|'local'
 type Shop = {id:number; name:string; shop_type:ShopType; has_platform_data:boolean}
 type Rate = {shop_id:number; currency:string; rate:string|null}
@@ -41,6 +43,11 @@ const shopDraftName = ref(''), shopDraftType = ref<ShopType>('cross_border'), sh
 const showImport = ref(false), importShopId = ref<number|null>(null), importKind = ref<'platform'|'erp'>('platform'), importFile = ref<File|null>(null)
 const importSheets = ref<string[]>([]), importSheet = ref(''), importError = ref(''), fileInputKey = ref(0)
 const history = ref<any[]>([])
+const showDeletion = ref(false), deletionShopId = ref<number|null>(null), deletionPreview = ref<DeletionPreview|null>(null)
+const deletionName = ref(''), deletionError = ref(''), previewLoading = ref(false)
+let previewGeneration = 0
+const deletionCountLabels: [keyof DeletionCounts,string][] = [['orders','财务订单'],['bills','后台账单'],['erp_items','ERP 商品明细'],['sku_costs','SKU 成本配置'],['exchange_rates','汇率配置']]
+function deletionSummary(counts:DeletionCounts) { return deletionCountLabels.map(([key,label])=>`${label} ${counts[key]} 条`).join('，') }
 const showCostDialog = ref(false), costDialogSkus = ref<{shop_id:number; base_sku:string}[]>([]), unitCost = ref(''), costFormError = ref('')
 const otherCostInputs = ref<Record<number,string>>({}), exporting = ref('')
 let generation = 0, disposed = false
@@ -200,6 +207,55 @@ async function saveShop() {
     shopFormError.value=saved ? '店铺已保存，部分数据刷新失败，请关闭弹窗后重新查询' : typeof e.response?.data?.detail==='string' ? e.response.data.detail : '保存失败，请重试'
   } finally { saving.value=false }
 }
+function closeDeletion() {
+  if (saving.value) return
+  showDeletion.value=false; previewGeneration++; previewLoading.value=false
+}
+function openDeletion() {
+  deletionShopId.value=null; deletionPreview.value=null; deletionName.value=''; deletionError.value=''
+  previewGeneration++; previewLoading.value=false; showDeletion.value=true
+}
+async function selectDeletionShop(value:string|number|null) {
+  deletionShopId.value=typeof value==='number' ? value : null
+  deletionPreview.value=null; deletionName.value=''; deletionError.value=''
+  const id=++previewGeneration, shopId=deletionShopId.value
+  previewLoading.value=false
+  if (!shopId) return
+  previewLoading.value=true
+  try {
+    const {data}=await api.get(`/finance/shops/${shopId}/deletion-preview`,auth())
+    if (id===previewGeneration && !disposed) deletionPreview.value=data
+  } catch(e:any) {
+    if (id===previewGeneration && !disposed) deletionError.value=fail(e)
+  } finally { if (id===previewGeneration && !disposed) previewLoading.value=false }
+}
+async function deleteShop() {
+  const preview=deletionPreview.value
+  if (saving.value || !preview || deletionName.value!==preview.shop.name) return
+  saving.value=true; deletionError.value=''; error.value=''
+  let deleted=false
+  try {
+    await api.delete(`/finance/shops/${preview.shop.id}`,{...auth(),data:{confirm_name:deletionName.value,preview_token:preview.preview_token}})
+    deleted=true; showDeletion.value=false; previewGeneration++
+    generation++; loading.value=false; results.value=null; applied.value=null; pending.value={items:[],total:0}
+    detail.value=null; selectedSkus.value=[]; otherCostInputs.value={}
+    orderPage.value=skuPage.value=pendingPage.value=1
+    shops.value=shops.value.filter(shop=>shop.id!==preview.shop.id)
+    selectedShopIds.value=selectedShopIds.value.filter(id=>id!==preview.shop.id)
+    if (localStorage.getItem(storageKey)===String(preview.shop.id)) localStorage.removeItem(storageKey)
+    rates.value=rates.value.filter(rate=>rate.shop_id!==preview.shop.id)
+    notice.value=`财务店铺“${preview.shop.name}”及全部关联数据已删除。`
+    await Promise.all([loadShops(),settings(),loadHistory()])
+    selectedShopIds.value=selectedShopIds.value.filter(id=>shops.value.some(shop=>shop.id===id))
+    if (selectedShopIds.value.length && !queryError.value && !await loadResults({ids:[...selectedShopIds.value],start:start.value,end:end.value})) error.value='店铺已删除，请刷新页面'
+  } catch(e:any) {
+    if (deleted) error.value='店铺已删除，请刷新页面'
+    else {
+      deletionError.value=fail(e)
+      if ([404,409].includes(e.response?.status)) { deletionPreview.value=null; deletionName.value='' }
+    }
+  } finally { saving.value=false }
+}
 function openImport() {
   importShopId.value=null
   importFile.value=null; importSheets.value=[]; importSheet.value=''; importError.value=''; fileInputKey.value++; showImport.value=true
@@ -271,7 +327,7 @@ onUnmounted(() => { document.removeEventListener('pointerdown',closeShopDropdown
 
 <template>
   <section class="page finance-page">
-    <header class="finance-title"><div class="finance-actions"><button class="primary" @click="openImport" :disabled="!shops.length || saving">导入数据</button><button class="primary" @click="openShopSettings" :disabled="initializing || saving">店铺管理</button></div></header>
+    <header class="finance-title"><div class="finance-actions"><button class="primary" @click="openImport" :disabled="!shops.length || saving">导入数据</button><button class="primary" @click="openShopSettings" :disabled="initializing || saving">店铺管理</button><button class="finance-danger" :disabled="initializing || saving || !shops.length" @click="openDeletion">删除财务店铺</button></div></header>
     <p v-if="error" class="finance-alert finance-error" role="alert">{{error}}</p>
     <p v-if="notice" class="finance-alert finance-success" role="status">{{notice}}<button aria-label="关闭提示" @click="notice=''">×</button></p>
     <section class="finance-panel finance-filters" aria-label="财务查询条件">
@@ -289,10 +345,12 @@ onUnmounted(() => { document.removeEventListener('pointerdown',closeShopDropdown
         <p v-if="applied" class="finance-applied-range">下单日期：{{applied.start}} 至 {{applied.end}}（北京时间，含开始和结束当天）</p><div class="finance-table-scroll"><table class="finance-table finance-summary"><thead><tr><th>店铺</th><th>订单数</th><th>销售额</th><th>结算金额</th><th>衣服成本</th><th>其他成本</th><th>利润</th><th>核算进度</th></tr></thead><tbody><tr v-for="row in summaryRows" :key="row.shop_id ?? 'total'" :class="{'finance-total':row.shop_id===null}"><td><strong>{{row.shop_name}}</strong></td><td>{{row.order_count}}</td><td>{{amount(row.sales)}}<small>已换算 {{row.converted_count}} / {{row.order_count}} 单</small></td><td>{{amount(row.settlement)}}<small>已换算 {{row.converted_count}} / {{row.order_count}} 单</small></td><td>{{amount(row.cost)}}<small>已核算 {{row.calculated_count}} 单</small></td><td class="finance-other-cost"><template v-if="row.shop_id!==null"><input v-model="otherCostInputs[row.shop_id]" type="text" inputmode="decimal" :aria-label="`${row.shop_name}其他成本`" :aria-invalid="!!row.error" placeholder="输入金额"/><small v-if="row.error" class="finance-invalid">{{row.error}}</small><small v-else>人民币 · 临时计算</small></template><strong v-else>{{amount(row.otherCost)}}</strong></td><td :class="{'finance-negative':row.profit!==null && Number(row.profit)<0}"><strong>{{amount(row.profit)}}</strong><small>已核算 {{row.calculated_count}} 单</small></td><td><span class="finance-badge" :class="row.pending_count ? 'warning' : 'complete'">{{row.pending_count ? `${row.pending_count} 单待核算` : '核算完整'}}</span><div v-if="row.erp_only_count" class="finance-missing-bill-export"><span>另有 {{row.erp_only_count}} 单缺后台账单</span><button :aria-label="`导出${row.shop_name}缺后台账单订单`" :disabled="loading || !!exporting" @click="exportOrders('missing-bills',row.shop_id)">{{exporting===`missing-bills:${row.shop_id ?? 'all'}` ? '导出中…' : '导出'}}</button></div></td></tr></tbody></table></div>
         <p class="finance-footnote">销售额按后台总收入计算；概览利润＝已核算订单利润 − 其他成本。其他成本仅用于本次查询，不保存；重新查询后清空。衣服成本与订单利润仅汇总资料齐全的订单，缺失数据不按零计算。</p>
       </section>
-      <section class="finance-panel finance-workspace" :aria-busy="loading">
-        <nav class="finance-tabs" aria-label="财务明细"><button v-for="item in [['orders','订单明细'],['skus','成本输入'],['settings','汇率设置'],['history','导入记录']]" :key="item[0]" :class="{active:tab===item[0]}" @click="tab=item[0]">{{item[1]}}</button></nav>
-        <template v-if="tab==='orders'"><div class="finance-section-title finance-order-toolbar"><select v-model="orderStatus" aria-label="订单状态" :disabled="loading || saving" @change="filterOrders"><option v-for="item in orderStatuses" :key="item[0]" :value="item[0]">{{item[1]}}</option></select><span>当前筛选条件下共 {{results.orders.total}} 单</span></div><div class="finance-table-scroll"><table class="finance-table"><thead><tr><th>店铺 / 订单编号</th><th>下单时间</th><th>销售额</th><th>结算金额</th><th>衣服成本</th><th>利润</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="row in results.orders.items" :key="row.id"><td>{{row.shop_name}}<small class="finance-order-id">{{row.order_number}}</small></td><td>{{date(row.paid_at)}}</td><td>{{amount(row.sales)}}</td><td>{{amount(row.settlement)}}</td><td>{{amount(row.cost)}}</td><td :class="{'finance-negative':row.profit!==null && Number(row.profit)<0}">{{amount(row.profit)}}</td><td><span v-for="status in row.statuses" :key="status" class="finance-badge" :class="status==='已核算' ? 'complete' : 'warning'">{{status}}</span></td><td><button @click="detail=row">明细</button></td></tr><tr v-if="!results.orders.total"><td colspan="8" class="finance-empty-cell">当前筛选条件下暂无订单</td></tr></tbody></table></div><div class="finance-pagination"><span>共 {{results.orders.total}} 单 · 第 {{orderPage}} 页</span><label>每页<select aria-label="订单明细每页数量" :value="orderPageSize" :disabled="loading || saving" @change="changePageSize('orders',$event)"><option v-for="size in pageSizes" :key="size" :value="size">{{size}} 条</option></select></label><button :disabled="orderPage<=1 || loading" @click="paginate('orders',-1)">上一页</button><button :disabled="orderPage*orderPageSize>=results.orders.total || loading" @click="paginate('orders',1)">下一页</button></div></template>
-        <template v-else-if="tab==='skus'">
+    </template>
+    <p v-if="!initializing && shops.length && !results && tab!=='history'" class="finance-panel finance-footnote">请选择店铺并点击查询。</p>
+    <section v-if="!initializing" class="finance-panel finance-workspace" :aria-busy="tab!=='history' && loading">
+        <nav class="finance-tabs" aria-label="财务明细"><button v-for="item in [['orders','订单明细'],['skus','成本输入'],['settings','汇率设置'],['history','导入与删除记录']]" :key="item[0]" :class="{active:tab===item[0]}" :disabled="!results && item[0]!=='history'" @click="tab=item[0]">{{item[1]}}</button></nav>
+        <template v-if="results && tab==='orders'"><div class="finance-section-title finance-order-toolbar"><select v-model="orderStatus" aria-label="订单状态" :disabled="loading || saving" @change="filterOrders"><option v-for="item in orderStatuses" :key="item[0]" :value="item[0]">{{item[1]}}</option></select><span>当前筛选条件下共 {{results.orders.total}} 单</span></div><div class="finance-table-scroll"><table class="finance-table"><thead><tr><th>店铺 / 订单编号</th><th>下单时间</th><th>销售额</th><th>结算金额</th><th>衣服成本</th><th>利润</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="row in results.orders.items" :key="row.id"><td>{{row.shop_name}}<small class="finance-order-id">{{row.order_number}}</small></td><td>{{date(row.paid_at)}}</td><td>{{amount(row.sales)}}</td><td>{{amount(row.settlement)}}</td><td>{{amount(row.cost)}}</td><td :class="{'finance-negative':row.profit!==null && Number(row.profit)<0}">{{amount(row.profit)}}</td><td><span v-for="status in row.statuses" :key="status" class="finance-badge" :class="status==='已核算' ? 'complete' : 'warning'">{{status}}</span></td><td><button @click="detail=row">明细</button></td></tr><tr v-if="!results.orders.total"><td colspan="8" class="finance-empty-cell">当前筛选条件下暂无订单</td></tr></tbody></table></div><div class="finance-pagination"><span>共 {{results.orders.total}} 单 · 第 {{orderPage}} 页</span><label>每页<select aria-label="订单明细每页数量" :value="orderPageSize" :disabled="loading || saving" @change="changePageSize('orders',$event)"><option v-for="size in pageSizes" :key="size" :value="size">{{size}} 条</option></select></label><button :disabled="orderPage<=1 || loading" @click="paginate('orders',-1)">上一页</button><button :disabled="orderPage*orderPageSize>=results.orders.total || loading" @click="paginate('orders',1)">下一页</button></div></template>
+        <template v-else-if="results && tab==='skus'">
           <div class="finance-sku-toolbar">
             <div class="finance-actions"><select v-model="skuCostStatus" aria-label="成本设置状态" :disabled="loading || saving" @change="searchSkus"><option value="all">全部状态</option><option value="set">已设置</option><option value="unset">未设置</option></select><input v-model="skuSearch" placeholder="输入基础 SKU 前缀" aria-label="搜索基础 SKU" @keyup.enter="searchSkus"/><button :disabled="loading" @click="searchSkus">搜索</button></div>
             <div class="finance-actions"><template v-if="selectedSkus.length"><span>已选 {{selectedSkus.length}} 项</span><button class="primary" :disabled="saving || loading" @click="openCostDialog">批量设置成本</button></template></div>
@@ -302,10 +360,29 @@ onUnmounted(() => { document.removeEventListener('pointerdown',closeShopDropdown
           <div class="finance-pagination"><span>共 {{results.skus.total}} 项 · 第 {{skuPage}} 页</span><label>每页<select aria-label="成本输入每页数量" :value="skuPageSize" :disabled="loading || saving" @change="changePageSize('skus',$event)"><option v-for="size in pageSizes" :key="size" :value="size">{{size}} 条</option></select></label><button :disabled="skuPage<=1 || loading" @click="paginate('skus',-1)">上一页</button><button :disabled="skuPage*skuPageSize>=results.skus.total || loading" @click="paginate('skus',1)">下一页</button></div>
         </template>
         <div v-else-if="tab==='settings'" class="finance-settings"><section><div class="finance-section-title"><h3>店铺汇率</h3><button class="primary" :disabled="saving" @click="saveRates">保存汇率</button></div><p class="finance-footnote">1 单位外币＝输入值人民币；保存后重算该店铺历史数据。</p><label v-for="rate in selectedRates" :key="rateKey(rate)" class="finance-rate-row"><span>{{shopName(rate.shop_id)}}<small>1 {{rate.currency}} =</small></span><input v-model="rateInputs[rateKey(rate)]" type="text" inputmode="decimal" :disabled="rate.currency==='CNY' || saving" :aria-label="`${shopName(rate.shop_id)} ${rate.currency} 汇率`" placeholder="输入人民币汇率"/><span>人民币</span></label><p v-if="!selectedRates.length" class="empty">导入后台账单后显示需要配置的币种。</p></section></div>
-        <template v-else-if="tab==='history'"><p class="finance-footnote">最近 100 次导入记录，覆盖本公司全部财务店铺，不受查询时间筛选。</p><div class="finance-table-scroll"><table class="finance-table"><thead><tr><th>导入时间</th><th>店铺</th><th>数据类型 / 文件</th><th>新增</th><th>更新</th><th>未变化</th></tr></thead><tbody><tr v-for="item in history" :key="item.id"><td>{{date(item.created_at)}}</td><td>{{item.shop_name}}</td><td>{{item.kind==='erp' ? 'ERP 数据' : '店铺后台数据'}}<small>{{item.filename}}</small></td><td>{{item.counts.created}}</td><td>{{item.counts.updated}}</td><td>{{item.counts.unchanged}}</td></tr><tr v-if="!history.length"><td colspan="6" class="finance-empty-cell">暂无导入记录</td></tr></tbody></table></div></template>
+    <section v-else-if="tab==='history'" aria-label="导入与删除记录">
+      <p class="finance-footnote">最近 100 次操作，覆盖本公司全部财务店铺，不受查询时间筛选。历史导入记录不代表数据仍然存在。</p>
+      <div class="finance-table-scroll"><table class="finance-table"><thead><tr><th>操作时间</th><th>店铺</th><th>操作 / 文件</th><th>操作人 ID</th><th>结果</th></tr></thead><tbody>
+        <tr v-for="item in history" :key="item.id"><td>{{date(item.created_at)}}</td><td>{{item.shop_name}}<small v-if="item.shop_deleted">店铺已删除</small></td><td>{{item.kind==='deletion' ? '删除财务店铺' : item.kind==='erp' ? '导入 ERP 数据' : '导入店铺后台数据'}}<small v-if="item.filename">{{item.filename}}</small></td><td>{{item.created_by}}</td><td class="finance-history-result"><template v-if="item.kind==='deletion'">{{deletionSummary(item.counts)}}</template><template v-else>新增 {{item.counts.created}}，更新 {{item.counts.updated}}，未变化 {{item.counts.unchanged}} {{item.counts.unit}}</template></td></tr>
+        <tr v-if="!history.length"><td colspan="5" class="finance-empty-cell">暂无导入与删除记录</td></tr>
+      </tbody></table></div>
+    </section>
+    </section>
+    <section v-if="results" class="finance-panel finance-pending"><div class="finance-section-title"><div class="finance-pending-export-title"><h2>下单时间待补 <span>{{pending.total}} 单</span></h2><button v-if="pending.total" aria-label="导出下单时间待补订单" :disabled="loading || !!exporting" @click="exportOrders('pending-order-time')">{{exporting==='pending-order-time:all' ? '导出中…' : '导出'}}</button></div><span>所选店铺全部待补订单 · 不受时间筛选 · 未计入上方统计</span></div><p class="finance-footnote">这些后台订单尚未匹配 ERP，无法确定下单时间。补导 ERP 后将自动归入对应查询时段。</p><details v-if="pending.total"><summary>查看待补订单</summary><div class="finance-table-scroll"><table class="finance-table"><thead><tr><th>店铺</th><th>订单编号</th><th>待处理</th></tr></thead><tbody><tr v-for="row in pending.items" :key="row.id"><td>{{row.shop_name}}</td><td>{{row.order_number}}</td><td>补导 ERP 商品及下单时间</td></tr></tbody></table></div><div class="finance-pagination"><span>共 {{pending.total}} 单 · 第 {{pendingPage}} 页</span><label>每页<select aria-label="下单时间待补每页数量" :value="pendingPageSize" :disabled="loading || saving" @change="changePageSize('pending',$event)"><option v-for="size in pageSizes" :key="size" :value="size">{{size}} 条</option></select></label><button :disabled="pendingPage<=1 || loading" @click="paginate('pending',-1)">上一页</button><button :disabled="pendingPage*pendingPageSize>=pending.total || loading" @click="paginate('pending',1)">下一页</button></div></details><p v-else class="finance-footnote">当前所选店铺没有待补下单时间的订单。</p></section>
+    <div v-if="showDeletion" class="modal-backdrop" @click.self="closeDeletion">
+      <section v-dialog-focus="{close:closeDeletion,busy:saving}" class="modal-card finance-modal finance-deletion-modal" role="dialog" aria-modal="true" aria-labelledby="finance-deletion-title">
+        <h2 id="finance-deletion-title">删除财务店铺</h2>
+        <p class="finance-deletion-warning">将永久删除所选财务店铺及其全部订单。覆盖全部历史数据，不受日期筛选影响，且不可撤销。再次导入前需要重新新增店铺。</p>
+        <div class="finance-import-shop-field"><span>选择要删除的店铺 <b>*</b></span><SearchableSelect :model-value="deletionShopId" :options="importShopOptions" aria-label="选择要删除的店铺" placeholder="请手动选择一个店铺" search-placeholder="搜索店铺名称" :disabled="saving" @update:model-value="selectDeletionShop"/></div>
+        <p v-if="previewLoading" role="status" class="finance-footnote">正在预览删除范围…</p>
+        <template v-if="deletionPreview">
+          <dl class="finance-deletion-counts"><template v-for="[key,label] in deletionCountLabels" :key="key"><dt>{{label}}</dt><dd>{{deletionPreview.counts[key]}} 条</dd></template></dl>
+          <label>输入完整店铺名称确认：{{deletionPreview.shop.name}}<input v-model="deletionName" aria-label="输入完整店铺名称确认删除" autocomplete="off" :disabled="saving" placeholder="请输入完整店铺名称"/></label>
+        </template>
+        <p v-if="deletionError" class="finance-invalid" role="alert">{{deletionError}}</p>
+        <div class="modal-actions"><button :disabled="saving" @click="closeDeletion">取消</button><button v-if="deletionShopId && !deletionPreview && !previewLoading" :disabled="saving" @click="selectDeletionShop(deletionShopId)">重新预览</button><button class="finance-danger-solid" :disabled="saving || previewLoading || !deletionPreview || deletionName!==deletionPreview.shop.name" @click="deleteShop">{{saving ? '正在删除…' : '永久删除店铺及全部数据'}}</button></div>
       </section>
-      <section class="finance-panel finance-pending"><div class="finance-section-title"><div class="finance-pending-export-title"><h2>下单时间待补 <span>{{pending.total}} 单</span></h2><button v-if="pending.total" aria-label="导出下单时间待补订单" :disabled="loading || !!exporting" @click="exportOrders('pending-order-time')">{{exporting==='pending-order-time:all' ? '导出中…' : '导出'}}</button></div><span>所选店铺全部待补订单 · 不受时间筛选 · 未计入上方统计</span></div><p class="finance-footnote">这些后台订单尚未匹配 ERP，无法确定下单时间。补导 ERP 后将自动归入对应查询时段。</p><details v-if="pending.total"><summary>查看待补订单</summary><div class="finance-table-scroll"><table class="finance-table"><thead><tr><th>店铺</th><th>订单编号</th><th>待处理</th></tr></thead><tbody><tr v-for="row in pending.items" :key="row.id"><td>{{row.shop_name}}</td><td>{{row.order_number}}</td><td>补导 ERP 商品及下单时间</td></tr></tbody></table></div><div class="finance-pagination"><span>共 {{pending.total}} 单 · 第 {{pendingPage}} 页</span><label>每页<select aria-label="下单时间待补每页数量" :value="pendingPageSize" :disabled="loading || saving" @change="changePageSize('pending',$event)"><option v-for="size in pageSizes" :key="size" :value="size">{{size}} 条</option></select></label><button :disabled="pendingPage<=1 || loading" @click="paginate('pending',-1)">上一页</button><button :disabled="pendingPage*pendingPageSize>=pending.total || loading" @click="paginate('pending',1)">下一页</button></div></details><p v-else class="finance-footnote">当前所选店铺没有待补下单时间的订单。</p></section>
-    </template>
+    </div>
     <div v-if="showCostDialog" class="modal-backdrop" @click.self="!saving && (showCostDialog=false)"><section v-dialog-focus class="modal-card finance-modal" role="dialog" aria-modal="true" aria-labelledby="finance-cost-title"><h2 id="finance-cost-title">批量设置成本</h2><p class="finance-footnote">为已选 {{costDialogSkus.length}} 条店铺 SKU 设置人民币单件衣服成本，仅影响所选店铺的对应 SKU，保存后会重新核算相关订单。</p><label>单件衣服成本<input v-model="unitCost" type="text" inputmode="decimal" aria-label="单件衣服成本" placeholder="输入单件衣服成本" :disabled="saving" @keyup.enter="saveSkuCosts"/></label><p v-if="costFormError" class="finance-invalid" role="alert">{{costFormError}}</p><div class="modal-actions"><button :disabled="saving" @click="showCostDialog=false">取消</button><button class="primary" :disabled="saving || !unitCost.trim()" @click="saveSkuCosts">{{saving ? '保存中…' : '确定'}}</button></div></section></div>
     <div v-if="showShopSettings" class="modal-backdrop" @click.self="closeShopSettings">
       <section v-dialog-focus="{close:closeShopSettings,busy:saving}" class="modal-card finance-shop-manager" role="dialog" aria-modal="true" aria-labelledby="finance-shop-settings-title">
@@ -338,6 +415,8 @@ onUnmounted(() => { document.removeEventListener('pointerdown',closeShopDropdown
 </template>
 
 <style scoped>
+.finance-danger,.finance-danger-solid,.finance-deletion-modal .modal-actions button{min-height:42px;padding:10px 14px;border-radius:10px;font:inherit;font-size:13px;box-shadow:none}.finance-danger:focus-visible,.finance-danger-solid:focus-visible{outline:2px solid #b91c1c;outline-offset:3px}.finance-deletion-modal .modal-actions{flex-wrap:wrap}.finance-danger{color:#b91c1c;border:1px solid #fecaca;background:#fff}.finance-danger-solid{color:white;background:#b91c1c;border:1px solid #b91c1c}.finance-deletion-warning{padding:12px;background:#fef2f2;color:#991b1b;font-size:13px;line-height:1.8;border-radius:8px}.finance-deletion-counts{display:grid;grid-template-columns:1fr auto;gap:10px;font-size:13px;color:#334155;margin-top:20px}.finance-deletion-counts dd{margin:0;font-weight:600}.finance-history-result{white-space:normal;min-width:220px}.finance-modal{max-height:90vh;overflow:auto}
+
 .finance-other-cost input{width:145px!important;max-width:180px}.finance-other-cost small{white-space:normal;max-width:180px}.finance-summary td small.finance-invalid{color:#b91c1c}.finance-missing-bill-export,.finance-pending-export-title{display:flex;align-items:center;gap:10px}.finance-missing-bill-export{margin-top:5px;font-size:11px;color:#64748b}.finance-missing-bill-export button,.finance-pending-export-title button{font-size:12px;color:#6043d4;border:1px solid #e2dff0;border-radius:7px;padding:5px 10px;background:#fff;white-space:nowrap}
 .finance-import-shop-field{display:flex;flex-direction:column;gap:8px;margin-top:16px;font-size:13px;color:#334155}.finance-import-shop-field b{color:#dc2626}.finance-import-shop-field :deep(.search-select-trigger){min-height:42px;border-radius:10px;font-size:13px}.finance-import-shop-field :deep(.search-select-search input){font-size:13px}.finance-import-shop-field :deep(.search-select-search input::placeholder){font-size:12px}
 .finance-shop-manager{width:920px;max-width:calc(100vw - 36px);box-sizing:border-box;max-height:88vh;overflow:auto}

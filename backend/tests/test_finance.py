@@ -19,7 +19,7 @@ from app.database import Base, get_db
 from app.finance import router
 from app.finance_import import parse_workbook
 from app.models import (Company, FinanceBill, FinanceErpItem, FinanceImport, FinanceOrder,
-    FinanceShop, FinanceShopSkuCost, FinanceSkuCost, FinanceSkuMapping, FinanceTemplateCost, ProductTemplate, Role, User)
+    FinanceShop, FinanceShopSkuCost, FinanceExchangeRate, FinanceSkuCost, FinanceSkuMapping, FinanceTemplateCost, ProductTemplate, Role, User)
 from app.schema_version import alembic_config
 from app.security import create_access_token
 
@@ -101,6 +101,155 @@ class FinanceTests(TestCase):
     def settings(self, cost='5', rate='1.63'):
         self.ok(self.request('PUT', '/finance/sku-costs', json={'items':[{'shop_id':self.shop,'base_sku':sku} for sku in ['Y1AA001']], 'unit_cost':cost}))
         self.ok(self.request('PUT', '/finance/exchange-rates', json={'items': [{'shop_id': self.shop, 'currency': 'MYR', 'rate': rate}]}))
+
+    def deletion_preview(self, shop=None, uid=1):
+        return self.request('GET', f'/finance/shops/{shop or self.shop}/deletion-preview', uid=uid)
+
+    def delete_finance_shop(self, preview=None, shop=None, uid=1, name='测试店铺'):
+        preview = preview or self.ok(self.deletion_preview(shop, uid))
+        return self.request('DELETE', f'/finance/shops/{shop or self.shop}', uid=uid,
+            json={'confirm_name': name, 'preview_token': preview['preview_token']})
+
+    def test_delete_shop_removes_all_data_retains_history_and_isolates_other_shops(self):
+        self.ok(self.upload('platform', [bill()]))
+        self.ok(self.upload('erp', [erp()]))
+        self.settings()
+        other = self.ok(self.request('POST', '/finance/shops', json={'name':'保留店铺'}))['id']
+        self.ok(self.upload('platform', [bill()], shop=other))
+        self.ok(self.upload('erp', [erp()], shop=other))
+        with self.sessions() as db:
+            db.add(FinanceSkuCost(company_id=1, base_sku='legacy', unit_cost=Decimal('9')))
+            db.commit()
+        preview = self.ok(self.deletion_preview())
+        self.assertEqual(preview['counts'], {'orders':1,'bills':1,'erp_items':1,'sku_costs':1,'exchange_rates':1})
+        self.assertEqual(self.ok(self.delete_finance_shop(preview))['counts'], preview['counts'])
+        with self.sessions() as db:
+            self.assertIsNone(db.get(FinanceShop, self.shop))
+            self.assertEqual(len(db.scalars(select(FinanceOrder)).all()), 1)
+            self.assertEqual(len(db.scalars(select(FinanceBill)).all()), 1)
+            self.assertEqual(len(db.scalars(select(FinanceErpItem)).all()), 1)
+            self.assertEqual(len(db.scalars(select(FinanceShopSkuCost)).all()), 0)
+            self.assertEqual(len(db.scalars(select(FinanceExchangeRate)).all()), 0)
+            self.assertEqual(len(db.scalars(select(FinanceSkuCost)).all()), 1)
+        history = self.ok(self.request('GET', '/finance/imports'))
+        deleted = [row for row in history if row['shop_id'] == self.shop]
+        self.assertEqual(len(deleted), 3)
+        self.assertEqual(deleted[0]['kind'], 'deletion')
+        self.assertTrue(all(row['shop_deleted'] and row['shop_name']=='测试店铺' for row in deleted))
+        self.assertEqual(deleted[0]['created_by'], 1)
+        self.assertEqual(self.delete_finance_shop(preview).status_code, 404)
+        self.assertEqual(self.ok(self.query(shops=[other]))['total']['order_count'], 1)
+
+    def test_delete_empty_local_and_one_sided_shops_and_recreate(self):
+        for kind in ('empty', 'platform', 'erp', 'local'):
+            with self.subTest(kind=kind):
+                shop = self.ok(self.request('POST','/finance/shops',json={
+                    'name':kind, 'shop_type':'local' if kind=='local' else 'cross_border'}))['id']
+                if kind in ('platform','local'):
+                    self.ok(self.upload('platform',[bill()],shop=shop))
+                if kind in ('erp','local'):
+                    self.ok(self.upload('erp',[erp()],shop=shop))
+                self.ok(self.delete_finance_shop(shop=shop,name=kind))
+                replacement=self.ok(self.request('POST','/finance/shops',json={'name':kind}))['id']
+                self.assertEqual(self.ok(self.deletion_preview(replacement))['counts'],
+                    {'orders':0,'bills':0,'erp_items':0,'sku_costs':0,'exchange_rates':0})
+                self.ok(self.request('PATCH',f'/finance/shops/{replacement}',json={'name':kind+'新','shop_type':'local'}))
+                old = [row for row in self.ok(self.request('GET','/finance/imports')) if row['kind']=='deletion']
+                self.assertIn(kind, [row['shop_name'] for row in old])
+        self.ok(self.delete_finance_shop())
+        # 无需现存店铺也可读取历史。
+        self.assertTrue(self.ok(self.request('GET','/finance/imports')))
+
+    def test_delete_last_shop_and_recreate_without_old_settings(self):
+        self.ok(self.upload('platform',[bill()]))
+        self.ok(self.upload('erp',[erp()]))
+        self.settings()
+        self.ok(self.delete_finance_shop())
+        self.assertEqual(self.ok(self.request('GET','/finance/shops')),[])
+        self.assertEqual(len(self.ok(self.request('GET','/finance/imports'))),3)
+        recreated=self.ok(self.request('POST','/finance/shops',json={'name':'测试店铺'}))['id']
+        self.assertTrue(all(value==0 for value in self.ok(self.deletion_preview(recreated))['counts'].values()))
+        self.ok(self.request('PATCH',f'/finance/shops/{recreated}',json={'name':'新店名称','shop_type':'local'}))
+        self.assertTrue(all(row['shop_name']=='测试店铺' and row['shop_deleted']
+            for row in self.ok(self.request('GET','/finance/imports'))))
+        self.ok(self.upload('platform',[bill()],shop=recreated))
+        self.ok(self.upload('erp',[erp()],shop=recreated))
+        result=self.ok(self.query(shops=[recreated]))
+        self.assertEqual(result['skus']['items'][0]['unit_cost'],None)
+        self.assertEqual(self.ok(self.request('GET','/finance/settings'))['rates'][0]['rate'],None)
+
+    def test_deletion_permission_name_and_token_validation(self):
+        preview=self.ok(self.deletion_preview())
+        for uid in (2,3,5):
+            self.assertEqual(self.deletion_preview(uid=uid).status_code,403)
+            self.assertEqual(self.delete_finance_shop(preview,uid=uid).status_code,403)
+        self.assertEqual(self.deletion_preview(uid=4).status_code,404)
+        self.assertEqual(self.delete_finance_shop(preview,uid=4).status_code,404)
+        self.assertEqual(self.delete_finance_shop(preview,name='错误名称').status_code,400)
+        self.assertEqual(self.delete_finance_shop({'preview_token':'invalid'}).status_code,409)
+        self.assertIsNotNone(self.ok(self.deletion_preview()))
+        other=self.ok(self.request('POST','/finance/shops',json={'name':'测试店铺2'}))['id']
+        self.assertEqual(self.delete_finance_shop(preview,shop=other,name='测试店铺2').status_code,409)
+        from jose import jwt
+        from app.config import get_settings
+        token=jwt.decode(preview['preview_token'],get_settings().secret_key,algorithms=['HS256'])
+        token['exp']=0
+        expired={'preview_token':jwt.encode(token,get_settings().secret_key,algorithm='HS256')}
+        self.assertEqual(self.delete_finance_shop(expired).status_code,409)
+
+    def test_deletion_preview_invalidated_by_updates_with_same_row_counts(self):
+        self.ok(self.upload('platform',[bill()]))
+        self.ok(self.upload('erp',[erp()]))
+        self.settings()
+        mutations=[
+            lambda:self.upload('platform',[bill(amount='21')]),
+            lambda:self.upload('erp',[erp(quantity=2)]),
+            lambda:self.request('PUT','/finance/sku-costs',json={'items':[{'shop_id':self.shop,'base_sku':'Y1AA001'}],'unit_cost':'6'}),
+            lambda:self.request('PUT','/finance/exchange-rates',json={'items':[{'shop_id':self.shop,'currency':'MYR','rate':'1.7'}]}),
+            lambda:self.upload('erp',[erp(quantity=2)]),
+        ]
+        for mutate in mutations:
+            preview=self.ok(self.deletion_preview())
+            self.ok(mutate())
+            self.assertEqual(self.delete_finance_shop(preview).status_code,409)
+        preview=self.ok(self.deletion_preview())
+        self.ok(self.request('PATCH',f'/finance/shops/{self.shop}',json={'name':'新名称','shop_type':'cross_border'}))
+        self.assertEqual(self.delete_finance_shop(preview,name='新名称').status_code,409)
+
+    def test_deletion_rolls_back_all_changes_if_commit_fails(self):
+        self.ok(self.upload('platform',[bill()]))
+        self.ok(self.upload('erp',[erp()]))
+        self.settings()
+        preview=self.ok(self.deletion_preview())
+        with patch('app.finance.commit',side_effect=RuntimeError('模拟提交失败')):
+            with self.assertRaises(RuntimeError):
+                self.delete_finance_shop(preview)
+        self.assertEqual(self.ok(self.deletion_preview())['counts'],preview['counts'])
+        history=self.ok(self.request('GET','/finance/imports'))
+        self.assertEqual(len(history),2)
+        self.assertTrue(all(not row['shop_deleted'] for row in history))
+        self.ok(self.delete_finance_shop(preview))
+
+    def test_writes_recheck_shop_after_company_lock(self):
+        from app.finance import lock_company
+        for action in ('import','edit','rates','costs'):
+            with self.subTest(action=action):
+                shop=self.ok(self.request('POST','/finance/shops',json={'name':action}))['id']
+                def remove_then_lock(db,user):
+                    with self.sessions() as other:
+                        other.delete(other.get(FinanceShop,shop))
+                        other.commit()
+                    lock_company(db,user)
+                with patch('app.finance.lock_company',side_effect=remove_then_lock):
+                    if action=='import': response=self.upload('platform',[bill()],shop=shop)
+                    elif action=='edit': response=self.request('PATCH',f'/finance/shops/{shop}',json={'name':'changed','shop_type':'local'})
+                    elif action=='rates': response=self.request('PUT','/finance/exchange-rates',json={'items':[{'shop_id':shop,'currency':'MYR','rate':'1'}]})
+                    else: response=self.request('PUT','/finance/sku-costs',json={'items':[{'shop_id':shop,'base_sku':'Y1AA001'}],'unit_cost':'2'})
+                self.assertEqual(response.status_code,404,response.text)
+                with self.sessions() as db:
+                    self.assertIsNone(db.scalar(select(FinanceOrder.id).where(FinanceOrder.shop_id==shop)))
+                    self.assertIsNone(db.scalar(select(FinanceExchangeRate.id).where(FinanceExchangeRate.shop_id==shop)))
+                    self.assertIsNone(db.scalar(select(FinanceShopSkuCost.id).where(FinanceShopSkuCost.shop_id==shop)))
 
     def test_only_company_admin_and_all_shop_ids_validated(self):
         for uid in (2, 3, 5):
