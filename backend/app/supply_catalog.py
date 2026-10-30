@@ -337,6 +337,7 @@ def templates(user=Depends(supply_actor), db: Session = Depends(get_db)):
         items.append({"id": item.id, "name": item.name, "cover_url": item.cover_url,
             "group_id": item.group_id if item.group_id in groups else None, "group_name": groups.get(item.group_id),
             "description": item.description, "supply_public": item.supply_public,
+            "title_engine": "v1",
             "supply_fallback_title": item.supply_fallback_title if is_manager(user) else None,
             "sizes": sizes(snapshot), "available_count": len(available)})
     return items
@@ -547,6 +548,7 @@ def submit_job(payload: JobInput, user=Depends(supply_actor), db: Session = Depe
         template_id=template.id, category_catalog_id=catalog.id,
         idempotency_key=payload.idempotency_key, request_hash=request_hash,
         snapshot={"strategy": parameters, "template": snapshot, "template_version": version,
+            "title_engine": "v1", "title_profile": None, "title_market_id": None,
             "catalog_options": copy.deepcopy(catalog_listing_options(catalog)), "catalog_type": catalog.template_type,
             "candidates": candidates, "seed": secrets.token_hex(16), "user_name": actor.name,
             "internal_usage": actor.role != Role.SUPPLY_USER, "expected_rows": rows},

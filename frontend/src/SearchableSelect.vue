@@ -15,6 +15,8 @@ const props = withDefaults(defineProps<{
   maxVisible?: number
   emptyLabel?: string
   noMatchLabel?: string
+  multiple?: boolean
+  selectedValues?: OptionValue[]
 }>(), {
   valueKey: 'value',
   labelKey: 'label',
@@ -24,9 +26,11 @@ const props = withDefaults(defineProps<{
   maxVisible: 200,
   emptyLabel: '暂无可选类目',
   noMatchLabel: '没有匹配的类目',
+  multiple: false,
+  selectedValues: () => [],
 })
 
-const emit = defineEmits<{ 'update:modelValue': [OptionValue]; change: [OptionValue] }>()
+const emit = defineEmits<{ 'update:modelValue': [OptionValue]; change: [OptionValue]; toggle: [OptionValue] }>()
 
 const root = ref<HTMLElement | null>(null)
 const listbox = ref<HTMLElement | null>(null)
@@ -40,7 +44,10 @@ const normalizedOptions = computed(() => (props.options || []).map(option => ({
   label: String(option?.[props.labelKey] ?? ''),
 })))
 
-const selectedLabel = computed(() => normalizedOptions.value.find(option => option.value === props.modelValue)?.label || '')
+const selectedLabel = computed(() => props.multiple
+  ? (props.selectedValues.length ? `已选择 ${props.selectedValues.length} 项` : '')
+  : normalizedOptions.value.find(option => option.value === props.modelValue)?.label || '')
+const isSelected = (value: OptionValue) => props.multiple ? props.selectedValues.includes(value) : value === props.modelValue
 
 const keywordTerms = computed(() => keyword.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean))
 
@@ -56,9 +63,10 @@ const visibleOptions = computed(() => matchedOptions.value.slice(0, props.maxVis
 const hiddenCount = computed(() => matchedOptions.value.length - visibleOptions.value.length)
 
 watch(() => props.options, () => {
-  keyword.value = ''
+  if (!props.multiple) keyword.value = ''
   activeIndex.value = 0
 })
+watch(() => props.disabled, value => { if (value) closePanel() })
 
 watch(matchedOptions, () => {
   if (activeIndex.value >= visibleOptions.value.length) activeIndex.value = Math.max(0, visibleOptions.value.length - 1)
@@ -113,6 +121,11 @@ function togglePanel() {
 }
 
 function selectOption(value: OptionValue) {
+  if (props.disabled) return
+  if (props.multiple) {
+    emit('toggle', value)
+    return
+  }
   emit('update:modelValue', value)
   emit('change', value)
   closePanel()
@@ -182,21 +195,23 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
           v-model="keyword"
           type="text"
           :placeholder="searchPlaceholder"
+          :aria-label="searchPlaceholder"
           @keydown="onSearchKeydown"
         />
       </div>
-      <ul ref="listbox" class="search-select-list" role="listbox">
+      <ul ref="listbox" class="search-select-list" role="listbox" :aria-multiselectable="multiple || undefined">
         <li
           v-for="(option, index) in visibleOptions"
           :key="String(option.value)"
           class="search-select-option"
-          :class="{ 'is-active': index === activeIndex, 'is-selected': option.value === modelValue }"
+          :class="{ 'is-active': index === activeIndex, 'is-selected': isSelected(option.value) }"
           role="option"
-          :aria-selected="option.value === modelValue"
+          :aria-selected="isSelected(option.value)"
           @mouseenter="activeIndex = index"
           @mousedown.prevent
           @click.prevent="selectOption(option.value)"
         >
+          <span v-if="multiple" class="search-select-check" aria-hidden="true">{{isSelected(option.value)?'☑':'☐'}} </span>
           <span
             v-for="(segment, segmentIndex) in highlightSegments(option.label)"
             :key="segmentIndex"

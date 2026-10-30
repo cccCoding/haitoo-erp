@@ -1,4 +1,16 @@
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
+.app-shell>aside>nav{grid-template-columns:minmax(0,1fr)}
+.sidebar-nav-group{min-width:0;margin-top:7px}
+.sidebar-nav-group .nav-group-toggle{align-items:center}
+.nav-group-toggle.has-active{color:#563bd0;font-weight:700}
+.nav-group-toggle.has-active[aria-expanded="false"]{background:#eeeaff}
+.nav-group-chevron{flex:none;width:16px;height:16px;margin-left:auto;fill:none;stroke:currentColor;stroke-width:1.6;transition:transform .15s}
+.nav-group-chevron.expanded{transform:rotate(90deg)}
+.nav-group-items{display:grid;min-width:0;gap:5px;margin-top:7px;margin-left:21px;padding-left:9px;border-left:1px solid #e7e2f5}
+.nav-group-items button{align-items:center;gap:10px;padding:10px 12px;font-size:13px}
+.nav-group-items button i{font-size:16px}
+.sidebar-nav-group button:focus-visible{outline:2px solid #7256e7;outline-offset:2px}
+@media(max-width:1000px){.sidebar-nav-group .nav-group-toggle>span,.nav-group-chevron{display:none}.nav-group-items{margin-left:0;padding-left:0;border-left:0}.sidebar-nav-group button{min-width:0;justify-content:center;gap:0;padding:12px 0;font-size:0}.nav-group-items button i{font-size:18px}}
 .material-draft-sort-hint{margin:0 0 9px;color:#857e94;font-size:12px;line-height:1.4}
 .material-draft-sort-item{position:relative;flex:none;border:2px solid transparent;border-radius:9px;cursor:grab;outline:none}
 .material-draft-sort-item:active{cursor:grabbing}
@@ -155,6 +167,7 @@ nav button.subnav{width:calc(100% - 14px);margin:-3px 0 4px 14px;padding:10px 14
 .draft-title-generation-controls{margin:0}.draft-title-generation-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.draft-title-generation-actions button{margin:0;white-space:nowrap}.draft-title-generation-actions .ghost{padding:6px 0;color:#6043d4}
 
 .draft-title-generate-group{display:flex;align-items:center;gap:8px}.draft-title-generation-actions .draft-title-help-button{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:50%;background:transparent;color:#847d94;font-size:20px;line-height:1}.draft-title-help-button:hover{background:#f2eeff;color:#6043d4}.draft-title-help-button:focus-visible{outline:2px solid #7256e7;outline-offset:2px}.material-draft-dialog .draft-title-generation-help,.material-batch-draft-dialog .draft-title-generation-help{margin:10px 0 0;padding:10px 12px;border-radius:8px;background:#f6f3ff;color:#766d88;font-size:12px;line-height:1.6}
+.draft-title-generation-actions .title-checkbox{display:flex;align-items:center;gap:6px;margin:0;font-size:12px}.draft-title-generation-actions .title-checkbox input{width:16px;height:16px;margin:0;accent-color:#6546dc}.title-result-details{padding:12px;border:1px solid #e5dff4;border-radius:8px;background:#faf8fe;font-size:12px;line-height:1.6}.title-result-warning{font-size:12px;color:#8b681f;line-height:1.5}
 
 .material-batch-groups .draft-title-generation-controls{margin-top:10px}
 

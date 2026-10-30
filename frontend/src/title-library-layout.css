@@ -1,0 +1,13 @@
+/* 标题词库沿用创作资源的筛选栏与独立表格样式。 */
+.title-library .title-library-filters{margin:0;gap:16px;align-items:flex-end}
+.title-library .title-library-filters>label{flex:0 1 180px;width:180px;min-width:0;max-width:100%}
+.title-library .title-library-filters>label.title-library-search{flex-basis:240px;width:240px}
+.title-library .title-library-filters input,.title-library .title-library-filters select{box-sizing:border-box;display:block;width:100%;min-width:0;margin:0;padding:10px 12px;border:1px solid #e2dff0;border-radius:9px;background:#fff;color:inherit;font:inherit}
+.title-library-filter-total{padding:10px 0;color:#8a8495;font-size:13px}
+.title-library .title-library-table{width:100%;min-width:940px;border-collapse:collapse;text-align:left;font-size:13px}
+.title-library .title-library-table th{padding:14px 16px;border-bottom:0;background:#faf9fd;color:#8a8397;font-size:12px;font-weight:600;white-space:nowrap}
+.title-library .title-library-table td{padding:14px 16px;border-top:1px solid #eeebf4;border-bottom:0;color:#4d465b;vertical-align:middle;overflow-wrap:anywhere}
+@media(max-width:640px){
+  .title-library .title-library-filters>label,.title-library .title-library-filters>label.title-library-search{flex:1 1 100%;width:100%}
+  .title-library .title-library-filters>.creative-resource-filter-actions{flex-wrap:wrap}
+}

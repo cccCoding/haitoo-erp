@@ -11,12 +11,12 @@ from uuid import uuid4
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import aliased
 
 from .config import get_settings
 from .credentials import decrypt_secret
-from .ai_providers import DEEPSEEK_TITLE_MODEL, validate_generated_title
+from .ai_providers import DEEPSEEK_TITLE_MODEL, ProviderError, validate_generated_title
 from .database import SessionLocal
 from .models import Company, ProductTemplate, SupplyJob, SupplyJobMaterial, User
 from .supply_common import (ACTIVE_STATES, digest, eligible_materials,
@@ -193,6 +193,39 @@ async def request_title(api_key, template, requirements):
         return validate_generated_title(value.strip())
 
 
+async def request_market_title(job_id, epoch, index, first_image, session_factory):
+    from .title_models import TitleMarket, TitleRecord
+    from .title_service import create_record, generate_record, task_still_active, validate_malay_title
+    with session_factory() as db:
+        job = db.get(SupplyJob, job_id)
+        market = db.get(TitleMarket, job.snapshot['title_market_id'])
+        profile = copy.deepcopy(job.snapshot['title_profile'])
+        profile.update(supply_job_id=job_id, supply_epoch=epoch,
+            additional_requirements=job.snapshot['strategy'].get('title_requirements', ''))
+        record = create_record(db, market, job.user_id, profile, first_image,
+            ['supply', job_id, index], supply=True)
+        # 执行 epoch 是权限检查，不改变已固定的商品、词库或策略。
+        record.snapshot = {**record.snapshot, 'supply_epoch': epoch}
+        db.commit()
+        try:
+            result = await generate_record(db, record.id)
+        except ProviderError as exc:
+            task_still_active(db, record)
+            db.refresh(record)
+            if record.lease_owner or any(word in str(exc) for word in ('执行权', '取消', '正在生成', '账号')):
+                raise
+            fallback = validate_malay_title(profile['fallback_title'], 220)
+            record = db.get(TitleRecord, record.id, populate_existing=True)
+            record.title = fallback
+            record.source = 'fallback'
+            record.state = 'generated'
+            record.selected_keywords = []
+            record.warnings = ['已使用审核的马来语兜底标题；可能与其他链接高度相似']
+            db.commit()
+            result = {'title': fallback, 'source': 'fallback', 'warnings': record.warnings}
+        return {**result, 'generation_id': record.id}
+
+
 async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
     settings = get_settings()
     dead = asyncio.Event()
@@ -243,6 +276,20 @@ async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
 
             async def generate(index):
                 async with title_semaphore:
+                    if snap.get('title_engine') == 'v2':
+                        state = save(lambda value, db, job: None)
+                        link = state['links'][index]
+                        if link.get('title'):
+                            return
+                        result = await request_market_title(job_id, epoch, index, link['materials'][0]['url'], session_factory)
+                        title = result['title'] + f" - L{index + 1:02d}"
+                        def complete_market(value, db, job):
+                            value['links'][index].update(title=title, title_source=result.get('source', 'ai'),
+                                generation_id=result['generation_id'], title_warnings=result.get('warnings', []))
+                            job.progress = {'links_total': strategy['link_count'],
+                                'links_done': sum(bool(row.get('title')) for row in value['links'])}
+                        save(complete_market)
+                        return
                     while True:
                         state = save(lambda value, db, job: None)
                         if state["links"][index].get("title"):
@@ -326,6 +373,14 @@ async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
 
         def complete(db, job):
             for link in job.checkpoint["links"]:
+                if link.get('generation_id'):
+                    from .title_models import TitleRecord
+                    from .title_service import count_adopted_keywords
+                    record = db.get(TitleRecord, link['generation_id'])
+                    if record and not record.adopted_at:
+                        record.adopted_at = now()
+                        record.state = 'adopted'
+                        count_adopted_keywords(db, record, record.title)
                 for item in link["materials"]:
                     db.add(SupplyJobMaterial(company_id=company_id, job_id=job_id,
                         material_id=item["id"], version_hash=item["version_hash"],

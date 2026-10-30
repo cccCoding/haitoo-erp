@@ -250,3 +250,29 @@ test('creation title validation trims whitespace and accepts 25–255 only', () 
   items[1].title = 'B'.repeat(256)
   assert.equal(hasValidBatchTitles(items), false)
 })
+
+test('accepted prompt results clear library metadata; cancelled responses preserve it', async () => {
+  const items = groups(1)
+  items[0].generation_id = 17
+  const progress = reactive(emptyTitleGenerationProgress())
+  let accepted = 0
+  const pending = deferred()
+  const generator = createBatchTitleGenerator({
+    progress, generate: () => pending.promise, isCurrent: group => items.includes(group), onFatal: () => {},
+    onGenerated: group => { accepted++; group.generation_id = undefined },
+  })
+  const cancelled = generator.run(items)
+  generator.stop()
+  pending.resolve(title(0))
+  await cancelled
+  assert.equal(accepted, 0)
+  assert.equal(items[0].generation_id, 17)
+  const successful = createBatchTitleGenerator({
+    progress, generate: async () => title(0), isCurrent: group => items.includes(group), onFatal: () => {},
+    onGenerated: group => { accepted++; group.generation_id = undefined },
+  })
+  await successful.run(items)
+  assert.equal(accepted, 1)
+  assert.equal(items[0].generation_id, undefined)
+  assert.equal(items[0].title, title(0))
+})

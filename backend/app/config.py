@@ -20,8 +20,10 @@ class Settings(BaseSettings):
     login_client_ip_source: Literal["peer", "auto"] = "peer"
     # Grsai 异步图像生成接口，用于印花贴合。
     grsai_base_url: str = "https://grsaiapi.com"
-    # DeepSeek 英文标题采用 OpenAI 兼容接口，密钥按当前用户从数据库读取。
+    # 标题模型采用 OpenAI 兼容接口，密钥按业务归属从数据库读取。
     deepseek_base_url: str = "https://api.deepseek.com"
+    title_jaccard_threshold: float = Field(default=0.85, ge=0, le=1)
+    title_text_threshold: float = Field(default=0.90, ge=0, le=1)
     supply_worker_concurrency: int = Field(default=4, gt=0)
     supply_company_concurrency: int = Field(default=2, gt=0)
     supply_title_concurrency: int = Field(default=3, gt=0)

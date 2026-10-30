@@ -64,6 +64,7 @@ export function createBatchTitleGenerator<Group extends BatchTitleGroup>(options
   generate: (group: Group, signal: AbortSignal) => Promise<string>
   isCurrent: (group: Group) => boolean
   onFatal: (message: string) => void
+  onGenerated?: (group: Group) => void
 }) {
   const { progress } = options
   let revision = 0
@@ -113,6 +114,7 @@ export function createBatchTitleGenerator<Group extends BatchTitleGroup>(options
           if (typeof title !== 'string' || title.trim().length < 25 || title.trim().length > 255) {
             throw { response: { data: { detail: 'AI 返回的标题长度必须为 25–255 个字符，请重试或手动填写' } } }
           }
+          options.onGenerated?.(group)
           group.title = title.trim()
           group.edited = true
           group.titleStatus = 'success'

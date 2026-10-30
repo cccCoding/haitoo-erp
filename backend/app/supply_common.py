@@ -107,9 +107,10 @@ def validate_fallback(title):
     return value
 
 
-def validate_template(template):
+def validate_template(template, *, validate_title=True):
     snapshot = template_snapshot(template)
-    validate_fallback(snapshot["supply_fallback_title"])
+    if validate_title:
+        validate_fallback(snapshot["supply_fallback_title"])
     if not (snapshot["product_description"] or "").strip():
         raise HTTPException(400, "模板缺少产品描述")
     for key in ("package_weight", "package_length", "package_width", "package_height"):

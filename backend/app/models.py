@@ -5,6 +5,8 @@ from sqlalchemy import Boolean, Date, DateTime, Enum, Float, Index, Integer, JSO
 from sqlalchemy.dialects.mysql import DATETIME as MYSQL_DATETIME, MEDIUMBLOB
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
+from .title_models import (TitleMarket, TitleTemplateProfile, TitleKeyword, TitleEvidence,
+                          TitleTask, TitleRecord, TitleAttributeCache, TitleImportWord, TitleDictionaryEntry)
 
 
 class Role(str, enum.Enum):
@@ -273,6 +275,7 @@ class ProductTemplate(Base):
     name: Mapped[str] = mapped_column(String(120))
     cover_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 模板默认标题要求；新版作为表达偏好使用，不能覆盖确认事实。
     title_template: Mapped[str | None] = mapped_column(String(500), nullable=True)
     product_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     size_chart_url: Mapped[str | None] = mapped_column(String(500), nullable=True)

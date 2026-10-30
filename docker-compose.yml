@@ -212,6 +212,25 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  title-worker:
+    build:
+      context: ./backend
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
+    logging: *default-logging
+    command: python -m app.title_worker
+    environment:
+      DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
+      SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   web:
     build:
       context: ./frontend

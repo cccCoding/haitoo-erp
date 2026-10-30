@@ -351,6 +351,9 @@ app.include_router(supply_catalog_router)
 app.include_router(material_styles_router)
 from .finance import router as finance_router
 app.include_router(finance_router)
+from .title_api import router as title_router, generate_single
+from .title_service import adopt_record
+app.include_router(title_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins.split(","),
@@ -413,6 +416,10 @@ def serialize_record(record) -> dict:
         else value.value if isinstance(value, Enum) else value
         for column in record.__table__.columns
     }
+
+
+def serialize_template(template) -> dict:
+    return serialize_record(template)
 
 
 def ensure_shop(db: Session, user: User, shop_id: int) -> Shop:
@@ -1077,7 +1084,7 @@ def list_templates(group_id: int | None = None, q: str | None = None, user: User
         stmt = stmt.where(ProductTemplate.group_id == group_id)
     if q:
         stmt = stmt.where(ProductTemplate.name.contains(q.strip()))
-    return db.scalars(stmt.order_by(ProductTemplate.is_platform.desc(), ProductTemplate.id.desc())).all()
+    return [serialize_template(template) for template in db.scalars(stmt.order_by(ProductTemplate.is_platform.desc(), ProductTemplate.id.desc())).all()]
 
 
 @app.get("/product-library/import-template")
@@ -1651,7 +1658,7 @@ def create_template(payload: TemplateCreate, user: User = Depends(require_roles(
     data["size_chart_url"] = validate_template_image_url(data["size_chart_url"], user.company_id, None, db)
     template = ProductTemplate(company_id=user.company_id, **data)
     db.add(template); db.commit(); db.refresh(template)
-    return template
+    return serialize_template(template)
 
 
 def get_company_template(db: Session, user: User, template_id: int) -> ProductTemplate:
@@ -2048,7 +2055,7 @@ def update_template(template_id: int, payload: TemplateUpdate, user: User = Depe
             value = validate_template_image_url(value, user.company_id, template.size_chart_url, db)
         setattr(template, field, value)
     db.commit(); db.refresh(template)
-    return template
+    return serialize_template(template)
 
 
 @app.delete("/templates/{template_id}")
@@ -3055,6 +3062,8 @@ def create_draft_from_product_library(payload: ProductLibraryDraftCreate,
     draft = build_product_library_draft(user, template, records, payload.title,
         payload.product_description.strip() if payload.product_description else None)
     db.add(draft)
+    db.flush()
+    adopt_record(db, draft, user, payload.generation_id, platform=payload.title_platform)
     for record in records:
         if isinstance(record, MaterialAsset):
             record.usage_status = "used"
@@ -3077,6 +3086,9 @@ def create_drafts_from_product_library_batch(payload: ProductLibraryDraftBatchCr
         validate_product_library_draft_records(group_records, template)
         drafts.append(build_product_library_draft(user, template, group_records, group.title, template.product_description))
     db.add_all(drafts)
+    db.flush()
+    for draft, group in zip(drafts, payload.groups):
+        adopt_record(db, draft, user, group.generation_id, platform=payload.title_platform)
     for record in records:
         if isinstance(record, MaterialAsset):
             record.usage_status = "used"
@@ -3107,7 +3119,8 @@ async def generate_product_library_draft_title(payload: ProductLibraryTitleGener
     validate_product_library_draft_records([record], template)
     api_key = get_title_generation_api_key(db, user)
     try:
-        return {"title": await generate_draft_title(template.title_template or "", library_record_image(record), api_key, additional_requirements=payload.additional_requirements)}
+        result = await generate_single(db, user, template, library_record_image(record), payload) if payload.method == 'library' else None
+        return result if result is not None else {"title": await generate_draft_title((template.title_template or "").strip(), library_record_image(record), api_key, additional_requirements=payload.additional_requirements)}
     except ProviderError as exc:
         raise HTTPException(502, str(exc)) from exc
 
@@ -3133,6 +3146,8 @@ def create_draft_from_material_assets(payload: MaterialDraftCreate, user: User =
     draft = build_product_library_draft(user, template, assets, payload.title,
         payload.product_description.strip() if payload.product_description else None)
     db.add(draft)
+    db.flush()
+    adopt_record(db, draft, user, payload.generation_id, platform=payload.title_platform)
     for asset in assets:
         asset.usage_status = "used"
     db.commit(); db.refresh(draft)
@@ -3168,6 +3183,9 @@ def create_drafts_from_material_assets_batch(payload: MaterialDraftBatchCreate, 
         assets = [assets_by_id[asset_id] for asset_id in asset_ids]
         drafts.append(build_product_library_draft(user, template, assets, title, template.product_description))
     db.add_all(drafts)
+    db.flush()
+    for draft, group in zip(drafts, payload.groups):
+        adopt_record(db, draft, user, group.generation_id, platform=payload.title_platform)
     for asset in assets_by_id.values():
         asset.usage_status = "used"
     db.commit()
@@ -3179,7 +3197,8 @@ def create_drafts_from_material_assets_batch(payload: MaterialDraftBatchCreate, 
 @app.post("/templates/{template_id}/generate-draft-title")
 async def generate_material_draft_title(template_id: int, payload: DraftTitleGenerate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     template = get_company_template(db, user, template_id)
-    asset_filters = [MaterialAsset.company_id == user.company_id, MaterialAsset.url == payload.image_url]
+    asset_filters = [MaterialAsset.company_id == user.company_id, MaterialAsset.url == payload.image_url,
+                     MaterialAsset.template_id == template.id]
     if is_operator(user):
         asset_filters.append(MaterialAsset.claimed_by == user.id)
     asset = db.scalar(select(MaterialAsset).where(*asset_filters))
@@ -3187,7 +3206,8 @@ async def generate_material_draft_title(template_id: int, payload: DraftTitleGen
         raise HTTPException(400, "请使用当前公司素材库中的首图生成标题")
     api_key = get_title_generation_api_key(db, user)
     try:
-        return {"title": await generate_draft_title(template.title_template or "", payload.image_url, api_key, additional_requirements=payload.additional_requirements)}
+        result = await generate_single(db, user, template, payload.image_url, payload) if payload.method == 'library' else None
+        return result if result is not None else {"title": await generate_draft_title((template.title_template or "").strip(), payload.image_url, api_key, additional_requirements=payload.additional_requirements)}
     except ProviderError as exc:
         raise HTTPException(502, str(exc)) from exc
 
@@ -3951,6 +3971,7 @@ def update_draft(draft_id: int, payload: DraftUpdate, user: User = Depends(curre
     draft.title = payload.title
     draft.product_description = payload.product_description.strip() if payload.product_description else None
     draft.updated_by = user.id
+    adopt_record(db, draft, user, payload.generation_id, platform=payload.title_platform)
     db.commit(); db.refresh(draft)
     return serialize_record(draft)
 

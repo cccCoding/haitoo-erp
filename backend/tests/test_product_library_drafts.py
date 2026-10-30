@@ -203,7 +203,7 @@ class ProductLibraryDraftTests(TestCase):
                 for kind, image in (('product', 'https://product/1'), ('material', 'https://img/1')):
                     result = self.title_request(kind)
                     self.assertEqual(result.status_code, 200, result.text)
-                    generate.assert_awaited_with(requirements or '', image, 'title-key-3', additional_requirements='')
+                    generate.assert_awaited_with('', image, 'title-key-3', additional_requirements='')
 
     def test_title_endpoints_use_callers_key_and_do_not_fallback(self):
         with patch.object(main, 'generate_draft_title', new_callable=AsyncMock, return_value='Floral Long Sleeve Everyday Dress') as generate:
@@ -226,17 +226,20 @@ class ProductLibraryDraftTests(TestCase):
             for kind in ('product', 'material'):
                 self.assertIn(self.title_request(kind, 5).status_code, (400, 404))
 
-    def test_template_and_temporary_requirements_are_separate(self):
+    def test_template_requirements_are_saved_read_back_and_temporary_style_is_separate(self):
         result = self.client.put('/templates/1', headers=self.headers(1), json={
             'title_template': 'Place product category first',
         })
         self.assertEqual(result.status_code, 200, result.text)
-        self.assertNotIn('confirmed_product_info', result.json())
+        self.assertEqual(result.json()['title_template'], 'Place product category first')
+        templates = self.client.get('/templates', headers=self.headers(1)).json()
+        self.assertEqual(next(t for t in templates if t['id'] == 1)['title_template'], 'Place product category first')
         with patch.object(main, 'generate_draft_title', new_callable=AsyncMock, return_value='Floral Nursing Dress With Hidden Zipper') as generate:
             for url, payload in (('/product-library/generate-draft-title', self.source(1, 'product')),
                                  ('/templates/1/generate-draft-title', {'image_url': 'https://img/1'})):
                 response = self.client.post(url, headers=self.headers(), json={**payload, 'additional_requirements': 'Emphasize blue flowers'})
                 self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(generate.call_args.args[0], 'Place product category first')
                 self.assertEqual(generate.call_args.kwargs, {
                     'additional_requirements': 'Emphasize blue flowers',
                 })
@@ -247,6 +250,19 @@ class ProductLibraryDraftTests(TestCase):
         with self.sessions() as db:
             template = db.get(ProductTemplate, 1)
             self.assertEqual(template.title_template, 'Place product category first')
+
+    def test_title_requirements_create_clear_and_length_limit(self):
+        response = self.client.post('/templates', headers=self.headers(1), json={
+            'name': 'NEW01', 'title_template': 'Place category first'})
+        self.assertEqual(response.status_code, 200, response.text)
+        identity = response.json()['id']
+        self.assertEqual(response.json()['title_template'], 'Place category first')
+        response = self.client.put(f'/templates/{identity}', headers=self.headers(1), json={'title_template': None})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIsNone(response.json()['title_template'])
+        for method, url, data in (('post', '/templates', {'name': 'NEW02'}), ('put', f'/templates/{identity}', {})):
+            result = getattr(self.client, method)(url, headers=self.headers(1), json={**data, 'title_template': 'x'*501})
+            self.assertEqual(result.status_code, 422)
 
     def test_company_admin_manages_personal_title_keys(self):
         for user_id in (1, 3):

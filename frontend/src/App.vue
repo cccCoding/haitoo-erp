@@ -16,11 +16,13 @@ import { applySelectedStyle, commonStyleTemplate, styleOptions, type MaterialSty
 import { deduplicatedImageUpload, imageSha256, transferItem, type MaterialTransferItem } from './material-transfer'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
 import { batchTitleRequest, createBatchTitleGenerator, emptyTitleGenerationProgress, hasValidBatchTitles, isUnfinishedTitle, titleGenerationStatusLabels, type BatchTitleGroup } from './batch-title-generation'
+import { createPersistentTitleGenerator } from './persistent-title-generation'
 import { createTaskBatchRetrier } from './task-batch-retry'
 import { shippingInsuranceError, shippingInsuranceSelection, type ShippingInsurance } from './tiktok-export'
 
 const pageSizeOptions = [20, 50, 100, 500, 1000]
 const SupplyCatalog = defineAsyncComponent(() => import('./SupplyCatalog.vue'))
+const TitleLibrary = defineAsyncComponent(() => import('./TitleLibrary.vue'))
 const FinancePage = defineAsyncComponent(() => import('./FinancePage.vue'))
 const productLibraryPageSizeOptions = [...pageSizeOptions, 2000]
 const materialPageSizeOptions = [...pageSizeOptions, 2000]
@@ -30,7 +32,7 @@ const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://loca
 const token = ref(localStorage.getItem('haitoro_token') || '')
 const route = useRoute()
 const router = useRouter()
-const workspaceRouteNames = new Set(['collection', 'collection-history', 'dashboard', 'templates', 'pod', 'creative-resources', 'tasks', 'materials', 'drafts', 'product-library', 'supply', 'miaoshou', 'members', 'finance', 'shops', 'tiktok-catalogs'])
+const workspaceRouteNames = new Set(['collection', 'collection-history', 'dashboard', 'templates', 'pod', 'creative-resources', 'tasks', 'materials', 'drafts', 'product-library', 'title-library', 'supply', 'miaoshou', 'members', 'finance', 'shops', 'tiktok-catalogs'])
 const page = computed<string>({
   get: () => workspaceRouteNames.has(String(route.name)) ? String(route.name) : 'dashboard',
   set: value => { if (workspaceRouteNames.has(value) && value !== route.name) void router.push({ name: value }) },
@@ -99,14 +101,20 @@ function materialSourceLabel(source:string) { return ({ai_created:'AI创作',loc
 
 const selectedMaterialAssetIds = ref<number[]>([]), materialTemplateFilterId = ref<number | null>(null), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref<number | null>(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false)
 const materialDraftAdditionalRequirements = ref(''), showDraftAdditionalRequirements = ref(false), showDraftTitleHelp = ref(false)
-watch(showMaterialDraftDialog, () => { materialDraftAdditionalRequirements.value = ''; showDraftAdditionalRequirements.value = false; showDraftTitleHelp.value = false })
+watch(showMaterialDraftDialog, () => { materialDraftTitleResult.value=null; materialDraftAdditionalRequirements.value = ''; showDraftAdditionalRequirements.value = false; showDraftTitleHelp.value = false })
 
+const materialTitlePlatform = ref('TikTok')
+type TitleMethod = 'prompt' | 'library'
+const materialDraftTitleMethod = ref<TitleMethod>('prompt'), materialBatchTitleMethod = ref<TitleMethod>('prompt')
+const materialDraftTitleResult = ref<any>(null)
+const materialDraftTitleManualRevision = ref(0)
+watch(materialDraftTitle,()=>{materialDraftTitleManualRevision.value++})
 const libraryDraftMode = ref(false), libraryDraftSelection = ref<any[]>([]), materialDraftTitleEdited = ref(false)
 const materialDraftAssets = ref<any[]>([]), draggedMaterialDraftAssetId = ref<number | null>(null)
 type MaterialUsageTab = 'unused' | 'used'
 const activeMaterialUsageTab = ref<MaterialUsageTab>('unused')
 const materialUsageTabs: {key: MaterialUsageTab; label: string}[] = [{key:'unused', label:'未使用'}, {key:'used', label:'已使用'}]
-type MaterialBatchGroup = BatchTitleGroup & {assets:any[]; additionalRequirements:string; showAdditionalRequirements:boolean; showTitleHelp:boolean}
+type MaterialBatchGroup = BatchTitleGroup & {manualTitle?:boolean; generation_id?:number; titleWarnings?:string[]; titleKeywords?:any[];assets:any[]; additionalRequirements:string; showAdditionalRequirements:boolean; showTitleHelp:boolean}
 const showMaterialBatchDraftDialog = ref(false), materialBatchGroupSize = ref<5|6|7|8>(5), materialBatchMode = ref<'sequential'|'random'>('sequential'), materialBatchGroups = ref<MaterialBatchGroup[]>([]), materialBatchSaving = ref(false)
 const draggedMaterialBatchAsset = ref<{groupIndex:number; assetId:number} | null>(null)
 let materialBatchGroupId = 0
@@ -114,7 +122,7 @@ const materialBatchTitleProgress = ref(emptyTitleGenerationProgress())
 const materialBatchControlsLocked = computed(() => materialBatchSaving.value || materialBatchTitleProgress.value.running)
 const materialBatchTitlesValid = computed(() => hasValidBatchTitles(materialBatchGroups.value))
 const materialBatchUnfinishedTitles = computed(() => materialBatchGroups.value.filter(isUnfinishedTitle))
-const materialBatchTitleGenerator = createBatchTitleGenerator<MaterialBatchGroup>({
+const legacyMaterialBatchTitleGenerator = createBatchTitleGenerator<MaterialBatchGroup>({
   progress: materialBatchTitleProgress.value,
   generate: async (group, signal) => {
     const request = batchTitleRequest(draftSelectionTemplateId.value!, libraryDraftMode.value, group.assets[0], group.additionalRequirements)
@@ -123,7 +131,25 @@ const materialBatchTitleGenerator = createBatchTitleGenerator<MaterialBatchGroup
   },
   isCurrent: group => showMaterialBatchDraftDialog.value && materialBatchGroups.value.includes(group),
   onFatal: message => showToast(message),
+  onGenerated: group => {group.generation_id=undefined;group.titleWarnings=[];group.titleKeywords=[]},
 })
+const persistentMaterialBatchTitleGenerator = createPersistentTitleGenerator<MaterialBatchGroup>({
+  progress: materialBatchTitleProgress.value,
+  submit: async groups => (await api.post('/title-generation-jobs', {template_id:draftSelectionTemplateId.value, request_key:crypto.randomUUID(), from_library:libraryDraftMode.value, platform:materialTitlePlatform.value, site:'MY', language:'ms', groups:groups.map(group=>({key:String(group.id),source:libraryDraftMode.value?librarySource(group.assets[0]):{source_type:'material',id:group.assets[0].id},additional_requirements:group.additionalRequirements}))}, {headers:headers.value})).data,
+  poll: async id => (await api.get(`/title-tasks/${id}`,{headers:headers.value})).data,
+  cancel: async id => api.post(`/title-tasks/${id}/cancel`,{}, {headers:headers.value}),
+  isCurrent: group => showMaterialBatchDraftDialog.value && materialBatchGroups.value.includes(group),
+  onError: message => showToast(message),
+})
+const materialBatchTitleGenerator = {
+  run(groups:MaterialBatchGroup[], method:TitleMethod='prompt') {
+    materialBatchTitleMethod.value=method
+    return (method==='library'?persistentMaterialBatchTitleGenerator:legacyMaterialBatchTitleGenerator).run(groups.filter(group=>!group.manualTitle))
+  },
+  stop(){persistentMaterialBatchTitleGenerator.stop();legacyMaterialBatchTitleGenerator.stop()},
+  reset(){persistentMaterialBatchTitleGenerator.reset();legacyMaterialBatchTitleGenerator.reset()},
+}
+watch(materialTitlePlatform,()=>{materialDraftTitleResult.value=null;materialBatchTitleGenerator.reset();for(const group of materialBatchGroups.value){group.generation_id=undefined;group.titleWarnings=[];group.titleKeywords=[]}})
 watch(showMaterialBatchDraftDialog, visible => {
   if (!visible) materialBatchTitleGenerator.reset()
   for (const group of materialBatchGroups.value) { group.additionalRequirements = ''; group.showAdditionalRequirements = false; group.showTitleHelp = false }
@@ -277,7 +303,17 @@ const editingWhiteImage = ref<any>(null), whiteImageForm = ref({ template_id: nu
 const editingPersonalPrompt = ref<any>(null), personalPromptForm = ref({ template_id: null as number | null, name: '', content: '' })
 const resourceEditorType = ref<'white-images' | 'prompts' | null>(null), resourceEditorError = ref(''), resourceEditorUserId = ref<number | null>(null)
 const resourceEditorTitle = computed(() => resourceEditorType.value==='white-images' ? (editingWhiteImage.value ? '编辑白底图' : '新增白底图') : (editingPersonalPrompt.value ? '编辑创作要求' : '新增创作要求'))
-const nav = [{key:'dashboard', icon:'◈', label:'工作台'}, {key:'templates', icon:'▦', label:'产品模板'}, {key:'pod', icon:'✦', label:'AI创作'}, {key:'creative-resources', icon:'▧', label:'创作资源'}, {key:'tasks', icon:'◌', label:'任务中心'}, {key:'materials', icon:'◈', label:'素材库'}, {key:'drafts', icon:'▤', label:'商品草稿'}, {key:'product-library', icon:'▤', label:'产品库'}, {key:'supply', icon:'▦', label:'公开货盘'}, {key:'miaoshou', icon:'▤', label:'妙手管理', adminOnly:true}, {key:'shops', icon:'▣', label:'HubStudio管理'}, {key:'tiktok-catalogs', icon:'▧', label:'类目管理', adminOnly:true}, {key:'members', icon:'♙', label:'成员管理', adminOnly:true}, {key:'finance', icon:'¥', label:'财务计算', adminOnly:true}]
+const nav = [{key:'dashboard', icon:'◈', label:'工作台'}, {key:'templates', icon:'▦', label:'产品模板'}, {key:'pod', icon:'✦', label:'AI创作'}, {key:'creative-resources', icon:'▧', label:'创作资源'}, {key:'tasks', icon:'◌', label:'任务中心'}, {key:'materials', icon:'◈', label:'素材库'}, {key:'drafts', icon:'▤', label:'商品草稿'}, {key:'title-library', icon:'▤', label:'标题词库'}, {key:'supply', icon:'▦', label:'公开货盘'}, {key:'miaoshou', icon:'▤', label:'妙手店铺', adminOnly:true}, {key:'shops', icon:'▣', label:'HubStudio管理'}, {key:'tiktok-catalogs', icon:'▧', label:'类目管理', adminOnly:true}, {key:'members', icon:'♙', label:'成员管理', adminOnly:true}, {key:'finance', icon:'¥', label:'财务统计', adminOnly:true}, {key:'product-library', icon:'▤', label:'产品统计'}]
+const navGroups = [
+  { key:'statistics', label:'数据统计', icon:'▥', pages:['product-library', 'finance'] },
+  { key:'enterprise', label:'企业管理', icon:'⚙', pages:['miaoshou', 'tiktok-catalogs', 'members'] },
+]
+const groupedNavKeys = new Set(navGroups.flatMap(group => group.pages))
+const navGroupExpanded = ref<Record<string, boolean>>({})
+watch(page, value => {
+  const group = navGroups.find(group => group.pages.includes(value))
+  if (group) navGroupExpanded.value[group.key] = true
+}, { immediate: true })
 const materialStyles = ref<MaterialStyle[]>([]), materialStylesLoading = ref(false)
 const materialStyleLabels = computed(() => new Map(styleOptions(materialStyles.value, null).map(option => [option.value, option.label])))
 const materialStyleTargetId = ref<number | null>(null), uploadStyleTargetId = ref<number | null>(null), importStyleTargetId = ref<number | null>(null)
@@ -369,7 +405,13 @@ async function confirmMaterialSetting() {
   finally { materialSettingSaving.value = false }
 }
 const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }))
+const canViewProductStatistics = computed(() => ['company_admin', 'member', 'team_leader'].includes(user.value?.role))
 const visibleNav = computed(() => nav.filter(item => user.value?.role === 'supply_user' ? item.key === 'supply' : !item.adminOnly || user.value?.role === 'company_admin'))
+const primaryNav = computed(() => visibleNav.value.filter(item => !groupedNavKeys.has(item.key)))
+const visibleNavGroups = computed(() => navGroups.map(group => ({
+  ...group,
+  items: group.pages.flatMap(key => visibleNav.value.filter(item => item.key === key)),
+})).filter(group => group.items.length))
 const pageTitle = computed(() => page.value === 'collection' ? '采集' : page.value === 'collection-history' ? '采集记录' : nav.find(x => x.key === page.value)?.label || '')
 const filteredTemplates = computed(() => templates.value.filter(t => (!activeGroupId.value || t.group_id === activeGroupId.value) && t.name.toLowerCase().includes(templateQuery.value.trim().toLowerCase())))
 function templateGroupIsEmpty(groupId: number) { return !templates.value.some(template => template.group_id === groupId) }
@@ -717,7 +759,7 @@ watch(page,value=>{
   if (value === 'shops') void loadHubUploadTasks()
   if (value === 'creative-resources') void enterCreativeResources()
   if (value === 'materials') void loadMaterialStyles()
-  if (value === 'product-library') {
+  if (value === 'product-library' && canViewProductStatistics.value) {
     if (user.value?.role !== 'company_admin' && activeProductLibraryTab.value === 'shops') activeProductLibraryTab.value = 'products'
     if (user.value?.role === 'company_admin') void loadProductLibraryStatisticsStatus()
     if (activeProductLibraryTab.value === 'shops') void loadProductLibraryShops()
@@ -809,7 +851,7 @@ async function loadProductLibraryShops() {
     productLibraryShopsLoading.value = true
     const {data} = await api.get('/product-library/shops', {headers:headers.value})
     productLibraryShops.value = data || []
-  } catch(e:any) { showProductLibraryErrorToast(e, '加载产品库店铺失败') }
+  } catch(e:any) { showProductLibraryErrorToast(e, '加载产品统计店铺失败') }
   finally { productLibraryShopsLoading.value = false }
 }
 async function assignProductLibraryShop(shop:any, event:Event) {
@@ -850,7 +892,7 @@ async function loadProductLibrary(withFilters = false) {
     productLibraryTotal.value = list.data.total || 0
     productLibraryBrokenImages.value = []
     if (filters) productLibraryFilters.value = filters.data
-  } catch(e:any) { showProductLibraryErrorToast(e, '加载产品库失败') }
+  } catch(e:any) { showProductLibraryErrorToast(e, '加载产品统计失败') }
   finally { productLibraryLoading.value = false }
 }
 function showProductLibraryErrorToast(error:any, fallback:string): string {
@@ -1098,7 +1140,7 @@ async function downloadProductLibraryTemplate() {
     const response = await api.get('/product-library/import-template', {headers:headers.value, responseType:'blob'})
     const url = URL.createObjectURL(response.data)
     const link = document.createElement('a')
-    link.href = url; link.download = '产品库导入模版.xlsx'; document.body.appendChild(link); link.click(); link.remove()
+    link.href = url; link.download = '产品统计导入模版.xlsx'; document.body.appendChild(link); link.click(); link.remove()
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   } catch { showToast('下载导入模版失败') }
   finally { productLibraryDownloading.value = false }
@@ -1117,7 +1159,7 @@ async function importProductLibrary(event:Event) {
     if (activeProductLibraryTab.value === 'shops') await loadProductLibraryShops()
     if (activeProductLibraryTab.value === 'stagnant') await loadStagnantMaterials()
     showToast(`导入完成：新增 ${data.created_shops} 个店铺、${data.created_products} 个产品、${data.created_orders} 个订单，更新 ${data.updated_products} 个产品`)
-  } catch(e:any) { showToast(e.response?.data?.detail || '导入产品库失败') }
+  } catch(e:any) { showToast(e.response?.data?.detail || '导入产品统计失败') }
   finally { productLibraryImporting.value = false; input.value = '' }
 }
 async function loadProductLibraryStatisticsStatus() {
@@ -1198,7 +1240,7 @@ async function refresh() {
   } else { members.value = []; operatorGroups.value = []; managedShops.value = [] }
   if (!selectedTemplateId.value && templates.value[0]) selectedTemplateId.value=templates.value[0].id
   if (selectedTemplateId.value) await loadMyTemplateResources(false)
-  if (page.value === 'product-library') {
+  if (page.value === 'product-library' && canViewProductStatistics.value) {
     if (user.value.role !== 'company_admin' && activeProductLibraryTab.value === 'shops') activeProductLibraryTab.value = 'products'
     if (user.value.role === 'company_admin') void loadProductLibraryStatisticsStatus()
     if (activeProductLibraryTab.value === 'shops') await loadProductLibraryShops()
@@ -1528,14 +1570,16 @@ function onMaterialDraftTemplateChange() {
   materialDraftProductDescription.value = template?.product_description || ''
   materialDraftSizeChartPreview.value = imageUrl(template?.size_chart_url)
 }
-async function generateMaterialDraftTitle() {
-  if (!materialDraftTemplateId.value || !materialDraftAssets.value[0]) return
-  const firstAsset = materialDraftAssets.value[0], fromLibrary = libraryDraftMode.value
+async function generateMaterialDraftTitle(method:TitleMethod='prompt') {
+  if (materialDraftTitleGenerating.value || !materialDraftTemplateId.value || !materialDraftAssets.value[0]) return
+  const firstAsset = materialDraftAssets.value[0], fromLibrary = libraryDraftMode.value, templateId=materialDraftTemplateId.value, editRevision=materialDraftTitleManualRevision.value
   try {
     materialDraftTitleGenerating.value = true
-    const { data } = await api.post(libraryDraftMode.value ? '/product-library/generate-draft-title' : `/templates/${materialDraftTemplateId.value}/generate-draft-title`, { ...(libraryDraftMode.value ? librarySource(materialDraftAssets.value[0]) : { image_url: materialDraftAssets.value[0].url }), additional_requirements: materialDraftAdditionalRequirements.value.trim() }, { headers: headers.value })
-    if (libraryDraftMode.value !== fromLibrary || materialDraftAssets.value[0]?.id !== firstAsset.id) return
+    materialDraftTitleMethod.value=method
+    const { data } = await api.post(libraryDraftMode.value ? '/product-library/generate-draft-title' : `/templates/${materialDraftTemplateId.value}/generate-draft-title`, { ...(libraryDraftMode.value ? librarySource(materialDraftAssets.value[0]) : { image_url: materialDraftAssets.value[0].url }), method, additional_requirements: materialDraftAdditionalRequirements.value.trim(), platform:materialTitlePlatform.value, site:'MY', language:'ms', request_key:crypto.randomUUID() }, { headers: headers.value, timeout:360000 })
+    if (!showMaterialDraftDialog.value || libraryDraftMode.value !== fromLibrary || materialDraftAssets.value[0]?.id !== firstAsset.id || materialDraftTemplateId.value!==templateId || materialDraftTitleManualRevision.value!==editRevision) return
     materialDraftTitle.value = data.title
+    materialDraftTitleResult.value = data
     materialDraftTitleEdited.value = true
   } catch (e:any) {
     showToast(e.response?.data?.detail || 'AI 生成标题失败，请稍后重试')
@@ -1602,7 +1646,7 @@ async function createDraftFromMaterialAssets() {
   if (title.length < 25 || title.length > 255) { showToast('商品标题长度须为 25-255 个字符'); return }
   try {
     materialDraftSaving.value = true
-    await api.post(libraryDraftMode.value ? '/drafts/from-product-library' : '/drafts/from-material-assets', { ...(libraryDraftMode.value ? {sources:materialDraftAssets.value.map(librarySource)} : {material_asset_ids: materialDraftAssets.value.map(asset => asset.id)}), template_id: materialDraftTemplateId.value, title, product_description: materialDraftProductDescription.value.trim() || null }, { headers: headers.value })
+    await api.post(libraryDraftMode.value ? '/drafts/from-product-library' : '/drafts/from-material-assets', { ...(libraryDraftMode.value ? {sources:materialDraftAssets.value.map(librarySource)} : {material_asset_ids: materialDraftAssets.value.map(asset => asset.id)}), template_id: materialDraftTemplateId.value, title, title_platform:materialTitlePlatform.value, generation_id:materialDraftTitleResult.value?.generation_id, product_description: materialDraftProductDescription.value.trim() || null }, { headers: headers.value })
     selectedMaterialAssetIds.value = []
     showMaterialDraftDialog.value = false
     if (libraryDraftMode.value) await refreshLibraryDraftSource()
@@ -1647,7 +1691,7 @@ function moveMaterialBatchAsset(groupIndex: number, from: number, to: number) {
   const assets = [...group.assets]
   const [asset] = assets.splice(from, 1)
   assets.splice(to, 0, asset)
-  if (assets[0] !== group.assets[0]) { group.titleStatus = 'idle'; group.titleError = '' }
+  if (assets[0] !== group.assets[0]) { group.titleStatus = 'idle'; group.titleError = ''; group.generation_id=undefined;group.titleWarnings=[] }
   group.assets = assets
   if (libraryDraftMode.value && !group.edited) group.title = assets[0]?.title || ''
 }
@@ -1660,16 +1704,17 @@ function dropMaterialBatchAsset(groupIndex: number, targetId: number) {
 }
 function editMaterialBatchTitle(group: MaterialBatchGroup) {
   group.edited = true
+  group.manualTitle = true
   group.titleStatus = 'idle'
   group.titleError = ''
 }
-async function generateMaterialBatchTitles(groups: MaterialBatchGroup[] = materialBatchGroups.value) {
+async function generateMaterialBatchTitles(groups: MaterialBatchGroup[] = materialBatchGroups.value, method:TitleMethod='prompt') {
   if (materialBatchControlsLocked.value || !showMaterialBatchDraftDialog.value || !draftSelectionTemplateId.value || !groups.length) return
   draggedMaterialBatchAsset.value = null
-  await materialBatchTitleGenerator.run(groups)
+  await materialBatchTitleGenerator.run(groups,method)
 }
-function generateMaterialBatchTitle(group: MaterialBatchGroup) {
-  return generateMaterialBatchTitles([group])
+function generateMaterialBatchTitle(group: MaterialBatchGroup, method:TitleMethod='prompt') {
+  return generateMaterialBatchTitles([group],method)
 }
 function stopMaterialBatchTitleGeneration() {
   materialBatchTitleGenerator.stop()
@@ -1681,7 +1726,7 @@ async function createMaterialBatchDrafts() {
   if (materialBatchGroups.value.some(group => group.title.trim().length < 25 || group.title.trim().length > 255)) { showToast('请为每个组合填写 25-255 个字符的商品标题'); return }
   try {
     materialBatchSaving.value = true
-    const {data} = await api.post(libraryDraftMode.value ? '/drafts/from-product-library/batch' : '/drafts/from-material-assets/batch', { template_id: draftSelectionTemplateId.value, groups: materialBatchGroups.value.map(group => ({...(libraryDraftMode.value ? {sources:group.assets.map(librarySource)} : {material_asset_ids:group.assets.map(asset => asset.id)}), title:group.title.trim()})) }, {headers:headers.value})
+    const {data} = await api.post(libraryDraftMode.value ? '/drafts/from-product-library/batch' : '/drafts/from-material-assets/batch', { template_id: draftSelectionTemplateId.value, title_platform:materialTitlePlatform.value, groups: materialBatchGroups.value.map(group => ({...(libraryDraftMode.value ? {sources:group.assets.map(librarySource)} : {material_asset_ids:group.assets.map(asset => asset.id)}), title:group.title.trim(),generation_id:group.generation_id})) }, {headers:headers.value})
     selectedMaterialAssetIds.value = []; showMaterialBatchDraftDialog.value = false; if (libraryDraftMode.value) await refreshLibraryDraftSource(); await refresh(); page.value = 'drafts'; showToast(`已创建 ${data.total} 条商品草稿`)
   } catch (e:any) { showToast(e.response?.data?.detail || '批量创建商品草稿失败，请稍后重试') }
   finally { materialBatchSaving.value = false }
@@ -2632,12 +2677,26 @@ onUnmounted(() => {
   <div v-if="showTiktokCatalogDialog" class="modal-backdrop" @click.self="!tiktokCatalogLoading && (showTiktokCatalogDialog=false)"><section class="modal-card tiktok-catalog-create-dialog"><button class="modal-close" :disabled="tiktokCatalogLoading" @click="showTiktokCatalogDialog=false">×</button><h2>新增类目</h2><p>当前店铺类型：{{tiktokCatalogTypeLabel(tiktokCatalogTypeTab)}}。请上传对应平台下载的批量上传 XLSX 模板，系统会使用匹配的解析器校验。</p><label>类目库名称 <b class="required">*</b><input v-model="tiktokCatalogName" maxlength="120" placeholder="例如：女装"/></label><label>模板文件 <b class="required">*</b><input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="onTiktokCatalogFileChange"/><small>仅支持 .xlsx，最大 10MB。</small></label><p v-if="tiktokCatalogError" class="error material-draft-error">{{tiktokCatalogError}}</p><div class="modal-actions"><button class="ghost" :disabled="tiktokCatalogLoading" @click="showTiktokCatalogDialog=false">取消</button><button class="primary" :disabled="tiktokCatalogLoading" @click="createTiktokCatalog">{{tiktokCatalogLoading ? '解析中…' : '上传并解析'}}</button></div></section></div>
   <div v-if="showTiktokCatalogDetailDialog" class="modal-backdrop" @click.self="showTiktokCatalogDetailDialog=false"><section class="modal-card tiktok-catalog-detail-dialog"><button class="modal-close" @click="showTiktokCatalogDetailDialog=false">×</button><h2>{{managingTiktokCatalog?.name}} · 属性设置</h2><p>导入后仅支持修正属性的输入方式；属性名称、状态和候选值保持模板原始内容。</p><label>商品类目<select v-model="managingTiktokCategory"><option v-for="category in managingTiktokCatalogOptions?.categories || []" :key="category.name" :value="category.name">{{category.name}}</option></select></label><div class="tiktok-property-list"><div class="tiktok-property-head"><span>属性</span><span>状态</span><span>选项数</span><span>输入方式</span></div><div v-for="field in managingTiktokCategoryAttributes" :key="field.field" class="tiktok-property-row"><span><b>{{field.label}}</b><small>{{field.field}}</small></span><span>{{field.required ? '必填' : '可选'}}</span><span>{{field.options?.length || 0}}</span><select class="tiktok-input-mode-select" :value="['single','multiple'].includes(field.input_mode) ? 'select' : field.input_mode || (!field.options?.length ? 'text' : field.allow_custom ? 'select_or_text' : 'select')" :disabled="tiktokCatalogLoading" @change="onTiktokInputModeChange(field,$event)"><option value="text">手动填写</option><option value="select" :disabled="!field.options?.length">选择</option><option value="select_or_text" :disabled="!field.options?.length">选择或手动填写</option></select></div><p v-if="!managingTiktokCategoryAttributes.length" class="empty">该类目没有可填写属性。</p></div><div class="modal-actions"><button class="primary" @click="showTiktokCatalogDetailDialog=false">完成</button></div></section></div>
   <main v-if="token" class="app-shell">
-    <aside><div class="logo"><img src="/brand-icon.png" alt="Haitoro" width="27" height="27" /><b>Haitoro AI</b></div><nav><button v-for="item in visibleNav" :key="item.key" :class="{active: page===item.key}" @click="page=item.key"><i>{{item.icon}}</i>{{item.label}}</button></nav></aside>
+    <aside>
+      <div class="logo"><img src="/brand-icon.png" alt="Haitoro" width="27" height="27" /><b>Haitoro AI</b></div>
+      <nav aria-label="主导航">
+        <button v-for="item in primaryNav" :key="item.key" type="button" :title="item.label" :class="{active: page===item.key}" :aria-current="page===item.key ? 'page' : undefined" @click="page=item.key"><i aria-hidden="true">{{item.icon}}</i>{{item.label}}</button>
+        <div v-for="group in visibleNavGroups" :key="group.key" class="sidebar-nav-group">
+          <button type="button" class="nav-group-toggle" :class="{'has-active': group.pages.includes(page)}" :title="group.label" :aria-label="group.label" :aria-expanded="!!navGroupExpanded[group.key]" :aria-controls="`${group.key}-nav-items`" @click="navGroupExpanded[group.key]=!navGroupExpanded[group.key]">
+            <i aria-hidden="true">{{group.icon}}</i><span>{{group.label}}</span><svg class="nav-group-chevron" :class="{expanded: navGroupExpanded[group.key]}" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg>
+          </button>
+          <div v-show="navGroupExpanded[group.key]" :id="`${group.key}-nav-items`" class="nav-group-items" role="group" :aria-label="group.label">
+            <button v-for="item in group.items" :key="item.key" type="button" :title="item.label" :class="{active: page===item.key}" :aria-current="page===item.key ? 'page' : undefined" @click="page=item.key"><i aria-hidden="true">{{item.icon}}</i>{{item.label}}</button>
+          </div>
+        </div>
+      </nav>
+    </aside>
     <section class="content"><header><div><h1>{{ pageTitle }}</h1></div><div class="context"><button class="member account-button" :disabled="user?.role==='supply_user'" @click="openMyAccountDialog">{{user?.name}} · {{ user?.role === 'supply_user' ? '货盘用户' : user?.role === 'company_admin' ? '管理员' : user?.role === 'team_leader' ? '运营组长' : '运营成员' }}{{user?.group_name ? ` · ${user.group_name}` : ''}}{{user?.user_code ? ` · ${user.user_code}` : ''}}</button><button class="ghost" @click="logout">退出</button></div></header>
+      <TitleLibrary v-if="page==='title-library'" :token="token" :user="user" />
       <SupplyCatalog v-if="page==='supply'" :token="token" :user="user" :initial-tab="String(route.query.tab || '')" @unauthorized="logout" />
       <FinancePage v-else-if="page==='finance' && user?.role==='company_admin'" :token="token" :user="user" @unauthorized="logout" />
       <section v-else-if="page==='dashboard'" class="page"><div class="hero"><div><p>POD 商品工作台</p><h2>今天要先处理什么？</h2><span>从 AI创作到待发布商品，所有进度都在这里。</span></div><button class="primary" @click="page='pod'">✦ 开始 AI创作</button></div><div class="metrics"><article><span>待领取任务</span><b>{{taskStatusCounts.awaiting_selection || 0}}</b><em>请选择要领取的图片</em></article><article><span>待发布商品</span><b>{{drafts.length}}</b><em>妙手接口待接入</em></article><article><span>素材库</span><b>{{materialTotal}}</b><em>已保存的商品素材</em></article></div><div class="two-col"><section class="panel"><h3>最近任务 <button @click="page='tasks'">查看全部</button></h3><div v-for="task in tasks.slice(0,3)" :key="task.id" class="task-row"><span class="thumb">✦</span><div><strong>AI创作 #{{task.id}}</strong><small>{{taskTypeLabel(task)}} · {{new Date(task.created_at).toLocaleString()}}</small></div><span class="chip" :class="taskStatusClass(task.status)">{{taskStatusLabel[task.status] || task.status || '—'}}</span></div><p v-if="!tasks.length" class="empty">暂无 AI 创作任务。</p></section><section class="panel"><h3>快捷操作</h3><button class="quick" @click="page='templates'">▦ 浏览产品模板 <span>→</span></button><button class="quick" @click="page='tasks'">◌ 查看任务中心 <span>→</span></button></section></div></section>
-      <section v-else-if="page==='templates'" class="page"><div class="toolbar"><input v-model="templateQuery" placeholder="搜索模板名称"/><div v-if="user?.role==='company_admin'" class="toolbar-actions"><button class="primary" @click="openTemplateDialog()">新增模板</button></div></div><div class="template-layout"><section class="groups"><div class="groups-heading"><h3>模板分类</h3><button v-if="user?.role==='company_admin'" class="add-group" @click="showGroupDialog=true">新增</button></div><button :class="{selected:activeGroupId===null}" @click="activeGroupId=null">全部模板</button><div v-for="group in templateGroups" :key="group.id" class="template-group-item"><button :class="{selected:activeGroupId===group.id}" @click="activeGroupId=group.id">{{group.name}}</button><button v-if="user?.role==='company_admin' && !group.is_platform && templateGroupIsEmpty(group.id)" class="template-group-delete" :aria-label="`删除空模板分类 ${group.name}`" :title="`删除空模板分类 ${group.name}`" @click.stop="deleteTemplateGroup(group)">×</button></div></section><section><div class="section-heading"><h2>{{activeGroupId ? templateGroups.find(g=>g.id===activeGroupId)?.name : '全部模板'}}</h2><span>共 {{filteredTemplates.length}} 个模板</span></div><div class="template-grid"><article v-for="t in filteredTemplates" :key="t.id" class="template-card"><button v-if="hasTemplateCover(t)" type="button" class="template-image hasCover template-image-button" :aria-label="`查看 ${t.name} 大图`" title="查看大图" @click="openTemplateCoverPreview(t)"><img :src="templateCoverUrl(t)" :alt="t.name"/></button><div v-else class="template-image"><span>{{t.name.includes('T恤')?'♧':'♔'}}</span></div><h3>{{t.name}}</h3><p v-if="t.description" class="template-description">{{t.description}}</p><div class="template-actions"><button @click="useTemplate(t)">用于 AI创作 →</button><template v-if="!t.is_platform && user?.role==='company_admin'"><button @click="openTemplateDialog(t)">编辑</button><button class="danger" @click="deleteTemplate(t)">删除</button></template></div></article><p v-if="!filteredTemplates.length" class="empty">没有符合条件的模板。</p></div></section></div></section>
+      <section v-else-if="page==='templates'" class="page"><div class="toolbar"><input v-model="templateQuery" placeholder="搜索模板名称"/><div v-if="user?.role==='company_admin'" class="toolbar-actions"><button class="primary" @click="openTemplateDialog()">新增模板</button></div></div><div class="template-layout"><section class="groups"><div class="groups-heading"><h3>模板分类</h3><button v-if="user?.role==='company_admin'" class="add-group" @click="showGroupDialog=true">新增</button></div><button :class="{selected:activeGroupId===null}" @click="activeGroupId=null">全部模板</button><div v-for="group in templateGroups" :key="group.id" class="template-group-item"><button :class="{selected:activeGroupId===group.id}" @click="activeGroupId=group.id">{{group.name}}</button><button v-if="user?.role==='company_admin' && !group.is_platform && templateGroupIsEmpty(group.id)" class="template-group-delete" :aria-label="`删除空模板分类 ${group.name}`" :title="`删除空模板分类 ${group.name}`" @click.stop="deleteTemplateGroup(group)">×</button></div></section><section><div class="section-heading"><h2>{{activeGroupId ? templateGroups.find(g=>g.id===activeGroupId)?.name : '全部模板'}}</h2><span>共 {{filteredTemplates.length}} 个模板</span></div><div class="template-grid"><article v-for="t in filteredTemplates" :key="t.id" class="template-card"><button v-if="hasTemplateCover(t)" type="button" class="template-image hasCover template-image-button" :aria-label="`查看 ${t.name} 大图`" title="查看大图" @click="openTemplateCoverPreview(t)"><img :src="templateCoverUrl(t)" :alt="t.name"/></button><div v-else class="template-image"><span>{{t.name.includes('T恤')?'♧':'♔'}}</span></div><h3>{{t.name}}</h3><p v-if="t.description" class="template-description">{{t.description}}</p><div class="template-actions"><button @click="useTemplate(t)">AI 创作 →</button><template v-if="!t.is_platform && user?.role==='company_admin'"><button @click="openTemplateDialog(t)">编辑</button><button class="danger" @click="deleteTemplate(t)">删除</button></template></div></article><p v-if="!filteredTemplates.length" class="empty">没有符合条件的模板。</p></div></section></div></section>
       <section v-else-if="page==='pod'" class="page">
         <CreativeUploadNotice :notice="creativeUploadNotice" @close="creativeUploadNotice=null" />
         <div class="mode-tabs"><button>灵感参考</button><button class="active">印花贴合</button><button>创作变体</button></div><section class="pod-panel"><div class="pod-heading personal-resource-heading"><div><h2>印花贴合</h2><p>上传印花素材，选择产品模板和个人白底图，生成 AI 创作效果图。</p></div><div class="personal-resource-actions"><button class="secondary" @click="openPersonalResourcesDialog()">管理白底图与创作要求</button></div><label class="requirement-label">创作要求 <b>*</b><span v-if="selectedTemplateAiPrompts().length || personalPrompts.length" class="prompt-picker"><select v-model="creativePromptIndex" @change="applyTemplateAiPrompt"><option value="">选择创作要求</option><optgroup v-if="selectedTemplateAiPrompts().length" label="产品模板创作要求"><option v-for="(prompt,index) in selectedTemplateAiPrompts()" :key="`template-${index}`" :value="`template:${index}`">{{prompt.name}}</option></optgroup><optgroup v-if="personalPrompts.length" label="我的创作要求"><option v-for="prompt in personalPrompts" :key="`personal-${prompt.id}`" :value="`personal:${prompt.id}`">{{prompt.name}}</option></optgroup></select><small>选择后会填充至下方，仍可自行修改。</small></span><textarea v-model="creativeRequirement" maxlength="1000" placeholder="例如：保留花朵细节，色彩清晰自然，印花完整贴合布料"></textarea></label></div><div class="pod-grid"><article><label>创作素材</label><label class="upload floral" :class="{hasAsset:creativeAssets.length, invalid:creativeAssetError}"><input type="file" multiple accept="image/png,image/jpeg,image/webp" @change="onCreativeAssetChange"/><img v-if="creativeAssets.length" :src="creativeAssets[0].preview" alt="印花素材预览"/><template v-else><b>✿</b><span>点击上传印花图</span><small>JPG、PNG、WebP，单张最大 3MB</small></template><button v-if="creativeAssets.length" type="button" class="asset-count" @click.prevent="showCreativeAssetsDialog=true">{{creativeAssets.length}}</button></label><p v-if="creativeAssetError" class="creative-asset-error" role="alert">{{creativeAssetError}}</p><button v-if="creativeAssets.length" class="manage-assets" @click="showCreativeAssetsDialog=true">管理 {{creativeAssets.length}} 张印花图</button></article><article class="white-image-picker"><label>产品模板</label><select v-model="selectedTemplateId" @change="onCreativeTemplateChange"><option v-for="t in templates" :key="t.id" :value="t.id">{{t.name}}</option></select><label class="white-image-label">产品白底图 <b>*</b></label><select v-model="selectedWhiteImageId" :disabled="personalResourcesLoading || !personalWhiteImages.length"><option :value="null">{{personalWhiteImages.length ? '请选择白底图' : '尚未设置白底图'}}</option><option v-for="item in personalWhiteImages" :key="item.id" :value="item.id">{{item.name}}</option></select><div v-if="selectedWhiteImage" class="product-preview template-preview"><img :src="imageUrl(selectedWhiteImage.image_url)" :alt="selectedWhiteImage.name"/></div><div v-else class="white-image-empty"><span>{{personalWhiteImages.length ? '请从上方选择一张白底图' : '尚未设置该模板的白底图，请先设置'}}</span><button v-if="!personalWhiteImages.length" @click="openPersonalResourcesDialog('white-images')">立即设置</button></div></article><article class="settings"><label class="settings-title">创作参数</label><div class="parameter-fields"><label class="parameter-field"><span>AI模型</span><select v-model="creativeProvider" :disabled="!availableAiProviders.length"><option v-if="!availableAiProviders.length" value="">暂无后台已启用的模型</option><option v-for="provider in availableAiProviders" :key="provider.provider" :value="provider.provider">{{provider.display_name}} · {{provider.model}}{{provider.credential_configured ? '' : ' · 未配置密钥'}}</option></select><small v-if="!availableAiProviders.length">请联系超级管理员在后台启用至少一个模型。</small></label><label class="parameter-field"><span>画面比例</span><select v-model="creativeRatio" :disabled="providerUsesFixedSquare(creativeProvider)"><option>1:1</option><option>3:4</option></select></label><label class="parameter-field"><span>清晰度</span><select value="1K"><option>1K</option></select></label></div></article><aside class="estimate"><div v-if="creativeUploading" class="upload-progress"><span>已处理 {{creativeProcessedCount}} / {{creativeAssets.length}}，已上传 {{creativeUploadedCount}} 张，已跳过 {{creativeSkippedCount}} 张</span><progress :max="creativeAssets.length" :value="creativeProcessedCount"></progress><small>损坏图片会自动跳过；上传完成后将按模型配置创建独立任务，中断后可继续未完成图片。</small></div><button class="primary full" :disabled="!availableAiProviders.length || creativeUploading || !selectedWhiteImageId || Boolean(creativeCredentialError)" @click="createTask">{{creativeUploading ? `处理中 ${creativeProcessedCount}/${creativeAssets.length}` : '✦ 开始印花贴合'}}</button><p v-if="creativeCredentialError || creativeSubmitError" class="creative-submit-error" role="alert">{{creativeCredentialError || creativeSubmitError}}</p></aside></div></section></section>
@@ -2758,7 +2817,7 @@ onUnmounted(() => {
           <div v-if="draftListRefreshing" class="list-refresh-overlay" role="status"><i></i><span>正在刷新列表…</span></div>
         </div>
       </section>
-      <section v-else-if="page==='product-library'" class="page">
+      <section v-else-if="page==='product-library' && canViewProductStatistics" class="page">
         <div class="section-heading product-library-heading">
           <div><span>按基础 SKU 汇总：订单数按订单去重，销量为各尺码销售数量之和。</span></div>
           <div v-if="user?.role==='company_admin'" class="product-library-actions">
@@ -2774,7 +2833,7 @@ onUnmounted(() => {
           <template v-else-if="productLibraryStatisticsTask.status==='succeeded'">最近一次统计已完成：截至 {{productLibraryStatisticsTask.through_date}}</template>
           <template v-else>最近一次统计失败，请点击“数据统计”重试。</template>
         </p>
-        <div class="material-usage-tabs product-library-tabs" role="tablist" aria-label="产品库分类"><button v-for="tab in productLibraryTabs.filter(item => item.key !== 'shops' || user?.role === 'company_admin')" :key="tab.key" type="button" role="tab" :aria-selected="activeProductLibraryTab===tab.key" :class="{active:activeProductLibraryTab===tab.key}" @click="changeProductLibraryTab(tab.key)">{{tab.label}}</button></div>
+        <div class="material-usage-tabs product-library-tabs" role="tablist" aria-label="产品统计分类"><button v-for="tab in productLibraryTabs.filter(item => item.key !== 'shops' || user?.role === 'company_admin')" :key="tab.key" type="button" role="tab" :aria-selected="activeProductLibraryTab===tab.key" :class="{active:activeProductLibraryTab===tab.key}" @click="changeProductLibraryTab(tab.key)">{{tab.label}}</button></div>
         <p v-if="productLibraryCategoryDescriptions[activeProductLibraryTab]" class="product-library-category-description">{{productLibraryCategoryDescriptions[activeProductLibraryTab]}}</p>
         <div v-if="activeProductLibraryTab==='products' || productLibraryRankingTabKeys.has(activeProductLibraryTab)" class="product-library-filters">
           <div class="product-library-shop-filter"><span>店铺名称</span><details ref="productLibraryShopFilterDetails"><summary><span :title="productLibraryShopSelectionLabel">{{productLibraryShopSelectionLabel}}</span><span aria-hidden="true">▾</span></summary><div class="product-library-shop-filter-panel"><input v-model="productLibraryShopSearch" type="search" placeholder="搜索平台、站点或店铺" aria-label="搜索店铺"/><div class="product-library-shop-filter-actions"><span>可选 {{productLibraryShopOptions.length }} 家</span><button type="button" :disabled="!productLibrarySelectedShopIds.length" @click="productLibrarySelectedShopIds=[]">清空选择</button></div><div class="product-library-shop-filter-options"><label v-for="shop in productLibraryShopOptions" :key="shop.id" class="product-library-shop-filter-option"><input v-model="productLibrarySelectedShopIds" type="checkbox" :value="shop.id"/><span>{{shop.label}}</span></label><p v-if="!productLibraryShopOptions.length" class="product-library-shop-filter-empty">没有匹配的店铺</p></div></div></details></div>
@@ -2795,14 +2854,14 @@ onUnmounted(() => {
           <div v-else-if="!productLibraryItems.length && !productLibraryLoading" class="empty">{{productLibraryTotal ? '没有符合筛选条件的产品。' : user?.role==='company_admin' ? '暂无产品，请先下载模版并导入历史订单。' : '暂无可查看的产品，请联系管理员分配店铺。'}}</div>
           <footer v-if="activeProductLibraryTab==='products'" class="draft-pagination product-library-pagination"><span>共 {{productLibraryTotal}} 条</span><label>每页 <select v-model.number="productLibraryPageSize" :disabled="productLibraryLoading" @change="changeProductLibraryPageSize"><option v-for="size in productLibraryPageSizeOptions" :key="size" :value="size">{{size}}</option></select> 条</label><button :disabled="productLibraryLoading || productLibraryPage===1" @click="changeProductLibraryPage(productLibraryPage-1)">上一页</button><span>第 {{productLibraryPage}} / {{productLibraryPageCount}} 页</span><button :disabled="productLibraryLoading || productLibraryPage===productLibraryPageCount" @click="changeProductLibraryPage(productLibraryPage+1)">下一页</button></footer>
           <footer v-else class="draft-pagination product-library-pagination"><span>共 0 条</span></footer>
-          <div v-if="activeProductLibraryTab==='products' && productLibraryLoading" class="list-refresh-overlay" role="status"><i></i><span>正在加载产品库…</span></div>
+          <div v-if="activeProductLibraryTab==='products' && productLibraryLoading" class="list-refresh-overlay" role="status"><i></i><span>正在加载产品统计…</span></div>
         </div>
         <div v-else-if="activeProductLibraryTab==='shops' && user?.role==='company_admin'" class="product-library-ranking-section">
           <p class="product-library-category-description">导入订单后自动保存平台、站点和店铺。每个店铺最多分配一位运营；组长可见组员数据；未分配店铺仅管理员可见。</p>
           <div class="draft-table product-library-table" :aria-busy="productLibraryShopsLoading">
             <div class="thead" style="grid-template-columns:1fr 1fr 2fr 2fr"><span>平台</span><span>站点</span><span>店铺名称</span><span>负责运营</span></div>
             <div v-for="shop in productLibraryShops" :key="shop.id" class="trow" style="grid-template-columns:1fr 1fr 2fr 2fr"><span>{{shop.platform}}</span><span>{{shop.site}}</span><strong>{{shop.shop_name}}</strong><select :value="shop.assigned_user_id ?? ''" :disabled="productLibraryAssigningId===shop.id" :aria-label="`分配 ${shop.shop_name} 的负责运营`" @change="assignProductLibraryShop(shop, $event)"><option value="">未分配</option><option v-for="member in members.filter(item => (item.role==='member' || item.role==='team_leader') && (item.is_active || item.id===shop.assigned_user_id))" :key="member.id" :value="member.id">{{member.name}} · {{operatorGroupName(member.group_id)}} · {{memberRoleLabel(member)}}</option></select></div>
-            <p v-if="!productLibraryShops.length && !productLibraryShopsLoading" class="empty">暂无店铺，请先导入产品库订单。</p>
+            <p v-if="!productLibraryShops.length && !productLibraryShopsLoading" class="empty">暂无店铺，请先导入产品统计订单。</p>
             <div v-if="productLibraryShopsLoading" class="list-refresh-overlay" role="status"><i></i><span>正在加载店铺…</span></div>
           </div>
         </div>
@@ -3007,7 +3066,7 @@ onUnmounted(() => {
       <button class="modal-close" @click="showMaterialDraftDialog=false">×</button>
       <h2>创建商品草稿</h2>
       <p>将使用已选的 {{materialDraftAssets.length}} 张素材创建商品草稿。</p>
-      <label>产品模板<input :value="materialDraftTemplate?.name || '—'" readonly/></label>
+      <label>产品模板<input :value="materialDraftTemplate?.name || '—'" readonly/></label><p class="title-note">AI 生成使用模板提示词；词库生成使用马来语词库</p>
       <section class="material-draft-preview">
         <div class="material-draft-preview-heading"><strong>图片预览</strong><span>{{materialDraftAssets.length}} 张</span></div>
         <p v-if="materialDraftAssets.length > 1" class="material-draft-sort-hint">拖动图片调整顺序，首张图片将用于 AI 生成标题。</p>
@@ -3021,11 +3080,11 @@ onUnmounted(() => {
       <section v-if="materialDraftTemplate" class="material-draft-details">
         <label>商品标题<input v-model="materialDraftTitle" @input="materialDraftTitleEdited=true" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符，或使用 AI 生成"/><div class="material-draft-counter" :class="{invalid: materialDraftTitle.length > 0 && materialDraftTitle.length < 25}"><span>{{ materialDraftTitle.length }} / 255 字符</span></div></label>
         <div class="title-additional-requirements draft-title-generation-controls">
-          <div class="draft-title-generation-actions"><button type="button" class="ghost" :aria-expanded="showDraftAdditionalRequirements" aria-controls="draft-title-additional-requirements" @click="showDraftAdditionalRequirements=!showDraftAdditionalRequirements">{{showDraftAdditionalRequirements ? '收起' : '展开'}}补充要求（选填）</button><div class="draft-title-generate-group"><button type="button" class="secondary" :disabled="materialDraftTitleGenerating" @click="generateMaterialDraftTitle">{{materialDraftTitleGenerating ? '生成中…' : 'AI 生成标题'}}</button><button type="button" class="draft-title-help-button" aria-label="标题生成说明" :aria-expanded="showDraftTitleHelp" aria-controls="draft-title-generation-help" @click="showDraftTitleHelp=!showDraftTitleHelp">ⓘ</button></div></div>
-          <p v-if="showDraftTitleHelp" id="draft-title-generation-help" class="draft-title-generation-help">将使用此模版的 AI生成标题要求和首图生成英文标题；仅在要求明确指定时提及材质。</p>
+          <div class="draft-title-generation-actions"><button type="button" class="ghost" :aria-expanded="showDraftAdditionalRequirements" aria-controls="draft-title-additional-requirements" @click="showDraftAdditionalRequirements=!showDraftAdditionalRequirements">{{showDraftAdditionalRequirements ? '收起' : '展开'}}补充要求（选填）</button><div class="draft-title-generate-group"><button type="button" class="secondary" :disabled="materialDraftTitleGenerating" @click="generateMaterialDraftTitle('prompt')">{{materialDraftTitleGenerating&&materialDraftTitleMethod==='prompt' ? '生成中…' : 'AI 生成标题'}}</button><button v-if="!libraryDraftMode" type="button" class="secondary" :disabled="materialDraftTitleGenerating" @click="generateMaterialDraftTitle('library')">{{materialDraftTitleGenerating&&materialDraftTitleMethod==='library'?'生成中…':'词库生成标题'}}</button><button type="button" class="draft-title-help-button" aria-label="标题生成说明" :aria-expanded="showDraftTitleHelp" aria-controls="draft-title-generation-help" @click="showDraftTitleHelp=!showDraftTitleHelp">ⓘ</button></div></div>
+          <p v-if="showDraftTitleHelp" id="draft-title-generation-help" class="draft-title-generation-help">AI 生成标题使用模板 AI生成标题要求、首图和本次补充要求。词库生成标题使用已确认属性与马来语词库；多 SKU 请核对首图描述。</p>
           <label v-if="showDraftAdditionalRequirements" id="draft-title-additional-requirements">本次标题补充要求<textarea v-model="materialDraftAdditionalRequirements" maxlength="1000" placeholder="例如：重点突出蓝色花卉图案"/><small>仅作用于当前商品，不保存到模板；再次生成时保留，关闭后清空。</small></label>
         </div>
-        <label>产品描述<textarea v-model="materialDraftProductDescription" maxlength="5000" placeholder="默认使用产品模版描述，可按商品修改"></textarea><div class="material-draft-counter"><span>{{ materialDraftProductDescription.length }} / 5000 字符</span></div></label>
+        <section v-if="materialDraftTitleResult?.generation_id" class="title-result-details"><p v-for="message in materialDraftTitleResult.warnings" :key="message">{{message}}</p><details><summary>查看选词与商品事实</summary><p v-for="word in materialDraftTitleResult.keywords" :key="word.id">{{word.code}} · {{word.phrase}} · {{word.translation}}</p><p v-for="fact in materialDraftTitleResult.facts?.attributes" :key="fact.tag">{{fact.tag}}：{{fact.value}} · {{fact.evidence}}</p></details></section><label>产品描述<textarea v-model="materialDraftProductDescription" maxlength="5000" placeholder="默认使用产品模版描述，可按商品修改"></textarea><div class="material-draft-counter"><span>{{ materialDraftProductDescription.length }} / 5000 字符</span></div></label>
       </section>
       <section v-if="materialDraftTemplate" class="material-draft-sku-summary"><strong>基础 SKU 列表</strong><p>{{libraryDraftMode ? '直接使用所选数据的基础 SKU；' : '直接使用素材入库时生成的永久 SKU；'}}发布妙手时会拼接模板尺码：{{materialDraftSizes.length ? materialDraftSizes.join('、') : '默认规格'}}。</p><b>共 {{materialDraftSkuCount}} 个基础 SKU</b><small v-if="!libraryDraftMode">格式：模板名称 + 用户代码 + 6 位随机字符串</small><div class="material-draft-sku-list"><div v-for="asset in materialDraftAssets" :key="asset.id"><span>图片 SKU</span><code>{{asset.sku}}</code></div></div><label class="material-draft-size-chart">尺码图<small>直接使用产品模版的尺码图；如需更换，请到产品模版中修改。</small><img v-if="materialDraftSizeChartPreview" :src="materialDraftSizeChartPreview" alt="尺码图预览"/><small v-else>该产品模版尚未上传尺码图</small></label></section>
       <div class="modal-actions"><button class="ghost" @click="showMaterialDraftDialog=false">取消</button><button class="primary" :disabled="materialDraftSaving" @click="createDraftFromMaterialAssets">{{materialDraftSaving ? '创建中…' : '确认创建'}}</button></div>
@@ -3043,11 +3102,11 @@ onUnmounted(() => {
       <p v-if="draftSelectionAssets.length % materialBatchGroupSize" class="material-batch-remainder">最后 {{draftSelectionAssets.length % materialBatchGroupSize}} 张不足一组，不参与创建，使用状态保持不变。</p>
       <section class="material-batch-title-toolbar" aria-label="批量生成标题">
         <div class="material-batch-title-actions">
-          <button type="button" class="secondary" :disabled="materialBatchControlsLocked || !materialBatchGroups.length" @click="generateMaterialBatchTitles()">一键 AI 生成所有标题</button>
-          <button v-if="materialBatchUnfinishedTitles.length" type="button" class="ghost" :disabled="materialBatchControlsLocked" @click="generateMaterialBatchTitles(materialBatchUnfinishedTitles)">重试未完成（{{materialBatchUnfinishedTitles.length}}）</button>
+          <button type="button" class="secondary" :disabled="materialBatchControlsLocked || !materialBatchGroups.length" @click="generateMaterialBatchTitles()">一键 AI 生成所有标题</button><button v-if="!libraryDraftMode" type="button" class="secondary" :disabled="materialBatchControlsLocked || !materialBatchGroups.length" @click="generateMaterialBatchTitles(materialBatchGroups,'library')">词库生成所有标题</button>
+          <button v-if="!libraryDraftMode" type="button" class="ghost" :disabled="materialBatchControlsLocked" @click="generateMaterialBatchTitles(materialBatchGroups.filter(g=>g.titleWarnings?.some(w=>w.includes('高度相似'))),'library')">重生成高相似项</button><button v-if="materialBatchUnfinishedTitles.length" type="button" class="ghost" :disabled="materialBatchControlsLocked" @click="generateMaterialBatchTitles(materialBatchUnfinishedTitles,materialBatchTitleMethod)">{{materialBatchTitleMethod==='library'?'词库':'AI'}}重试未完成（{{materialBatchUnfinishedTitles.length}}）</button>
           <button v-if="materialBatchTitleProgress.running" type="button" class="ghost" @click="stopMaterialBatchTitleGeneration">停止生成</button>
         </div>
-        <p class="material-batch-title-warning">将覆盖所有组合标题；使用各组首图、模板要求和本组补充要求。</p>
+        <p class="material-batch-title-warning">仅更新允许 AI 重写的组合。AI 生成使用模板提示词；词库生成使用马来语词库和确认属性。</p>
         <div v-if="materialBatchTitleProgress.total" class="material-batch-title-progress" role="status" aria-live="polite">
           <progress :value="materialBatchTitleProgress.completed" :max="materialBatchTitleProgress.total" aria-label="标题生成进度"></progress>
           <span>已完成 {{materialBatchTitleProgress.completed}} / {{materialBatchTitleProgress.total}}，成功 {{materialBatchTitleProgress.succeeded}}，失败 {{materialBatchTitleProgress.failed}}<template v-if="materialBatchTitleProgress.stopped">，已停止 {{materialBatchTitleProgress.stopped}}</template></span>
@@ -3070,10 +3129,10 @@ onUnmounted(() => {
           <div class="title-additional-requirements draft-title-generation-controls">
             <div class="draft-title-generation-actions">
               <button type="button" class="ghost" :aria-expanded="group.showAdditionalRequirements" :aria-controls="'batch-title-additional-requirements-' + index" @click="group.showAdditionalRequirements=!group.showAdditionalRequirements">{{group.showAdditionalRequirements ? '收起' : '展开'}}补充要求（选填）</button>
-              <div class="draft-title-generate-group"><button type="button" class="secondary" :disabled="materialBatchControlsLocked" @click="generateMaterialBatchTitle(group)">{{group.titleStatus === 'running' ? '生成中…' : 'AI 生成标题'}}</button><button type="button" class="draft-title-help-button" :aria-label="'草稿 ' + (index + 1) + ' 标题生成说明'" :aria-expanded="group.showTitleHelp" :aria-controls="'batch-title-generation-help-' + index" @click="group.showTitleHelp=!group.showTitleHelp">ⓘ</button></div>
+              <button v-if="group.manualTitle" type="button" class="ghost" :disabled="materialBatchControlsLocked" @click="group.manualTitle=false">允许 AI 重写</button><div class="draft-title-generate-group"><button type="button" class="secondary" :disabled="materialBatchControlsLocked" @click="generateMaterialBatchTitle(group)">{{group.titleStatus === 'running'&&materialBatchTitleMethod==='prompt' ? '生成中…' : 'AI 生成标题'}}</button><button v-if="!libraryDraftMode" type="button" class="secondary" :disabled="materialBatchControlsLocked" @click="generateMaterialBatchTitle(group,'library')">{{group.titleStatus==='running'&&materialBatchTitleMethod==='library'?'生成中…':'词库生成标题'}}</button><button type="button" class="draft-title-help-button" :aria-label="'草稿 ' + (index + 1) + ' 标题生成说明'" :aria-expanded="group.showTitleHelp" :aria-controls="'batch-title-generation-help-' + index" @click="group.showTitleHelp=!group.showTitleHelp">ⓘ</button></div>
             </div>
-            <p v-if="group.showTitleHelp" :id="'batch-title-generation-help-' + index" class="draft-title-generation-help">将使用此模版的 AI生成标题要求和首图生成英文标题；仅在要求明确指定时提及材质。</p>
-            <label v-if="group.showAdditionalRequirements" :id="'batch-title-additional-requirements-' + index">本草稿标题补充要求<textarea v-model="group.additionalRequirements" :disabled="materialBatchControlsLocked" maxlength="1000" placeholder="例如：重点突出蓝色花卉图案"/><small>仅作用于本草稿，不保存到模板；再次生成时保留，关闭弹窗或重新分组后清空。</small></label>
+            <p v-if="group.showTitleHelp" :id="'batch-title-generation-help-' + index" class="draft-title-generation-help">AI 生成标题使用模板 AI生成标题要求、首图和本次补充要求。词库生成标题使用已确认属性与马来语词库；多 SKU 请核对首图描述。</p>
+            <p v-for="message in group.titleWarnings" :key="message" class="title-result-warning">{{message}}</p><details v-if="group.titleKeywords?.length"><summary>本条词源</summary><p v-for="word in group.titleKeywords" :key="word.id">{{word.code}} · {{word.phrase}} · {{word.translation}}</p></details><label v-if="group.showAdditionalRequirements" :id="'batch-title-additional-requirements-' + index">本草稿标题补充要求<textarea v-model="group.additionalRequirements" :disabled="materialBatchControlsLocked" maxlength="1000" placeholder="例如：重点突出蓝色花卉图案"/><small>仅作用于本草稿，不保存到模板；再次生成时保留，关闭弹窗或重新分组后清空。</small></label>
           </div>
         </article>
       </section>
@@ -3324,7 +3383,7 @@ onUnmounted(() => {
   <div v-if="showMiaoshouDialog" class="modal-backdrop" @click.self="showMiaoshouDialog=false"><section class="modal-card"><h2>{{company?.miaoshou_configured?'更新':'配置'}}妙手 API Key</h2><p>App ID 和 App Secret 会加密保存，仅用于本公司的店铺同步与商品上架。保存后将立即重新同步店铺。</p><label>App ID<input v-model="miaoshouForm.app_id" maxlength="255" autocomplete="off" placeholder="请输入 App ID" /></label><label>App Secret<input v-model="miaoshouForm.app_secret" type="password" maxlength="500" autocomplete="new-password" placeholder="请输入 App Secret" @keyup.enter="saveMiaoshouAccount" /></label><div class="modal-actions"><button class="ghost" :disabled="miaoshouSaving" @click="showMiaoshouDialog=false">取消</button><button class="primary" :disabled="miaoshouSaving || !miaoshouForm.app_id.trim() || !miaoshouForm.app_secret.trim()" @click="saveMiaoshouAccount">{{miaoshouSaving?'保存中…':'保存并同步'}}</button></div></section></div>
   <div v-if="showHubstudioDialog && user?.role==='company_admin'" class="modal-backdrop" @click.self="showHubstudioDialog=false"><section class="modal-card"><h2>配置 HubStudio API</h2><p>凭据会加密保存，仅向已认证的本地执行器提供，不返回浏览器。</p><label>App ID<input v-model="hubstudioForm.app_id" maxlength="255" /></label><label>App Secret<input v-model="hubstudioForm.app_secret" type="password" maxlength="2000" /></label><label>团队 Group Code<input v-model="hubstudioForm.group_code" maxlength="120" /></label><div class="modal-actions"><button class="ghost" :disabled="hubstudioSaving" @click="showHubstudioDialog=false">取消</button><button class="primary" :disabled="hubstudioSaving || !hubstudioForm.app_id || !hubstudioForm.app_secret || !hubstudioForm.group_code" @click="saveHubstudioAccount">{{hubstudioSaving?'保存中…':'安全保存'}}</button></div></section></div>
   <div v-if="showShopManagersDialog" class="modal-backdrop" @click.self="showShopManagersDialog=false"><section class="modal-card"><h2>分配店铺管理人员</h2><p>{{managingShop?.name}}。被选中的运营成员可在该店铺创建、管理并上架商品。</p><label v-for="member in members.filter(item => item.role === 'member' || item.role === 'team_leader')" :key="member.id" class="manager-option"><input v-model="selectedManagerIds" :value="member.id" type="checkbox" />{{member.name}} <small>{{member.email}}</small></label><p v-if="!members.some(item => item.role === 'member' || item.role === 'team_leader')" class="empty">请先在成员管理中新增运营成员。</p><div class="modal-actions"><button class="ghost" @click="showShopManagersDialog=false">取消</button><button class="primary" :disabled="shopManagersSaving" @click="saveShopManagers">{{shopManagersSaving ? '保存中…' : '保存分配'}}</button></div></section></div>
-  <div v-if="showTemplateDialog" class="drawer-backdrop"><section class="template-drawer"><header><div><h2>{{editingTemplate ? '编辑产品模板' : '新增产品模板'}}</h2><p>完善模板信息后可直接用于 AI 创作。</p></div><button class="drawer-close" aria-label="关闭" :disabled="templateSaving" @click="showTemplateDialog=false">×</button></header><nav class="drawer-tabs"><button :class="{active:templateFormTab==='basic'}" @click="templateFormTab='basic'">模版信息</button><button :class="{active:templateFormTab==='product'}" @click="templateFormTab='product'">商品信息</button><button :class="{active:templateFormTab==='logistics'}" @click="templateFormTab='logistics'">物流信息</button><button :class="{active:templateFormTab==='ai-prompts'}" @click="templateFormTab='ai-prompts'">AI提示词</button></nav><div class="drawer-content"><div v-if="templateFormTab==='basic'" class="drawer-form"><label>模板名称<span>*</span><input v-model="newTemplateName" placeholder="例如：宽松短袖上衣" /></label><label>模板图片<span>*</span><input accept="image/png,image/jpeg,image/webp" type="file" @change="onCoverChange" /><small>{{newTemplateImage ? newTemplateImage.name : editingTemplate?.cover_url ? '保留当前图片' : '支持 JPG、PNG、WebP，最大 3MB'}}</small><div v-if="newTemplateImagePreview" class="template-upload-preview"><img :src="newTemplateImagePreview" alt="模板图片预览" /></div></label><label>模板描述<span>*</span><textarea v-model="newTemplateDescription" maxlength="500" placeholder="描述产品材质、版型和适用的印花区域"></textarea></label><label>模板分类<span>*</span><select v-model="newTemplateGroupId"><option :value="null" disabled>请选择模板分类</option><option v-for="group in templateGroups" :key="group.id" :value="group.id">{{group.name}}</option></select></label></div><div v-else-if="templateFormTab==='product'" class="drawer-form product-info-form"><label>产品描述<span>*</span><textarea v-model="newTemplateProductDescription" rows="4" maxlength="5000" placeholder="填写商品详情页的产品描述"></textarea></label><div class="sku-form"><section><strong><b>*</b> 尺码</strong><div class="sku-size-grid"><div v-for="(_, index) in newSkuSizeOptions" :key="index" class="sku-size-row"><input v-model="newSkuSizeOptions[index]" maxlength="50" placeholder="例如：M"/><small>{{newSkuSizeOptions[index].length}} / 50</small><button title="删除尺码" @click="newSkuSizeOptions.splice(index,1)">×</button></div></div><button class="sku-add-option" @click="addSkuSize">＋ 添加选项</button></section><small class="sku-total">预计生成 {{Math.max(1,newSkuSizeOptions.filter(value=>value.trim()).length)}} 个 SKU</small></div><label>尺码图<span>*</span><input accept="image/png,image/jpeg,image/webp" type="file" @change="onSizeChartChange" /><small>{{newTemplateSizeChart ? newTemplateSizeChart.name : editingTemplate?.size_chart_url ? '保留当前尺码图' : '支持 JPG、PNG、WebP，最多上传 1 张，最大 3MB'}}</small><div v-if="newTemplateSizeChartPreview" class="template-upload-preview"><img :src="newTemplateSizeChartPreview" alt="尺码图预览" /></div></label></div><div v-else-if="templateFormTab==='ai-prompts'" class="drawer-form ai-prompts-form"><label>AI生成标题要求（选填）<textarea v-model="newTemplateTitleTemplate" rows="4" maxlength="500" placeholder="例如：女款长袖连衣裙，突出印花与日常穿搭；如需提及材质，请写明具体材质"></textarea><small>留空时根据首图生成英文标题；填写后作为默认要求，也可在生成时补充。功能特性请明确描述，材质仅在明确要求并指定时提及。</small></label><div><h3>AI生成素材提示</h3><p>为印花贴合保存可复用的创作要求；在 AI 创作页选择模板后可一键填充并继续修改。</p></div><section v-for="(prompt, index) in newTemplateAiPrompts" :key="index" class="ai-prompt-editor"><div><b>提示词 {{index + 1}}</b><button type="button" class="danger" @click="removeTemplateAiPrompt(index)">删除</button></div><label>名称<input v-model="prompt.name" maxlength="80" placeholder="例如：自然布料贴合" /></label><label>提示词内容<textarea v-model="prompt.content" maxlength="1000" placeholder="描述印花贴合方式、细节、光影等创作要求"></textarea></label></section><button type="button" class="secondary ai-prompt-add" @click="addTemplateAiPrompt">＋ 新增提示词</button></div><div v-else class="drawer-form logistics-form"><h3>物流信息 <span title="用于运费及配送计算">?</span></h3><label><b>*</b> 包裹重量<div class="unit-input"><input v-model.number="newPackageWeight" type="number" min="0.001" step="0.001" placeholder="请输入重量" /><span>KG</span></div></label><label><b>*</b> 包裹尺寸<div class="dimension-inputs"><label><input v-model.number="newPackageLength" type="number" min="0.1" step="0.1" placeholder="长" /><span>cm</span></label><label><input v-model.number="newPackageWidth" type="number" min="0.1" step="0.1" placeholder="宽" /><span>cm</span></label><label><input v-model.number="newPackageHeight" type="number" min="0.1" step="0.1" placeholder="高" /><span>cm</span></label></div></label></div></div><footer><button class="ghost" :disabled="templateSaving" @click="showTemplateDialog=false">取消</button><button class="primary" :disabled="templateSaving" @click="createTemplate">{{templateSaving ? '上传中…' : (editingTemplate ? '保存修改' : '确认新增')}}</button></footer></section></div>
+  <div v-if="showTemplateDialog" class="drawer-backdrop"><section class="template-drawer"><header><div><h2>{{editingTemplate ? '编辑产品模板' : '新增产品模板'}}</h2><p>完善模板信息后可直接用于 AI 创作。</p></div><button class="drawer-close" aria-label="关闭" :disabled="templateSaving" @click="showTemplateDialog=false">×</button></header><nav class="drawer-tabs"><button :class="{active:templateFormTab==='basic'}" @click="templateFormTab='basic'">模版信息</button><button :class="{active:templateFormTab==='product'}" @click="templateFormTab='product'">商品信息</button><button :class="{active:templateFormTab==='logistics'}" @click="templateFormTab='logistics'">物流信息</button><button :class="{active:templateFormTab==='ai-prompts'}" @click="templateFormTab='ai-prompts'">AI提示词</button></nav><div class="drawer-content"><div v-if="templateFormTab==='basic'" class="drawer-form"><label>模板名称<span>*</span><input v-model="newTemplateName" placeholder="例如：宽松短袖上衣" /></label><label>模板图片<span>*</span><input accept="image/png,image/jpeg,image/webp" type="file" @change="onCoverChange" /><small>{{newTemplateImage ? newTemplateImage.name : editingTemplate?.cover_url ? '保留当前图片' : '支持 JPG、PNG、WebP，最大 3MB'}}</small><div v-if="newTemplateImagePreview" class="template-upload-preview"><img :src="newTemplateImagePreview" alt="模板图片预览" /></div></label><label>模板描述<span>*</span><textarea v-model="newTemplateDescription" maxlength="500" placeholder="描述产品材质、版型和适用的印花区域"></textarea></label><label>模板分类<span>*</span><select v-model="newTemplateGroupId"><option :value="null" disabled>请选择模板分类</option><option v-for="group in templateGroups" :key="group.id" :value="group.id">{{group.name}}</option></select></label></div><div v-else-if="templateFormTab==='product'" class="drawer-form product-info-form"><label>产品描述<span>*</span><textarea v-model="newTemplateProductDescription" rows="4" maxlength="5000" placeholder="填写商品详情页的产品描述"></textarea></label><div class="sku-form"><section><strong><b>*</b> 尺码</strong><div class="sku-size-grid"><div v-for="(_, index) in newSkuSizeOptions" :key="index" class="sku-size-row"><input v-model="newSkuSizeOptions[index]" maxlength="50" placeholder="例如：M"/><small>{{newSkuSizeOptions[index].length}} / 50</small><button title="删除尺码" @click="newSkuSizeOptions.splice(index,1)">×</button></div></div><button class="sku-add-option" @click="addSkuSize">＋ 添加选项</button></section><small class="sku-total">预计生成 {{Math.max(1,newSkuSizeOptions.filter(value=>value.trim()).length)}} 个 SKU</small></div><label>尺码图<span>*</span><input accept="image/png,image/jpeg,image/webp" type="file" @change="onSizeChartChange" /><small>{{newTemplateSizeChart ? newTemplateSizeChart.name : editingTemplate?.size_chart_url ? '保留当前尺码图' : '支持 JPG、PNG、WebP，最多上传 1 张，最大 3MB'}}</small><div v-if="newTemplateSizeChartPreview" class="template-upload-preview"><img :src="newTemplateSizeChartPreview" alt="尺码图预览" /></div></label></div><div v-else-if="templateFormTab==='ai-prompts'" class="drawer-form ai-prompts-form"><label>AI生成标题要求（选填）<textarea v-model="newTemplateTitleTemplate" rows="4" maxlength="500" placeholder="例如：品类放在开头，突出已确认的长袖与花卉图案，避免促销词"></textarea><small>作为该模板的默认标题要求，可在生成时补充。词库方式固定生成马来语标题，要求不能覆盖已确认属性；商品事实在标题词库的模板配置中维护，货盘兜底标题在公开货盘中维护。</small></label><div><h3>AI生成素材提示</h3><p>为印花贴合保存可复用的创作要求；在 AI 创作页选择模板后可一键填充并继续修改。</p></div><section v-for="(prompt, index) in newTemplateAiPrompts" :key="index" class="ai-prompt-editor"><div><b>提示词 {{index + 1}}</b><button type="button" class="danger" @click="removeTemplateAiPrompt(index)">删除</button></div><label>名称<input v-model="prompt.name" maxlength="80" placeholder="例如：自然布料贴合" /></label><label>提示词内容<textarea v-model="prompt.content" maxlength="1000" placeholder="描述印花贴合方式、细节、光影等创作要求"></textarea></label></section><button type="button" class="secondary ai-prompt-add" @click="addTemplateAiPrompt">＋ 新增提示词</button></div><div v-else class="drawer-form logistics-form"><h3>物流信息 <span title="用于运费及配送计算">?</span></h3><label><b>*</b> 包裹重量<div class="unit-input"><input v-model.number="newPackageWeight" type="number" min="0.001" step="0.001" placeholder="请输入重量" /><span>KG</span></div></label><label><b>*</b> 包裹尺寸<div class="dimension-inputs"><label><input v-model.number="newPackageLength" type="number" min="0.1" step="0.1" placeholder="长" /><span>cm</span></label><label><input v-model.number="newPackageWidth" type="number" min="0.1" step="0.1" placeholder="宽" /><span>cm</span></label><label><input v-model.number="newPackageHeight" type="number" min="0.1" step="0.1" placeholder="高" /><span>cm</span></label></div></label></div></div><footer><button class="ghost" :disabled="templateSaving" @click="showTemplateDialog=false">取消</button><button class="primary" :disabled="templateSaving" @click="createTemplate">{{templateSaving ? '上传中…' : (editingTemplate ? '保存修改' : '确认新增')}}</button></footer></section></div>
   <div v-if="previewImageUrl" class="image-preview-backdrop" @click.self="previewImageUrl=''"><section class="image-preview-modal"><button class="modal-close" aria-label="关闭大图" @click="previewImageUrl=''">×</button><img :src="previewImageUrl" :alt="previewImageAlt"/></section></div>
   <div v-if="productLibraryOrderProduct" class="modal-backdrop" @click.self="closeProductLibraryOrders"><section class="modal-card product-library-orders-dialog" role="dialog" aria-modal="true" aria-labelledby="product-library-orders-heading"><button class="modal-close" aria-label="关闭订单详情" @click="closeProductLibraryOrders">×</button><h2 id="product-library-orders-heading">订单详情</h2><p>{{productLibraryOrderProduct.sku}}</p><div class="product-library-orders-table" :aria-busy="productLibraryOrderLoading"><div class="product-library-orders-head"><span>下单时间</span><span>订单编号</span><span>店铺</span><span>产品 ID</span><span>数量</span></div><div v-for="(order, index) in productLibraryOrders" :key="index" class="product-library-orders-row"><span>{{new Date(order.ordered_at).toLocaleString()}}</span><span :title="order.order_number">{{order.order_number}}</span><span :title="order.shop_name">{{order.shop_name}}</span><span :title="order.product_id">{{order.product_id}}</span><strong>{{order.quantity}}</strong></div><div v-if="!productLibraryOrders.length && !productLibraryOrderLoading" class="empty">暂无订单</div><div v-if="productLibraryOrderLoading" class="product-library-orders-loading" role="status">正在加载订单…</div></div><footer class="draft-pagination product-library-orders-pagination"><span>共 {{productLibraryOrderCount}} 单 · {{productLibraryOrderTotal}} 条明细</span><label>每页 <select v-model.number="productLibraryOrderPageSize" :disabled="productLibraryOrderLoading" @change="changeProductLibraryOrderPageSize"><option v-for="size in pageSizeOptions" :key="size" :value="size">{{size}}</option></select> 条</label><button :disabled="productLibraryOrderLoading || productLibraryOrderPage===1" @click="changeProductLibraryOrderPage(productLibraryOrderPage-1)">上一页</button><span>第 {{productLibraryOrderPage}} / {{productLibraryOrderPageCount}} 页</span><button :disabled="productLibraryOrderLoading || productLibraryOrderPage===productLibraryOrderPageCount" @click="changeProductLibraryOrderPage(productLibraryOrderPage+1)">下一页</button></footer></section></div>
   <div v-if="showProductLibraryTemplateDialog" class="modal-backdrop" @click.self="!productLibraryTemplateSaving && (showProductLibraryTemplateDialog=false)"><section class="modal-card product-library-template-dialog"><button class="modal-close" :disabled="productLibraryTemplateSaving" aria-label="关闭批量设置模版" @click="showProductLibraryTemplateDialog=false">×</button><h2>批量设置模版</h2><p>将为 {{selectedProductLibraryIds.length}} 条数据设置同一模版，原模版将被替换，SKU 和使用状态保持不变。</p><label>目标模版<select v-model="productLibraryTargetTemplateId" :disabled="productLibraryTemplateSaving"><option :value="null" disabled>请选择模版</option><option v-for="item in templates" :key="item.id" :value="item.id">{{item.name}}</option></select></label><div class="modal-actions"><button class="ghost" :disabled="productLibraryTemplateSaving" @click="showProductLibraryTemplateDialog=false">取消</button><button class="primary" :disabled="productLibraryTemplateSaving || !productLibraryTargetTemplateId" @click="saveProductLibraryTemplate">{{productLibraryTemplateSaving ? '保存中…' : '确认设置'}}</button></div></section></div>

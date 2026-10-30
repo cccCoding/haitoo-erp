@@ -355,6 +355,8 @@ class TaskBatchRetry(BaseModel):
 
 class MaterialDraftCreate(BaseModel):
     """尺码图不再随草稿提交，一律沿用所选产品模版的尺码图。"""
+    title_platform: Literal["TikTok", "Shopee"] = "TikTok"
+    generation_id: int | None = Field(default=None, gt=0)
     template_id: int
     material_asset_ids: list[int] = Field(min_length=1, max_length=100)
     title: str = Field(min_length=25, max_length=255)
@@ -370,6 +372,7 @@ class MaterialDraftCreate(BaseModel):
 
 
 class MaterialDraftBatchGroup(BaseModel):
+    generation_id: int | None = Field(default=None, gt=0)
     material_asset_ids: list[int] = Field(min_length=5, max_length=8)
     title: str = Field(min_length=25, max_length=255)
 
@@ -383,16 +386,24 @@ class MaterialDraftBatchGroup(BaseModel):
 
 
 class MaterialDraftBatchCreate(BaseModel):
+    title_platform: Literal["TikTok", "Shopee"] = "TikTok"
     template_id: int
     groups: list[MaterialDraftBatchGroup] = Field(min_length=1, max_length=MAX_PRODUCT_LIBRARY_SELECTION // 5)
 
 
 class DraftTitleGenerate(BaseModel):
+    method: Literal['prompt', 'library'] = 'prompt'
+    platform: Literal["TikTok", "Shopee"] = "TikTok"
+    site: Literal["MY"] = "MY"
+    language: Literal["ms"] = "ms"
+    request_key: str | None = Field(default=None, min_length=8, max_length=128)
     image_url: str = Field(min_length=1, max_length=500)
     additional_requirements: str = Field(default="", max_length=1000)
 
 
 class DraftUpdate(BaseModel):
+    title_platform: Literal["TikTok", "Shopee"] = "TikTok"
+    generation_id: int | None = Field(default=None, gt=0)
     title: str = Field(min_length=25, max_length=255)
     product_description: str | None = Field(default=None, max_length=5000)
 
@@ -694,10 +705,17 @@ class MaterialImportConfirmInput(BaseModel):
 
 
 class ProductLibraryTitleGenerate(ProductLibraryDraftSource):
+    method: Literal['prompt', 'library'] = 'prompt'
+    platform: Literal["TikTok", "Shopee"] = "TikTok"
+    site: Literal["MY"] = "MY"
+    language: Literal["ms"] = "ms"
+    request_key: str | None = Field(default=None, min_length=8, max_length=128)
     additional_requirements: str = Field(default="", max_length=1000)
 
 
 class ProductLibraryDraftCreate(BaseModel):
+    title_platform: Literal["TikTok", "Shopee"] = "TikTok"
+    generation_id: int | None = Field(default=None, gt=0)
     template_id: int
     sources: list[ProductLibraryDraftSource] = Field(min_length=1, max_length=MAX_PRODUCT_LIBRARY_SELECTION)
     title: str = Field(min_length=25, max_length=255)
@@ -707,6 +725,7 @@ class ProductLibraryDraftCreate(BaseModel):
 
 
 class ProductLibraryDraftGroup(BaseModel):
+    generation_id: int | None = Field(default=None, gt=0)
     sources: list[ProductLibraryDraftSource] = Field(min_length=5, max_length=8)
     title: str = Field(min_length=25, max_length=255)
 
@@ -714,5 +733,6 @@ class ProductLibraryDraftGroup(BaseModel):
 
 
 class ProductLibraryDraftBatchCreate(BaseModel):
+    title_platform: Literal["TikTok", "Shopee"] = "TikTok"
     template_id: int
     groups: list[ProductLibraryDraftGroup] = Field(min_length=1, max_length=MAX_PRODUCT_LIBRARY_SELECTION // 5)
