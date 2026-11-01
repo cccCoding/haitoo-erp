@@ -14,11 +14,17 @@ const api = axios.create({baseURL: import.meta.env.VITE_API_URL || 'http://local
 const label = computed(()=>props.kind==='category'?'产品分类':'标签')
 const search = ref(''), state = ref(''), error = ref(''), busy = ref(false), editing = ref<any>(null)
 const rows = computed(()=>props.entries.filter(row=>!row.merged_into_id&&(!state.value||String(row.enabled)===state.value) && `${props.kind==='tag'?titleTagLabel(row.name):row.name} ${row.aliases?.join(' ')||''} ${row.localized_name||''} ${row.description}`.toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase())))
-const aliasText = ref(''), selectedSources = ref<number[]>([]), mergeDialog = ref(false), mergeTarget = ref<number | null>(null), mergeSummary = ref<any>(null), mergeNotice = ref('')
-const mergeOptions = computed(()=>props.entries.filter(row=>row.enabled&&!row.merged_into_id&&!selectedSources.value.includes(row.id)).map(row=>({value:row.id,label:row.name})))
+const aliasText = ref(''), selectedCategories = ref<number[]>([]), mergeDialog = ref(false), mergeTarget = ref<number | null>(null), mergeSummary = ref<any>(null), mergeNotice = ref('')
+const mergeOptions = computed(()=>props.entries.filter(row=>row.enabled&&!row.merged_into_id&&selectedCategories.value.includes(row.id)).map(row=>({value:row.id,label:row.name})))
+const mergeSourceIds = computed(()=>selectedCategories.value.filter(id=>id!==mergeTarget.value))
+watch(mergeSourceIds,()=>{mergeSummary.value=null})
+watch(mergeOptions,options=>{
+  mergeSummary.value=null
+  if(mergeTarget.value!==null&&!options.some(option=>option.value===mergeTarget.value))mergeTarget.value=null
+})
 watch(mergeTarget,()=>{mergeSummary.value=null;error.value=''})
-watch(()=>props.kind,()=>{selectedSources.value=[];mergeDialog.value=false;mergeNotice.value=''})
-watch(()=>props.entries,()=>{selectedSources.value=selectedSources.value.filter(id=>props.entries.some(row=>row.id===id&&!row.merged_into_id))})
+watch(()=>props.kind,()=>{selectedCategories.value=[];mergeDialog.value=false;mergeNotice.value=''})
+watch(()=>props.entries,()=>{selectedCategories.value=selectedCategories.value.filter(id=>props.entries.some(row=>row.id===id&&!row.merged_into_id))})
 const formName = computed({get:()=>props.kind==='tag'?titleTagLabel(editing.value?.name):editing.value?.name||'',set:value=>{if(editing.value)editing.value.name=value}})
 const page=ref(1),pageSize=ref(20)
 const pagedRows=computed(()=>rows.value.slice((page.value-1)*pageSize.value,page.value*pageSize.value))
@@ -27,17 +33,23 @@ watch([search,state],()=>{page.value=1})
 watch(()=>rows.value.length,()=>{page.value=Math.min(page.value,Math.max(1,Math.ceil(rows.value.length/pageSize.value)))})
 const fixedIdentity = computed(()=>!!editing.value && !!(editing.value.built_in || editing.value.reference_count))
 function edit(row?: Entry) {error.value='';aliasText.value=(row?.aliases||[]).join('\n');editing.value=row?{...row,localized_name:row.localized_name||''}:{name:'',description:'',localized_name:'',semantic_tag:'待分类',enabled:true}}
-function openMerge(){error.value='';mergeTarget.value=null;mergeSummary.value=null;mergeDialog.value=true}
+function openMerge(){
+  error.value=''
+  if(selectedCategories.value.length<2){error.value='请至少勾选两个需要合并的分类';return}
+  mergeTarget.value=null;mergeSummary.value=null;mergeDialog.value=true
+}
 async function previewMerge(){
-  if(busy.value||!mergeTarget.value)return
+  if(busy.value)return
+  if(!mergeTarget.value||!mergeOptions.value.some(option=>option.value===mergeTarget.value)){error.value='请先从勾选项中选择一个已启用的保留分类，再预览合并影响';return}
+  if(!mergeSourceIds.value.length){error.value='请至少勾选两个需要合并的分类';return}
   busy.value=true;error.value=''
-  try{const {data}=await api.post('/title-category-merges/preview',{source_ids:selectedSources.value,target_id:mergeTarget.value},{headers:{Authorization:`Bearer ${props.token}`}});mergeSummary.value=data}
+  try{const {data}=await api.post('/title-category-merges/preview',{source_ids:mergeSourceIds.value,target_id:mergeTarget.value},{headers:{Authorization:`Bearer ${props.token}`}});mergeSummary.value=data}
   catch(e:any){failure(e)}finally{busy.value=false}
 }
 async function executeMerge(){
   if(busy.value||!mergeSummary.value)return
   busy.value=true;error.value=''
-  try{await api.post('/title-category-merges',{source_ids:selectedSources.value,target_id:mergeTarget.value,token:mergeSummary.value.token},{headers:{Authorization:`Bearer ${props.token}`}});mergeNotice.value=`已将 ${selectedSources.value.length} 个分类合并到“${mergeSummary.value.target.name}”，旧名称保留为别名。`;mergeDialog.value=false;selectedSources.value=[];emit('changed')}
+  try{await api.post('/title-category-merges',{source_ids:mergeSourceIds.value,target_id:mergeTarget.value,token:mergeSummary.value.token},{headers:{Authorization:`Bearer ${props.token}`}});mergeNotice.value=`已将 ${mergeSourceIds.value.length} 个分类合并到“${mergeSummary.value.target.name}”，旧名称保留为别名。`;mergeDialog.value=false;selectedCategories.value=[];emit('changed')}
   catch(e:any){mergeSummary.value=null;failure(e)}finally{busy.value=false}
 }
 function failure(e:any){error.value=typeof e.response?.data?.detail==='string'?e.response.data.detail:e.message||'操作失败'}
@@ -78,16 +90,44 @@ async function remove(row:Entry){
     <div class="creative-resource-filters title-library-filters">
       <label class="title-library-search">搜索<input v-model="search" :aria-label="`搜索${label}`" :placeholder="`搜索${label}名称或说明`" /></label>
       <label>状态<select v-model="state" :aria-label="`${label}状态`"><option value="">全部状态</option><option value="true">启用</option><option value="false">停用</option></select></label>
-      <div v-if="admin" class="creative-resource-filter-actions"><button class="primary" :disabled="busy" @click="edit()">新增{{label}}</button><button v-if="kind==='category'" class="secondary" :disabled="busy||!selectedSources.length" @click="openMerge">合并选中分类<span v-if="selectedSources.length">（{{selectedSources.length}}）</span></button><button v-if="selectedSources.length" class="ghost" :disabled="busy" @click="selectedSources=[]">清空选择</button></div>
+      <div v-if="admin" class="creative-resource-filter-actions"><button class="primary" :disabled="busy" @click="edit()">新增{{label}}</button><button v-if="kind==='category'" class="secondary" :disabled="busy||selectedCategories.length<2" @click="openMerge">合并选中分类<span v-if="selectedCategories.length">（{{selectedCategories.length}}）</span></button><button v-if="selectedCategories.length" class="ghost" :disabled="busy" @click="selectedCategories=[]">清空选择</button></div>
       <span class="title-library-filter-total">共 {{rows.length}} 项</span>
     </div>
+    <p v-if="admin&&kind==='category'" class="dictionary-note">勾选至少两个分类，再点击“合并选中分类”，从勾选项中选择一个已启用的分类作为保留项，其余分类合并到该分类。</p>
     <p v-if="error&&!editing&&!mergeDialog" class="error" role="alert">{{error}}</p>
     <p v-if="mergeNotice" class="dictionary-note" role="status">{{mergeNotice}}</p>
-    <div class="dictionary-scroll creative-resource-table-wrap"><table class="title-library-table"><thead><tr><th v-if="admin&&kind==='category'">选择</th><th>{{label}}名称</th><th v-if="kind==='category'">马来语名称</th><th v-if="kind==='tag'">语义分类</th><th>说明</th><th :title="kind==='category'?'将本分类列为适用品类的关键词数量，包含待审核、启用及停用词；不重复统计已合并词。点击查看对应关键词。':'使用本标签的关键词数量。'">关键词引用</th><th>模板引用</th><th>导入引用</th><th>状态</th><th v-if="admin">操作</th></tr></thead><tbody><tr v-for="row in pagedRows" :key="row.id"><td v-if="admin&&kind==='category'"><input v-model="selectedSources" type="checkbox" :value="row.id" :disabled="busy" :aria-label="`选择合并分类 ${row.name}`" /></td><td>{{kind==='tag'?titleTagLabel(row.name):row.name}}<small v-if="row.built_in">内置标签</small><small v-if="row.aliases?.length">别名：{{row.aliases.join('、')}}</small></td><td v-if="kind==='category'"><span :class="{'dictionary-unset':!row.localized_name}">{{row.localized_name||'待设置'}}</span></td><td v-if="kind==='tag'">{{titleTagLabel(row.semantic_tag)}}</td><td class="dictionary-description">{{row.description||'—'}}</td><td><button v-if="kind==='category'" class="dictionary-count" :disabled="!(row.applicable_keyword_count??row.keyword_count)" :aria-label="`查看${row.name}适用关键词`" @click="emit('keywords',row.name)">{{row.applicable_keyword_count??row.keyword_count}}</button><template v-else>{{row.keyword_count}}</template></td><td>{{row.template_count}}</td><td>{{row.import_count}}</td><td><span class="dictionary-state" :class="row.enabled?'enabled':'disabled'">{{row.enabled?'启用':'停用'}}</span></td><td v-if="admin"><div class="dictionary-actions"><button class="ghost" :disabled="busy" @click="edit(row)">编辑</button><button class="ghost" :disabled="busy" @click="toggle(row)">{{row.enabled?'停用':'启用'}}</button><button v-if="!row.built_in&&!row.reference_count" class="danger" :disabled="busy" @click="remove(row)">删除</button></div></td></tr></tbody></table></div>
+    <div class="dictionary-scroll creative-resource-table-wrap"><table class="title-library-table"><thead><tr><th v-if="admin&&kind==='category'">选择</th><th>{{label}}名称</th><th v-if="kind==='category'">马来语名称</th><th v-if="kind==='tag'">语义分类</th><th>说明</th><th :title="kind==='category'?'将本分类列为适用品类的关键词数量，包含待审核、启用及停用词；不重复统计已合并词。点击查看对应关键词。':'使用本标签的关键词数量。'">关键词引用</th><th>模板引用</th><th>导入引用</th><th>状态</th><th v-if="admin">操作</th></tr></thead><tbody><tr v-for="row in pagedRows" :key="row.id"><td v-if="admin&&kind==='category'"><input v-model="selectedCategories" type="checkbox" :value="row.id" :disabled="busy" :aria-label="`选择合并分类 ${row.name}`" /></td><td>{{kind==='tag'?titleTagLabel(row.name):row.name}}<small v-if="row.built_in">内置标签</small><small v-if="row.aliases?.length">别名：{{row.aliases.join('、')}}</small></td><td v-if="kind==='category'"><span :class="{'dictionary-unset':!row.localized_name}">{{row.localized_name||'待设置'}}</span></td><td v-if="kind==='tag'">{{titleTagLabel(row.semantic_tag)}}</td><td class="dictionary-description">{{row.description||'—'}}</td><td><button v-if="kind==='category'" class="dictionary-count" :disabled="!(row.applicable_keyword_count??row.keyword_count)" :aria-label="`查看${row.name}适用关键词`" @click="emit('keywords',row.name)">{{row.applicable_keyword_count??row.keyword_count}}</button><template v-else>{{row.keyword_count}}</template></td><td>{{row.template_count}}</td><td>{{row.import_count}}</td><td><span class="dictionary-state" :class="row.enabled?'enabled':'disabled'">{{row.enabled?'启用':'停用'}}</span></td><td v-if="admin"><div class="dictionary-actions"><button class="ghost" :disabled="busy" @click="edit(row)">编辑</button><button class="ghost" :disabled="busy" @click="toggle(row)">{{row.enabled?'停用':'启用'}}</button><button v-if="!row.built_in&&!row.reference_count" class="danger" :disabled="busy" @click="remove(row)">删除</button></div></td></tr></tbody></table></div>
     <p v-if="!rows.length" class="dictionary-note">暂无符合条件的{{label}}。</p>
     <TitlePagination :label="label" :page="page" :page-size="pageSize" :total="rows.length" :disabled="busy" @page="page=$event" @page-size="changePageSize" />
     <p class="dictionary-note">{{kind==='category'?'已引用的分类名称不可修改；仍可编辑站点名称、说明或启停。仅未引用的分类可删除。':'已引用的名称和语义分类不可修改；可编辑说明或启停。仅未引用的自定义条目可删除。'}}</p>
-    <div v-if="mergeDialog" class="modal-backdrop" @click.self="!busy&&(mergeDialog=false)"><section v-dialog-focus="{close:()=>{if(!busy)mergeDialog=false},busy}" class="modal-card dictionary-dialog" role="dialog" aria-modal="true" aria-labelledby="category-merge-heading"><h2 id="category-merge-heading">合并产品分类</h2><p class="dictionary-note">仅合并业务含义相同的分类。选中了 {{selectedSources.length}} 个源分类，目标分类必须已启用。合并不提供自动撤销。</p><SearchableSelect :model-value="mergeTarget" :options="mergeOptions" :disabled="busy" aria-label="合并目标分类" placeholder="选择保留的目标分类" @update:model-value="mergeTarget=typeof $event==='number'?$event:null" /><template v-if="mergeSummary"><div class="merge-preview"><h3>源分类</h3><article v-for="source in mergeSummary.sources" :key="source.id"><strong>{{source.name}}</strong><p>别名：{{source.aliases.join('、')||'无'}}；马来语名称：{{source.localized_name||'未设置'}}</p><p>说明：{{source.description||'无'}}</p></article><h3>保留的目标分类：{{mergeSummary.target.name}}</h3><p>别名：{{mergeSummary.target.aliases.join('、')||'无'}}；马来语名称：{{mergeSummary.target.localized_name||'未设置'}}</p><p>说明：{{mergeSummary.target.description||'无'}}</p><p>影响 {{mergeSummary.counts.keywords}} 个关键词、{{mergeSummary.counts.templates}} 个模板、{{mergeSummary.counts.imports}} 个待处理导入。</p><p>{{mergeSummary.notice}}</p></div></template><p v-if="error" class="error" role="alert">{{error}}</p><div class="dictionary-dialog-actions"><button :disabled="busy" @click="mergeDialog=false">取消</button><button v-if="!mergeSummary" class="primary" :disabled="busy||!mergeTarget" @click="previewMerge">预览合并影响</button><button v-else class="primary" :disabled="busy" @click="executeMerge">确认合并到“{{mergeSummary.target.name}}”</button></div></section></div>
+    <div v-if="mergeDialog" class="modal-backdrop" @click.self="!busy&&(mergeDialog=false)">
+      <section v-dialog-focus="{close:()=>{if(!busy)mergeDialog=false},busy}" class="modal-card dictionary-dialog" role="dialog" aria-modal="true" aria-labelledby="category-merge-heading">
+        <h2 id="category-merge-heading">合并产品分类</h2>
+        <p class="dictionary-note">仅合并业务含义相同的分类。已勾选 {{selectedCategories.length}} 个分类，请从中选择一个保留，其余 {{selectedCategories.length-1}} 个分类将合并到保留项。合并不提供自动撤销。</p>
+        <SearchableSelect :model-value="mergeTarget" :options="mergeOptions" :disabled="busy" aria-label="从勾选项中选择保留分类" placeholder="从勾选项中选择保留分类" empty-label="勾选项中没有已启用的分类" @update:model-value="mergeTarget=typeof $event==='number'?$event:null" />
+        <p v-if="!mergeOptions.length" class="dictionary-note" role="status">勾选的分类均已停用，无法作为保留项。请取消合并，先启用要保留的分类。</p>
+        <p v-else-if="!mergeTarget" class="dictionary-note">请先选择保留分类，再预览合并影响；停用分类不能作为保留项。</p>
+        <div v-if="mergeSummary" class="merge-preview">
+          <h3>源分类</h3>
+          <article v-for="source in mergeSummary.sources" :key="source.id">
+            <strong>{{source.name}}</strong>
+            <p>别名：{{source.aliases.join('、')||'无'}}；马来语名称：{{source.localized_name||'未设置'}}</p>
+            <p>说明：{{source.description||'无'}}</p>
+          </article>
+          <h3>保留的目标分类：{{mergeSummary.target.name}}</h3>
+          <p>别名：{{mergeSummary.target.aliases.join('、')||'无'}}；马来语名称：{{mergeSummary.target.localized_name||'未设置'}}</p>
+          <p>说明：{{mergeSummary.target.description||'无'}}</p>
+          <p>影响 {{mergeSummary.counts.keywords}} 个关键词、{{mergeSummary.counts.templates}} 个模板、{{mergeSummary.counts.imports}} 个待处理导入。</p>
+          <p>{{mergeSummary.notice}}</p>
+        </div>
+        <p v-if="error" class="error" role="alert">{{error}}</p>
+        <div class="dictionary-dialog-actions">
+          <button :disabled="busy" @click="mergeDialog=false">取消</button>
+          <button v-if="!mergeSummary" class="primary" :disabled="busy" @click="previewMerge">预览合并影响</button>
+          <button v-else class="primary" :disabled="busy" @click="executeMerge">确认合并到“{{mergeSummary.target.name}}”</button>
+        </div>
+      </section>
+    </div>
     <div v-if="editing" class="modal-backdrop" @click.self="!busy&&(editing=null)"><section v-dialog-focus="{close:()=>{if(!busy)editing=null},busy}" class="modal-card dictionary-dialog" role="dialog" aria-modal="true" aria-labelledby="dictionary-editor-heading"><h2 id="dictionary-editor-heading">{{editing.id?'编辑':'新增'}}{{label}}</h2><form @submit.prevent="save"><label>{{label}}名称<input v-model="formName" required :maxlength="kind==='tag'?40:255" :readonly="fixedIdentity" /></label><label v-if="kind==='category'">马来西亚名称（马来语）<input v-model="editing.localized_name" maxlength="255" placeholder="例如：上衣填写 Baju" /><small>用于马来西亚站点的分类展示和词库标题品类表达；运营名称及已有引用保持不变。</small></label><label v-if="kind==='tag'">语义分类<select v-model="editing.semantic_tag" required :disabled="fixedIdentity"><option v-for="tag in semanticTags" :key="tag" :value="tag">{{titleTagLabel(tag)}}</option></select><small>用于匹配商品确认属性；品牌、营销等语义不会进入自动选词池。</small></label><label v-if="kind==='category'">分类别名<textarea v-model="aliasText" rows="4" placeholder="每行一个，例如：连身裙" /><small>用于导入识别与搜索，不会自动成为标题用词。合并保留的原分类名称不可移除。</small></label><label>说明<textarea v-model="editing.description" rows="3" maxlength="500" /></label><label class="dictionary-checkbox"><input v-model="editing.enabled" type="checkbox" />启用</label><p v-if="fixedIdentity" class="dictionary-note">{{kind==='category'?'该分类已被引用，名称已锁定；站点名称和说明仍可编辑。':'该条目为内置或已被引用，名称和语义分类已锁定。'}}</p><p v-if="error" class="error" role="alert">{{error}}</p><div class="dictionary-dialog-actions"><button type="button" :disabled="busy" @click="editing=null">取消</button><button class="primary" :disabled="busy">{{busy?'保存中…':'保存'}}</button></div></form></section></div>
   </section>
 </template>
