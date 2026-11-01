@@ -14,6 +14,7 @@ LOCAL_TIMEZONE = timezone(timedelta(hours=8))
 BILL_HEADERS = ("交易类型", "订单ID/调整单ID", "货币", "结算总金额", "总收入")
 CROSS_BORDER_BILL_HEADERS = (*BILL_HEADERS, "结算单ID", "SKUID")
 ERP_HEADERS = ("订单编号", "平台SKU", "商品数量", "下单时间")
+AD_HEADERS = ("日期", "成本", "币种")
 HEADER_ALIASES = {
     "订单ID/调整单ID": ("订单ID/调整单ID", "订单ID", "订单编号", "订单号"),
     "订单编号": ("订单编号", "订单ID", "订单号"),
@@ -117,7 +118,42 @@ def ordered_time(value, row, epoch):
         raise ValueError(f"第 {row} 行「下单时间」无效，请使用 YYYY-MM-DD HH:MM:SS") from None
 
 
+def parse_ad_rows(sheet, columns, header_row, epoch):
+    costs = {}
+    source_rows = ignored = 0
+    for row_number, row in enumerate(sheet.iter_rows(min_row=header_row + 1, values_only=True), header_row + 1):
+        if not any(v is not None and str(v).strip() for v in row):
+            continue
+        source_rows += 1
+        if source_rows > MAX_ROWS:
+            raise ValueError("单次最多导入 50,000 条数据")
+        values = {name: row[index] if index < len(row) else None for name, index in columns.items()}
+        if str(values['日期']).strip() in {'-', '合计', '总计'}:
+            ignored += 1
+            continue
+        try:
+            day = ordered_time(values['日期'], row_number, epoch).replace(tzinfo=timezone.utc).astimezone(LOCAL_TIMEZONE).date()
+        except ValueError:
+            raise ValueError(f"第 {row_number} 行「日期」无效，请使用 YYYY-MM-DD 或 Excel 日期") from None
+        currency = str(values['币种'] or '').strip().upper()
+        currency = 'CNY' if currency == 'RMB' else currency
+        if not re.fullmatch('[A-Z]{3}', currency):
+            raise ValueError(f"第 {row_number} 行「币种」须为 USD、CNY 等三位货币代码")
+        amount = decimal_value(values['成本'], f'第 {row_number} 行「成本」')
+        if amount < 0:
+            raise ValueError(f"第 {row_number} 行「成本」不能为负数")
+        key = (day, currency)
+        with localcontext() as context:
+            context.prec = 64
+            costs[key] = decimal_value(costs.get(key, Decimal(0)) + amount, f'第 {row_number} 行同日期同币种成本合计')
+    if not costs:
+        raise ValueError('没有可导入的广告成本数据')
+    return {'ad_costs': costs, 'source_rows': source_rows, 'ignored': ignored, 'sheet': sheet.title}
+
+
 def parse_workbook(data: bytes, kind: str, sheet_name: str | None = None, shop_type: str = 'cross_border'):
+    if kind not in {'platform', 'erp', 'advertising'}:
+        raise ValueError('导入类型无效')
     if shop_type not in {'cross_border', 'local'}:
         raise ValueError('店铺类型无效')
     if len(data) > MAX_BYTES:
@@ -132,8 +168,11 @@ def parse_workbook(data: bytes, kind: str, sheet_name: str | None = None, shop_t
     except Exception as exc:
         raise ValueError("无法读取 XLSX 文件，请检查文件格式") from exc
     try:
-        required = (CROSS_BORDER_BILL_HEADERS if shop_type == 'cross_border' else BILL_HEADERS) if kind == 'platform' else ERP_HEADERS
+        required = AD_HEADERS if kind == 'advertising' else (
+            (CROSS_BORDER_BILL_HEADERS if shop_type == 'cross_border' else BILL_HEADERS) if kind == 'platform' else ERP_HEADERS)
         sheet, columns, header_row = find_headers(workbook, required, sheet_name)
+        if kind == 'advertising':
+            return parse_ad_rows(sheet, columns, header_row, workbook.epoch)
         bills = {}
         bill_sources = {}
         orders = {}

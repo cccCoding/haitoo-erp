@@ -860,6 +860,20 @@ class FinanceExchangeRate(Base):
     rate: Mapped[Decimal] = mapped_column(Numeric(18, 8))
 
 
+class FinanceAdCost(Base):
+    __tablename__ = "finance_ad_costs"
+    __table_args__ = (
+        UniqueConstraint("shop_id", "cost_date", "currency", name="uq_finance_ad_cost"),
+        Index("ix_finance_ad_cost_scope_date", "company_id", "shop_id", "cost_date"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(Integer)
+    shop_id: Mapped[int] = mapped_column(Integer)
+    cost_date: Mapped[date] = mapped_column(Date)
+    currency: Mapped[str] = mapped_column(String(3))
+    amount: Mapped[Decimal] = mapped_column(Numeric(24, 6))
+
+
 class FinanceImport(Base):
     __tablename__ = "finance_imports"
     id: Mapped[int] = mapped_column(primary_key=True)

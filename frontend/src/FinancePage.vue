@@ -6,14 +6,15 @@ import { dialogFocus as vDialogFocus } from './dialog-focus'
 import SearchableSelect from './SearchableSelect.vue'
 import FinanceDateRangePicker from './FinanceDateRangePicker.vue'
 
-type DeletionCounts = {orders:number; bills:number; erp_items:number; sku_costs:number; exchange_rates:number}
+type DeletionCounts = {orders:number; bills:number; erp_items:number; sku_costs:number; exchange_rates:number; ad_costs:number}
 type DeletionPreview = {shop:Shop; counts:DeletionCounts; preview_token:string}
 type ShopType = 'cross_border'|'local'
 type Shop = {id:number; name:string; shop_type:ShopType; has_platform_data:boolean}
 type Rate = {shop_id:number; currency:string; rate:string|null}
 type Sku = {shop_id:number; shop_name:string; base_sku:string; quantity:number; order_count:number; unit_cost:string|null; total_cost:string|null}
 type Order = {id:number; shop_id:number; shop_name:string; shop_type:ShopType; order_number:string; paid_at:string; sales:string|null; settlement:string|null; cost:string|null; profit:string|null; statuses:string[]; currencies:any[]; items:any[]; bills:any[]}
-type Summary = {shop_id:number|null; shop_name:string; order_count:number; converted_count:number; calculated_count:number; pending_count:number; erp_only_count:number; sales:string|null; settlement:string|null; cost:string|null; profit:string|null}
+type Summary = {shop_id:number|null; shop_name:string; order_count:number; converted_count:number; calculated_count:number; pending_count:number; erp_only_count:number; sales:string|null; settlement:string|null; cost:string|null; profit:string|null; ad_cost:string|null; profit_after_ads:string|null; ad_record_count:number; ad_missing_currencies:string[]}
+type AdCost = {id:number; shop_id:number; shop_name:string; cost_date:string; currency:string; amount:string; rate:string|null; cny_amount:string|null; status:string}
 type Results = {summaries:Summary[]; total:Summary; orders:{items:Order[]; total:number}; skus:{items:Sku[]; total:number}}
 const props = defineProps<{token:string; user:any}>()
 const emit = defineEmits<{unauthorized:[]}>()
@@ -29,6 +30,7 @@ function closeShopDropdownOutside(event: PointerEvent) {
 const defaults = financeDefaults(), start = ref(defaults.start), end = ref(defaults.end)
 const applied = ref<{ids:number[]; start:string; end:string}|null>(null)
 const results = ref<Results|null>(null), pending = ref<{items:any[];total:number}>({items:[],total:0})
+const ads = ref<{items:AdCost[];total:number}>({items:[],total:0}), adPage = ref(1), adPageSize = ref(20)
 const orderPage = ref(1), skuPage = ref(1), pendingPage = ref(1)
 const orderPageSize = ref(20), skuPageSize = ref(20), pendingPageSize = ref(20), pageSizes = [20,50,100,500,1000]
 const skuSearch = ref(''), appliedSkuSearch = ref(''), selectedSkus = ref<string[]>([])
@@ -40,14 +42,14 @@ const loading = ref(false), saving = ref(false), initializing = ref(true), error
 const tab = ref('orders'), detail = ref<Order|null>(null), showShopSettings = ref(false)
 const managedShopSearch = ref(''), editingShopId = ref<number|null>(null), shopNameInput = ref<HTMLInputElement|null>(null)
 const shopDraftName = ref(''), shopDraftType = ref<ShopType>('cross_border'), shopFormError = ref(''), shopFormNotice = ref('')
-const showImport = ref(false), importShopId = ref<number|null>(null), importKind = ref<'platform'|'erp'>('platform'), importFile = ref<File|null>(null)
+const showImport = ref(false), importShopId = ref<number|null>(null), importKind = ref<'platform'|'erp'|'advertising'>('platform'), importFile = ref<File|null>(null)
 const importSheets = ref<string[]>([]), importSheet = ref(''), importError = ref(''), fileInputKey = ref(0)
 const history = ref<any[]>([])
 const showDeletion = ref(false), deletionShopId = ref<number|null>(null), deletionPreview = ref<DeletionPreview|null>(null)
 const deletionName = ref(''), deletionError = ref(''), previewLoading = ref(false)
 let previewGeneration = 0
-const deletionCountLabels: [keyof DeletionCounts,string][] = [['orders','财务订单'],['bills','后台账单'],['erp_items','ERP 商品明细'],['sku_costs','SKU 成本配置'],['exchange_rates','汇率配置']]
-function deletionSummary(counts:DeletionCounts) { return deletionCountLabels.map(([key,label])=>`${label} ${counts[key]} 条`).join('，') }
+const deletionCountLabels: [keyof DeletionCounts,string][] = [['orders','财务订单'],['bills','后台账单'],['erp_items','ERP 商品明细'],['sku_costs','SKU 成本配置'],['exchange_rates','汇率配置'],['ad_costs','广告日成本']]
+function deletionSummary(counts:DeletionCounts) { return deletionCountLabels.map(([key,label])=>`${label} ${counts[key] ?? 0} 条`).join('，') }
 const showCostDialog = ref(false), costDialogSkus = ref<{shop_id:number; base_sku:string}[]>([]), unitCost = ref(''), costFormError = ref('')
 const otherCostInputs = ref<Record<number,string>>({}), exporting = ref('')
 let generation = 0, disposed = false
@@ -58,13 +60,13 @@ const shopFormChanged = computed(() => !editingShop.value || shopDraftName.value
 const queryError = computed(() => validateFinanceQuery(selectedShopIds.value, start.value, end.value))
 const dirty = computed(() => !!applied.value && financeQueryKey(selectedShopIds.value,start.value,end.value) !== financeQueryKey(applied.value.ids,applied.value.start,applied.value.end))
 const summaryRows = computed(() => results.value ? [...results.value.summaries, ...(results.value.summaries.length>1 ? [results.value.total] : [])].map(row=>({
-  ...row, ...financeOverviewAmounts(row.profit,row.shop_id===null ? results.value!.summaries.map(s=>otherCostInputs.value[s.shop_id!] || '') : [otherCostInputs.value[row.shop_id] || ''])
+  ...row, ...financeOverviewAmounts(row.profit_after_ads,row.shop_id===null ? results.value!.summaries.map(s=>otherCostInputs.value[s.shop_id!] || '') : [otherCostInputs.value[row.shop_id] || ''])
 })) : [])
 const allPageSelected = computed(() => !!results.value?.skus.items.length && results.value.skus.items.every(s => selectedSkus.value.includes(skuKey(s))))
 const selectedRates = computed(() => rates.value.filter(r => (applied.value?.ids || selectedShopIds.value).includes(r.shop_id)))
 const importShop = computed(() => shops.value.find(shop => shop.id===importShopId.value))
 const importShopOptions = computed(() => shops.value.map(shop => ({value:shop.id,label:`${shop.name} · ${shopTypeLabel(shop.shop_type)}`})))
-const importRule = computed(() => importKind.value==='erp' ? '同订单重复 SKU 数量相加；重导将替换该订单全部商品。' :
+const importRule = computed(() => importKind.value==='advertising' ? '同日期、同币种的成本先汇总；重导覆盖对应日成本，其他记录保留。日期为 -、合计、总计的汇总行忽略。成本允许为零，不能为负数。' : importKind.value==='erp' ? '同订单重复 SKU 数量相加；重导将替换该订单全部商品。' :
   importShop.value?.shop_type==='local' ? '仅读取订单交易。同店铺、同订单的行先汇总；重导覆盖该订单金额，其他订单保留。重导须包含该订单的完整账单。' :
   '同一订单、结算单、SKU 的订单交易逐行汇总，金额相同的行也计入。重导覆盖对应组，其他组保留；重导须包含对应组的全部记录。')
 function shopTypeLabel(value:ShopType) { return value==='local' ? '本土店' : '跨境店' }
@@ -116,14 +118,20 @@ async function loadResults(next = applied.value): Promise<boolean> {
     query.ids.forEach(s => pendingParams.append('shop_ids',String(s)))
     pendingParams.set('page',String(pendingPage.value))
     pendingParams.set('page_size',String(pendingPageSize.value))
-    const [response, missing] = await Promise.all([api.get(`/finance/results?${params}`,auth()),api.get(`/finance/pending-payment-time?${pendingParams}`,auth())])
+    const adParams = new URLSearchParams()
+    query.ids.forEach(s => adParams.append('shop_ids',String(s)))
+    adParams.set('paid_from',financeInstant(query.start)); adParams.set('paid_to',financeInstant(query.end,'end'))
+    adParams.set('page',String(adPage.value)); adParams.set('page_size',String(adPageSize.value))
+    const [response, missing, advertising] = await Promise.all([api.get(`/finance/results?${params}`,auth()),api.get(`/finance/pending-payment-time?${pendingParams}`,auth()),api.get(`/finance/ad-costs?${adParams}`,auth())])
     if (id!==generation || disposed) return false
     const orderLast=Math.max(1,Math.ceil(response.data.orders.total/orderPageSize.value)), skuLast=Math.max(1,Math.ceil(response.data.skus.total/skuPageSize.value)), pendingLast=Math.max(1,Math.ceil(missing.data.total/pendingPageSize.value))
-    if (orderPage.value>orderLast || skuPage.value>skuLast || pendingPage.value>pendingLast) {
+    const adLast=Math.max(1,Math.ceil(advertising.data.total/adPageSize.value))
+    if (orderPage.value>orderLast || skuPage.value>skuLast || pendingPage.value>pendingLast || adPage.value>adLast) {
       orderPage.value=Math.min(orderPage.value,orderLast); skuPage.value=Math.min(skuPage.value,skuLast); pendingPage.value=Math.min(pendingPage.value,pendingLast)
+      adPage.value=Math.min(adPage.value,adLast)
       return await loadResults(query)
     }
-    results.value=response.data; pending.value=missing.data; applied.value=query
+    results.value=response.data; pending.value=missing.data; ads.value=advertising.data; applied.value=query
     return true
   } catch(e:any) { if (id===generation && !disposed) fail(e); return false }
   finally { if (id===generation && !disposed) loading.value=false }
@@ -131,12 +139,12 @@ async function loadResults(next = applied.value): Promise<boolean> {
 async function search() {
   if (queryError.value) { error.value=queryError.value; return }
   const next={ids:[...selectedShopIds.value],start:start.value,end:end.value}
-  const previous={order:orderPage.value,sku:skuPage.value,pending:pendingPage.value,search:appliedSkuSearch.value,status:appliedSkuCostStatus.value}
-  orderPage.value=skuPage.value=pendingPage.value=1; selectedSkus.value=[]; detail.value=null
+  const previous={order:orderPage.value,sku:skuPage.value,pending:pendingPage.value,ad:adPage.value,search:appliedSkuSearch.value,status:appliedSkuCostStatus.value}
+  orderPage.value=skuPage.value=pendingPage.value=adPage.value=1; selectedSkus.value=[]; detail.value=null
   skuSearch.value=appliedSkuSearch.value=''
   skuCostStatus.value=appliedSkuCostStatus.value='all'
   if (selectedShopIds.value.length===1) localStorage.setItem(storageKey,String(selectedShopIds.value[0]))
-  if (!await loadResults(next)) { orderPage.value=previous.order; skuPage.value=previous.sku; pendingPage.value=previous.pending; appliedSkuSearch.value=previous.search; appliedSkuCostStatus.value=previous.status }
+  if (!await loadResults(next)) { orderPage.value=previous.order; skuPage.value=previous.sku; pendingPage.value=previous.pending; adPage.value=previous.ad; appliedSkuSearch.value=previous.search; appliedSkuCostStatus.value=previous.status }
   else otherCostInputs.value={}
 }
 async function exportOrders(kind:'missing-bills'|'pending-order-time',shopId:number|null=null) {
@@ -160,7 +168,7 @@ async function exportOrders(kind:'missing-bills'|'pending-order-time',shopId:num
   } finally { exporting.value='' }
 }
 async function paginate(kind:string, delta:number) {
-  const page = kind==='orders' ? orderPage : kind==='skus' ? skuPage : pendingPage
+  const page = kind==='orders' ? orderPage : kind==='skus' ? skuPage : kind==='ads' ? adPage : pendingPage
   const previous=page.value
   page.value+=delta; selectedSkus.value=[]; if (!await loadResults()) page.value=previous
 }
@@ -173,8 +181,8 @@ async function filterOrders() {
   }
 }
 async function changePageSize(kind:string, event:Event) {
-  const page = kind==='orders' ? orderPage : kind==='skus' ? skuPage : pendingPage
-  const size = kind==='orders' ? orderPageSize : kind==='skus' ? skuPageSize : pendingPageSize
+  const page = kind==='orders' ? orderPage : kind==='skus' ? skuPage : kind==='ads' ? adPage : pendingPage
+  const size = kind==='orders' ? orderPageSize : kind==='skus' ? skuPageSize : kind==='ads' ? adPageSize : pendingPageSize
   const previous={size:size.value,page:page.value}
   size.value=Number((event.target as HTMLSelectElement).value)
   page.value=1; selectedSkus.value=[]
@@ -239,7 +247,7 @@ async function deleteShop() {
     deleted=true; showDeletion.value=false; previewGeneration++
     generation++; loading.value=false; results.value=null; applied.value=null; pending.value={items:[],total:0}
     detail.value=null; selectedSkus.value=[]; otherCostInputs.value={}
-    orderPage.value=skuPage.value=pendingPage.value=1
+    orderPage.value=skuPage.value=pendingPage.value=adPage.value=1; ads.value={items:[],total:0}
     shops.value=shops.value.filter(shop=>shop.id!==preview.shop.id)
     selectedShopIds.value=selectedShopIds.value.filter(id=>id!==preview.shop.id)
     if (localStorage.getItem(storageKey)===String(preview.shop.id)) localStorage.removeItem(storageKey)
@@ -278,12 +286,12 @@ async function upload() {
     const data = new FormData(); data.append('file',importFile.value); if (importSheet.value) data.append('sheet_name',importSheet.value)
     const response = await api.post(`/finance/shops/${importShopId.value}/imports/${importKind.value}`,data,auth())
     const c=response.data
-    notice.value=`导入成功：新增 ${c.created}，更新 ${c.updated}，未变化 ${c.unchanged} ${c.unit}；忽略非订单行 ${c.ignored}。`
+    notice.value=`导入成功：新增 ${c.created}，更新 ${c.updated}，未变化 ${c.unchanged} ${c.unit}；忽略${importKind.value==='advertising' ? '汇总' : '非订单'}行 ${c.ignored}。`
     showImport.value=false; selectedSkus.value=[]
     await Promise.all([settings(),loadHistory(),loadResults(),loadShops()])
   } catch(e:any) {
     const sheets=e.response?.data?.detail?.sheets
-    if (sheets) { importSheets.value=sheets; importSheet.value=''; importError.value='检测到多个订单工作表，请选择后重新导入' }
+    if (sheets) { importSheets.value=sheets; importSheet.value=''; importError.value='检测到多个符合条件的工作表，请选择后重新导入' }
     else importError.value=fail(e)
   } finally { saving.value=false }
 }
@@ -308,7 +316,7 @@ async function saveRates() {
   saving.value=true; error.value=''
   try {
     await api.put('/finance/exchange-rates',{items},auth())
-    notice.value='汇率已保存，相关历史订单已重新核算。'
+    notice.value='汇率已保存，相关订单与广告成本已重新核算。'
     await Promise.all([settings(),loadResults()])
   } catch(e:any) { fail(e) } finally { saving.value=false }
 }
@@ -339,16 +347,16 @@ onUnmounted(() => { document.removeEventListener('pointerdown',closeShopDropdown
       <div class="finance-filter-note"><span v-if="queryError" class="finance-invalid">{{queryError}}</span><strong v-else-if="dirty">筛选条件未应用，请点击查询</strong></div>
     </section>
     <p v-if="initializing" class="empty">正在加载财务数据…</p>
-    <section v-else-if="!shops.length" class="finance-panel finance-empty"><h2>先添加一个店铺</h2><p>在店铺管理中新增店铺后，即可导入后台账单和 ERP 商品明细。</p><button class="primary" @click="openShopSettings">打开店铺管理</button></section>
+    <section v-else-if="!shops.length" class="finance-panel finance-empty"><h2>先添加一个店铺</h2><p>在店铺管理中新增店铺后，即可导入后台账单、ERP 商品明细和广告成本。</p><button class="primary" @click="openShopSettings">打开店铺管理</button></section>
     <template v-if="results">
       <section class="finance-panel" :aria-busy="loading"><div class="finance-section-title"><h2>店铺核算概览</h2><span v-if="loading">正在更新查询结果…</span><span v-else>本次查询 {{results.total.order_count}} 个后台订单</span></div>
-        <p v-if="applied" class="finance-applied-range">下单日期：{{applied.start}} 至 {{applied.end}}（北京时间，含开始和结束当天）</p><div class="finance-table-scroll"><table class="finance-table finance-summary"><thead><tr><th>店铺</th><th>订单数</th><th>销售额</th><th>结算金额</th><th>衣服成本</th><th>其他成本</th><th>利润</th><th>核算进度</th></tr></thead><tbody><tr v-for="row in summaryRows" :key="row.shop_id ?? 'total'" :class="{'finance-total':row.shop_id===null}"><td><strong>{{row.shop_name}}</strong></td><td>{{row.order_count}}</td><td>{{amount(row.sales)}}<small>已换算 {{row.converted_count}} / {{row.order_count}} 单</small></td><td>{{amount(row.settlement)}}<small>已换算 {{row.converted_count}} / {{row.order_count}} 单</small></td><td>{{amount(row.cost)}}<small>已核算 {{row.calculated_count}} 单</small></td><td class="finance-other-cost"><template v-if="row.shop_id!==null"><input v-model="otherCostInputs[row.shop_id]" type="text" inputmode="decimal" :aria-label="`${row.shop_name}其他成本`" :aria-invalid="!!row.error" placeholder="输入金额"/><small v-if="row.error" class="finance-invalid">{{row.error}}</small><small v-else>人民币 · 临时计算</small></template><strong v-else>{{amount(row.otherCost)}}</strong></td><td :class="{'finance-negative':row.profit!==null && Number(row.profit)<0}"><strong>{{amount(row.profit)}}</strong><small>已核算 {{row.calculated_count}} 单</small></td><td><span class="finance-badge" :class="row.pending_count ? 'warning' : 'complete'">{{row.pending_count ? `${row.pending_count} 单待核算` : '核算完整'}}</span><div v-if="row.erp_only_count" class="finance-missing-bill-export"><span>另有 {{row.erp_only_count}} 单缺后台账单</span><button :aria-label="`导出${row.shop_name}缺后台账单订单`" :disabled="loading || !!exporting" @click="exportOrders('missing-bills',row.shop_id)">{{exporting===`missing-bills:${row.shop_id ?? 'all'}` ? '导出中…' : '导出'}}</button></div></td></tr></tbody></table></div>
-        <p class="finance-footnote">销售额按后台总收入计算；概览利润＝已核算订单利润 − 其他成本。其他成本仅用于本次查询，不保存；重新查询后清空。衣服成本与订单利润仅汇总资料齐全的订单，缺失数据不按零计算。</p>
+        <p v-if="applied" class="finance-applied-range">下单日期：{{applied.start}} 至 {{applied.end}}（北京时间，含开始和结束当天）</p><div class="finance-table-scroll"><table class="finance-table finance-summary"><thead><tr><th>店铺</th><th>订单数</th><th>销售额</th><th>结算金额</th><th>衣服成本</th><th>广告成本</th><th>其他成本</th><th>利润</th><th>核算进度</th></tr></thead><tbody><tr v-for="row in summaryRows" :key="row.shop_id ?? 'total'" :class="{'finance-total':row.shop_id===null}"><td><strong>{{row.shop_name}}</strong></td><td>{{row.order_count}}</td><td>{{amount(row.sales)}}<small>已换算 {{row.converted_count}} / {{row.order_count}} 单</small></td><td>{{amount(row.settlement)}}<small>已换算 {{row.converted_count}} / {{row.order_count}} 单</small></td><td>{{amount(row.cost)}}<small>已核算 {{row.calculated_count}} 单</small></td><td><strong>{{amount(row.ad_cost)}}</strong><small v-if="row.ad_missing_currencies.length" class="finance-invalid">缺汇率：{{row.ad_missing_currencies.join('、')}}</small><small v-else>{{row.ad_record_count ? `已导入 ${row.ad_record_count} 条日成本` : '无导入记录'}}</small></td><td class="finance-other-cost"><template v-if="row.shop_id!==null"><input v-model="otherCostInputs[row.shop_id]" type="text" inputmode="decimal" :aria-label="`${row.shop_name}其他成本`" :aria-invalid="!!row.error" placeholder="输入金额"/><small v-if="row.error" class="finance-invalid">{{row.error}}</small><small v-else>人民币 · 临时计算</small></template><strong v-else>{{amount(row.otherCost)}}</strong></td><td :class="{'finance-negative':row.profit!==null && Number(row.profit)<0}"><strong>{{amount(row.profit)}}</strong><small>已核算 {{row.calculated_count}} 单</small></td><td><span class="finance-badge" :class="row.pending_count || row.ad_missing_currencies.length ? 'warning' : 'complete'">{{row.ad_missing_currencies.length ? '广告缺汇率' : row.pending_count ? `${row.pending_count} 单待核算` : '核算完整'}}</span><div v-if="row.erp_only_count" class="finance-missing-bill-export"><span>另有 {{row.erp_only_count}} 单缺后台账单</span><button :aria-label="`导出${row.shop_name}缺后台账单订单`" :disabled="loading || !!exporting" @click="exportOrders('missing-bills',row.shop_id)">{{exporting===`missing-bills:${row.shop_id ?? 'all'}` ? '导出中…' : '导出'}}</button></div></td></tr></tbody></table></div>
+        <p class="finance-footnote">销售额按后台总收入计算；概览利润＝已核算订单利润 − 广告成本 − 其他成本。广告按所选日期（北京时间，含首尾当天）统计已导入成本，即使没有订单也计入；按店铺、币种汇总换算后取分，明细逐日取分可能存在尾差。订单利润不分摊广告费。其他成本仅用于本次查询，不保存；重新查询后清空。衣服成本与订单利润仅汇总资料齐全的订单，缺失数据不按零计算。</p>
       </section>
     </template>
     <p v-if="!initializing && shops.length && !results && tab!=='history'" class="finance-panel finance-footnote">请选择店铺并点击查询。</p>
     <section v-if="!initializing" class="finance-panel finance-workspace" :aria-busy="tab!=='history' && loading">
-        <nav class="finance-tabs" aria-label="财务明细"><button v-for="item in [['orders','订单明细'],['skus','成本输入'],['settings','汇率设置'],['history','导入与删除记录']]" :key="item[0]" :class="{active:tab===item[0]}" :disabled="!results && item[0]!=='history'" @click="tab=item[0]">{{item[1]}}</button></nav>
+        <nav class="finance-tabs" aria-label="财务明细"><button v-for="item in [['orders','订单明细'],['skus','成本输入'],['ads','广告明细'],['settings','汇率设置'],['history','导入与删除记录']]" :key="item[0]" :class="{active:tab===item[0]}" :disabled="!results && item[0]!=='history'" @click="tab=item[0]">{{item[1]}}</button></nav>
         <template v-if="results && tab==='orders'"><div class="finance-section-title finance-order-toolbar"><select v-model="orderStatus" aria-label="订单状态" :disabled="loading || saving" @change="filterOrders"><option v-for="item in orderStatuses" :key="item[0]" :value="item[0]">{{item[1]}}</option></select><span>当前筛选条件下共 {{results.orders.total}} 单</span></div><div class="finance-table-scroll"><table class="finance-table"><thead><tr><th>店铺 / 订单编号</th><th>下单时间</th><th>销售额</th><th>结算金额</th><th>衣服成本</th><th>利润</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="row in results.orders.items" :key="row.id"><td>{{row.shop_name}}<small class="finance-order-id">{{row.order_number}}</small></td><td>{{date(row.paid_at)}}</td><td>{{amount(row.sales)}}</td><td>{{amount(row.settlement)}}</td><td>{{amount(row.cost)}}</td><td :class="{'finance-negative':row.profit!==null && Number(row.profit)<0}">{{amount(row.profit)}}</td><td><span v-for="status in row.statuses" :key="status" class="finance-badge" :class="status==='已核算' ? 'complete' : 'warning'">{{status}}</span></td><td><button @click="detail=row">明细</button></td></tr><tr v-if="!results.orders.total"><td colspan="8" class="finance-empty-cell">当前筛选条件下暂无订单</td></tr></tbody></table></div><div class="finance-pagination"><span>共 {{results.orders.total}} 单 · 第 {{orderPage}} 页</span><label>每页<select aria-label="订单明细每页数量" :value="orderPageSize" :disabled="loading || saving" @change="changePageSize('orders',$event)"><option v-for="size in pageSizes" :key="size" :value="size">{{size}} 条</option></select></label><button :disabled="orderPage<=1 || loading" @click="paginate('orders',-1)">上一页</button><button :disabled="orderPage*orderPageSize>=results.orders.total || loading" @click="paginate('orders',1)">下一页</button></div></template>
         <template v-else-if="results && tab==='skus'">
           <div class="finance-sku-toolbar">
@@ -359,11 +367,19 @@ onUnmounted(() => { document.removeEventListener('pointerdown',closeShopDropdown
           <div class="finance-table-scroll"><table class="finance-table"><thead><tr><th><input type="checkbox" aria-label="选择本页所有 SKU" :checked="allPageSelected" :disabled="loading" @change="toggleAll"/></th><th>店铺</th><th>基础 SKU</th><th>订单数</th><th>商品数量</th><th>单件衣服成本</th><th>总成本</th><th>状态</th></tr></thead><tbody><tr v-for="sku in results.skus.items" :key="skuKey(sku)"><td><input v-model="selectedSkus" type="checkbox" :value="skuKey(sku)" :aria-label="`选择 ${sku.shop_name} ${sku.base_sku}`" :disabled="loading"/></td><td>{{sku.shop_name}}</td><td><strong>{{sku.base_sku}}</strong></td><td>{{sku.order_count}}</td><td>{{sku.quantity}}</td><td>{{amount(sku.unit_cost)}}</td><td>{{amount(sku.total_cost)}}</td><td><span class="finance-badge" :class="sku.unit_cost!==null ? 'complete' : 'warning'">{{sku.unit_cost===null ? '未设置' : '已设置'}}</span></td></tr><tr v-if="!results.skus.total"><td colspan="8" class="finance-empty-cell">暂无符合条件的 SKU</td></tr></tbody></table></div>
           <div class="finance-pagination"><span>共 {{results.skus.total}} 项 · 第 {{skuPage}} 页</span><label>每页<select aria-label="成本输入每页数量" :value="skuPageSize" :disabled="loading || saving" @change="changePageSize('skus',$event)"><option v-for="size in pageSizes" :key="size" :value="size">{{size}} 条</option></select></label><button :disabled="skuPage<=1 || loading" @click="paginate('skus',-1)">上一页</button><button :disabled="skuPage*skuPageSize>=results.skus.total || loading" @click="paginate('skus',1)">下一页</button></div>
         </template>
-        <div v-else-if="tab==='settings'" class="finance-settings"><section><div class="finance-section-title"><h3>店铺汇率</h3><button class="primary" :disabled="saving" @click="saveRates">保存汇率</button></div><p class="finance-footnote">1 单位外币＝输入值人民币；保存后重算该店铺历史数据。</p><label v-for="rate in selectedRates" :key="rateKey(rate)" class="finance-rate-row"><span>{{shopName(rate.shop_id)}}<small>1 {{rate.currency}} =</small></span><input v-model="rateInputs[rateKey(rate)]" type="text" inputmode="decimal" :disabled="rate.currency==='CNY' || saving" :aria-label="`${shopName(rate.shop_id)} ${rate.currency} 汇率`" placeholder="输入人民币汇率"/><span>人民币</span></label><p v-if="!selectedRates.length" class="empty">导入后台账单后显示需要配置的币种。</p></section></div>
+        <template v-else-if="results && tab==='ads'">
+          <p class="finance-footnote">广告日期按北京时间筛选，仅显示已导入数据。广告费在概览扣减，不分摊到订单；汇总按店铺、币种换算后取分，可能与逐行人民币金额合计存在尾差。</p>
+          <div class="finance-table-scroll"><table class="finance-table"><thead><tr><th>日期</th><th>店铺</th><th>原币成本</th><th>币种</th><th>人民币汇率</th><th>人民币金额</th><th>状态</th></tr></thead><tbody>
+            <tr v-for="row in ads.items" :key="row.id"><td>{{row.cost_date}}</td><td>{{row.shop_name}}</td><td>{{row.amount}}</td><td>{{row.currency}}</td><td>{{row.rate ?? '待设置'}}</td><td>{{amount(row.cny_amount)}}</td><td><span class="finance-badge" :class="row.status==='缺汇率' ? 'warning' : 'complete'">{{row.status}}</span></td></tr>
+            <tr v-if="!ads.total"><td colspan="7" class="finance-empty-cell">当前店铺与日期范围没有广告导入记录</td></tr>
+          </tbody></table></div>
+          <div class="finance-pagination"><span>共 {{ads.total}} 条 · 第 {{adPage}} 页</span><label>每页<select aria-label="广告明细每页数量" :value="adPageSize" :disabled="loading || saving" @change="changePageSize('ads',$event)"><option v-for="size in pageSizes" :key="size" :value="size">{{size}} 条</option></select></label><button :disabled="adPage<=1 || loading" @click="paginate('ads',-1)">上一页</button><button :disabled="adPage*adPageSize>=ads.total || loading" @click="paginate('ads',1)">下一页</button></div>
+        </template>
+        <div v-else-if="tab==='settings'" class="finance-settings"><section><div class="finance-section-title"><h3>店铺汇率</h3><button class="primary" :disabled="saving" @click="saveRates">保存汇率</button></div><p class="finance-footnote">1 单位外币＝输入值人民币；保存后重算该店铺历史数据。</p><label v-for="rate in selectedRates" :key="rateKey(rate)" class="finance-rate-row"><span>{{shopName(rate.shop_id)}}<small>1 {{rate.currency}} =</small></span><input v-model="rateInputs[rateKey(rate)]" type="text" inputmode="decimal" :disabled="rate.currency==='CNY' || saving" :aria-label="`${shopName(rate.shop_id)} ${rate.currency} 汇率`" placeholder="输入人民币汇率"/><span>人民币</span></label><p v-if="!selectedRates.length" class="empty">导入后台账单或广告成本后显示需要配置的币种。</p></section></div>
     <section v-else-if="tab==='history'" aria-label="导入与删除记录">
       <p class="finance-footnote">最近 100 次操作，覆盖本公司全部财务店铺，不受查询时间筛选。历史导入记录不代表数据仍然存在。</p>
       <div class="finance-table-scroll"><table class="finance-table"><thead><tr><th>操作时间</th><th>店铺</th><th>操作 / 文件</th><th>操作人 ID</th><th>结果</th></tr></thead><tbody>
-        <tr v-for="item in history" :key="item.id"><td>{{date(item.created_at)}}</td><td>{{item.shop_name}}<small v-if="item.shop_deleted">店铺已删除</small></td><td>{{item.kind==='deletion' ? '删除财务店铺' : item.kind==='erp' ? '导入 ERP 数据' : '导入店铺后台数据'}}<small v-if="item.filename">{{item.filename}}</small></td><td>{{item.created_by}}</td><td class="finance-history-result"><template v-if="item.kind==='deletion'">{{deletionSummary(item.counts)}}</template><template v-else>新增 {{item.counts.created}}，更新 {{item.counts.updated}}，未变化 {{item.counts.unchanged}} {{item.counts.unit}}</template></td></tr>
+        <tr v-for="item in history" :key="item.id"><td>{{date(item.created_at)}}</td><td>{{item.shop_name}}<small v-if="item.shop_deleted">店铺已删除</small></td><td>{{item.kind==='deletion' ? '删除财务店铺' : item.kind==='erp' ? '导入 ERP 数据' : item.kind==='advertising' ? '导入广告成本' : '导入店铺后台数据'}}<small v-if="item.filename">{{item.filename}}</small></td><td>{{item.created_by}}</td><td class="finance-history-result"><template v-if="item.kind==='deletion'">{{deletionSummary(item.counts)}}</template><template v-else>新增 {{item.counts.created}}，更新 {{item.counts.updated}}，未变化 {{item.counts.unchanged}} {{item.counts.unit}}<small v-if="item.kind==='advertising'">忽略汇总行 {{item.counts.ignored}} 条</small></template></td></tr>
         <tr v-if="!history.length"><td colspan="5" class="finance-empty-cell">暂无导入与删除记录</td></tr>
       </tbody></table></div>
     </section>
@@ -409,12 +425,13 @@ onUnmounted(() => { document.removeEventListener('pointerdown',closeShopDropdown
         </div>
       </section>
     </div>
-    <div v-if="showImport" class="modal-backdrop" @click.self="!saving && (showImport=false)"><section v-dialog-focus class="modal-card finance-modal" role="dialog" aria-modal="true" aria-labelledby="finance-import-title"><h2 id="finance-import-title">导入财务数据</h2><div class="finance-import-shop-field"><span>目标店铺 <b>*</b></span><SearchableSelect :model-value="importShopId" :options="importShopOptions" aria-label="目标店铺" placeholder="请选择一个目标店铺" search-placeholder="搜索店铺名称" empty-label="暂无店铺，请先在店铺管理中新增" no-match-label="没有匹配的店铺" :disabled="saving" @update:model-value="selectImportShop"/></div><label>数据类型<select v-model="importKind" @change="importSheets=[];importSheet='';importError=''"><option value="platform">店铺后台数据</option><option value="erp">ERP 数据</option></select></label><div class="finance-import-columns" aria-live="polite"><strong>{{importKind==='erp' ? 'ERP 数据' : importShop ? shopTypeLabel(importShop.shop_type)+'后台数据' : '店铺后台数据'}}必填列</strong><p v-if="importKind==='erp'">订单编号、平台 SKU、商品数量、下单时间。</p><template v-else-if="importShop"><p v-if="importShop.shop_type==='cross_border'">交易类型、订单 ID、货币、结算总金额、总收入、结算单 ID、SKU ID。</p><p v-else>交易类型、订单 ID、货币、结算总金额、总收入。</p></template><p v-else>请先选择目标店铺，以确定后台数据必填列。</p></div><label>XLSX 文件<input :key="fileInputKey" type="file" accept=".xlsx" @change="fileChanged"/></label><label v-if="importSheets.length">选择工作表<select v-model="importSheet"><option value="">请选择工作表</option><option v-for="name in importSheets" :key="name">{{name}}</option></select></label><p class="finance-footnote">最多 20MB、50,000 行。{{importRule}}</p><p v-if="importError" class="finance-invalid" role="alert">{{importError}}</p><div class="modal-actions"><button :disabled="saving" @click="showImport=false">取消</button><button class="primary" :disabled="saving || !importShopId || !importFile" @click="upload">{{saving ? '正在导入…' : '导入并保存'}}</button></div></section></div>
+    <div v-if="showImport" class="modal-backdrop" @click.self="!saving && (showImport=false)"><section v-dialog-focus class="modal-card finance-modal" role="dialog" aria-modal="true" aria-labelledby="finance-import-title"><h2 id="finance-import-title">导入财务数据</h2><div class="finance-import-shop-field"><span>目标店铺 <b>*</b></span><SearchableSelect :model-value="importShopId" :options="importShopOptions" aria-label="目标店铺" placeholder="请选择一个目标店铺" search-placeholder="搜索店铺名称" empty-label="暂无店铺，请先在店铺管理中新增" no-match-label="没有匹配的店铺" :disabled="saving" @update:model-value="selectImportShop"/></div><label>数据类型<select v-model="importKind" :disabled="saving" @change="importSheets=[];importSheet='';importError=''"><option value="platform">店铺后台数据</option><option value="erp">ERP 数据</option><option value="advertising">广告成本</option></select></label><div class="finance-import-columns" aria-live="polite"><strong>{{importKind==='advertising' ? '广告成本' : importKind==='erp' ? 'ERP 数据' : importShop ? shopTypeLabel(importShop.shop_type)+'后台数据' : '店铺后台数据'}}必填列</strong><p v-if="importKind==='advertising'">日期、成本、币种。支持 Excel 日期或 YYYY-MM-DD 文本，币种如 USD、CNY。</p><p v-else-if="importKind==='erp'">订单编号、平台 SKU、商品数量、下单时间。</p><template v-else-if="importShop"><p v-if="importShop.shop_type==='cross_border'">交易类型、订单 ID、货币、结算总金额、总收入、结算单 ID、SKU ID。</p><p v-else>交易类型、订单 ID、货币、结算总金额、总收入。</p></template><p v-else>请先选择目标店铺，以确定后台数据必填列。</p></div><label>XLSX 文件<input :key="fileInputKey" type="file" accept=".xlsx" :disabled="saving" @change="fileChanged"/></label><label v-if="importSheets.length">选择工作表<select v-model="importSheet" :disabled="saving"><option value="">请选择工作表</option><option v-for="name in importSheets" :key="name">{{name}}</option></select></label><p class="finance-footnote">最多 20MB、50,000 行。{{importRule}}</p><p v-if="importError" class="finance-invalid" role="alert">{{importError}}</p><div class="modal-actions"><button :disabled="saving" @click="showImport=false">取消</button><button class="primary" :disabled="saving || !importShopId || !importFile" @click="upload">{{saving ? '正在导入…' : '导入并保存'}}</button></div></section></div>
     <div v-if="detail" class="modal-backdrop" @click.self="detail=null"><section v-dialog-focus class="modal-card finance-detail" role="dialog" aria-modal="true" aria-labelledby="finance-detail-title"><div class="finance-section-title"><h2 id="finance-detail-title">订单核算明细</h2><button aria-label="关闭明细" @click="detail=null">关闭</button></div><p>{{detail.shop_name}} · {{detail.order_number}}<br/>下单时间：{{date(detail.paid_at)}}</p><div class="finance-detail-metrics"><span>销售额<strong>{{amount(detail.sales)}}</strong></span><span>结算金额<strong>{{amount(detail.settlement)}}</strong></span><span>衣服成本<strong>{{amount(detail.cost)}}</strong></span><span>利润<strong>{{amount(detail.profit)}}</strong></span></div><h3>原币汇总与汇率</h3><div class="finance-table-scroll"><table class="finance-table"><thead><tr><th>币种</th><th>总收入</th><th>结算总金额</th><th>人民币汇率</th></tr></thead><tbody><tr v-for="c in detail.currencies" :key="c.currency"><td>{{c.currency}}</td><td>{{c.revenue}}</td><td>{{c.settlement}}</td><td>{{c.rate ?? '待设置'}}</td></tr></tbody></table></div><h3>商品成本</h3><div class="finance-table-scroll"><table class="finance-table"><thead><tr><th>平台 SKU</th><th>数量</th><th>单件成本</th><th>商品成本</th></tr></thead><tbody><tr v-for="item in detail.items" :key="item.platform_sku"><td>{{item.platform_sku}}</td><td>{{item.quantity}}</td><td>{{amount(item.unit_cost)}}</td><td>{{amount(item.line_cost)}}</td></tr></tbody></table></div><h3>订单结算记录</h3><div class="finance-table-scroll"><table class="finance-table"><thead><tr><th v-if="detail.shop_type==='cross_border'">结算单 ID</th><th v-if="detail.shop_type==='cross_border'">SKU ID</th><th>币种</th><th>结算金额</th><th>总收入</th></tr></thead><tbody><tr v-for="(b,index) in detail.bills" :key="index"><td v-if="detail.shop_type==='cross_border'">{{b.settlement_id}}</td><td v-if="detail.shop_type==='cross_border'">{{b.sku_id || '历史待补'}}</td><td>{{b.currency}}</td><td>{{b.settlement}}</td><td>{{b.revenue}}</td></tr></tbody></table></div><details v-for="(b,index) in detail.bills" :key="`source-${index}`" class="finance-bill-sources"><summary>{{detail.shop_type==='cross_border' ? '结算单 '+b.settlement_id : '本土店订单账单'}} · 查看原始明细（{{b.source_details?.length || 0}} 条）</summary><div class="finance-table-scroll"><table class="finance-table"><thead><tr><th v-if="detail.shop_type==='cross_border'">SKU ID</th><th>币种</th><th>结算金额</th><th>总收入</th></tr></thead><tbody><tr v-for="(source,sourceIndex) in b.source_details" :key="sourceIndex"><td v-if="detail.shop_type==='cross_border'">{{source.sku_id || '—'}}</td><td>{{source.currency}}</td><td>{{source.settlement}}</td><td>{{source.revenue}}</td></tr></tbody></table></div></details></section></div>
   </section>
 </template>
 
 <style scoped>
+.finance-tabs button{font-size:13px;flex:0 0 auto;width:auto}
 .finance-danger,.finance-danger-solid,.finance-deletion-modal .modal-actions button{min-height:42px;padding:10px 14px;border-radius:10px;font:inherit;font-size:13px;box-shadow:none}.finance-danger:focus-visible,.finance-danger-solid:focus-visible{outline:2px solid #b91c1c;outline-offset:3px}.finance-deletion-modal .modal-actions{flex-wrap:wrap}.finance-danger{color:#b91c1c;border:1px solid #fecaca;background:#fff}.finance-danger-solid{color:white;background:#b91c1c;border:1px solid #b91c1c}.finance-deletion-warning{padding:12px;background:#fef2f2;color:#991b1b;font-size:13px;line-height:1.8;border-radius:8px}.finance-deletion-counts{display:grid;grid-template-columns:1fr auto;gap:10px;font-size:13px;color:#334155;margin-top:20px}.finance-deletion-counts dd{margin:0;font-weight:600}.finance-history-result{white-space:normal;min-width:220px}.finance-modal{max-height:90vh;overflow:auto}
 
 .finance-other-cost input{width:145px!important;max-width:180px}.finance-other-cost small{white-space:normal;max-width:180px}.finance-summary td small.finance-invalid{color:#b91c1c}.finance-missing-bill-export,.finance-pending-export-title{display:flex;align-items:center;gap:10px}.finance-missing-bill-export{margin-top:5px;font-size:11px;color:#64748b}.finance-missing-bill-export button,.finance-pending-export-title button{font-size:12px;color:#6043d4;border:1px solid #e2dff0;border-radius:7px;padding:5px 10px;background:#fff;white-space:nowrap}

@@ -1,5 +1,5 @@
 """财务导入、隔离、核算与时间范围的业务回归。"""
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from decimal import Decimal
 from unittest import TestCase
@@ -18,13 +18,14 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.finance import router
 from app.finance_import import parse_workbook
-from app.models import (Company, FinanceBill, FinanceErpItem, FinanceImport, FinanceOrder,
+from app.models import (Company, FinanceAdCost, FinanceBill, FinanceErpItem, FinanceImport, FinanceOrder,
     FinanceShop, FinanceShopSkuCost, FinanceExchangeRate, FinanceSkuCost, FinanceSkuMapping, FinanceTemplateCost, ProductTemplate, Role, User)
 from app.schema_version import alembic_config
 from app.security import create_access_token
 
 BILL_HEADERS = ['交易类型', '订单ID/调整单ID', '货币', '结算总金额', '总收入', '结算单 ID', 'SKU ID']
 ERP_HEADERS = ['订单编号', '平台SKU', '商品数量', '下单时间']
+AD_HEADERS = ['日期', '成本', '币种']
 PAID = '2026-10-20 12:00:00'
 
 
@@ -85,7 +86,7 @@ class FinanceTests(TestCase):
 
     def upload(self, kind, rows, shop=None, uid=1, headers=None, data=None, **kwargs):
         response = self.request('POST', f'/finance/shops/{shop or self.shop}/imports/{kind}', uid=uid,
-            files={'file': ('test.xlsx', data or workbook(headers or (BILL_HEADERS if kind == 'platform' else ERP_HEADERS), rows),
+            files={'file': ('test.xlsx', data or workbook(headers or (AD_HEADERS if kind == 'advertising' else BILL_HEADERS if kind == 'platform' else ERP_HEADERS), rows),
                             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}, **kwargs)
         return response
 
@@ -110,6 +111,169 @@ class FinanceTests(TestCase):
         return self.request('DELETE', f'/finance/shops/{shop or self.shop}', uid=uid,
             json={'confirm_name': name, 'preview_token': preview['preview_token']})
 
+    def ad_query(self, shops=None, uid=1, **kwargs):
+        return self.request('GET', '/finance/ad-costs', uid=uid, params={
+            'shop_ids': shops or [self.shop], 'paid_from': '2026-10-01T00:00:00+08:00',
+            'paid_to': '2026-10-25T23:59:59.999999+08:00', **kwargs})
+
+    def ad_rate(self, rate='7', currency='USD', shop=None):
+        self.ok(self.request('PUT', '/finance/exchange-rates', json={'items': [
+            {'shop_id': shop or self.shop, 'currency': currency, 'rate': rate}]}))
+
+    def test_ad_daily_aggregation_summary_rows_zero_and_partial_reimport(self):
+        rows = [['2026-10-20 00:00:00', '1.001', 'usd'], [date(2026, 10, 20), '2.002', 'USD'],
+            [datetime(2026, 10, 21), '0', 'USD'], ['-', '3.003', 'USD'], ['合计', '3.003', 'USD'],
+            ['总计', '=SUM(B2:B4)', 'USD'], [None, None, None]]
+        counts = self.ok(self.upload('advertising', rows))
+        self.assertEqual((counts['created'], counts['ignored'], counts['source_rows']), (2, 3, 6))
+        self.assertEqual(self.ok(self.upload('advertising', rows))['unchanged'], 2)
+        self.assertEqual(self.ok(self.upload('advertising', [['2026-10-20', '4', 'USD']]))['updated'], 1)
+        data = self.ok(self.ad_query())
+        self.assertEqual(data['total'], 2)
+        self.assertEqual([(r['cost_date'], Decimal(r['amount'])) for r in data['items']],
+            [('2026-10-21', Decimal(0)), ('2026-10-20', Decimal(4))])
+        with self.sessions() as db:
+            self.assertEqual(len(db.scalars(select(FinanceOrder)).all()), 0)
+        history = self.ok(self.request('GET', '/finance/imports'))
+        self.assertEqual(history[0]['kind'], 'advertising')
+        self.assertEqual(history[0]['counts']['updated'], 1)
+
+    def test_ad_subtracts_only_shop_profit_and_recalculates_after_rate_change(self):
+        self.ok(self.upload('platform', [bill()]))
+        self.ok(self.upload('erp', [erp()]))
+        self.settings()
+        before = self.ok(self.query())
+        self.assertEqual(before['total']['ad_cost'], '0.00')
+        self.assertEqual(before['total']['profit_after_ads'], before['total']['profit'])
+        self.ok(self.upload('advertising', [['2026-10-20', '2.50', 'USD']]))
+        missing = self.ok(self.query())
+        self.assertEqual(missing['total']['ad_missing_currencies'], ['USD'])
+        self.assertIsNone(missing['total']['ad_cost'])
+        self.assertIsNone(missing['total']['profit_after_ads'])
+        self.assertEqual(missing['orders'], before['orders'])
+        self.assertEqual(missing['skus'], before['skus'])
+        self.assertEqual(self.ok(self.ad_query())['items'][0]['status'], '缺汇率')
+        rates = self.ok(self.request('GET', '/finance/settings'))['rates']
+        self.assertEqual({r['currency'] for r in rates}, {'MYR', 'USD'})
+        self.ad_rate()
+        result = self.ok(self.query())
+        self.assertEqual(result['total']['profit'], '27.60')
+        self.assertEqual(result['total']['ad_cost'], '17.50')
+        self.assertEqual(result['total']['profit_after_ads'], '10.10')
+        self.assertEqual(self.ok(self.ad_query())['items'][0]['cny_amount'], '17.50')
+        self.assertEqual(self.ok(self.query(order_status='pending'))['total'], result['total'])
+        self.ad_rate('8')
+        self.assertEqual(self.ok(self.query())['total']['profit_after_ads'], '7.60')
+
+    def test_ad_without_orders_including_zero_and_missing_order_profit(self):
+        self.ok(self.upload('advertising', [['2026-10-20', '0', 'USD']]))
+        zero = self.ok(self.query())['total']
+        self.assertEqual((zero['ad_record_count'], zero['ad_cost'], zero['profit_after_ads']), (1, '0.00', '0.00'))
+        self.assertEqual(zero['ad_missing_currencies'], [])
+        self.ok(self.upload('advertising', [['2026-10-20', '3.25', 'rmb']]))
+        result = self.ok(self.query())['total']
+        self.assertEqual((result['order_count'], result['ad_cost'], result['profit_after_ads']), (0, '3.25', '-3.25'))
+        self.ok(self.upload('platform', [bill(currency='CNY')]))
+        self.ok(self.upload('erp', [erp()]))
+        unknown = self.ok(self.query())['total']
+        self.assertEqual(unknown['ad_cost'], '3.25')
+        self.assertIsNone(unknown['profit_after_ads'])
+
+    def test_ad_currency_rounding_shop_totals_and_missing_total_are_consistent(self):
+        other = self.ok(self.request('POST', '/finance/shops', json={'name': '本土店', 'shop_type': 'local'}))['id']
+        self.ok(self.upload('advertising', [['2026-10-20', '.004', 'USD'], ['2026-10-21', '.004', 'USD'],
+            ['2026-10-20', '.004', 'CNY']]))
+        self.ok(self.upload('advertising', [['2026-10-20', '.005', 'CNY']], shop=other))
+        mixed = self.ok(self.query(shops=[self.shop, other]))
+        self.assertIsNone(mixed['total']['profit_after_ads'])
+        self.assertEqual(mixed['summaries'][1]['ad_cost'], '0.01')
+        self.ad_rate('1')
+        known = self.ok(self.query(shops=[self.shop, other]))
+        self.assertEqual([r['ad_cost'] for r in known['summaries']], ['0.01', '0.01'])
+        self.assertEqual(known['total']['ad_cost'], '0.02')
+        self.assertEqual(known['total']['profit_after_ads'], '-0.02')
+        self.assertEqual(known['total']['ad_record_count'], 4)
+
+    def test_ad_date_types_beijing_boundaries_pagination_and_scope(self):
+        from openpyxl.utils.datetime import to_excel
+        self.ok(self.upload('advertising', [['2026-10-19', '1', 'CNY'],
+            ['2026-10-19T16:00:00+00:00', '2', 'CNY'], [to_excel(datetime(2026, 10, 20)), '3', 'CNY'],
+            ['2026-10-21', '4', 'CNY']]))
+        bounds = {'paid_from': '2026-10-19T16:00:00Z', 'paid_to': '2026-10-20T15:59:59.999999Z'}
+        scoped = self.ok(self.ad_query(**bounds))
+        self.assertEqual(scoped['total'], 1)
+        self.assertEqual(Decimal(scoped['items'][0]['amount']), Decimal(5))
+        self.assertEqual(self.ok(self.query(**bounds))['total']['ad_cost'], '5.00')
+        page = self.ok(self.ad_query(page=2, page_size=1))
+        self.assertEqual(page['total'], 3)
+        self.assertEqual(page['items'][0]['cost_date'], '2026-10-20')
+        empty = self.ok(self.ad_query(page=99))
+        self.assertEqual(empty['items'], [])
+        self.assertEqual(self.ad_query(page_size=1001).status_code, 422)
+
+    def test_ad_invalid_rows_rollback_whole_file_and_reject_formulas(self):
+        self.ok(self.upload('advertising', [['2026-10-20', '1', 'CNY']]))
+        history = self.ok(self.request('GET', '/finance/imports'))
+        for bad in [['bad-date', '2', 'USD'], ['2026-10-20', '-1', 'USD'],
+                ['2026-10-20', '=1+1', 'USD'], ['=TODAY()', '2', 'USD'], ['2026-10-20', '2', '=B2'],
+                ['2026-10-20', None, 'USD'], ['2026-10-20', True, 'USD'],
+                ['2026-10-20', 'NaN', 'USD'], ['2026-10-20', '1.0000001', 'USD'],
+                ['2026-10-20', '1', 'US'], [None, '1', 'USD']]:
+            with self.subTest(bad=bad):
+                response = self.upload('advertising', [['2026-10-20', '9', 'CNY'], bad])
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertIn('第 3 行', response.json()['detail'])
+                self.assertEqual(self.ok(self.query())['total']['ad_cost'], '1.00')
+        self.assertEqual(self.ok(self.request('GET', '/finance/imports')), history)
+        for rows in ([], [['-', '1', 'USD']], [['2026-10-20', '999999999999999999.999999', 'USD'],
+                ['2026-10-20', '.000001', 'USD']]):
+            self.assertEqual(self.upload('advertising', rows).status_code, 400)
+
+    def test_ad_sheet_selection_required_headers_and_reordered_columns(self):
+        data = workbook(AD_HEADERS, [['2026-10-20', '1', 'CNY']], second_sheet=True)
+        choice = self.upload('advertising', [], data=data)
+        self.assertEqual(choice.status_code, 409)
+        self.assertEqual(len(choice.json()['detail']['sheets']), 2)
+        selected = self.request('POST', f'/finance/shops/{self.shop}/imports/advertising',
+            files={'file': ('ads.xlsx', data)}, data={'sheet_name': '数据'})
+        self.assertEqual(self.ok(selected)['created'], 1)
+        self.assertEqual(self.upload('advertising', [['2026-10-20', '1']], headers=['日期', '成本']).status_code, 400)
+        self.assertEqual(self.upload('advertising', [['2026-10-20', '1', 'CNY', 'CNY']],
+            headers=[*AD_HEADERS, '币种']).status_code, 400)
+        self.ok(self.upload('advertising', [['=unrelated()', 'cny', '2', '2026-10-20']],
+            headers=['备注', ' 币 种 ', '成 本', '日 期']))
+        self.assertEqual(self.ok(self.query())['total']['ad_cost'], '2.00')
+
+    def test_ad_permissions_and_company_isolation(self):
+        self.ok(self.upload('advertising', [['2026-10-20', '1', 'CNY']]))
+        for uid in (2, 3, 5):
+            self.assertEqual(self.upload('advertising', [['2026-10-20', '5', 'CNY']], uid=uid).status_code, 403)
+            self.assertEqual(self.ad_query(uid=uid).status_code, 403)
+        self.assertEqual(self.upload('advertising', [['2026-10-20', '5', 'CNY']], uid=4).status_code, 404)
+        self.assertEqual(self.ad_query(uid=4).status_code, 404)
+        other = self.ok(self.request('POST', '/finance/shops', uid=4, json={'name': '其他公司'}))['id']
+        self.ok(self.upload('advertising', [['2026-10-20', '100', 'USD']], uid=4, shop=other))
+        self.assertEqual(self.ok(self.query())['total']['ad_cost'], '1.00')
+        self.assertEqual([r['currency'] for r in self.ok(self.request('GET', '/finance/settings'))['rates']], ['CNY'])
+
+    def test_ad_deletion_preview_detects_amount_changes_removes_rows_and_keeps_history(self):
+        self.ok(self.upload('advertising', [['2026-10-20', '1', 'CNY']]))
+        other = self.ok(self.request('POST', '/finance/shops', json={'name': '保留广告店'}))['id']
+        self.ok(self.upload('advertising', [['2026-10-20', '2', 'CNY']], shop=other))
+        preview = self.ok(self.deletion_preview())
+        self.assertEqual(preview['counts']['ad_costs'], 1)
+        with self.sessions() as db:
+            row = db.scalar(select(FinanceAdCost).where(FinanceAdCost.shop_id == self.shop))
+            row.amount = Decimal(3)
+            db.commit()
+        self.assertEqual(self.delete_finance_shop(preview).status_code, 409)
+        self.ok(self.delete_finance_shop())
+        with self.sessions() as db:
+            self.assertEqual([r.shop_id for r in db.scalars(select(FinanceAdCost))], [other])
+        history = self.ok(self.request('GET', '/finance/imports'))
+        self.assertTrue(all(r['shop_deleted'] for r in history if r['shop_id'] == self.shop))
+        self.assertEqual(self.ok(self.query(shops=[other]))['total']['ad_cost'], '2.00')
+
     def test_delete_shop_removes_all_data_retains_history_and_isolates_other_shops(self):
         self.ok(self.upload('platform', [bill()]))
         self.ok(self.upload('erp', [erp()]))
@@ -121,7 +285,7 @@ class FinanceTests(TestCase):
             db.add(FinanceSkuCost(company_id=1, base_sku='legacy', unit_cost=Decimal('9')))
             db.commit()
         preview = self.ok(self.deletion_preview())
-        self.assertEqual(preview['counts'], {'orders':1,'bills':1,'erp_items':1,'sku_costs':1,'exchange_rates':1})
+        self.assertEqual(preview['counts'], {'orders':1,'bills':1,'erp_items':1,'sku_costs':1,'exchange_rates':1,'ad_costs':0})
         self.assertEqual(self.ok(self.delete_finance_shop(preview))['counts'], preview['counts'])
         with self.sessions() as db:
             self.assertIsNone(db.get(FinanceShop, self.shop))
@@ -152,7 +316,7 @@ class FinanceTests(TestCase):
                 self.ok(self.delete_finance_shop(shop=shop,name=kind))
                 replacement=self.ok(self.request('POST','/finance/shops',json={'name':kind}))['id']
                 self.assertEqual(self.ok(self.deletion_preview(replacement))['counts'],
-                    {'orders':0,'bills':0,'erp_items':0,'sku_costs':0,'exchange_rates':0})
+                    {'orders':0,'bills':0,'erp_items':0,'sku_costs':0,'exchange_rates':0,'ad_costs':0})
                 self.ok(self.request('PATCH',f'/finance/shops/{replacement}',json={'name':kind+'新','shop_type':'local'}))
                 old = [row for row in self.ok(self.request('GET','/finance/imports')) if row['kind']=='deletion']
                 self.assertIn(kind, [row['shop_name'] for row in old])
@@ -876,6 +1040,27 @@ class FinanceTests(TestCase):
 
 
 class FinanceMigrationTests(TestCase):
+    def test_ad_cost_migration_unique_key_and_downgrade_preserves_shops(self):
+        engine = create_engine('sqlite://')
+        with engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, '20261031_56')
+            connection.execute(FinanceShop.__table__.insert().values(id=1, company_id=1, name='保留店铺'))
+            command.upgrade(config, 'head')
+            constraint = next(c for c in inspect(connection).get_unique_constraints('finance_ad_costs')
+                if c['name'] == 'uq_finance_ad_cost')
+            self.assertEqual(constraint['column_names'], ['shop_id', 'cost_date', 'currency'])
+            values = dict(company_id=1, shop_id=1, cost_date=date(2026, 10, 20), currency='USD', amount=Decimal('1.123456'))
+            connection.execute(FinanceAdCost.__table__.insert().values(**values))
+            with self.assertRaises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(FinanceAdCost.__table__.insert().values(**values))
+            self.assertEqual(connection.scalar(select(FinanceAdCost.amount)), Decimal('1.123456'))
+            command.downgrade(config, '20261031_56')
+            self.assertNotIn('finance_ad_costs', inspect(connection).get_table_names())
+            self.assertEqual(connection.scalar(select(FinanceShop.name)), '保留店铺')
+        engine.dispose()
+
     def test_shop_cost_migration_preserves_prices_and_does_not_invent_missing_costs(self):
         engine = create_engine('sqlite://')
         with engine.begin() as connection:
@@ -993,7 +1178,7 @@ class FinanceMigrationTests(TestCase):
             connection.execute(Company.__table__.insert().values(id=1,name='已有公司',is_active=True,created_at=datetime.utcnow()))
             command.upgrade(config,'head')
             finance_tables={t.name for t in Base.metadata.tables.values() if t.name.startswith('finance_')}
-            self.assertEqual(len(finance_tables),10)
+            self.assertEqual(len(finance_tables),11)
             self.assertTrue(finance_tables.issubset(inspect(connection).get_table_names()))
             command.downgrade(config,'20261025_44')
             self.assertFalse(finance_tables.intersection(inspect(connection).get_table_names()))

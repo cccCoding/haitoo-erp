@@ -15,9 +15,9 @@ from sqlalchemy.orm import Session
 
 from .database import get_db
 from .config import get_settings as app_settings
-from .finance_import import MAX_BYTES, SheetChoice, decimal_value, parse_workbook
+from .finance_import import LOCAL_TIMEZONE, MAX_BYTES, SheetChoice, decimal_value, parse_workbook
 from .finance_export import export_workbook
-from .models import (Company, FinanceBill, FinanceErpItem, FinanceExchangeRate, FinanceImport,
+from .models import (Company, FinanceAdCost, FinanceBill, FinanceErpItem, FinanceExchangeRate, FinanceImport,
     FinanceOrder, FinanceShop, FinanceShopSkuCost, Role, User)
 from .security import require_roles
 
@@ -151,6 +151,8 @@ def deletion_state(db, user, shop):
         'sku_costs': select(FinanceShopSkuCost.__table__).where(
             FinanceShopSkuCost.company_id == user.company_id, FinanceShopSkuCost.shop_id == shop.id),
         'exchange_rates': select(FinanceExchangeRate.__table__).where(FinanceExchangeRate.shop_id == shop.id),
+        'ad_costs': select(FinanceAdCost.__table__).where(
+            FinanceAdCost.company_id == user.company_id, FinanceAdCost.shop_id == shop.id),
     }
     counts = {}
     for name, query in queries.items():
@@ -212,6 +214,8 @@ def delete_shop(shop_id: int, payload: ShopDeletionInput, user: User = Depends(a
             FinanceShopSkuCost.shop_id == shop_id), execution_options={'synchronize_session': False})
         db.execute(delete(FinanceExchangeRate).where(FinanceExchangeRate.shop_id == shop_id),
             execution_options={'synchronize_session': False})
+        db.execute(delete(FinanceAdCost).where(FinanceAdCost.company_id == user.company_id,
+            FinanceAdCost.shop_id == shop_id), execution_options={'synchronize_session': False})
         db.delete(shop)
         db.add(FinanceImport(company_id=user.company_id, shop_id=shop_id, created_by=user.id,
             kind='deletion', filename='', counts={**counts, 'shop_name': name, 'shop_deleted': True}))
@@ -223,7 +227,7 @@ def delete_shop(shop_id: int, payload: ShopDeletionInput, user: User = Depends(a
 
 
 @router.post('/shops/{shop_id}/imports/{kind}')
-def import_file(shop_id: int, kind: Literal['platform', 'erp'], file: UploadFile = File(...),
+def import_file(shop_id: int, kind: Literal['platform', 'erp', 'advertising'], file: UploadFile = File(...),
                 sheet_name: str | None = Form(None), user: User = Depends(admin), db: Session = Depends(get_db)):
     shop_type = shops_for(db, user, [shop_id])[0].shop_type
     if not (file.filename or '').lower().endswith('.xlsx'):
@@ -238,6 +242,8 @@ def import_file(shop_id: int, kind: Literal['platform', 'erp'], file: UploadFile
     lock_company(db, user)
     if shops_for(db, user, [shop_id])[0].shop_type != shop_type:
         raise HTTPException(409, '店铺类型已变更，请重新导入')
+    if kind == 'advertising':
+        return import_ad_costs(db, user, shop_id, file.filename, parsed)
     order_numbers = set(parsed['orders']) | {key[0] for key in parsed['bills']}
     existing_orders = {}
     numbers = sorted(order_numbers)
@@ -329,6 +335,32 @@ def import_file(shop_id: int, kind: Literal['platform', 'erp'], file: UploadFile
     return counts
 
 
+def import_ad_costs(db, user, shop_id, filename, parsed):
+    incoming = parsed['ad_costs']
+    days = [key[0] for key in incoming]
+    existing = {(row.cost_date, row.currency): row for row in db.scalars(select(FinanceAdCost).where(
+        FinanceAdCost.company_id == user.company_id, FinanceAdCost.shop_id == shop_id,
+        FinanceAdCost.cost_date >= min(days), FinanceAdCost.cost_date <= max(days)))}
+    counts = dict(created=0, updated=0, unchanged=0, source_rows=parsed['source_rows'],
+        ignored=parsed['ignored'], sheet=parsed['sheet'], unit='条广告日成本')
+    for (day, currency), amount in incoming.items():
+        row = existing.get((day, currency))
+        if row is None:
+            row = FinanceAdCost(company_id=user.company_id, shop_id=shop_id, cost_date=day, currency=currency)
+            db.add(row)
+            counts['created'] += 1
+        elif row.amount == amount:
+            counts['unchanged'] += 1
+            continue
+        else:
+            counts['updated'] += 1
+        row.amount = amount
+    db.add(FinanceImport(company_id=user.company_id, shop_id=shop_id, created_by=user.id,
+        kind='advertising', filename=(filename or '')[:255], counts=counts))
+    commit(db)
+    return counts
+
+
 @router.get('/imports')
 def import_history(user: User = Depends(admin), db: Session = Depends(get_db)):
     return [{'id': i.id, 'shop_id': i.shop_id,
@@ -346,6 +378,8 @@ def get_settings(user: User = Depends(admin), db: Session = Depends(get_db)):
         FinanceShop, FinanceShop.id == FinanceExchangeRate.shop_id).where(FinanceShop.company_id == user.company_id))}
     currencies = db.execute(select(FinanceOrder.shop_id, FinanceBill.currency).join(
         FinanceBill, FinanceBill.order_id == FinanceOrder.id).where(FinanceOrder.company_id == user.company_id).distinct()).all()
+    currencies = set(currencies) | set(db.execute(select(FinanceAdCost.shop_id, FinanceAdCost.currency).where(
+        FinanceAdCost.company_id == user.company_id).distinct()).all())
     return {'rates': [{'shop_id': shop, 'currency': currency,
                        'rate': str(Decimal(1) if currency == 'CNY' else rates[(shop, currency)])
                        if currency == 'CNY' or (shop, currency) in rates else None}
@@ -450,6 +484,60 @@ def calculate(db, user, shops, start, end):
         return _calculate(db, user, shops, start, end)
 
 
+def ad_cost_query(user, shops, start, end):
+    first, last = [value.replace(tzinfo=timezone.utc).astimezone(LOCAL_TIMEZONE).date() for value in (start, end)]
+    return select(FinanceAdCost).where(FinanceAdCost.company_id == user.company_id,
+        FinanceAdCost.shop_id.in_([s.id for s in shops]),
+        FinanceAdCost.cost_date >= first, FinanceAdCost.cost_date <= last)
+
+
+def ad_summaries(db, user, shops, start, end, rates):
+    output = {s.id: {'amount': Decimal(0), 'ad_record_count': 0, 'ad_missing_currencies': []} for s in shops}
+    query = ad_cost_query(user, shops, start, end).with_only_columns(
+        FinanceAdCost.shop_id, FinanceAdCost.currency, func.sum(FinanceAdCost.amount), func.count(FinanceAdCost.id)
+    ).group_by(FinanceAdCost.shop_id, FinanceAdCost.currency)
+    for shop_id, currency, amount, count in db.execute(query):
+        row = output[shop_id]
+        row['ad_record_count'] += count
+        rate = Decimal(1) if currency == 'CNY' else rates.get((shop_id, currency))
+        if rate is None and amount:
+            row['ad_missing_currencies'].append(currency)
+        else:
+            row['amount'] += amount * (rate if rate is not None else Decimal(0))
+    for row in output.values():
+        row['ad_missing_currencies'].sort()
+        row['amount'] = None if row['ad_missing_currencies'] else row['amount'].quantize(CENT, rounding=ROUND_HALF_UP)
+    missing = sorted({currency for row in output.values() for currency in row['ad_missing_currencies']})
+    output[None] = {'amount': None if missing else sum((row['amount'] for row in output.values()), Decimal(0)),
+        'ad_record_count': sum(row['ad_record_count'] for row in output.values()), 'ad_missing_currencies': missing}
+    return output
+
+
+@router.get('/ad-costs')
+def list_ad_costs(scope=Depends(query_scope), page: int = Query(1, ge=1),
+                  page_size: int = Query(20, ge=1, le=1000),
+                  user: User = Depends(admin), db: Session = Depends(get_db)):
+    shops, start, end = scope
+    names = {s.id: s.name for s in shops}
+    query = ad_cost_query(user, shops, start, end)
+    total = db.scalar(select(func.count()).select_from(query.subquery()))
+    rates = {(r.shop_id, r.currency): r.rate for r in db.scalars(select(FinanceExchangeRate).where(
+        FinanceExchangeRate.shop_id.in_(names)))}
+    items = []
+    with localcontext() as context:
+        context.prec = 64
+        for row in db.scalars(query.order_by(FinanceAdCost.cost_date.desc(), FinanceAdCost.shop_id,
+                FinanceAdCost.currency).offset((page - 1) * page_size).limit(page_size)):
+            rate = Decimal(1) if row.currency == 'CNY' else rates.get((row.shop_id, row.currency))
+            missing = rate is None and row.amount != 0
+            items.append({'id': row.id, 'shop_id': row.shop_id, 'shop_name': names[row.shop_id],
+                'cost_date': row.cost_date.isoformat(), 'currency': row.currency, 'amount': str(row.amount),
+                'rate': str(rate) if rate is not None else None,
+                'cny_amount': None if missing else money(row.amount * (rate if rate is not None else Decimal(0))),
+                'status': '缺汇率' if missing else '已换算'})
+    return {'items': items, 'total': total}
+
+
 def _calculate(db, user, shops, start, end):
     shop_names = {s.id: s.name for s in shops}
     shop_types = {s.id: s.shop_type for s in shops}
@@ -538,12 +626,17 @@ def _calculate(db, user, shops, start, end):
     total = {'shop_id': None, 'shop_name': '合计', **{key: sum(s[key] for s in summaries.values()) for key in (
         'order_count', 'converted_count', 'calculated_count', 'erp_only_count', 'sales', 'settlement', 'cost', 'profit')}}
     output_summaries = []
+    advertising = ad_summaries(db, user, shops, start, end, rates)
     for summary in [*summaries.values(), total]:
+        ad = advertising[summary['shop_id']]
+        profit = summary['profit'] if summary['calculated_count'] or not summary['order_count'] else None
         output_summaries.append({**summary, 'pending_count': summary['order_count'] - summary['calculated_count'],
             'sales': money(summary['sales']) if summary['converted_count'] or not summary['order_count'] else None,
             'settlement': money(summary['settlement']) if summary['converted_count'] or not summary['order_count'] else None,
             'cost': money(summary['cost']) if summary['calculated_count'] or not summary['order_count'] else None,
-            'profit': money(summary['profit']) if summary['calculated_count'] or not summary['order_count'] else None})
+            'profit': money(profit), 'ad_cost': money(ad['amount']),
+            'ad_record_count': ad['ad_record_count'], 'ad_missing_currencies': ad['ad_missing_currencies'],
+            'profit_after_ads': money(profit - ad['amount']) if profit is not None and ad['amount'] is not None else None})
     for row in sku_rows.values():
         row['order_count'] = len(row.pop('_orders'))
         unit_cost = costs.get((row['shop_id'], row['base_sku']))
