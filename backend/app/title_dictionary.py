@@ -18,13 +18,15 @@ def name_key(value):
     return hashlib.sha256(normalize(value).encode()).hexdigest()
 
 
-def localized_category_name(value):
+def localized_category_name(value, site='MY'):
+    from .title_markets import market_labels
+    locale = market_labels(site)
     value = (value or '').strip()
     if not value:
         return None
     if (re.search(r'[\u3400-\u9fff]', value) or any(unicodedata.category(c).startswith('C') for c in value)
             or any(c in value for c in ('"', '*', '`', '<', '>'))):
-        raise HTTPException(400, '马来西亚分类名称请填写单行马来语，不包含中文、Markdown 或控制字符')
+        raise HTTPException(400, f"{locale['site_name']}分类名称请填写单行{locale['language_name']}，不包含中文、Markdown 或控制字符")
     return value
 
 

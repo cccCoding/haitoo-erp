@@ -12,15 +12,16 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, undefer
 
+from .title_markets import TitleMarketSelection, check_market
 from .ai_providers import ProviderError
 from .database import get_db
 from .models import MaterialAsset, ProductTemplate, Role, User
 from .security import require_roles
-from .title_import import MAX_BYTES, TITLE_COLUMN_NAMES, KEYWORD_COLUMN_NAMES, IMPORT_OPTIONAL_COLUMNS, confirm_import, parse_file
+from .title_import import MAX_BYTES, TITLE_COLUMN_NAMES, keyword_column_names, IMPORT_OPTIONAL_COLUMNS, confirm_import, parse_file
 from .title_models import TitleCategoryMerge, TitleDictionaryEntry, TitleEvidence, TitleImportWord, TitleKeyword, TitleMarket, TitleRecord, TitleTask, TitleTemplateProfile
 from .title_service import (TAGS, CATEGORY_FIELDS, DICTIONARY_TAGS, PROFILE_TAGS, GENDERS, AGE_GROUPS,
                             canonical_tag, profile_attributes, profile_issues, create_record, credential, digest, generate_record, get_market,
-                            keyword_data, normalize, profile_snapshot, record_payload, validate_malay_title)
+                            keyword_data, normalize, profile_snapshot, record_payload, validate_localized_title)
 
 from .title_dictionary import (entries as dictionary_entries, entry_payload as dictionary_payload,
     usage_counts as dictionary_usage, name_key as dictionary_key, touch_market as touch_dictionary_market,
@@ -37,15 +38,13 @@ class Input(BaseModel):
     model_config = {'extra': 'forbid'}
 
 
-class MarketInput(Input):
+class MarketInput(Input, TitleMarketSelection):
     platform: Literal['TikTok', 'Shopee'] = 'TikTok'
     @field_validator('platform')
     @classmethod
     def shared_library(cls, value):
         return 'TikTok'
 
-    site: Literal['MY'] = 'MY'
-    language: Literal['ms'] = 'ms'
 
 
 class MarketUpdate(MarketInput):
@@ -177,7 +176,9 @@ def task_for(db, identity, user):
     return task
 
 
-def profile_payload(profile, market=None, db=None):
+def profile_payload(profile, market=None, db=None, *, site='MY', language='ms'):
+    if market:
+        site, language = market.site, market.language
     definitions = dictionary_entries(db, market.id) if db is not None and market else []
     categories = [row for row in definitions if row.kind == 'category']
     category_entry = next((row for row in categories if profile and dictionary_key(row.name) == dictionary_key(profile.category)), None)
@@ -213,7 +214,7 @@ def profile_payload(profile, market=None, db=None):
         'categories': [row.name for row in categories if row.enabled],
         'category_options': [{'name': row.name, 'localized_name': row.localized_name, 'enabled': row.enabled} for row in categories],
         'attribute_tags': attribute_tags, 'genders': GENDERS, 'age_groups': AGE_GROUPS,
-        'enabled': True, 'tags': [row['name'] for row in attribute_tags] if definitions else PROFILE_TAGS, 'site': 'MY', 'language': 'ms'}
+        'enabled': True, 'tags': [row['name'] for row in attribute_tags] if definitions else PROFILE_TAGS, 'site': site, 'language': language}
 
 
 class DictionaryCreate(MarketInput):
@@ -267,7 +268,7 @@ def create_dictionary(kind: Literal['category', 'tag'], payload: DictionaryCreat
         raise HTTPException(409, '该名称已存在，请编辑已有条目')
     row = TitleDictionaryEntry(market_id=market.id, kind=kind, name=name, name_key=dictionary_key(name),
         description=payload.description.strip(),
-        localized_name=localized_category_name(payload.localized_name), semantic_tag=payload.semantic_tag, enabled=payload.enabled)
+        localized_name=localized_category_name(payload.localized_name, market.site), semantic_tag=payload.semantic_tag, enabled=payload.enabled)
     db.add(row)
     db.flush()
     if kind == 'category':
@@ -315,7 +316,7 @@ def update_dictionary(identity: int, payload: DictionaryUpdate, user: User = Dep
         sync_names(db, row, data.get('aliases'))
     row.description = data.get('description', row.description).strip()
     if 'localized_name' in data:
-        row.localized_name = localized_category_name(data['localized_name'])
+        row.localized_name = localized_category_name(data['localized_name'], market.site)
     row.enabled = data.get('enabled', row.enabled)
     row.updated_at = datetime.utcnow()
     touch_dictionary_market(market)
@@ -351,9 +352,9 @@ def preview_category_merge(payload: CategoryMergeInput, user: User = Depends(adm
 
 
 @router.get('/title-category-merges')
-def category_merge_history(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+def category_merge_history(platform: str = 'TikTok', site: str = 'MY', language: str = 'ms', page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
                            user: User = Depends(reader), db: Session = Depends(get_db)):
-    market = market_for(db, user)
+    market = market_for(db, user, platform, site, language)
     query = select(TitleCategoryMerge).where(TitleCategoryMerge.market_id == market.id) if market else None
     total = db.scalar(select(func.count()).select_from(query.subquery())) if query is not None else 0
     rows = db.scalars(query.order_by(TitleCategoryMerge.id.desc()).offset((page-1)*page_size).limit(page_size)).all() if total else []
@@ -392,13 +393,13 @@ def update_market(payload: MarketUpdate, user: User = Depends(admin), db: Sessio
 
 
 @router.get('/title-profiles/{template_id}')
-def get_profile(template_id: int, platform: str = 'TikTok', user: User = Depends(reader), db: Session = Depends(get_db)):
+def get_profile(template_id: int, platform: str = 'TikTok', site: str = 'MY', language: str = 'ms', user: User = Depends(reader), db: Session = Depends(get_db)):
     from .main import get_usable_template
     get_usable_template(db, user, template_id)
-    market = market_for(db, user, platform)
+    market = market_for(db, user, platform, site, language)
     profile = db.scalar(select(TitleTemplateProfile).where(TitleTemplateProfile.market_id == market.id,
         TitleTemplateProfile.template_id == template_id)) if market else None
-    return profile_payload(profile, market, db)
+    return profile_payload(profile, market, db, site=site, language=language)
 
 
 @router.put('/title-profiles/{template_id}')
@@ -415,10 +416,10 @@ def put_profile(template_id: int, payload: ProfileInput, user: User = Depends(ad
         raise HTTPException(400, '包含其他词库或不存在的关键词')
     fallback = payload.fallback_title.strip() if payload.fallback_title else None
     if payload.fallback_approved and not fallback:
-        raise HTTPException(400, '请填写马来语兜底标题后再确认审核')
+        raise HTTPException(400, '请填写对应站点语言的兜底标题后再确认审核')
     if fallback:
         try:
-            fallback = validate_malay_title(fallback, 220)
+            fallback = validate_localized_title(fallback, 220, site=market.site, language=market.language)
         except ProviderError as exc:
             raise HTTPException(400, str(exc)) from exc
     profile = db.scalar(select(TitleTemplateProfile).where(TitleTemplateProfile.market_id == market.id,
@@ -450,10 +451,10 @@ def put_profile(template_id: int, payload: ProfileInput, user: User = Depends(ad
 
 
 @router.get('/title-template-configurations')
-def template_configurations(q: str = '', category: str = '', state: Literal['', 'ready', 'incomplete'] = '',
+def template_configurations(platform: str = 'TikTok', site: str = 'MY', language: str = 'ms', q: str = '', category: str = '', state: Literal['', 'ready', 'incomplete'] = '',
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=1000),
     user: User = Depends(reader), db: Session = Depends(get_db)):
-    market = market_for(db, user)
+    market = market_for(db, user, platform, site, language)
     definitions = dictionary_entries(db, market.id) if market else []
     categories = {row.name_key: row for row in definitions if row.kind == 'category'}
     profiles = {row.template_id: row for row in db.scalars(select(TitleTemplateProfile).where(
@@ -568,7 +569,7 @@ def edit_keyword(identity: int, payload: KeywordInput, user: User = Depends(admi
     if 'phrase' in data:
         import re
         if re.search(r'[\u3400-\u9fff]', data['phrase']):
-            raise HTTPException(400, '马来语词语不能包含中文')
+            raise HTTPException(400, '词语不能包含中文')
     conflicts = set(data.get('conflicts', row.conflicts))
     if row.id in conflicts or conflicts != set(db.scalars(select(TitleKeyword.id).where(
         TitleKeyword.market_id == market.id, TitleKeyword.id.in_(conflicts), TitleKeyword.merged_into_id.is_(None)))):
@@ -642,11 +643,12 @@ def keyword_evidence(identity: int, page: int = Query(1, ge=1), page_size: int =
 
 
 @router.get('/title-import-template')
-def import_template(kind: Literal['titles', 'keywords'] = 'titles', user: User = Depends(admin)):
+def import_template(kind: Literal['titles', 'keywords'] = 'titles', platform: str = 'TikTok', site: str = 'MY', language: str = 'ms', user: User = Depends(admin)):
+    check_market(platform, site, language)
     stream = io.StringIO()
     writer = csv.writer(stream)
     writer.writerow([*TITLE_COLUMN_NAMES.values(), *IMPORT_OPTIONAL_COLUMNS] if kind == 'titles'
-                    else [*KEYWORD_COLUMN_NAMES.values(), *IMPORT_OPTIONAL_COLUMNS])
+                    else [*keyword_column_names(site).values(), *IMPORT_OPTIONAL_COLUMNS])
     return Response(stream.getvalue().encode('utf-8-sig'), media_type='text/csv',
                     headers={'Content-Disposition': f'attachment; filename="title-{kind}.csv"'})
 
@@ -673,7 +675,7 @@ async def preview_import(file: UploadFile = File(...), kind: Literal['titles', '
     market = market_for(db, user, platform, site, language, create=True, lock=True)
     tag_definitions = [row for row in dictionary_entries(db, market.id, 'tag') if row.enabled]
     allowed_tags = [*CATEGORY_FIELDS, *(row.name for row in tag_definitions)]
-    rows = parse_file(content, file.filename or '', kind, allowed_tags=allowed_tags)
+    rows = parse_file(content, file.filename or '', kind, allowed_tags=allowed_tags, site=site, language=language)
     from .title_import import split_values
     category_states = category_index(db, market.id)
     for row in rows:
@@ -689,7 +691,7 @@ async def preview_import(file: UploadFile = File(...), kind: Literal['titles', '
         return {'id': previous.id, 'state': previous.state, 'duplicate': True, 'rows': len(rows), 'preview': rows[:20],
                 'note': previous.snapshot.get('note', ''), 'category_resolution': category_summary(db, previous)}
     task = TitleTask(market_id=market.id, user_id=user.id, kind='import', request_key=key, request_hash=key,
-        state='preview', snapshot={'rows': rows, 'allowed_tags': allowed_tags,
+        state='preview', snapshot={'rows': rows, 'site': site, 'language': language, 'allowed_tags': allowed_tags,
             'tag_semantics': {**{field: field for field in CATEGORY_FIELDS}, **{row.name: row.semantic_tag for row in tag_definitions}},
             'kind': kind, 'source_name': source_name, 'period': period, 'period_basis': period_basis, 'note': note.strip(),
             'filename': (file.filename or '')[:255]}, progress={'total': len(rows), 'completed': 0})
@@ -702,10 +704,10 @@ async def preview_import(file: UploadFile = File(...), kind: Literal['titles', '
 
 
 @router.get('/title-tasks')
-def tasks(platform: str = 'TikTok', kind: Literal['import', 'batch'] = 'import', page: int = Query(1, ge=1),
+def tasks(platform: str = 'TikTok', site: str = 'MY', language: str = 'ms', kind: Literal['import', 'batch'] = 'import', page: int = Query(1, ge=1),
           page_size: int = Query(30, ge=1, le=1000),
           user: User = Depends(reader), db: Session = Depends(get_db)):
-    market = market_for(db, user, platform)
+    market = market_for(db, user, platform, site, language)
     if not market:
         return {'items': [], 'total': 0, 'page': 1, 'page_size': page_size}
     query = select(TitleTask).where(TitleTask.market_id == market.id, TitleTask.kind == kind)
@@ -921,8 +923,8 @@ async def generate_single(db, user, template, image_url, payload):
 
 
 @router.get('/title-statistics')
-def statistics(platform: str = 'TikTok', user: User = Depends(reader), db: Session = Depends(get_db)):
-    market = market_for(db, user, platform)
+def statistics(platform: str = 'TikTok', site: str = 'MY', language: str = 'ms', user: User = Depends(reader), db: Session = Depends(get_db)):
+    market = market_for(db, user, platform, site, language)
     if not market:
         return {'generated': 0, 'adopted': 0, 'manual': 0, 'high_similarity': 0, 'attempts': 0}
     query = select(TitleRecord).where(TitleRecord.market_id == market.id)

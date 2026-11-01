@@ -6,6 +6,7 @@ export interface BatchTitleGroup {
   edited?: boolean
   titleStatus: TitleGenerationStatus
   titleError: string
+  titleMarketStale?: boolean
 }
 
 export interface TitleGenerationProgress {
@@ -33,7 +34,7 @@ export function isUnfinishedTitle(group: BatchTitleGroup): boolean {
 export function hasValidBatchTitles(groups: BatchTitleGroup[]): boolean {
   return groups.length > 0 && groups.every(group => {
     const length = group.title.trim().length
-    return length >= 25 && length <= 255
+    return !group.titleMarketStale && length >= 25 && length <= 255
   })
 }
 

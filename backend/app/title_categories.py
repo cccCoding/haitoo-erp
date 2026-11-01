@@ -299,7 +299,7 @@ def merge_preview(db, market, source_ids, target_id):
             'enabled': row.enabled, 'aliases': sorted(item.name for item in row.names if item.name_key != row.name_key)}
     summary = {'sources': [brief(row) for row in sources], 'target': brief(target),
         'counts': {'keywords': len(keywords), 'templates': len(profiles), 'imports': len(pending)},
-        'notice': '保留目标分类的名称、马来西亚名称和说明；源分类名称及别名转为目标别名。历史证据及已提交标题快照保留。'}
+        'notice': '保留目标分类的名称、站点名称和说明；源分类名称及别名转为目标别名。历史证据及已提交标题快照保留。'}
     token = digest([summary, market.revision,
         [(word.id, word.categories) for word in keywords], [(p.id, p.category) for p in profiles],
         [(task.id, task.state, task.snapshot.get('category_resolution', []), task.result.get('selections', [])) for task in pending]])

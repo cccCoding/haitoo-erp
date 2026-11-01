@@ -1,4 +1,4 @@
-"""可追溯的马来语标题流水线；外部请求期间不持有数据库锁。"""
+"""可追溯的多站点标题流水线；外部请求期间不持有数据库锁。"""
 import copy
 import hashlib
 import json
@@ -14,6 +14,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from .ai_providers import DEEPSEEK_TITLE_MODEL, ProviderError, _public_url
+from .title_markets import check_market, market_labels, localized_value
 from .config import get_settings
 from .credentials import decrypt_secret
 from .models import Company, ProductTemplate, Role, User, UserAIProviderCredential
@@ -57,11 +58,6 @@ def normalized_title(value):
 
 def contains_phrase(text, phrase):
     return bool(phrase and re.search(r"(?<!\w)" + re.escape(normalize(phrase)) + r"(?!\w)", normalize(text)))
-
-
-def check_market(platform="TikTok", site="MY", language="ms"):
-    if platform not in {"TikTok", "Shopee"} or site != "MY" or language != "ms":
-        raise HTTPException(400, "首期仅支持马来西亚站点的马来语词库")
 
 
 def get_market(db, company_id, platform="TikTok", site="MY", language="ms", *, create=False, lock=False):
@@ -138,15 +134,45 @@ async def ask_json(api_key, instructions, data, *, image_url=None, max_tokens=35
         raise ProviderError("标题模型未返回完整结构化结果，请重试") from exc
 
 
-def validate_malay_title(title, maximum=255):
+INDONESIAN_WORDS = set('baju gaun gamis daster hijab kerudung celana rok kemeja kaus blus tunik kebaya jubah wanita pria anak bayi lengan panjang pendek motif bunga polos leher bulat longgar ukuran besar katun kain untuk dengan dan warna harian pakaian menyusui muslimah hitam putih biru merah hijau ungu kuning cokelat resleting dewasa'.split())
+INDONESIAN_GRAMMAR = set('untuk dengan dan yang pada di ke dari oleh dalam serta atau tanpa gaya potongan berlengan berwarna bermotif'.split())
+INDONESIAN_CLAIMS = {
+    '材质': ('katun', 'cotton', 'kapas', 'poliester', 'polyester', 'linen', 'sutra', 'silk', 'viskosa', 'viscose', 'rayon', 'nilon', 'nylon', 'wol', 'wool'),
+    '功能': ('tahan air', 'waterproof', 'anti uv', 'anti-uv', 'perlindungan uv', 'bernapas', 'breathable', 'antibakteri', 'antibacterial'),
+}
+
+
+def title_rules(site='MY', language='ms'):
+    check_market(site=site, language=language)
+    return (INDONESIAN_WORDS, INDONESIAN_GRAMMAR, INDONESIAN_CLAIMS) if site == 'ID' else (MALAY_WORDS, GRAMMAR, PROTECTED_CLAIMS)
+
+
+def validate_localized_title(title, maximum=255, *, site='MY', language='ms'):
+    words, _, _ = title_rules(site, language)
+    label = market_labels(site)['language_name']
     if not isinstance(title, str) or not 25 <= len(title.strip()) <= maximum:
-        raise ProviderError(f"马来语标题长度须为 25–{maximum} 个字符")
+        raise ProviderError(f"{label}标题长度须为 25–{maximum} 个字符")
     title = title.strip()
     if any(c in title for c in ('\n', '\r', '"', '*', '`', '<', '>')) or any(unicodedata.category(c).startswith("C") for c in title):
         raise ProviderError("标题须为单行纯文本，不能包含 Markdown 或控制字符")
-    if re.search(r"[\u3400-\u9fff]", title) or not (set(tokens(title)) & MALAY_WORDS):
-        raise ProviderError("标题须为自然马来语，不能返回纯英文或中文")
+    if re.search(r"[\u3400-\u9fff]", title) or not (set(tokens(title)) & words):
+        raise ProviderError(f"标题须为自然{label}，不能返回纯英文或中文")
     return title
+
+
+def validate_malay_title(title, maximum=255):
+    # 保留历史调用入口（货盘及旧任务）。
+    return validate_localized_title(title, maximum)
+
+
+def validate_confirmed_claims(title, facts, selected, site='MY', language='ms'):
+    _, _, claims_by_tag = title_rules(site, language)
+    for tag, claims in claims_by_tag.items():
+        permitted_tags = {tag, '面料'} if tag == '材质' else {tag}
+        confirmed = [localized_value(f) for f in facts if f['source'] == 'manual' and f['tag'] in permitted_tags]
+        confirmed += [w['phrase'] for w in selected if w['tag'] in permitted_tags]
+        if any(contains_phrase(title, claim) and not any(contains_phrase(proof, claim) for proof in confirmed) for claim in claims):
+            raise ProviderError('面料或功能词缺少对应的人工确认事实')
 
 
 def keyword_data(row):
@@ -199,7 +225,7 @@ def profile_snapshot(db, market, template_id, *, require_fallback=False):
     if issues:
         raise HTTPException(400, '请先到标题词库 → 模板配置，配置商品品类、性别、年龄及确认属性：' + '；'.join(issues))
     if require_fallback and (not profile.fallback_title or not profile.fallback_approved):
-        raise HTTPException(400, "请先配置并审核马来语货盘兜底标题")
+        raise HTTPException(400, "请先配置并审核对应站点语言的货盘兜底标题")
     attributes, _ = profile_attributes(profile.attributes, definitions)
     observed = select(TitleEvidence.keyword_id, TitleEvidence.source_name, TitleEvidence.source_product,
         TitleEvidence.period).where(TitleEvidence.market_id == market.id, TitleEvidence.source_kind == 'titles').distinct().subquery()
@@ -251,7 +277,7 @@ def match_keywords(snapshot, facts):
         if category not in {normalize(c) for c in word["categories"]}:
             continue
         values = [normalize(v) for f in facts['attributes'] if canonical_tag(f['tag']) == canonical_tag(word['tag'])
-                  for v in (f['value'], f['ms'])]
+                  for v in (f['value'], localized_value(f))]
         options = [word["phrase"], word["translation"], *word["synonyms"]]
         applicable = any(normalize(o) == v for o in options for v in values)
         if applicable:
@@ -291,16 +317,17 @@ async def identify_facts(db, market_id, snapshot, image_url, api_key):
         manual['性别'] = snapshot['gender']
     if snapshot.get('age_group'):
         manual['年龄'] = snapshot['age_group']
-    category_ms = snapshot.get('category_localized_name')
-    cache_key = digest(["facts-v3", image_url, manual, category_ms, snapshot["platform"], snapshot["site"], snapshot["language"]])
+    category_localized = snapshot.get('category_localized_name')
+    cache_key = digest(["facts-v4", image_url, manual, category_localized, snapshot["platform"], snapshot["site"], snapshot["language"]])
     cache = db.scalar(select(TitleAttributeCache).where(TitleAttributeCache.market_id == market_id,
                                                       TitleAttributeCache.cache_key == cache_key))
     if cache:
         return copy.deepcopy(cache.facts)
+    locale = market_labels(snapshot['site'])
     instructions = (
-        'Identify clothing attributes and translate each confirmed value into Bahasa Melayu for MY. '
+        f"Identify clothing attributes and translate each confirmed value into {locale['model_language']} for {snapshot['site']}. "
         'Return {"attributes":[{"tag":"one supplied tag", "value":"original confirmed value", '
-        '"ms":"minimal Malay expression", "evidence":"specific evidence", "source":"manual or image"}], '
+        '"localized_value":"minimal target-language expression", "evidence":"specific evidence", "source":"manual or image"}], '
         '"conflicts":[]}. Include every manual attribute verbatim as value, with source manual. '
         'Only visually establish category, color, pattern, silhouette, length, neckline and visible details. '
         'Never infer fiber, function, religion, ethnicity, age, gender or occasion from model appearance. '
@@ -318,21 +345,21 @@ async def identify_facts(db, market_id, snapshot, image_url, api_key):
     for fact in answer.get("attributes", [])[:40]:
         if not isinstance(fact, dict):
             continue
-        tag, value, ms = fact.get("tag"), fact.get("value"), fact.get("ms")
-        if tag not in TAGS or not all(isinstance(v, str) and v.strip() and len(v) <= 255 for v in (value, ms, fact.get("evidence"))):
+        tag, value, expression = fact.get("tag"), fact.get("value"), localized_value(fact)
+        if tag not in TAGS or not all(isinstance(v, str) and v.strip() and len(v) <= 255 for v in (value, expression, fact.get("evidence"))):
             continue
         source = fact.get("source")
         if source == "manual" and tag in manual and normalize(value) == normalize(manual[tag]):
-            attributes.append({"tag": tag, "value": value, "ms": ms, "evidence": fact["evidence"], "source": source})
+            attributes.append({"tag": tag, "value": value, "localized_value": expression, "evidence": fact["evidence"], "source": source})
         elif source == "image" and image_url and not warnings and tag in VISUAL_TAGS and tag not in manual:
-            attributes.append({"tag": tag, "value": value, "ms": ms, "evidence": fact["evidence"], "source": source})
+            attributes.append({"tag": tag, "value": value, "localized_value": expression, "evidence": fact["evidence"], "source": source})
     if set(manual) - {f["tag"] for f in attributes if f["source"] == "manual"}:
         raise ProviderError("模型未完整保留模板确认属性，请重试")
-    if category_ms:
-        # 品类的马来语表达直接采用运营确认的站点名称，不让模型重复翻译。
+    if category_localized:
+        # 品类的目标语言表达直接采用运营确认的站点名称，不让模型重复翻译。
         attributes = [fact for fact in attributes if fact['tag'] != '品类']
-        attributes.insert(0, {'tag': '品类', 'value': snapshot['category'], 'ms': category_ms,
-            'evidence': '产品分类中已确认的马来西亚名称', 'source': 'manual'})
+        attributes.insert(0, {'tag': '品类', 'value': snapshot['category'], 'localized_value': category_localized,
+            'evidence': f"产品分类中已确认的{locale['site_name']}名称", 'source': 'manual'})
     facts = {"attributes": attributes, "warnings": warnings}
     try:
         with db.begin_nested():
@@ -438,6 +465,8 @@ async def generate_record(db, record_id, api_key=None):
             db.commit()
             db.refresh(record)
         facts = copy.deepcopy(record.facts)
+        locale = market_labels(market.site)
+        _, grammar, _ = title_rules(market.site, market.language)
         candidates = match_keywords(snapshot, facts)
         history = db.scalars(select(TitleRecord).where(TitleRecord.market_id == market.id,
             TitleRecord.category == record.category, TitleRecord.id != record.id, TitleRecord.title.is_not(None),
@@ -469,9 +498,9 @@ async def generate_record(db, record_id, api_key=None):
             db.refresh(record)
             try:
                 answer = await ask_json(api_key,
-                    'Tulis satu tajuk produk Bahasa Melayu Malaysia yang semula jadi. '
+                    f"Write one natural product title in {locale['model_language']}. "
                     'Return {"title":"..."}. Use every selected phrase exactly, keep core category. '
-                    'Only confirmed facts and selected phrases may supply content words; Malay grammar words are allowed. '
+                    f"Only confirmed facts and selected phrases may supply content words; {locale['model_language']} grammar words are allowed. "
                     'No invented material, function, audience, brand, marketing, season or occasion. '
                     'Prefer <=200 characters, minimum25; never truncate a word. Vary natural ordering and optional real attributes. '
                     'Template requirements are default style preferences; per-request requirements refine them. '
@@ -481,26 +510,21 @@ async def generate_record(db, record_id, api_key=None):
                      "template_requirements": snapshot.get("title_template") or "",
                      "style": snapshot.get("additional_requirements", ""), "maximum": 220 if snapshot.get("supply") else 255,
                      "avoid": [r["title"] for r in recent[-12:]], "feedback": feedback}, max_tokens=700)
-                title = validate_malay_title(answer.get("title"), 220 if snapshot.get("supply") else 255)
-                core = next(f["ms"] for f in facts["attributes"] if f["tag"] == "品类")
+                title = validate_localized_title(answer.get("title"), 220 if snapshot.get("supply") else 255, site=market.site, language=market.language)
+                core = next(localized_value(f) for f in facts["attributes"] if f["tag"] == "品类")
                 if not contains_phrase(title, core) or any(not contains_phrase(title, w["phrase"]) for w in selected):
                     raise ProviderError("标题遗漏核心品类或选定词组")
                 if any(contains_phrase(title, p) for p in snapshot["forbidden_phrases"]):
                     raise ProviderError("标题包含禁用词")
-                allowed = set(tokens(" ".join([f["ms"] for f in facts["attributes"]] + [w["phrase"] for w in selected]))) | GRAMMAR
+                allowed = set(tokens(" ".join([localized_value(f) for f in facts["attributes"]] + [w["phrase"] for w in selected]))) | grammar
                 if set(tokens(title)) - allowed:
                     raise ProviderError("标题新增了未经确认的属性词或借词")
-                for tag, claims in PROTECTED_CLAIMS.items():
-                    permitted_tags = {tag, '面料'} if tag == '材质' else {tag}
-                    confirmed = [f['ms'] for f in facts['attributes'] if f['source'] == 'manual' and f['tag'] in permitted_tags]
-                    confirmed += [w['phrase'] for w in selected if w['tag'] in permitted_tags]
-                    if any(contains_phrase(title, claim) and not any(contains_phrase(proof, claim) for proof in confirmed) for claim in claims):
-                        raise ProviderError('面料或功能词缺少对应的人工确认事实')
+                validate_confirmed_claims(title, facts['attributes'], selected, market.site, market.language)
                 warnings = list(facts.get("warnings", [])) + ["按首图描述，请核对其他 SKU"]
                 if not any(w["tag"] == "品类" for w in selected):
-                    warnings.append("词库覆盖不足，核心品类使用确认事实的马来语表达；未自动入库")
-                non_library = [f["ms"] for f in facts["attributes"] if contains_phrase(title, f["ms"]) and
-                               not any(normalize(f["ms"]) == normalize(w["phrase"]) for w in selected)]
+                    warnings.append(f"词库覆盖不足，核心品类使用确认事实的{locale['language_name']}表达；未自动入库")
+                non_library = [localized_value(f) for f in facts["attributes"] if contains_phrase(title, localized_value(f)) and
+                               not any(normalize(localized_value(f)) == normalize(w["phrase"]) for w in selected)]
                 if non_library:
                     warnings.append("非词库词：" + "、".join(non_library))
                 high = any(similarity(title, old["title"], selected, old["keywords"]) for old in recent)
@@ -577,16 +601,18 @@ def adopt_record(db, draft, user, generation_id=None, *, platform='TikTok'):
         raise HTTPException(400, "首图已改变，请重新生成标题")
     if normalized_title(draft.title) != normalized_title(record.title):
         try:
-            validate_malay_title(draft.title)
+            validate_localized_title(draft.title, site=market.site, language=market.language)
+            _, grammar, _ = title_rules(market.site, market.language)
             facts = record.facts.get('attributes', [])
-            core = next((f['ms'] for f in facts if f['tag'] == '品类'), None)
+            core = next((localized_value(f) for f in facts if f['tag'] == '品类'), None)
             if core and not contains_phrase(draft.title, core):
                 raise ProviderError('人工修改不能删除核心品类')
             if any(contains_phrase(draft.title, phrase) for phrase in record.snapshot.get('forbidden_phrases', [])):
                 raise ProviderError('人工标题包含禁用词')
-            allowed = set(tokens(' '.join([f['ms'] for f in facts] + [w['phrase'] for w in record.selected_keywords]))) | GRAMMAR
+            allowed = set(tokens(' '.join([localized_value(f) for f in facts] + [w['phrase'] for w in record.selected_keywords]))) | grammar
             if facts and set(tokens(draft.title)) - allowed:
                 raise ProviderError('人工标题包含未经确认的商品词，请先更新模板确认属性并重新生成')
+            validate_confirmed_claims(draft.title, facts, record.selected_keywords, market.site, market.language)
         except ProviderError as exc:
             raise HTTPException(400, str(exc)) from exc
         if previous and previous.title == draft.title:

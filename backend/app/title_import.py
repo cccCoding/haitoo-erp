@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from openpyxl import load_workbook
 from sqlalchemy import select
 
+from .title_markets import check_market, market_labels
 from .title_models import TitleEvidence, TitleKeyword, TitleMarket, TitleImportWord
 from .title_service import TAGS, ask_json, digest, normalize
 from .title_dictionary import name_key, tag_entry
@@ -21,7 +22,16 @@ IMPORT_OPTIONAL_COLUMNS = ('商品ID', '链接')
 IGNORED_METRIC_COLUMNS = {'销量', '搜索热度', '竞争度', '搜索曝光', '搜索点击', '搜索转化', '搜索来源', '搜索周期'}
 
 
-def parse_file(content, filename, kind, *, allowed_tags=None):
+def keyword_column_names(site='MY'):
+    if site == 'ID':
+        return {'词语': '印尼语词语', **{key: value for key, value in KEYWORD_COLUMN_NAMES.items() if key != '马来语词语'}}
+    return KEYWORD_COLUMN_NAMES
+
+
+def parse_file(content, filename, kind, *, allowed_tags=None, site='MY', language='ms'):
+    check_market(site=site, language=language)
+    phrase_key = '词语' if site == 'ID' else '马来语词语'
+    phrase_label = market_labels(site)['language_name'] + '词语'
     allowed_tags = TAGS if allowed_tags is None else allowed_tags
     if not content or len(content) > MAX_BYTES:
         raise HTTPException(400, "文件为空或超过 20MB")
@@ -44,7 +54,7 @@ def parse_file(content, filename, kind, *, allowed_tags=None):
             raise ValueError("文件没有数据")
         headers = [str(c or '').strip() for c in rows[0]]
         # 保持任务快照内的字段稳定，同时接受新列名和历史模板列名。
-        column_names = TITLE_COLUMN_NAMES if kind == 'titles' else KEYWORD_COLUMN_NAMES
+        column_names = TITLE_COLUMN_NAMES if kind == 'titles' else keyword_column_names(site)
         aliases = {label: field for field, label in column_names.items()}
         headers = [aliases.get(header, header) for header in headers]
         required = list(column_names)
@@ -73,10 +83,10 @@ def parse_file(content, filename, kind, *, allowed_tags=None):
                 if normalize(values['属性分类']) not in tag_names:
                     raise ValueError(f"第 {row_number} 行标签不存在或已停用，请先在标签管理中维护")
                 values['属性分类'] = tag_names[normalize(values['属性分类'])]
-                if len(values['马来语词语']) > 160 or len(values['中文释义']) > 255:
+                if len(values[phrase_key]) > 160 or len(values['中文释义']) > 255:
                     raise ValueError(f"第 {row_number} 行词语或释义过长")
-                if re.search(r'[\u3400-\u9fff]', values['马来语词语']):
-                    raise ValueError(f"第 {row_number} 行马来语词语不能包含中文")
+                if re.search(r'[\u3400-\u9fff]', values[phrase_key]):
+                    raise ValueError(f"第 {row_number} 行{phrase_label}不能包含中文")
             if len(values.get('商品品类', values.get('适用品类', ''))) > 255:
                 raise ValueError(f"第 {row_number} 行品类过长")
             parsed.append({'row': row_number, 'values': values, 'metrics': {}})
@@ -123,28 +133,31 @@ def validate_word(word, row, kind, allowed_tags=None):
         'synonyms': [], 'conflicts': [], 'row': row['row']}
 
 
-async def extract_row(row, kind, api_key=None, *, allowed_tags=None, tag_semantics=None):
+async def extract_row(row, kind, api_key=None, *, allowed_tags=None, tag_semantics=None, site='MY', language='ms'):
+    check_market(site=site, language=language)
+    locale = market_labels(site)
     allowed_tags = TAGS if allowed_tags is None else allowed_tags
     if kind == 'keywords':
         v = row['values']
-        word = validate_word({'phrase': v['马来语词语'], 'translation': v['中文释义'], 'tag': v['属性分类'],
+        word = validate_word({'phrase': v.get('词语', v.get('马来语词语')), 'translation': v['中文释义'], 'tag': v['属性分类'],
                              'is_borrowed': v.get('是否借词') in ('是', 'Y', 'true')}, row, kind, allowed_tags)
         word['synonyms'] = split_values(v.get('同义表达'))
         return [word]
     answer = await ask_json(api_key,
-        'Extract all independently meaningful original Malay keyword phrases from one MY clothing title. '
-        'Return {"language":"ms or other", "keywords":[{"phrase":"EXACT contiguous original substring", "translation":"accurate Chinese meaning", '
+        f"Extract all independently meaningful original {locale['model_language']} keyword phrases from one {site} clothing title. "
+        f'Return {{"language":"{language} or other", "keywords":['
+        '{"phrase":"EXACT contiguous original substring", "translation":"accurate Chinese meaning", '
         '"tag":"one allowed tag", "is_borrowed":false}]}. Keep complete phrases, reduplication and hyphens. '
-        'Do not translate English into invented Malay. Mark English loan expressions as borrowed. '
+        f"Do not translate English into invented {locale['model_language']}. Mark English loan expressions as borrowed. "
         'Distinguish brands, shop names and promotional claims using 品牌 or 营销修饰. '
-        'Set language to ms only for a Malay title (Malay with English loan phrases is allowed). '
+        f"Set language to {language} only for a {locale['model_language']} title (English loan phrases are allowed). "
         'Set other for English-only or other-language titles. '
         'Never infer attributes, search heat or competition from title. Do not extract grammar words.',
         {'title': row['values']['原标题'], 'category': row['values']['商品品类'], 'allowed_tags': allowed_tags,
          'tag_semantics': tag_semantics or {tag: tag for tag in allowed_tags}}, max_tokens=3000)
     words = answer.get('keywords')
-    if answer.get('language') != 'ms':
-        raise ValueError('原标题未识别为马来语，请核对语言；不得把英文标题翻译后当作原文提词')
+    if answer.get('language') != language:
+        raise ValueError(f"原标题未识别为{locale['language_name']}，请核对语言；不得把英文标题翻译后当作原文提词")
     if not isinstance(words, list) or not words or len(words) > 60:
         raise ValueError('模型未返回有效提词列表')
     return [validate_word(w, row, kind, allowed_tags) for w in words]

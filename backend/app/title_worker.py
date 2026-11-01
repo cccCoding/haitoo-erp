@@ -95,7 +95,8 @@ async def run_task(identity, owner, session_factory=SessionLocal):
                     api_key = credential(db, user_id, market_company) if snapshot['kind'] == 'titles' else None
                 try:
                     words = await extract_row(row, snapshot['kind'], api_key, allowed_tags=snapshot.get('allowed_tags'),
-                                              tag_semantics=snapshot.get('tag_semantics'))
+                                              tag_semantics=snapshot.get('tag_semantics'),
+                                              site=snapshot.get('site', 'MY'), language=snapshot.get('language', 'ms'))
                     def save_words(db, task, market):
                         result = copy.deepcopy(task.result)
                         if row_key not in result.setdefault('completed_rows', []):

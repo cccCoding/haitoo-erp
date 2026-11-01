@@ -2,11 +2,13 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import axios from 'axios'
 import SearchableSelect from './SearchableSelect.vue'
+import { titleMarket, titleMarketParams, type TitleSite } from './title-markets'
 import { titleTagLabel } from './title-labels'
 
-const props = withDefaults(defineProps<{ token: string; templateId: number; platform?: string; readonly?: boolean; showFallback?: boolean }>(), { showFallback: false, platform: 'TikTok', readonly: false })
+const props = withDefaults(defineProps<{ token: string; templateId: number; platform?: string; site?: TitleSite; readonly?: boolean; showFallback?: boolean }>(), { showFallback: false, platform: 'TikTok', site: 'MY', readonly: false })
 const emit = defineEmits<{ saved: []; busy: [value: boolean] }>()
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' })
+const market = computed(() => titleMarket(props.site))
 const config = computed(() => ({ headers: { Authorization: `Bearer ${props.token}` } }))
 const form = ref<any>({ category: '', gender: '', age_group: '', fallback_title: '', fallback_approved: false })
 const attributes = ref<{ tag: string; value: string }[]>([]), tags = ref<string[]>([])
@@ -43,11 +45,11 @@ function toggleForbidden(value: string | number | null) {
 }
 let revision = 0
 watch(busy, value => emit('busy', value))
-watch(() => [props.templateId, props.platform, props.token], async () => {
+watch(() => [props.templateId, props.platform, props.site, props.token], async () => {
   const current = ++revision
   error.value = ''; notice.value = ''; busy.value = true; loaded.value = false
   try {
-    const { data } = await api.get(`/title-profiles/${props.templateId}`, { ...config.value, params: { platform: props.platform } })
+    const { data } = await api.get(`/title-profiles/${props.templateId}`, { ...config.value, params: { platform: props.platform, ...titleMarketParams(props.site) } })
     if (current !== revision) return
     const definitions: { name: string; semantic_tag: string }[] = data.attribute_tags || []
     const semantic = (tag: string) => definitions.find(item => item.name === tag)?.semantic_tag || (tag === '面料' ? '材质' : tag)
@@ -88,7 +90,7 @@ async function save() {
       if (item.tag in confirmed) throw new Error('同一标签只能选择一次')
       confirmed[item.tag] = item.value.trim()
     }
-    const payload = { platform: props.platform, site: 'MY', language: 'ms', category: form.value.category,
+    const payload = { platform: props.platform, ...titleMarketParams(props.site), category: form.value.category,
       gender: form.value.gender, age_group: form.value.age_group, attributes: confirmed,
       category_names: [], locked_keyword_ids: [], forbidden_keyword_ids: forbiddenIds.value,
       fallback_title: form.value.fallback_title?.trim() || null,
@@ -103,7 +105,7 @@ async function save() {
 
 <template>
   <section class="title-profile-editor">
-    <p>马来西亚 · 马来语。产品分类、性别和年龄用于词库匹配；面料及其他标签请选择符合商品事实的已导入关键词。</p>
+    <p>{{market.siteName}} · {{market.languageName}}。产品分类、性别和年龄用于词库匹配；面料及其他标签请选择符合商品事实的已导入关键词。</p>
     <p v-if="legacyAudience" class="profile-warning">旧配置：{{legacyAudience}}。请按下方标准选项重新确认。</p>
     <form @submit.prevent="save">
       <fieldset :disabled="busy || readonly || !loaded">
@@ -130,8 +132,8 @@ async function save() {
           <div v-if="forbiddenIds.length" class="profile-keyword-chips" aria-label="已选禁用关键词"><span v-for="id in forbiddenIds" :key="id">{{forbiddenLabel(id)}}<button v-if="!readonly" type="button" :disabled="selectorDisabled" :aria-label="`移除禁用关键词 ${forbiddenLabel(id)}`" @click="toggleForbidden(id)">×</button></span></div>
           <small>选中的关键词不会出现在本模板的词库标题中，最多选择 100 个。</small>
         </div>
-        <label v-if="showFallback">马来语货盘兜底标题<textarea v-model="form.fallback_title" rows="2" minlength="25" maxlength="220" /></label>
-        <label v-if="showFallback" class="title-checkbox"><input v-model="form.fallback_approved" type="checkbox" />我已审核马来语兜底标题</label>
+        <label v-if="showFallback">{{market.languageName}}货盘兜底标题<textarea v-model="form.fallback_title" rows="2" minlength="25" maxlength="220" /></label>
+        <label v-if="showFallback" class="title-checkbox"><input v-model="form.fallback_approved" type="checkbox" />我已审核{{market.languageName}}兜底标题</label>
         <button v-if="!readonly" type="submit" class="primary profile-save">{{busy?'保存中…':'保存模板配置'}}</button>
       </fieldset>
     </form>

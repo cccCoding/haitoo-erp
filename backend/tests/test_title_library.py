@@ -432,7 +432,7 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             self.assertEqual(snapshot['category_localized_name'], 'Gaun')
             with patch('app.title_service.ask_json', new=self.model()) as model:
                 first = asyncio.run(identify_facts(db, get_market(db, 1).id, snapshot, 'https://img.example/1.png', 'test-key'))
-                self.assertEqual(next(f['ms'] for f in first['attributes'] if f['tag'] == '品类'), 'Gaun')
+                self.assertEqual(next(f['localized_value'] for f in first['attributes'] if f['tag'] == '品类'), 'Gaun')
 
                 cached = asyncio.run(identify_facts(db, get_market(db, 1).id, snapshot, 'https://img.example/1.png', 'test-key'))
                 self.assertEqual(model.await_count, 1)
@@ -441,9 +441,9 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
                 latest = profile_snapshot(db, get_market(db, 1), 1)
                 updated = asyncio.run(identify_facts(db, get_market(db, 1).id, latest, 'https://img.example/1.png', 'test-key'))
                 self.assertEqual(model.await_count, 2)
-                self.assertEqual(next(f['ms'] for f in updated['attributes'] if f['tag'] == '品类'), 'Gaun Panjang')
+                self.assertEqual(next(f['localized_value'] for f in updated['attributes'] if f['tag'] == '品类'), 'Gaun Panjang')
                 self.assertEqual(snapshot['category_localized_name'], 'Gaun')
-                self.assertEqual(next(f['ms'] for f in first['attributes'] if f['tag'] == '品类'), 'Gaun')
+                self.assertEqual(next(f['localized_value'] for f in first['attributes'] if f['tag'] == '品类'), 'Gaun')
 
     def test_category_keyword_count_matches_filtered_words_after_merge_and_preserves_reference_guard(self):
         self.profile(); self.import_words(content=KEYWORDS+'gaun panjang,连衣裙,连衣裙,品类,否\n')

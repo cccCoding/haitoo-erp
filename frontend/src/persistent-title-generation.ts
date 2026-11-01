@@ -56,7 +56,7 @@ export function createPersistentTitleGenerator<Group extends PersistentTitleGrou
           if (item?.title && ['queued','running'].includes(group.titleStatus)) {
             group.title = item.title; group.generation_id = item.generation_id
             group.titleWarnings = item.warnings || []; group.titleKeywords = item.keywords || []
-            group.edited = true; group.titleStatus = 'success'
+            group.edited = true; group.titleStatus = 'success'; group.titleMarketStale = false
             progress.succeeded++; progress.completed++
           } else if (item?.state === 'failed' && ['queued','running'].includes(group.titleStatus)) {
             group.titleStatus = 'failed'; group.titleError = item.error || '标题生成失败'

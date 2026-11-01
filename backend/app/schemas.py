@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Literal
 from pydantic import ConfigDict, BaseModel, EmailStr, Field, PositiveInt, field_serializer, field_validator, model_validator
 from .models import Role, TaskStatus
+from .title_markets import TitleMarketSelection
 
 
 class LoginInput(BaseModel):
@@ -391,11 +392,9 @@ class MaterialDraftBatchCreate(BaseModel):
     groups: list[MaterialDraftBatchGroup] = Field(min_length=1, max_length=MAX_PRODUCT_LIBRARY_SELECTION // 5)
 
 
-class DraftTitleGenerate(BaseModel):
+class DraftTitleGenerate(TitleMarketSelection):
     method: Literal['prompt', 'library'] = 'prompt'
     platform: Literal["TikTok", "Shopee"] = "TikTok"
-    site: Literal["MY"] = "MY"
-    language: Literal["ms"] = "ms"
     request_key: str | None = Field(default=None, min_length=8, max_length=128)
     image_url: str = Field(min_length=1, max_length=500)
     additional_requirements: str = Field(default="", max_length=1000)
@@ -704,11 +703,9 @@ class MaterialImportConfirmInput(BaseModel):
     request_key: str = Field(min_length=8, max_length=96)
 
 
-class ProductLibraryTitleGenerate(ProductLibraryDraftSource):
+class ProductLibraryTitleGenerate(ProductLibraryDraftSource, TitleMarketSelection):
     method: Literal['prompt', 'library'] = 'prompt'
     platform: Literal["TikTok", "Shopee"] = "TikTok"
-    site: Literal["MY"] = "MY"
-    language: Literal["ms"] = "ms"
     request_key: str | None = Field(default=None, min_length=8, max_length=128)
     additional_requirements: str = Field(default="", max_length=1000)
 

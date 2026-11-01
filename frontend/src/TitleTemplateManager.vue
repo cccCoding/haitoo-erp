@@ -3,10 +3,11 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import axios from 'axios'
 import TitleProfileEditor from './TitleProfileEditor.vue'
 import TitlePagination from './TitlePagination.vue'
+import { titleMarketParams, type TitleSite } from './title-markets'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
 
 type TemplateConfiguration = { id: number; name: string; cover_url: string | null; is_platform: boolean; category: string; category_localized_name: string | null; gender: string | null; age_group: string | null; material: string; attributes: Record<string,string>; configuration_issues: string[]; ready: boolean }
-const props = defineProps<{ token: string; admin: boolean; categories: { name: string; enabled: boolean }[] }>()
+const props = defineProps<{ token: string; admin: boolean; site: TitleSite; categories: { name: string; enabled: boolean }[] }>()
 const emit = defineEmits<{ changed: [] }>()
 const api = axios.create({baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000'})
 const rows = ref<TemplateConfiguration[]>([]), total = ref(0), page = ref(1), pageSize = ref(20)
@@ -17,7 +18,7 @@ async function load() {
   const current = ++revision
   loading.value = true; error.value = ''
   try {
-    const {data} = await api.get('/title-template-configurations', {headers:{Authorization:`Bearer ${props.token}`},params:{q:search.value,category:category.value,state:state.value,page:page.value,page_size:pageSize.value}})
+    const {data} = await api.get('/title-template-configurations', {headers:{Authorization:`Bearer ${props.token}`},params:{...titleMarketParams(props.site),q:search.value,category:category.value,state:state.value,page:page.value,page_size:pageSize.value}})
     if(current!==revision)return
     rows.value = data.items; total.value = data.total;page.value=data.page||1;loadedPage=page.value;loadedPageSize=pageSize.value
   } catch(e:any) { if(current===revision){page.value=loadedPage;pageSize.value=loadedPageSize;error.value = typeof e.response?.data?.detail==='string'?e.response.data.detail:'读取模板配置失败'} }
@@ -58,7 +59,7 @@ onUnmounted(()=>{revision++})
     <TitlePagination label="模板配置" :page="page" :page-size="pageSize" :total="total" :disabled="loading" @page="changePage" @page-size="changePageSize" />
     <div v-if="editing" class="modal-backdrop" @click.self="close"><section v-dialog-focus="{close,busy:editingBusy}" class="modal-card template-config-dialog" role="dialog" aria-modal="true" aria-labelledby="template-config-title">
       <div class="template-config-dialog-heading"><h2 id="template-config-title">{{editing.name}} · 词库配置</h2><button class="ghost" :disabled="editingBusy" aria-label="关闭模板词库配置" @click="close">×</button></div>
-      <TitleProfileEditor :token="token" :template-id="editing.id" :readonly="!admin" @busy="editingBusy=$event" @saved="saved" />
+      <TitleProfileEditor :site="site" :token="token" :template-id="editing.id" :readonly="!admin" @busy="editingBusy=$event" @saved="saved" />
     </section></div>
   </section>
 </template>

@@ -15,6 +15,7 @@ import StyleSelect from './StyleSelect.vue'
 import { applySelectedStyle, commonStyleTemplate, styleOptions, type MaterialStyle } from './material-styles'
 import { deduplicatedImageUpload, imageSha256, transferItem, type MaterialTransferItem } from './material-transfer'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
+import { titleMarket, titleMarkets, titleMarketParams, invalidateTitleMarket, type TitleSite } from './title-markets'
 import { batchTitleRequest, createBatchTitleGenerator, emptyTitleGenerationProgress, hasValidBatchTitles, isUnfinishedTitle, titleGenerationStatusLabels, type BatchTitleGroup } from './batch-title-generation'
 import { createPersistentTitleGenerator } from './persistent-title-generation'
 import { createTaskBatchRetrier } from './task-batch-retry'
@@ -101,9 +102,12 @@ function materialSourceLabel(source:string) { return ({ai_created:'AI创作',loc
 
 const selectedMaterialAssetIds = ref<number[]>([]), materialTemplateFilterId = ref<number | null>(null), showMaterialDraftDialog = ref(false), materialDraftTemplateId = ref<number | null>(null), materialDraftTitle = ref(''), materialDraftProductDescription = ref(''), materialDraftSizeChartPreview = ref(''), materialDraftTitleGenerating = ref(false), materialDraftSaving = ref(false)
 const materialDraftAdditionalRequirements = ref(''), showDraftAdditionalRequirements = ref(false), showDraftTitleHelp = ref(false)
-watch(showMaterialDraftDialog, () => { materialDraftTitleResult.value=null; materialDraftAdditionalRequirements.value = ''; showDraftAdditionalRequirements.value = false; showDraftTitleHelp.value = false })
+watch(showMaterialDraftDialog, () => { materialDraftTitleSite.value = 'MY'; materialDraftTitleResult.value=null; materialDraftAdditionalRequirements.value = ''; showDraftAdditionalRequirements.value = false; showDraftTitleHelp.value = false })
 
 const materialTitlePlatform = ref('TikTok')
+const materialDraftTitleSite = ref<TitleSite>('MY'), materialBatchTitleSite = ref<TitleSite>('MY')
+let materialDraftGenerationRevision = 0
+watch([showMaterialDraftDialog, materialDraftTitleSite], () => { materialDraftGenerationRevision++; materialDraftTitleResult.value = null }, { flush: 'sync' })
 type TitleMethod = 'prompt' | 'library'
 const materialDraftTitleMethod = ref<TitleMethod>('prompt'), materialBatchTitleMethod = ref<TitleMethod>('prompt')
 const materialDraftTitleResult = ref<any>(null)
@@ -131,11 +135,11 @@ const legacyMaterialBatchTitleGenerator = createBatchTitleGenerator<MaterialBatc
   },
   isCurrent: group => showMaterialBatchDraftDialog.value && materialBatchGroups.value.includes(group),
   onFatal: message => showToast(message),
-  onGenerated: group => {group.generation_id=undefined;group.titleWarnings=[];group.titleKeywords=[]},
+  onGenerated: group => {group.titleMarketStale=false;group.generation_id=undefined;group.titleWarnings=[];group.titleKeywords=[]},
 })
 const persistentMaterialBatchTitleGenerator = createPersistentTitleGenerator<MaterialBatchGroup>({
   progress: materialBatchTitleProgress.value,
-  submit: async groups => (await api.post('/title-generation-jobs', {template_id:draftSelectionTemplateId.value, request_key:crypto.randomUUID(), from_library:libraryDraftMode.value, platform:materialTitlePlatform.value, site:'MY', language:'ms', groups:groups.map(group=>({key:String(group.id),source:libraryDraftMode.value?librarySource(group.assets[0]):{source_type:'material',id:group.assets[0].id},additional_requirements:group.additionalRequirements}))}, {headers:headers.value})).data,
+  submit: async groups => (await api.post('/title-generation-jobs', {template_id:draftSelectionTemplateId.value, request_key:crypto.randomUUID(), from_library:libraryDraftMode.value, platform:materialTitlePlatform.value, ...titleMarketParams(materialBatchTitleSite.value), groups:groups.map(group=>({key:String(group.id),source:libraryDraftMode.value?librarySource(group.assets[0]):{source_type:'material',id:group.assets[0].id},additional_requirements:group.additionalRequirements}))}, {headers:headers.value})).data,
   poll: async id => (await api.get(`/title-tasks/${id}`,{headers:headers.value})).data,
   cancel: async id => api.post(`/title-tasks/${id}/cancel`,{}, {headers:headers.value}),
   isCurrent: group => showMaterialBatchDraftDialog.value && materialBatchGroups.value.includes(group),
@@ -149,8 +153,10 @@ const materialBatchTitleGenerator = {
   stop(){persistentMaterialBatchTitleGenerator.stop();legacyMaterialBatchTitleGenerator.stop()},
   reset(){persistentMaterialBatchTitleGenerator.reset();legacyMaterialBatchTitleGenerator.reset()},
 }
+watch(materialBatchTitleSite, () => { materialBatchTitleGenerator.reset(); invalidateTitleMarket(materialBatchGroups.value) }, { flush: 'sync' })
 watch(materialTitlePlatform,()=>{materialDraftTitleResult.value=null;materialBatchTitleGenerator.reset();for(const group of materialBatchGroups.value){group.generation_id=undefined;group.titleWarnings=[];group.titleKeywords=[]}})
 watch(showMaterialBatchDraftDialog, visible => {
+  if (visible) materialBatchTitleSite.value = 'MY'
   if (!visible) materialBatchTitleGenerator.reset()
   for (const group of materialBatchGroups.value) { group.additionalRequirements = ''; group.showAdditionalRequirements = false; group.showTitleHelp = false }
 }, { flush: 'sync' })
@@ -1572,12 +1578,12 @@ function onMaterialDraftTemplateChange() {
 }
 async function generateMaterialDraftTitle(method:TitleMethod='prompt') {
   if (materialDraftTitleGenerating.value || !materialDraftTemplateId.value || !materialDraftAssets.value[0]) return
-  const firstAsset = materialDraftAssets.value[0], fromLibrary = libraryDraftMode.value, templateId=materialDraftTemplateId.value, editRevision=materialDraftTitleManualRevision.value
+  const firstAsset = materialDraftAssets.value[0], fromLibrary = libraryDraftMode.value, templateId=materialDraftTemplateId.value, editRevision=materialDraftTitleManualRevision.value, generationRevision=materialDraftGenerationRevision
   try {
     materialDraftTitleGenerating.value = true
     materialDraftTitleMethod.value=method
-    const { data } = await api.post(libraryDraftMode.value ? '/product-library/generate-draft-title' : `/templates/${materialDraftTemplateId.value}/generate-draft-title`, { ...(libraryDraftMode.value ? librarySource(materialDraftAssets.value[0]) : { image_url: materialDraftAssets.value[0].url }), method, additional_requirements: materialDraftAdditionalRequirements.value.trim(), platform:materialTitlePlatform.value, site:'MY', language:'ms', request_key:crypto.randomUUID() }, { headers: headers.value, timeout:360000 })
-    if (!showMaterialDraftDialog.value || libraryDraftMode.value !== fromLibrary || materialDraftAssets.value[0]?.id !== firstAsset.id || materialDraftTemplateId.value!==templateId || materialDraftTitleManualRevision.value!==editRevision) return
+    const { data } = await api.post(libraryDraftMode.value ? '/product-library/generate-draft-title' : `/templates/${materialDraftTemplateId.value}/generate-draft-title`, { ...(libraryDraftMode.value ? librarySource(materialDraftAssets.value[0]) : { image_url: materialDraftAssets.value[0].url }), method, additional_requirements: materialDraftAdditionalRequirements.value.trim(), platform:materialTitlePlatform.value, ...titleMarketParams(materialDraftTitleSite.value), request_key:crypto.randomUUID() }, { headers: headers.value, timeout:360000 })
+    if (generationRevision !== materialDraftGenerationRevision || !showMaterialDraftDialog.value || libraryDraftMode.value !== fromLibrary || materialDraftAssets.value[0]?.id !== firstAsset.id || materialDraftTemplateId.value!==templateId || materialDraftTitleManualRevision.value!==editRevision) return
     materialDraftTitle.value = data.title
     materialDraftTitleResult.value = data
     materialDraftTitleEdited.value = true
@@ -1705,6 +1711,7 @@ function dropMaterialBatchAsset(groupIndex: number, targetId: number) {
 function editMaterialBatchTitle(group: MaterialBatchGroup) {
   group.edited = true
   group.manualTitle = true
+  group.titleMarketStale = false
   group.titleStatus = 'idle'
   group.titleError = ''
 }
@@ -1723,6 +1730,7 @@ function stopMaterialBatchTitleGeneration() {
 async function createMaterialBatchDrafts() {
   if (materialBatchControlsLocked.value || !draftSelectionTemplateId.value || !materialBatchGroups.value.length) return
   if (libraryDraftMode.value && materialBatchGroups.value.some(group => new Set(group.assets.map(asset => asset.sku.trim())).size !== group.assets.length)) { showToast('同一草稿不能包含重复 SKU，请调整组合'); return }
+  if (materialBatchGroups.value.some(group => group.titleMarketStale)) { showToast('站点已切换，请重新生成词库标题或手动编辑确认'); return }
   if (materialBatchGroups.value.some(group => group.title.trim().length < 25 || group.title.trim().length > 255)) { showToast('请为每个组合填写 25-255 个字符的商品标题'); return }
   try {
     materialBatchSaving.value = true
@@ -3066,7 +3074,7 @@ onUnmounted(() => {
       <button class="modal-close" @click="showMaterialDraftDialog=false">×</button>
       <h2>创建商品草稿</h2>
       <p>将使用已选的 {{materialDraftAssets.length}} 张素材创建商品草稿。</p>
-      <label>产品模板<input :value="materialDraftTemplate?.name || '—'" readonly/></label><p class="title-note">AI 生成使用模板提示词；词库生成使用马来语词库</p>
+      <label>产品模板<input :value="materialDraftTemplate?.name || '—'" readonly/></label><p class="title-note">AI 生成使用模板提示词；词库生成使用{{titleMarket(materialDraftTitleSite).languageName}}词库</p>
       <section class="material-draft-preview">
         <div class="material-draft-preview-heading"><strong>图片预览</strong><span>{{materialDraftAssets.length}} 张</span></div>
         <p v-if="materialDraftAssets.length > 1" class="material-draft-sort-hint">拖动图片调整顺序，首张图片将用于 AI 生成标题。</p>
@@ -3080,8 +3088,9 @@ onUnmounted(() => {
       <section v-if="materialDraftTemplate" class="material-draft-details">
         <label>商品标题<input v-model="materialDraftTitle" @input="materialDraftTitleEdited=true" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符，或使用 AI 生成"/><div class="material-draft-counter" :class="{invalid: materialDraftTitle.length > 0 && materialDraftTitle.length < 25}"><span>{{ materialDraftTitle.length }} / 255 字符</span></div></label>
         <div class="title-additional-requirements draft-title-generation-controls">
+          <label v-if="!libraryDraftMode">词库站点<select v-model="materialDraftTitleSite" aria-label="单条标题词库站点" :disabled="materialDraftTitleGenerating||materialDraftSaving"><option v-for="market in titleMarkets" :key="market.site" :value="market.site">{{market.siteName}} · {{market.languageName}}</option></select></label>
           <div class="draft-title-generation-actions"><button type="button" class="ghost" :aria-expanded="showDraftAdditionalRequirements" aria-controls="draft-title-additional-requirements" @click="showDraftAdditionalRequirements=!showDraftAdditionalRequirements">{{showDraftAdditionalRequirements ? '收起' : '展开'}}补充要求（选填）</button><div class="draft-title-generate-group"><button type="button" class="secondary" :disabled="materialDraftTitleGenerating" @click="generateMaterialDraftTitle('prompt')">{{materialDraftTitleGenerating&&materialDraftTitleMethod==='prompt' ? '生成中…' : 'AI 生成标题'}}</button><button v-if="!libraryDraftMode" type="button" class="secondary" :disabled="materialDraftTitleGenerating" @click="generateMaterialDraftTitle('library')">{{materialDraftTitleGenerating&&materialDraftTitleMethod==='library'?'生成中…':'词库生成标题'}}</button><button type="button" class="draft-title-help-button" aria-label="标题生成说明" :aria-expanded="showDraftTitleHelp" aria-controls="draft-title-generation-help" @click="showDraftTitleHelp=!showDraftTitleHelp">ⓘ</button></div></div>
-          <p v-if="showDraftTitleHelp" id="draft-title-generation-help" class="draft-title-generation-help">AI 生成标题使用模板 AI生成标题要求、首图和本次补充要求。词库生成标题使用已确认属性与马来语词库；多 SKU 请核对首图描述。</p>
+          <p v-if="showDraftTitleHelp" id="draft-title-generation-help" class="draft-title-generation-help">AI 生成标题使用模板 AI生成标题要求、首图和本次补充要求。词库生成标题使用已确认属性与{{titleMarket(materialDraftTitleSite).languageName}}词库；多 SKU 请核对首图描述。</p>
           <label v-if="showDraftAdditionalRequirements" id="draft-title-additional-requirements">本次标题补充要求<textarea v-model="materialDraftAdditionalRequirements" maxlength="1000" placeholder="例如：重点突出蓝色花卉图案"/><small>仅作用于当前商品，不保存到模板；再次生成时保留，关闭后清空。</small></label>
         </div>
         <section v-if="materialDraftTitleResult?.generation_id" class="title-result-details"><p v-for="message in materialDraftTitleResult.warnings" :key="message">{{message}}</p><details><summary>查看选词与商品事实</summary><p v-for="word in materialDraftTitleResult.keywords" :key="word.id">{{word.code}} · {{word.phrase}} · {{word.translation}}</p><p v-for="fact in materialDraftTitleResult.facts?.attributes" :key="fact.tag">{{fact.tag}}：{{fact.value}} · {{fact.evidence}}</p></details></section><label>产品描述<textarea v-model="materialDraftProductDescription" maxlength="5000" placeholder="默认使用产品模版描述，可按商品修改"></textarea><div class="material-draft-counter"><span>{{ materialDraftProductDescription.length }} / 5000 字符</span></div></label>
@@ -3101,12 +3110,14 @@ onUnmounted(() => {
       </div>
       <p v-if="draftSelectionAssets.length % materialBatchGroupSize" class="material-batch-remainder">最后 {{draftSelectionAssets.length % materialBatchGroupSize}} 张不足一组，不参与创建，使用状态保持不变。</p>
       <section class="material-batch-title-toolbar" aria-label="批量生成标题">
+        <label v-if="!libraryDraftMode">词库站点<select v-model="materialBatchTitleSite" aria-label="批量标题词库站点" :disabled="materialBatchControlsLocked"><option v-for="market in titleMarkets" :key="market.site" :value="market.site">{{market.siteName}} · {{market.languageName}}</option></select></label>
+        <p v-if="materialBatchGroups.some(group=>group.titleMarketStale)" class="material-batch-title-warning" role="alert">站点已切换，请重新生成词库标题或手动编辑确认后创建草稿。</p>
         <div class="material-batch-title-actions">
           <button type="button" class="secondary" :disabled="materialBatchControlsLocked || !materialBatchGroups.length" @click="generateMaterialBatchTitles()">一键 AI 生成所有标题</button><button v-if="!libraryDraftMode" type="button" class="secondary" :disabled="materialBatchControlsLocked || !materialBatchGroups.length" @click="generateMaterialBatchTitles(materialBatchGroups,'library')">词库生成所有标题</button>
           <button v-if="!libraryDraftMode" type="button" class="ghost" :disabled="materialBatchControlsLocked" @click="generateMaterialBatchTitles(materialBatchGroups.filter(g=>g.titleWarnings?.some(w=>w.includes('高度相似'))),'library')">重生成高相似项</button><button v-if="materialBatchUnfinishedTitles.length" type="button" class="ghost" :disabled="materialBatchControlsLocked" @click="generateMaterialBatchTitles(materialBatchUnfinishedTitles,materialBatchTitleMethod)">{{materialBatchTitleMethod==='library'?'词库':'AI'}}重试未完成（{{materialBatchUnfinishedTitles.length}}）</button>
           <button v-if="materialBatchTitleProgress.running" type="button" class="ghost" @click="stopMaterialBatchTitleGeneration">停止生成</button>
         </div>
-        <p class="material-batch-title-warning">仅更新允许 AI 重写的组合。AI 生成使用模板提示词；词库生成使用马来语词库和确认属性。</p>
+        <p class="material-batch-title-warning">仅更新允许 AI 重写的组合。AI 生成使用模板提示词；词库生成使用{{titleMarket(materialBatchTitleSite).languageName}}词库和确认属性。</p>
         <div v-if="materialBatchTitleProgress.total" class="material-batch-title-progress" role="status" aria-live="polite">
           <progress :value="materialBatchTitleProgress.completed" :max="materialBatchTitleProgress.total" aria-label="标题生成进度"></progress>
           <span>已完成 {{materialBatchTitleProgress.completed}} / {{materialBatchTitleProgress.total}}，成功 {{materialBatchTitleProgress.succeeded}}，失败 {{materialBatchTitleProgress.failed}}<template v-if="materialBatchTitleProgress.stopped">，已停止 {{materialBatchTitleProgress.stopped}}</template></span>
@@ -3131,7 +3142,7 @@ onUnmounted(() => {
               <button type="button" class="ghost" :aria-expanded="group.showAdditionalRequirements" :aria-controls="'batch-title-additional-requirements-' + index" @click="group.showAdditionalRequirements=!group.showAdditionalRequirements">{{group.showAdditionalRequirements ? '收起' : '展开'}}补充要求（选填）</button>
               <button v-if="group.manualTitle" type="button" class="ghost" :disabled="materialBatchControlsLocked" @click="group.manualTitle=false">允许 AI 重写</button><div class="draft-title-generate-group"><button type="button" class="secondary" :disabled="materialBatchControlsLocked" @click="generateMaterialBatchTitle(group)">{{group.titleStatus === 'running'&&materialBatchTitleMethod==='prompt' ? '生成中…' : 'AI 生成标题'}}</button><button v-if="!libraryDraftMode" type="button" class="secondary" :disabled="materialBatchControlsLocked" @click="generateMaterialBatchTitle(group,'library')">{{group.titleStatus==='running'&&materialBatchTitleMethod==='library'?'生成中…':'词库生成标题'}}</button><button type="button" class="draft-title-help-button" :aria-label="'草稿 ' + (index + 1) + ' 标题生成说明'" :aria-expanded="group.showTitleHelp" :aria-controls="'batch-title-generation-help-' + index" @click="group.showTitleHelp=!group.showTitleHelp">ⓘ</button></div>
             </div>
-            <p v-if="group.showTitleHelp" :id="'batch-title-generation-help-' + index" class="draft-title-generation-help">AI 生成标题使用模板 AI生成标题要求、首图和本次补充要求。词库生成标题使用已确认属性与马来语词库；多 SKU 请核对首图描述。</p>
+            <p v-if="group.showTitleHelp" :id="'batch-title-generation-help-' + index" class="draft-title-generation-help">AI 生成标题使用模板 AI生成标题要求、首图和本次补充要求。词库生成标题使用已确认属性与{{titleMarket(materialBatchTitleSite).languageName}}词库；多 SKU 请核对首图描述。</p>
             <p v-for="message in group.titleWarnings" :key="message" class="title-result-warning">{{message}}</p><details v-if="group.titleKeywords?.length"><summary>本条词源</summary><p v-for="word in group.titleKeywords" :key="word.id">{{word.code}} · {{word.phrase}} · {{word.translation}}</p></details><label v-if="group.showAdditionalRequirements" :id="'batch-title-additional-requirements-' + index">本草稿标题补充要求<textarea v-model="group.additionalRequirements" :disabled="materialBatchControlsLocked" maxlength="1000" placeholder="例如：重点突出蓝色花卉图案"/><small>仅作用于本草稿，不保存到模板；再次生成时保留，关闭弹窗或重新分组后清空。</small></label>
           </div>
         </article>
