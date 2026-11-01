@@ -1515,6 +1515,37 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(self.request('GET', f'/title-tasks/{identity}').json()['state'], 'cancelled')
         self.assertEqual(self.request('GET', '/title-keywords').json()['total'], 0)
 
+    def test_worker_claim_sorts_only_ids_and_retains_partial_results(self):
+        from sqlalchemy import event
+        self.enable()
+        result = {'items': {'one': {'title': 'x' * 400000}}}
+        with self.sessions() as db:
+            market = get_market(db, 1)
+            task = TitleTask(market_id=market.id, user_id=2, kind='batch', state='running',
+                lease_owner='expired', lease_expires_at=datetime.utcnow()-timedelta(seconds=1),
+                request_key='large-worker-claim', request_hash='large-worker-claim', result=result)
+            db.add(task);db.flush();identity=task.id;db.commit()
+        statements = []
+        def capture(connection, cursor, statement, parameters, context, executemany):
+            if 'ORDER BY title_tasks.id' in statement:
+                statements.append(statement)
+        event.listen(self.engine, 'before_cursor_execute', capture)
+        try:
+            claimed_id, owner = claim_task(self.sessions)
+        finally:
+            event.remove(self.engine, 'before_cursor_execute', capture)
+        self.assertEqual(claimed_id, identity)
+        self.assertNotEqual(owner, 'expired')
+        self.assertEqual(len(statements), 1)
+        self.assertTrue(statements[0].startswith('SELECT title_tasks.id \n'), statements[0])
+        self.assertNotIn('title_tasks.result', statements[0])
+        self.assertNotIn('title_tasks.snapshot', statements[0])
+        with self.sessions() as db:
+            task = db.get(TitleTask, identity)
+            self.assertEqual(task.result, result)
+            self.assertEqual(task.lease_owner, owner)
+        self.assertIsNone(claim_task(self.sessions))
+
     def test_supply_new_jobs_keep_prompt_engine_and_english_fallback_when_library_is_configured(self):
         from app.models import SupplyJob
         self.request('PUT', '/templates/1', json={'title_template': 'Place product category first'})

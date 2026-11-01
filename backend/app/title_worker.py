@@ -27,23 +27,25 @@ class LostTitleLease(Exception):
 def claim_task(session_factory=SessionLocal):
     with session_factory() as db:
         now = datetime.utcnow()
-        query = select(TitleTask).where(or_(TitleTask.state == 'queued',
+        # 领取时只锁定 ID，避免历史任务的大 JSON 结果进入 MySQL 排序缓冲。
+        query = select(TitleTask.id).where(or_(TitleTask.state == 'queued',
             (TitleTask.state == 'running') & (TitleTask.lease_expires_at <= now))).order_by(TitleTask.id).limit(1)
-        task = db.scalar(query.with_for_update(skip_locked=True))
-        if not task:
+        identity = db.scalar(query.with_for_update(skip_locked=True))
+        if identity is None:
             return None
         owner = secrets.token_hex(16)
-        changed = db.execute(update(TitleTask).where(TitleTask.id == task.id, or_(TitleTask.state == 'queued',
+        changed = db.execute(update(TitleTask).where(TitleTask.id == identity, or_(TitleTask.state == 'queued',
             (TitleTask.state == 'running') & (TitleTask.lease_expires_at <= now))).values(state='running',
                 lease_owner=owner, lease_expires_at=now + timedelta(seconds=120), error=None))
         if not changed.rowcount:
             db.rollback()
             return None
         # 只有成功接管过期任务的 Worker 可以回收它所属的记录租约。
-        db.execute(update(TitleRecord).where(TitleRecord.task_id == task.id,
+        db.execute(update(TitleRecord).where(TitleRecord.task_id == identity,
             TitleRecord.title.is_(None)).values(lease_owner=None, lease_expires_at=None))
         db.commit()
-        return task.id, owner
+        logger.info('标题任务已领取 | task_id=%s', identity)
+        return identity, owner
 
 
 def change_task(identity, owner, callback, session_factory=SessionLocal):
@@ -84,6 +86,7 @@ async def run_task(identity, owner, session_factory=SessionLocal):
     try:
         snapshot, kind, done, market_company, user_id = change_task(identity, owner, lambda db, task, market:
             (copy.deepcopy(task.snapshot), task.kind, copy.deepcopy(task.result), market.company_id, task.user_id), session_factory)
+        logger.info('标题任务开始处理 | task_id=%s kind=%s', identity, kind)
         if kind == 'import':
             for row in snapshot['rows']:
                 row_key = str(row['row'])
@@ -159,7 +162,7 @@ async def run_task(identity, owner, session_factory=SessionLocal):
                 TitleTask.state == 'running').values(state='failed', lease_owner=None, lease_expires_at=None,
                     error=str(exc) if isinstance(exc, ProviderError) else '任务处理失败，请重试'))
             db.commit()
-        logger.warning('标题任务失败 | task_id=%s type=%s', identity, type(exc).__name__)
+        logger.exception('标题任务失败 | task_id=%s type=%s', identity, type(exc).__name__)
     finally:
         stopped.set()
         pulse.cancel()
