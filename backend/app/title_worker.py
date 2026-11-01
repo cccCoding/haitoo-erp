@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, or_, select, update
 
 from .ai_providers import ProviderError
+from .config import get_settings
 from .database import SessionLocal
 from .logging_config import configure_logging
 from .models import Company, Role, User
@@ -24,12 +25,14 @@ class LostTitleLease(Exception):
     pass
 
 
-def claim_task(session_factory=SessionLocal):
+def claim_task(session_factory=SessionLocal, *, exclude_ids=()):
     with session_factory() as db:
         now = datetime.utcnow()
         # 领取时只锁定 ID，避免历史任务的大 JSON 结果进入 MySQL 排序缓冲。
         query = select(TitleTask.id).where(or_(TitleTask.state == 'queued',
             (TitleTask.state == 'running') & (TitleTask.lease_expires_at <= now))).order_by(TitleTask.id).limit(1)
+        if exclude_ids:
+            query = query.where(TitleTask.id.not_in(exclude_ids))
         identity = db.scalar(query.with_for_update(skip_locked=True))
         if identity is None:
             return None
@@ -66,8 +69,11 @@ def change_task(identity, owner, callback, session_factory=SessionLocal):
         return result
 
 
-async def run_task(identity, owner, session_factory=SessionLocal):
+async def run_task(identity, owner, session_factory=SessionLocal, *, item_semaphore=None):
     stopped = asyncio.Event()
+    item_limit = get_settings().title_item_concurrency
+    item_semaphore = item_semaphore if item_semaphore is not None else asyncio.Semaphore(item_limit)
+    group_workers = []
 
     async def heartbeat():
         while not stopped.is_set():
@@ -97,9 +103,13 @@ async def run_task(identity, owner, session_factory=SessionLocal):
                 with session_factory() as db:
                     api_key = credential(db, user_id, market_company) if snapshot['kind'] == 'titles' else None
                 try:
-                    words = await extract_row(row, snapshot['kind'], api_key, allowed_tags=snapshot.get('allowed_tags'),
-                                              tag_semantics=snapshot.get('tag_semantics'),
-                                              site=snapshot.get('site', 'MY'), language=snapshot.get('language', 'ms'))
+                    async with item_semaphore:
+                        if stopped.is_set():
+                            raise LostTitleLease()
+                        change_task(identity, owner, lambda db, task, market: None, session_factory)
+                        words = await extract_row(row, snapshot['kind'], api_key, allowed_tags=snapshot.get('allowed_tags'),
+                                                  tag_semantics=snapshot.get('tag_semantics'),
+                                                  site=snapshot.get('site', 'MY'), language=snapshot.get('language', 'ms'))
                     def save_words(db, task, market):
                         result = copy.deepcopy(task.result)
                         if row_key not in result.setdefault('completed_rows', []):
@@ -130,7 +140,7 @@ async def run_task(identity, owner, session_factory=SessionLocal):
                 task.lease_expires_at = None
             change_task(identity, owner, finish_import, session_factory)
         else:
-            for group in snapshot['groups']:
+            async def generate_group(group):
                 if stopped.is_set():
                     raise LostTitleLease()
                 change_task(identity, owner, lambda db, task, market: None, session_factory)
@@ -149,6 +159,14 @@ async def run_task(identity, owner, session_factory=SessionLocal):
                     task.progress = {'total': len(snapshot['groups']), 'completed': len(items),
                         'succeeded': sum(bool(i.get('title')) for i in items), 'failed': sum(not i.get('title') for i in items)}
                 change_task(identity, owner, save_item, session_factory)
+            groups = iter(snapshot['groups'])
+            async def group_worker():
+                for group in groups:
+                    async with item_semaphore:
+                        await generate_group(group)
+            # 每个任务只创建固定数量的协程，共享进程级信号量，避免并发数按任务倍增。
+            group_workers = [asyncio.create_task(group_worker()) for _ in range(min(item_limit, len(snapshot['groups'])))]
+            await asyncio.gather(*group_workers)
             def finish_batch(db, task, market):
                 task.state = 'completed_with_errors' if task.progress.get('failed') else 'completed'
                 task.lease_owner = None
@@ -165,25 +183,56 @@ async def run_task(identity, owner, session_factory=SessionLocal):
         logger.exception('标题任务失败 | task_id=%s type=%s', identity, type(exc).__name__)
     finally:
         stopped.set()
+        for worker in group_workers:
+            if not worker.done():
+                worker.cancel()
+        if group_workers:
+            await asyncio.gather(*group_workers, return_exceptions=True)
         pulse.cancel()
         with suppress(asyncio.CancelledError):
             await pulse
 
 
-async def serve():
-    stop = asyncio.Event()
+async def serve(*, stop_event=None, session_factory=SessionLocal):
+    settings = get_settings()
+    stop = stop_event if stop_event is not None else asyncio.Event()
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
-    while not stop.is_set():
-        claimed = claim_task()
-        if claimed:
-            await run_task(*claimed)
-        else:
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                pass
+    if stop_event is None:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
+    running = {}
+    item_semaphore = asyncio.Semaphore(settings.title_item_concurrency)
+    stop_waiter = asyncio.create_task(stop.wait())
+    logger.info('标题 Worker 启动 | task_concurrency=%s item_concurrency=%s',
+                settings.title_worker_concurrency, settings.title_item_concurrency)
+    try:
+        while not stop.is_set():
+            while len(running) < settings.title_worker_concurrency and not stop.is_set():
+                try:
+                    claimed = claim_task(session_factory, exclude_ids=tuple(running.values()))
+                except Exception:
+                    logger.exception('标题任务领取失败，将稍后重试')
+                    break
+                if not claimed:
+                    break
+                worker = asyncio.create_task(run_task(*claimed, session_factory=session_factory, item_semaphore=item_semaphore))
+                running[worker] = claimed[0]
+            done, _ = await asyncio.wait([stop_waiter, *running], timeout=2, return_when=asyncio.FIRST_COMPLETED)
+            for worker in done:
+                if worker is stop_waiter:
+                    continue
+                identity = running.pop(worker)
+                try:
+                    await worker
+                except Exception:
+                    logger.exception('标题任务执行异常 | task_id=%s', identity)
+    finally:
+        # 停止领取新任务，已领取任务继续续租并完成，避免主动丢失正在生成的结果。
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+        stop_waiter.cancel()
+        with suppress(asyncio.CancelledError):
+            await stop_waiter
 
 
 if __name__ == '__main__':

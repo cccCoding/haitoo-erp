@@ -1498,6 +1498,45 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         self.assertTrue(task['result']['items']['two']['warnings'])
         self.assertEqual(len(task['result']['items']), 2)
 
+    def test_concurrent_batch_uses_full_generation_pipeline_and_persists_each_record(self):
+        self.enable(); self.profile(); self.import_words()
+        response = self.request('POST', '/title-generation-jobs', uid=2, json={
+            'template_id': 1, 'request_key': 'concurrent-full-pipeline', 'groups': [
+                {'key': str(identity), 'source': {'source_type': 'material', 'id': identity}} for identity in (1, 2)]})
+        self.assertEqual(response.status_code, 200, response.text)
+        identity = response.json()['id']
+        claimed = claim_task(self.sessions)
+        self.assertEqual(claimed[0], identity)
+        async def execute():
+            facts_ready, titles_ready = asyncio.Event(), asyncio.Event()
+            counts = {'facts': 0, 'titles': 0}
+            async def answer(key, instructions, data, **kwargs):
+                if 'manual' in data:
+                    counts['facts'] += 1
+                    if counts['facts'] == 2:
+                        facts_ready.set()
+                    await asyncio.wait_for(facts_ready.wait(), 3)
+                    return copy.deepcopy(FACTS)
+                counts['titles'] += 1
+                if counts['titles'] >= 2:
+                    titles_ready.set()
+                await asyncio.wait_for(titles_ready.wait(), 3)
+                return {'title': TITLE}
+            with patch('app.title_service.ask_json', new=AsyncMock(side_effect=answer)):
+                await asyncio.wait_for(run_task(*claimed, session_factory=self.sessions), 5)
+            self.assertEqual(counts['facts'], 2)
+            self.assertGreaterEqual(counts['titles'], 2)
+        asyncio.run(execute())
+        with self.sessions() as db:
+            task = db.get(TitleTask, identity)
+            self.assertEqual(task.state, 'completed', task.error)
+            self.assertEqual(task.progress, {'total': 2, 'completed': 2, 'succeeded': 2, 'failed': 0})
+            records = db.scalars(select(TitleRecord).where(TitleRecord.task_id == identity)).all()
+            self.assertEqual(len(records), 2)
+            self.assertTrue(all(record.title == TITLE and record.state == 'generated' for record in records))
+            self.assertTrue(all(record.facts and record.lease_owner is None for record in records))
+            self.assertEqual(set(task.result['items']), {'1', '2'})
+
     def test_expired_task_lease_is_reclaimed_and_cancel_fences_late_writes(self):
         identity = self.upload()['id']
         self.request('POST', f'/title-tasks/{identity}/start', json={})

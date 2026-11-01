@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     title_jaccard_threshold: float = Field(default=0.85, ge=0, le=1)
     title_text_threshold: float = Field(default=0.90, ge=0, le=1)
+    title_worker_concurrency: int = Field(default=3, ge=1, le=20)
+    title_item_concurrency: int = Field(default=10, ge=1, le=10)
     supply_worker_concurrency: int = Field(default=4, gt=0)
     supply_company_concurrency: int = Field(default=2, gt=0)
     supply_title_concurrency: int = Field(default=3, gt=0)
