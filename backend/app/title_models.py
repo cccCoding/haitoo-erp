@@ -29,6 +29,7 @@ class TitleTemplateProfile(Base):
     gender: Mapped[str | None] = mapped_column(String(10), nullable=True)
     age_group: Mapped[str | None] = mapped_column(String(10), nullable=True)
     attributes: Mapped[dict] = mapped_column(JSON, default=dict)
+    material_keyword_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     category_names: Mapped[list] = mapped_column(JSON, default=list)
     locked_keyword_ids: Mapped[list] = mapped_column(JSON, default=list)
     forbidden_keyword_ids: Mapped[list] = mapped_column(JSON, default=list)

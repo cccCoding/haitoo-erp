@@ -17,16 +17,16 @@ type MaterialOption = { id: number; phrase: string; translation: string; categor
 type KeywordOption = MaterialOption & { code: string; tag: string; semantic_tag: string; status: string }
 const materialOptions = ref<MaterialOption[]>([])
 const keywordOptions = ref<KeywordOption[]>([]), attributeKeywordOptions = ref<KeywordOption[]>([])
-const material = ref(''), materialConflict = ref(''), legacyAudience = ref('')
+const materialIds = ref<number[]>([]), legacyMaterial = ref(''), materialConflict = ref(''), legacyAudience = ref('')
 const normalized = (value: string) => value.normalize('NFKC').trim().toLowerCase()
 const availableMaterials = computed(() => materialOptions.value.filter(item => item.categories.some(category => normalized(category) === normalized(form.value.category))))
-const unmatchedMaterial = computed(() => material.value && !availableMaterials.value.some(item => item.phrase === material.value) ? material.value : '')
+const unavailableMaterialIds = computed(() => materialIds.value.filter(id => !availableMaterials.value.some(item => item.id === id)))
 const forbiddenIds = ref<number[]>([])
 const busy = ref(false), loaded = ref(false), error = ref(''), notice = ref('')
 const selectorDisabled = computed(() => busy.value || props.readonly || !loaded.value)
 const inCategory = (item: MaterialOption) => item.categories.some(category => normalized(category) === normalized(form.value.category))
 const keywordLabel = (item: MaterialOption) => `${item.translation} · ${item.phrase}`
-const materialChoices = computed(() => [{ value: '', label: '未确认面料（留空）' }, ...availableMaterials.value.map(item => ({ value: item.phrase, label: keywordLabel(item) }))])
+const materialChoices = computed(() => availableMaterials.value.map(item => ({ value: item.id, label: keywordLabel(item) })))
 const tagChoices = computed(() => tags.value.map(tag => ({ value: tag, label: titleTagLabel(tag) })))
 const attributeWords = (tag: string) => attributeKeywordOptions.value.filter(item => item.tag === tag && inCategory(item))
 const attributeChoices = (tag: string) => attributeWords(tag).map(item => ({ value: item.phrase, label: keywordLabel(item) }))
@@ -37,6 +37,18 @@ function forbiddenLabel(id: number) {
   const item = keywordOptions.value.find(item => item.id === id)
   return item ? keywordLabel(item) : `关键词 #${id}（已不可用）`
 }
+function materialLabel(id: number) {
+  const item = keywordOptions.value.find(item => item.id === id)
+  return item ? keywordLabel(item) : `关键词 #${id}（已不可用）`
+}
+function toggleMaterial(value: string | number | null) {
+  if (selectorDisabled.value || typeof value !== 'number') return
+  if (materialIds.value.includes(value)) materialIds.value = materialIds.value.filter(id => id !== value)
+  else if (materialIds.value.length >= 100) { error.value = '最多选择 100 个面料关键词'; return }
+  else materialIds.value = [...materialIds.value, value]
+  legacyMaterial.value = ''; materialConflict.value = ''
+}
+function clearMaterials() { materialIds.value = []; legacyMaterial.value = ''; materialConflict.value = '' }
 function toggleForbidden(value: string | number | null) {
   if (selectorDisabled.value || typeof value !== 'number') return
   if (forbiddenIds.value.includes(value)) forbiddenIds.value = forbiddenIds.value.filter(id => id !== value)
@@ -66,7 +78,13 @@ watch(() => [props.templateId, props.platform, props.site, props.token], async (
       item.value = attributeWords(item.tag).find(word => [word.phrase, word.translation].some(value => normalized(value) === normalized(item.value)))?.phrase || item.value
     }
     const savedMaterial = data.material || ''
-    material.value = availableMaterials.value.find(item => [item.phrase, item.translation].some(value => normalized(value) === normalized(savedMaterial)))?.phrase || savedMaterial
+    materialIds.value = [...new Set<number>(data.material_keyword_ids || [])]
+    legacyMaterial.value = ''
+    if (!materialIds.value.length && savedMaterial) {
+      const matched = availableMaterials.value.find(item => [item.phrase, item.translation].some(value => normalized(value) === normalized(savedMaterial)))
+      if (matched) materialIds.value = [matched.id]
+      else legacyMaterial.value = savedMaterial
+    }
     materialConflict.value = (data.conflicting_attributes || []).includes('材质') ? values.filter(item => semantic(item.tag) === '材质').map(item => `${item.tag==='材质'?'面料':item.tag}：${item.value}`).join('；') : ''
     legacyAudience.value = values.filter(item => ['性别','年龄'].includes(item.tag)).map(item => `${item.tag==='材质'?'面料':item.tag}：${item.value}`).join('；')
     forbiddenIds.value = [...new Set<number>(data.forbidden_keyword_ids || [])]
@@ -80,10 +98,10 @@ async function save() {
   error.value = ''; notice.value = ''
   try {
     if (!form.value.category || !form.value.gender || !form.value.age_group) throw new Error('请选择产品分类、使用性别和年龄')
-    if (materialConflict.value && !material.value.trim()) throw new Error('请选择确认后的面料关键词，或明确清除未确认面料')
-    if (unmatchedMaterial.value) throw new Error('请选择当前产品分类下已启用的面料关键词，或选择未确认面料')
+    if (materialConflict.value && !materialIds.value.length) throw new Error('请选择确认后的面料关键词，或明确清除未确认面料')
+    if (legacyMaterial.value || unavailableMaterialIds.value.length) throw new Error('请选择当前产品分类下已启用的面料关键词，或清除不可用面料')
+    if (materialIds.value.some(id => forbiddenIds.value.includes(id))) throw new Error('所选面料关键词不能同时禁用')
     const confirmed: Record<string, string> = {}
-    if (material.value.trim()) confirmed['面料'] = material.value.trim()
     for (const item of attributes.value) {
       if (!item.tag || !item.value.trim()) throw new Error('请选择每项标签及对应关键词')
       if (!tags.value.includes(item.tag) || !matchedAttribute(item)) throw new Error('请选择当前产品分类下已启用的标签关键词，或删除未确认的标签')
@@ -92,6 +110,7 @@ async function save() {
     }
     const payload = { platform: props.platform, ...titleMarketParams(props.site), category: form.value.category,
       gender: form.value.gender, age_group: form.value.age_group, attributes: confirmed,
+      material_keyword_ids: materialIds.value,
       category_names: [], locked_keyword_ids: [], forbidden_keyword_ids: forbiddenIds.value,
       fallback_title: form.value.fallback_title?.trim() || null,
       fallback_approved: !!form.value.fallback_approved }
@@ -114,9 +133,16 @@ async function save() {
           <label>使用性别 <span class="profile-required">必填</span><select v-model="form.gender" required><option value="" disabled>请选择使用性别</option><option v-for="gender in ['男','女','中性']" :key="gender" :value="gender">{{gender}}</option></select></label>
           <label>年龄 <span class="profile-required">必填</span><select v-model="form.age_group" required><option value="" disabled>请选择年龄</option><option v-for="age in ['成人','儿童']" :key="age" :value="age">{{age}}</option></select></label>
         </div>
-        <div class="profile-select-field"><span>面料（选填）</span><SearchableSelect :model-value="material" :options="materialChoices" :disabled="selectorDisabled" aria-label="面料" :placeholder="unmatchedMaterial?`${unmatchedMaterial}（未匹配可选关键词）`:'未确认面料（留空）'" search-placeholder="搜索面料关键词或中文释义" empty-label="暂无可选面料" no-match-label="没有匹配的面料关键词" @update:model-value="material=String($event??'')" /><small>从当前产品分类下已导入并启用的面料关键词中选择，未确认请留空。</small><small v-if="loaded&&!availableMaterials.length">暂无可选面料，请先导入适用于本产品分类的面料关键词并启用。</small></div>
-        <p v-if="unmatchedMaterial" class="profile-warning">当前面料“{{unmatchedMaterial}}”未匹配可选关键词，请重新选择或留空。</p>
-        <div v-if="materialConflict" class="profile-warning">旧面料配置有冲突：{{materialConflict}}。请选择确认后的面料关键词。<button v-if="!readonly" type="button" class="ghost" @click="material='';materialConflict=''">清除未确认面料</button></div>
+        <div class="profile-select-field"><span>面料（选填，可多选）</span>
+          <SearchableSelect :model-value="null" :multiple="true" :selected-values="materialIds" :options="materialChoices" :disabled="selectorDisabled" aria-label="面料" placeholder="未确认面料（留空）" search-placeholder="搜索面料关键词或中文释义" empty-label="暂无可选面料" no-match-label="没有匹配的面料关键词" @toggle="toggleMaterial" />
+          <div v-if="materialIds.length" class="profile-keyword-chips" aria-label="已选面料关键词"><span v-for="id in materialIds" :key="id">{{materialLabel(id)}}{{unavailableMaterialIds.includes(id)?'（当前不可用）':''}}<button v-if="!readonly" type="button" :disabled="selectorDisabled" :aria-label="`移除面料关键词 ${materialLabel(id)}`" @click="toggleMaterial(id)">×</button></span></div>
+          <small>可选择多个符合商品事实的面料关键词；每条标题随机使用其中一个。未确认请留空。</small>
+          <button v-if="!readonly&&(materialIds.length||legacyMaterial||materialConflict)" type="button" class="ghost" :disabled="selectorDisabled" @click="clearMaterials">清空面料选择</button>
+          <small v-if="loaded&&!availableMaterials.length">暂无可选面料，请先导入适用于本产品分类的面料关键词并启用。</small>
+        </div>
+        <p v-if="legacyMaterial" class="profile-warning">原面料“{{legacyMaterial}}”未匹配可选关键词，请重新选择或清空面料选择。</p>
+        <p v-if="unavailableMaterialIds.length" class="profile-warning">部分已选面料已停用或不适用当前产品分类，请移除后重新选择。</p>
+        <div v-if="materialConflict" class="profile-warning">旧面料配置有冲突：{{materialConflict}}。请选择确认后的面料关键词，或清空面料选择。</div>
         <div class="profile-attribute-heading"><strong>其他标签</strong><button v-if="!readonly" type="button" class="secondary" @click="attributes.push({tag:'',value:''})">添加标签</button></div>
         <div v-for="(item, index) in attributes" :key="index" class="profile-attribute-item">
           <div class="title-attribute-row">

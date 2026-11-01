@@ -4,7 +4,7 @@ import csv
 import io
 import json
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
@@ -56,6 +56,7 @@ class ProfileInput(MarketInput):
     gender: Literal['男', '女', '中性']
     age_group: Literal['成人', '儿童']
     attributes: dict[str, str] = Field(default_factory=dict, max_length=25)
+    material_keyword_ids: list[Annotated[int, Field(gt=0)]] = Field(default_factory=list, max_length=100)
     category_names: list[str] = Field(default_factory=list, max_length=100)
     locked_keyword_ids: list[int] = Field(default_factory=list, max_length=8)
     forbidden_keyword_ids: list[int] = Field(default_factory=list, max_length=100)
@@ -96,6 +97,26 @@ class MergeInput(Input):
 class KeywordStatusInput(Input):
     status: Literal['enabled', 'disabled']
     review_token: str = Field(min_length=64, max_length=64)
+
+
+class KeywordSelection(Input):
+    id: int = Field(gt=0)
+    review_token: str = Field(min_length=64, max_length=64)
+
+
+class KeywordBatchDisableInput(MarketInput):
+    selections: list[KeywordSelection] = Field(min_length=1, max_length=1000)
+
+    @field_validator('selections')
+    @classmethod
+    def unique_keywords(cls, values):
+        if len({item.id for item in values}) != len(values):
+            raise ValueError('关键词不能重复选择')
+        return values
+
+
+class KeywordBatchStatusInput(KeywordBatchDisableInput):
+    status: Literal['enabled', 'disabled']
 
 
 class ConfirmInput(Input):
@@ -203,6 +224,7 @@ def profile_payload(profile, market=None, db=None, *, site='MY', language='ms'):
     return {'category': profile.category if profile else '', 'attributes': profile.attributes if profile else {},
         'gender': profile.gender if profile else None, 'age_group': profile.age_group if profile else None,
         'material': attributes.get('材质', '') if '材质' not in conflicts else '', 'material_options': material_options,
+        'material_keyword_ids': (profile.material_keyword_ids or []) if profile else [],
         'keyword_options': keyword_options, 'attribute_keyword_options': attribute_keyword_options,
         'conflicting_attributes': conflicts,
         'configuration_issues': issues, 'ready': not issues,
@@ -437,10 +459,28 @@ def put_profile(template_id: int, payload: ProfileInput, user: User = Depends(ad
         cleaned['材质' if semantic == '材质' else tag] = value
     payload.attributes = cleaned
     payload.category = category_values(db, market, [payload.category], allow_disabled=[profile.category] if profile else [])[0]
+    payload.material_keyword_ids = list(dict.fromkeys(payload.material_keyword_ids))
+    if payload.material_keyword_ids:
+        if '材质' in cleaned:
+            raise HTTPException(400, '面料多选与旧面料确认值不能同时设置')
+        if set(payload.material_keyword_ids) & set(payload.forbidden_keyword_ids):
+            raise HTTPException(400, '所选面料关键词不能同时禁用')
+        selected_materials = db.scalars(select(TitleKeyword).where(TitleKeyword.market_id == market.id,
+            TitleKeyword.id.in_(payload.material_keyword_ids), TitleKeyword.merged_into_id.is_(None))).all()
+        if len(selected_materials) != len(payload.material_keyword_ids):
+            raise HTTPException(400, '面料包含其他词库、已合并或不存在的关键词')
+        for word in selected_materials:
+            definition = tag_entry(db, market, word.tag)
+            if (canonical_tag(definition.semantic_tag) != '材质' or word.status != 'enabled'
+                    or word.priority == 'forbidden' or normalize(payload.category) not in map(normalize, word.categories)):
+                raise HTTPException(400, '请选择当前产品分类下已启用且未禁用的面料关键词')
+        locked_materials = db.scalars(select(TitleKeyword).where(TitleKeyword.id.in_(payload.locked_keyword_ids))).all()
+        if any(canonical_tag(tag_entry(db, market, word.tag).semantic_tag) == '材质' for word in locked_materials):
+            raise HTTPException(400, '面料多选时不能另设面料必用词')
     if not profile:
         profile = TitleTemplateProfile(market_id=market.id, template_id=template_id)
         db.add(profile)
-    for key in ('category', 'gender', 'age_group', 'attributes', 'category_names', 'locked_keyword_ids', 'forbidden_keyword_ids', 'fallback_approved'):
+    for key in ('category', 'gender', 'age_group', 'attributes', 'material_keyword_ids', 'category_names', 'locked_keyword_ids', 'forbidden_keyword_ids', 'fallback_approved'):
         setattr(profile, key, getattr(payload, key))
     profile.fallback_title = fallback
     profile.updated_at = datetime.utcnow()
@@ -459,6 +499,7 @@ def template_configurations(platform: str = 'TikTok', site: str = 'MY', language
     categories = {row.name_key: row for row in definitions if row.kind == 'category'}
     profiles = {row.template_id: row for row in db.scalars(select(TitleTemplateProfile).where(
         TitleTemplateProfile.market_id == market.id))} if market else {}
+    material_phrases = dict(db.execute(select(TitleKeyword.id, TitleKeyword.phrase).where(TitleKeyword.market_id == market.id)).all()) if market else {}
     query = select(ProductTemplate).where(or_(ProductTemplate.company_id == user.company_id, ProductTemplate.is_platform.is_(True)))
     if q.strip():
         query = query.where(ProductTemplate.name.contains(q.strip(), autoescape=True))
@@ -477,7 +518,8 @@ def template_configurations(platform: str = 'TikTok', site: str = 'MY', language
             'is_platform': template.is_platform, 'category': profile.category if profile else '',
             'category_localized_name': category_entry.localized_name if category_entry else None,
             'gender': profile.gender if profile else None, 'age_group': profile.age_group if profile else None,
-            'material': attributes.get('材质', '') if '材质' not in conflicts else '',
+            'material': '、'.join(material_phrases.get(identity, f'已不可用 #{identity}') for identity in profile.material_keyword_ids)
+                if profile and profile.material_keyword_ids else attributes.get('材质', '') if '材质' not in conflicts else '',
             'attributes': {tag: value for tag, value in attributes.items() if tag not in (*CATEGORY_FIELDS, '材质')},
             'configuration_issues': issues, 'ready': ready})
     page = min(page, max(1, (len(items) + page_size - 1) // page_size))
@@ -523,6 +565,46 @@ def keywords(platform: str = 'TikTok', site: str = 'MY', language: str = 'ms', s
             'associated_sales': sum(e.metrics.get('销量', 0) for e in current) if any('销量' in e.metrics for e in current) else None,
             'search_metrics': [e.metrics for e in current if e.metrics.get('source')]})
     return {'items': result, 'total': len(rows), 'revision': market.revision, 'page': page, 'page_size': page_size}
+
+
+@router.post('/title-keywords/batch-disable')
+def disable_keywords(payload: KeywordBatchDisableInput, user: User = Depends(admin), db: Session = Depends(get_db)):
+    return update_keyword_statuses(payload, 'disabled', user, db)
+
+
+@router.post('/title-keywords/batch-status')
+def set_keywords_status(payload: KeywordBatchStatusInput, user: User = Depends(admin), db: Session = Depends(get_db)):
+    return update_keyword_statuses(payload, payload.status, user, db)
+
+
+def update_keyword_statuses(payload, status, user, db):
+    market = market_for(db, user, payload.platform, payload.site, payload.language, lock=True)
+    if not market:
+        raise HTTPException(404, '记录不存在')
+    rows = db.scalars(select(TitleKeyword).where(TitleKeyword.market_id == market.id,
+        TitleKeyword.id.in_([item.id for item in payload.selections]))).all()
+    if len(rows) != len(payload.selections):
+        raise HTTPException(404, '记录不存在')
+    tokens = {item.id: item.review_token for item in payload.selections}
+    # 全部校验完成后再修改，避免批次中部分停用、部分失败。
+    for row in rows:
+        if row.merged_into_id:
+            raise HTTPException(400, '已合并词不能修改启用状态')
+        if tokens[row.id] != keyword_review_token(row):
+            raise HTTPException(409, '关键词已变更，请刷新列表后重新勾选')
+        if status == 'enabled':
+            tag_entry(db, market, row.tag)
+            category_values(db, market, row.categories)
+    changed = [row for row in rows if row.status != status]
+    if changed:
+        now = datetime.utcnow()
+        for row in changed:
+            row.status = status
+            row.updated_at = now
+        market.revision += 1
+        market.updated_at = now
+    db.commit()
+    return {status: len(changed)}
 
 
 @router.post('/title-keywords/{identity}/status')
@@ -607,10 +689,12 @@ def merge_keyword(identity: int, payload: MergeInput, user: User = Depends(admin
         target.priority = 'preferred'
     db.execute(update(TitleEvidence).where(TitleEvidence.keyword_id == source.id, TitleEvidence.market_id == market.id).values(keyword_id=target.id))
     for profile in db.scalars(select(TitleTemplateProfile).where(TitleTemplateProfile.market_id == market.id)):
-        for key in ('locked_keyword_ids', 'forbidden_keyword_ids'):
-            setattr(profile, key, list(dict.fromkeys(target.id if i == source.id else i for i in getattr(profile, key))))
+        for key in ('locked_keyword_ids', 'forbidden_keyword_ids', 'material_keyword_ids'):
+            setattr(profile, key, list(dict.fromkeys(target.id if i == source.id else i for i in (getattr(profile, key) or []))))
         if set(profile.locked_keyword_ids) & set(profile.forbidden_keyword_ids):
             raise HTTPException(400, '合并会使模板必用词与禁用词冲突，请先调整模板配置')
+        if set(profile.material_keyword_ids or []) & set(profile.forbidden_keyword_ids):
+            raise HTTPException(400, '合并会使模板面料与禁用词冲突，请先调整模板配置')
     for other in db.scalars(select(TitleKeyword).where(TitleKeyword.market_id == market.id,
         TitleKeyword.id.not_in([source.id, target.id]))):
         if source.id in other.conflicts:

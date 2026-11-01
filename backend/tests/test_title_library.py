@@ -597,6 +597,138 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         latest = self.request('GET', '/title-profiles/1').json()
         self.assertNotIn(custom['id'], [item['id'] for item in latest['attribute_keyword_options']])
 
+    def test_profile_material_multiselect_saves_ids_and_checks_eligible_keywords(self):
+        self.import_words(content=KEYWORDS + 'kapas,纯棉,连衣裙,材质\nlinen,亚麻,连衣裙,材质\npoliester,涤纶,上衣,材质\n')
+        words = {word['phrase']: word for word in self.request('GET', '/title-keywords').json()['items']}
+        ids = [words['kapas']['id'], words['linen']['id']]
+        saved = self.profile(attributes={}, material_keyword_ids=[*ids, ids[0]])
+        self.assertEqual(saved['material_keyword_ids'], ids)
+        self.assertEqual(saved['attributes'], {})
+        summary = self.request('GET', '/title-template-configurations').json()['items'][0]
+        self.assertEqual(summary['material'], 'kapas、linen')
+        base = {'category': '连衣裙', 'gender': '女', 'age_group': '成人', 'attributes': {}}
+        invalid = [
+            {'material_keyword_ids': [words['poliester']['id']]},
+            {'material_keyword_ids': [words['gaun']['id']]},
+            {'material_keyword_ids': [999999]},
+            {'material_keyword_ids': ids, 'forbidden_keyword_ids': [ids[0]]},
+            {'material_keyword_ids': ids, 'locked_keyword_ids': [ids[0]]},
+            {'material_keyword_ids': ids, 'attributes': {'面料': '纯棉'}},
+        ]
+        for extra in invalid:
+            response = self.request('PUT', '/title-profiles/1', json={**base, **extra})
+            self.assertEqual(response.status_code, 400, response.text)
+        with self.sessions() as db:
+            db.get(TitleKeyword, ids[0]).status = 'disabled'
+            db.get(TitleKeyword, ids[1]).priority = 'forbidden'
+            db.commit()
+        for identity in ids:
+            response = self.request('PUT', '/title-profiles/1', json={**base, 'material_keyword_ids': [identity]})
+            self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.request('GET', '/title-profiles/1').json()['material_keyword_ids'], ids)
+
+    def test_material_snapshot_excludes_disabled_and_forbidden_choices_and_preserves_merge_references(self):
+        self.import_words(content=KEYWORDS + 'kapas,纯棉,连衣裙,材质\nlinen,亚麻,连衣裙,材质\nsatin,缎面,连衣裙,材质\n')
+        words = {word['phrase']: word for word in self.request('GET', '/title-keywords').json()['items']}
+        ids = [words[name]['id'] for name in ('kapas', 'linen', 'satin')]
+        self.profile(attributes={}, material_keyword_ids=ids)
+        with self.sessions() as db:
+            db.get(TitleKeyword, ids[0]).status = 'disabled'
+            db.get(TitleKeyword, ids[1]).priority = 'forbidden'
+            db.commit()
+            snapshot = profile_snapshot(db, get_market(db, 1), 1)
+            self.assertEqual([word['id'] for word in snapshot['material_keywords']], [ids[2]])
+            db.get(TitleKeyword, ids[2]).status = 'disabled'
+            db.commit()
+            with self.assertRaises(HTTPException) as blocked:
+                profile_snapshot(db, get_market(db, 1), 1)
+            self.assertIn('重新选择面料', blocked.exception.detail)
+        merged = self.request('POST', f'/title-keywords/{ids[0]}/merge', json={'target_id': ids[2]})
+        self.assertEqual(merged.status_code, 200, merged.text)
+        self.assertEqual(self.request('GET', '/title-profiles/1').json()['material_keyword_ids'], [ids[2], ids[1]])
+
+    def test_each_title_randomly_picks_one_material_and_retries_keep_the_selection(self):
+        from app.title_service import choose_keywords, match_keywords
+        self.import_words(content=KEYWORDS + 'kapas,纯棉,连衣裙,材质\nlinen,亚麻,连衣裙,材质\n')
+        words = {word['phrase']: word for word in self.request('GET', '/title-keywords').json()['items']}
+        ids = [words['kapas']['id'], words['linen']['id']]
+        self.profile(material_keyword_ids=ids)
+        with self.sessions() as db:
+            market = get_market(db, 1)
+            snapshot = profile_snapshot(db, market, 1)
+            options = snapshot['material_keywords']
+            with patch('app.title_service.secrets.choice', side_effect=[options[0], options[1]]) as random_pick:
+                first = create_record(db, market, 2, snapshot, 'https://img.example/1.png', 'random-material-1')
+                second = create_record(db, market, 2, snapshot, 'https://img.example/2.png', 'random-material-2')
+                repeated = create_record(db, market, 2, snapshot, 'https://img.example/1.png', 'random-material-1')
+                self.assertEqual(random_pick.call_count, 2)
+                self.assertEqual(repeated.id, first.id)
+            self.assertEqual(first.snapshot['selected_material_keyword']['id'], ids[0])
+            self.assertEqual(second.snapshot['selected_material_keyword']['id'], ids[1])
+            db.commit()
+            first_id = first.id
+        async def answer(key, instructions, data, **kwargs):
+            if 'manual' in data:
+                return {'attributes': [{'tag': tag, 'value': value, 'localized_value':
+                    {'连衣裙': 'gaun', '女': 'wanita', '成人': 'dewasa', '长袖': 'lengan panjang'}.get(value, value),
+                    'evidence': 'confirmed', 'source': 'manual'} for tag, value in data['manual'].items()], 'conflicts': []}
+            return {'title': 'Gaun Wanita Dewasa Lengan Panjang Kapas'}
+        with patch('app.title_service.ask_json', new=AsyncMock(side_effect=answer)):
+            with self.sessions() as db:
+                generated = asyncio.run(generate_record(db, first_id))
+                material_words = [word for word in generated['keywords'] if word['tag'] == '材质']
+                self.assertEqual([word['id'] for word in material_words], [ids[0]])
+                self.assertIn('Kapas', generated['title'])
+                self.assertNotIn('linen', generated['title'].lower())
+                # 不同重试轮次都必须保留选中的面料，不能轮换或省略。
+                candidates = match_keywords(first.snapshot, generated['facts'])
+                for turn in range(8):
+                    selected = choose_keywords(first.snapshot, candidates, {}, turn)
+                    self.assertEqual([word['id'] for word in selected if word['tag'] == '材质'], [ids[0]])
+        self.profile(material_keyword_ids=ids[::-1])  # 顺序变化不改变配置含义。
+        adopted = self.request('POST', '/drafts/from-material-assets', uid=2,
+            json={'template_id': 1, 'material_asset_ids': [1], 'title': generated['title'], 'generation_id': first_id})
+        self.assertEqual(adopted.status_code, 200, adopted.text)
+        self.profile(material_keyword_ids=[ids[1]])
+        with self.sessions() as db:
+            with self.assertRaises(HTTPException) as changed:
+                create_record(db, get_market(db, 1), 2, profile_snapshot(db, get_market(db, 1), 1),
+                    'https://img.example/1.png', 'random-material-1')
+            self.assertEqual(changed.exception.status_code, 409)
+
+    def test_batch_titles_keep_independent_material_choices_in_shared_snapshot(self):
+        self.import_words(content=KEYWORDS + 'kapas,纯棉,连衣裙,材质\nlinen,亚麻,连衣裙,材质\n')
+        words = {word['phrase']: word for word in self.request('GET', '/title-keywords').json()['items']}
+        ids = [words['kapas']['id'], words['linen']['id']]
+        self.profile(material_keyword_ids=ids)
+        with self.sessions() as db:
+            options = profile_snapshot(db, get_market(db, 1), 1)['material_keywords']
+        with patch('app.title_service.secrets.choice', side_effect=options):
+            response = self.request('POST', '/title-generation-jobs', uid=2, json={'template_id': 1,
+                'request_key': 'batch-multi-material', 'groups': [
+                    {'key': str(identity), 'source': {'source_type': 'material', 'id': identity}} for identity in (1, 2)]})
+        self.assertEqual(response.status_code, 200, response.text)
+        task_id = response.json()['id']
+        with self.sessions() as db:
+            task = db.get(TitleTask, task_id)
+            self.assertNotIn('selected_material_keyword', task.snapshot['profile'])
+            self.assertEqual(len(task.snapshot['profile']['material_keywords']), 2)
+            records = db.scalars(select(TitleRecord).where(TitleRecord.task_id == task_id).order_by(TitleRecord.id)).all()
+            self.assertEqual([record.snapshot['selected_material_keyword']['id'] for record in records], ids)
+            self.assertTrue(all('keywords' not in record.snapshot and 'material_keywords' not in record.snapshot for record in records))
+        async def answer(key, instructions, data, **kwargs):
+            if 'manual' in data:
+                return {'attributes': [{'tag': tag, 'value': value, 'localized_value':
+                    {'连衣裙': 'gaun', '女': 'wanita', '成人': 'dewasa', '长袖': 'lengan panjang'}.get(value, value),
+                    'evidence': 'confirmed', 'source': 'manual'} for tag, value in data['manual'].items()], 'conflicts': []}
+            return {'title': 'Gaun Wanita Dewasa Lengan Panjang ' + next(word['phrase'] for word in data['selected'] if word['tag'] == '材质')}
+        with patch('app.title_service.ask_json', new=AsyncMock(side_effect=answer)):
+            self.run_worker()
+        with self.sessions() as db:
+            self.assertEqual(db.get(TitleTask, task_id).state, 'completed')
+            records = db.scalars(select(TitleRecord).where(TitleRecord.task_id == task_id).order_by(TitleRecord.id)).all()
+            self.assertEqual([[word['id'] for word in record.selected_keywords if word['tag'] == '材质'] for record in records], [[ids[0]], [ids[1]]])
+
     def test_material_and_fabric_share_one_setting_and_historical_words_still_match(self):
         from app.title_service import match_keywords
         result = self.profile(attributes={'面料':'纯棉'})
@@ -753,6 +885,107 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         # 旧客户端的审核 URL 保持兼容，行为与启停接口相同。
         compatible = self.request('POST','/title-keywords/1/review',json={'status':'enabled','review_token':word()['review_token']})
         self.assertEqual(compatible.status_code,200,compatible.text)
+
+    def test_batch_disable_only_changes_selected_words_and_advances_configuration_once(self):
+        self.import_words()
+        words = self.request('GET', '/title-keywords').json()['items']
+        selections = [{'id': word['id'], 'review_token': word['review_token']} for word in words[:2]]
+        with self.sessions() as db:
+            revision = get_market(db, 1).revision
+            get_market(db, 1).updated_at = datetime(2026, 1, 1)
+            # 选用次数更新不应阻止批量停用。
+            db.get(TitleKeyword, words[0]['id']).selected_count += 1
+            db.commit()
+        response = self.request('POST', '/title-keywords/batch-disable', json={'selections': selections})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {'disabled': 2})
+        enabled = self.request('GET', '/title-keywords', params={'status': 'enabled'}).json()
+        self.assertEqual([word['id'] for word in enabled['items']], [words[2]['id']])
+        with self.sessions() as db:
+            self.assertEqual(get_market(db, 1).revision, revision + 1)
+            self.assertGreater(get_market(db, 1).updated_at, datetime(2026, 1, 1))
+        disabled = self.request('GET', '/title-keywords', params={'status': 'disabled'}).json()['items']
+        repeated = self.request('POST', '/title-keywords/batch-disable', json={
+            'selections': [{'id': word['id'], 'review_token': word['review_token']} for word in disabled]})
+        self.assertEqual(repeated.json(), {'disabled': 0})
+        with self.sessions() as db:
+            self.assertEqual(get_market(db, 1).revision, revision + 1)
+
+    def test_batch_disable_rejects_entire_selection_when_a_word_is_stale_or_merged(self):
+        self.import_words()
+        words = self.request('GET', '/title-keywords').json()['items']
+        selections = [{'id': word['id'], 'review_token': word['review_token']} for word in words[:2]]
+        self.request('PATCH', f"/title-keywords/{words[1]['id']}", json={'translation': '已核对长袖'})
+        with self.sessions() as db:
+            revision = get_market(db, 1).revision
+        stale = self.request('POST', '/title-keywords/batch-disable', json={'selections': selections})
+        self.assertEqual(stale.status_code, 409, stale.text)
+        with self.sessions() as db:
+            self.assertTrue(all(db.get(TitleKeyword, word['id']).status == 'enabled' for word in words))
+            self.assertEqual(get_market(db, 1).revision, revision)
+            db.get(TitleKeyword, words[1]['id']).merged_into_id = words[2]['id']
+            db.commit()
+        merged = self.request('POST', '/title-keywords/batch-disable', json={'selections': selections})
+        self.assertEqual(merged.status_code, 400, merged.text)
+        with self.sessions() as db:
+            self.assertEqual(db.get(TitleKeyword, words[0]['id']).status, 'enabled')
+            self.assertEqual(get_market(db, 1).revision, revision)
+
+    def test_batch_disable_enforces_admin_company_and_market_scope(self):
+        self.import_words()
+        words = self.request('GET', '/title-keywords').json()['items']
+        selection = {'id': words[0]['id'], 'review_token': words[0]['review_token']}
+        endpoint = '/title-keywords/batch-disable'
+        for uid, code in ((2, 403), (3, 403), (5, 404)):
+            with self.subTest(uid=uid):
+                response = self.request('POST', endpoint, uid=uid, json={'selections': [selection]})
+                self.assertEqual(response.status_code, code, response.text)
+        with self.sessions() as db:
+            other_market = get_market(db, 1, site='ID', language='id', create=True)
+            foreign_market = get_market(db, 2, create=True)
+            for market in (other_market, foreign_market):
+                db.add(TitleKeyword(market_id=market.id, code='KW000001', phrase='gaun', translation='连衣裙',
+                    tag='品类', identity_hash=digest(['gaun'])))
+            db.commit()
+            other_ids = db.scalars(select(TitleKeyword.id).where(TitleKeyword.market_id.in_([other_market.id, foreign_market.id]))).all()
+        wrong_market = self.request('POST', endpoint, json={'site': 'ID', 'language': 'id', 'selections': [selection]})
+        self.assertEqual(wrong_market.status_code, 404, wrong_market.text)
+        for identity in [*other_ids, 999999]:
+            response = self.request('POST', endpoint, json={'selections': [selection, {'id': identity, 'review_token': '0' * 64}]})
+            self.assertEqual(response.status_code, 404, response.text)
+        self.assertTrue(all(word['status'] == 'enabled' for word in self.request('GET', '/title-keywords').json()['items']))
+
+    def test_batch_disable_validates_selection_limits_and_duplicates(self):
+        selection = {'id': 1, 'review_token': '0' * 64}
+        for selections in ([], [selection, selection], [selection] * 1001,
+                [{'id': 0, 'review_token': '0' * 64}], [{'id': 1, 'review_token': 'short'}]):
+            response = self.request('POST', '/title-keywords/batch-disable', json={'selections': selections})
+            self.assertEqual(response.status_code, 422, response.text)
+
+    def test_batch_enable_is_atomic_and_checks_disabled_dictionary_and_permissions(self):
+        self.import_words()
+        endpoint = '/title-keywords/batch-status'
+        def payload(status):
+            words = self.request('GET', '/title-keywords').json()['items']
+            return {'status': status, 'selections': [{'id': word['id'], 'review_token': word['review_token']} for word in words]}
+        self.assertEqual(self.request('POST', endpoint, json=payload('disabled')).json(), {'disabled': 3})
+        before = payload('enabled')
+        self.assertEqual(self.request('POST', endpoint, uid=2, json=before).status_code, 403)
+        self.assertEqual(self.request('POST', endpoint, uid=5, json=before).status_code, 404)
+        self.request('PATCH', '/title-keywords/3', json={'translation': '已核对花卉'})
+        self.assertEqual(self.request('POST', endpoint, json=before).status_code, 409)
+        tag = next(item for item in self.dictionary_items('tag') if item['name'] == '图案')
+        self.request('PATCH', f"/title-dictionaries/{tag['id']}", json={'enabled': False})
+        blocked = self.request('POST', endpoint, json=payload('enabled'))
+        self.assertEqual(blocked.status_code, 400, blocked.text)
+        self.assertTrue(all(word['status'] == 'disabled' for word in self.request('GET', '/title-keywords').json()['items']))
+        self.request('PATCH', f"/title-dictionaries/{tag['id']}", json={'enabled': True})
+        response = self.request('POST', endpoint, json=payload('enabled'))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {'enabled': 3})
+        self.assertTrue(all(word['status'] == 'enabled' for word in self.request('GET', '/title-keywords').json()['items']))
+        self.assertEqual(self.request('POST', endpoint, json=payload('enabled')).json(), {'enabled': 0})
+        self.assertEqual(self.request('POST', endpoint, json=payload('pending')).status_code, 422)
 
     def test_fabric_semantic_alias_accepts_new_name_without_rewriting_historical_fields(self):
         self.enable()
@@ -1301,6 +1534,34 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
 
 
 class TitlePureTests(unittest.TestCase):
+    def test_material_choices_migration_keeps_legacy_profile_and_task_snapshots(self):
+        from sqlalchemy import MetaData, Table
+        engine = create_engine('sqlite://')
+        with engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, '20261031_57')
+            profiles = Table('title_template_profiles', MetaData(), autoload_with=connection)
+            legacy_attributes = {'材质': '纯棉', '结构设计': '长袖'}
+            connection.execute(profiles.insert(), {'id': 1, 'market_id': 7, 'template_id': 9,
+                'category': '连衣裙', 'gender': '女', 'age_group': '成人', 'attributes': legacy_attributes,
+                'category_names': [], 'locked_keyword_ids': [], 'forbidden_keyword_ids': [],
+                'fallback_approved': False, 'updated_at': datetime(2026, 1, 1)})
+            snapshot = {'profile': {'attributes': legacy_attributes}, 'marker': '原快照'}
+            connection.execute(TitleTask.__table__.insert(), {'id': 10, 'market_id': 7, 'user_id': 1,
+                'kind': 'batch', 'state': 'completed', 'request_key': 'm' * 64, 'request_hash': 'n' * 64, 'snapshot': snapshot})
+            command.upgrade(config, 'head')
+            current = Table('title_template_profiles', MetaData(), autoload_with=connection)
+            row = connection.execute(select(current)).mappings().one()
+            self.assertIsNone(row['material_keyword_ids'])
+            self.assertEqual(row['attributes'], legacy_attributes)
+            self.assertEqual(connection.scalar(select(TitleTask.snapshot)), snapshot)
+            connection.execute(current.update().values(material_keyword_ids=[1, 2]))
+            self.assertEqual(connection.scalar(select(current.c.material_keyword_ids)), [1, 2])
+            command.downgrade(config, '20261031_57')
+            self.assertNotIn('material_keyword_ids', {column['name'] for column in inspect(connection).get_columns('title_template_profiles')})
+            self.assertEqual(connection.scalar(select(profiles.c.attributes)), legacy_attributes)
+        engine.dispose()
+
     def test_custom_tag_semantics_are_supplied_to_extraction_with_original_evidence(self):
         row = {'row': 2, 'values': {'原标题': 'Gaun Lengan Panjang Corak Bunga', '商品品类': '连衣裙'}, 'metrics': {}}
         answer = {'language': 'ms', 'keywords': [{'phrase': 'Lengan Panjang', 'translation': '长袖', 'tag': '袖型'}]}

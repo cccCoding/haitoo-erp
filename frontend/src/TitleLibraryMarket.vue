@@ -23,6 +23,15 @@ const importDialogBody = ref<HTMLElement | null>(null)
 const tab = ref('templates'), updated = ref('')
 const busy = ref(false), error = ref(''), notice = ref(''), search = ref(''), status = ref(''), category = ref(''), tagFilter = ref(''), page = ref(1), pageSize = ref(20)
 const words = ref<any[]>([]), total = ref(0), tasks = ref<any[]>([]), stats = ref<any>({})
+const selectedWords = ref<{ id: number; review_token: string }[]>([])
+const selectableWords = computed(() => words.value)
+const selectedWordIds = computed(() => new Set(selectedWords.value.map(word => word.id)))
+const selectedEnabledCount = computed(() => words.value.filter(word => selectedWordIds.value.has(word.id) && word.status === 'enabled').length)
+const selectedInactiveCount = computed(() => words.value.filter(word => selectedWordIds.value.has(word.id) && word.status !== 'enabled').length)
+const wordPageSelection = computed(() => {
+  const count = selectableWords.value.filter(word => selectedWordIds.value.has(word.id)).length
+  return { all: count > 0 && count === selectableWords.value.length, some: count > 0 && count < selectableWords.value.length }
+})
 const taskPage = ref(1), taskPageSize = ref(20), taskTotal = ref(0), taskListLoading = ref(false)
 const taskPageCount = computed(() => Math.max(1, Math.ceil(taskTotal.value / taskPageSize.value)))
 const file = ref<File | null>(null), kind = ref('titles'), note = ref('')
@@ -69,6 +78,7 @@ async function load() {
     if (disposed || current !== revision) return
     updated.value=market.data.updated_at; dictionaryEntries.value=dictionaries.data.items;semanticTags.value=dictionaries.data.semantic_tags;categoryFields.value=dictionaries.data.category_fields||['品类','性别','年龄']
     words.value=list.data.items; total.value=list.data.total;page.value=list.data.page||1; tasks.value=jobs.data.items; taskTotal.value=jobs.data.total; taskPage.value=jobs.data.page||1; stats.value=statistics.data
+    selectedWords.value=selectedWords.value.filter(selected=>selectableWords.value.some(word=>word.id===selected.id))
     loadedTaskPage=taskPage.value;loadedTaskPageSize=taskPageSize.value
     loadedWordPage=page.value;loadedWordPageSize=pageSize.value
   } catch(e:any) { if(!disposed && current===revision){taskPage.value=loadedTaskPage;taskPageSize.value=loadedTaskPageSize;page.value=loadedWordPage;pageSize.value=loadedWordPageSize;failure(e)} }
@@ -81,9 +91,9 @@ async function action(run:()=>Promise<void>) {
 }
 async function changeTaskPage(target: number) { if(taskListLoading.value)return;error.value='';taskPage.value=Math.min(Math.max(1,target),taskPageCount.value);revision++;await load() }
 async function changeTaskPageSize(value:number) { if(taskListLoading.value)return;error.value='';taskPageSize.value=value;taskPage.value=1;revision++;await load() }
-async function changeWordPage(value:number) { if(taskListLoading.value)return;error.value='';page.value=value;revision++;await load() }
-async function changeWordPageSize(value:number) { if(taskListLoading.value)return;pageSize.value=value;await searchWords() }
-async function searchWords(){error.value='';page.value=1;revision++;await load()}
+async function changeWordPage(value:number) { if(busy.value||taskListLoading.value)return;selectedWords.value=[];error.value='';page.value=value;revision++;await load() }
+async function changeWordPageSize(value:number) { if(busy.value||taskListLoading.value)return;pageSize.value=value;await searchWords() }
+async function searchWords(){if(busy.value||taskListLoading.value)return;selectedWords.value=[];error.value='';page.value=1;revision++;await load()}
 function closeTask() { detailRequest++;taskDetailId.value=null;activeTask.value=null;taskDetailLoading.value=false;taskError.value='';selected.value=[];taskCategoryPending.value=false }
 async function downloadTemplate() {
   await action(async () => {
@@ -148,7 +158,34 @@ async function setKeywordStatus(word:any){
     await load()
   })
 }
-watch(tab,()=>{revision++;tasks.value=[];taskTotal.value=0;taskPage.value=1;loadedTaskPage=1;loadedTaskPageSize=taskPageSize.value;closeTask();void load()})
+function toggleWord(word:any, event:Event) {
+  if(!admin.value||busy.value||taskListLoading.value)return
+  selectedWords.value=selectedWords.value.filter(selected=>selected.id!==word.id)
+  if((event.target as HTMLInputElement).checked)selectedWords.value.push({id:word.id,review_token:word.review_token})
+}
+function toggleWordPage(event:Event) {
+  if(!admin.value||busy.value||taskListLoading.value)return
+  selectedWords.value=(event.target as HTMLInputElement).checked
+    ? selectableWords.value.map(word=>selectedWords.value.find(selected=>selected.id===word.id)||{id:word.id,review_token:word.review_token})
+    : []
+}
+async function setSelectedWordsStatus(nextStatus:'enabled'|'disabled') {
+  if(!admin.value||busy.value||taskListLoading.value||!selectedWords.value.length)return
+  const selections=selectedWords.value.filter(selected=>words.value.some(word=>word.id===selected.id&&word.status!==nextStatus))
+  if(!selections.length)return
+  await action(async()=>{
+    try {
+      const {data}=await api.post('/title-keywords/batch-status',{...marketParams.value,status:nextStatus,selections},config.value)
+      selectedWords.value=[]
+      notice.value=`已${nextStatus==='enabled'?'启用':'停用'} ${data[nextStatus]} 个关键词`
+    } catch(e:any) {
+      if([400,404,409].includes(e.response?.status)){selectedWords.value=[];await load()}
+      throw e
+    }
+    await load()
+  })
+}
+watch(tab,()=>{selectedWords.value=[];revision++;tasks.value=[];taskTotal.value=0;taskPage.value=1;loadedTaskPage=1;loadedTaskPageSize=taskPageSize.value;closeTask();void load()})
 onMounted(()=>{void load();timer=setInterval(()=>{if(tasks.value.some(t=>['queued','running'].includes(t.state)))void load();if(activeTask.value&&['queued','running'].includes(activeTask.value.state)&&!taskDetailLoading.value&&!busy.value)void openTask(activeTask.value.id,false)},2500)})
 onUnmounted(()=>{disposed=true;revision++;detailRequest++;if(timer)clearInterval(timer)})
 </script>
@@ -167,10 +204,25 @@ onUnmounted(()=>{disposed=true;revision++;detailRequest++;if(timer)clearInterval
         <label>产品分类<select v-model="category" aria-label="产品分类筛选"><option value="">全部产品分类</option><option v-for="entry in categories" :key="entry.id" :value="entry.name">{{entry.name}}{{entry.enabled?'':'（停用）'}}</option></select></label>
         <label>标签<select v-model="tagFilter" aria-label="标签筛选"><option value="">全部标签</option><option v-for="entry in tags" :key="entry.id" :value="entry.name">{{titleTagLabel(entry.name)}}{{entry.enabled?'':'（停用）'}}</option></select></label>
         <label>状态<select v-model="status" aria-label="关键词状态"><option value="">全部状态</option><option value="enabled">启用</option><option value="disabled">停用</option></select></label>
-        <div class="creative-resource-filter-actions"><button class="secondary" :disabled="taskListLoading">搜索</button></div>
+        <div class="creative-resource-filter-actions"><button class="secondary" :disabled="busy||taskListLoading">搜索</button></div>
       </form>
-      <div class="title-scroll creative-resource-table-wrap"><table class="title-library-table"><thead><tr><th>编码</th><th>{{market.languageName}}词语</th><th>中文释义</th><th>产品分类</th><th>标签</th><th>原文频次</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="word in words" :key="word.id"><td>{{word.code}}</td><td>{{word.phrase}}<small v-if="word.is_borrowed">借词</small></td><td>{{word.translation}}</td><td>{{word.categories.join('、')}}</td><td>{{titleTagLabel(word.tag)}}<small v-if="categoryFields.includes(word.tag)">模板基础字段</small></td><td>{{word.title_frequency}}</td><td>{{labels[word.status]}}<small title="选词优先级，与启用状态独立">{{({preferred:'优先词',normal:'普通词',forbidden:'禁用词'} as Record<string,string>)[word.priority]}}</small></td><td><button class="ghost" @click="showEvidence(word)">来源</button><button v-if="admin" class="ghost" @click="edit(word)">编辑</button><button v-if="admin" class="ghost" :disabled="busy||taskListLoading" :aria-label="`${word.status==='enabled'?'停用':'启用'}关键词 ${word.code}`" @click="setKeywordStatus(word)">{{word.status==='enabled'?'停用':'启用'}}</button></td></tr></tbody></table></div>
-      <p v-if="!words.length" class="empty">暂无关键词，请先导入并确认入库。</p><TitlePagination label="关键词" :page="page" :page-size="pageSize" :total="total" :disabled="taskListLoading" @page="changeWordPage" @page-size="changeWordPageSize" />
+      <div v-if="admin" class="title-keyword-bulk-actions">
+        <span aria-live="polite">已选 {{selectedWords.length}} 项<span class="title-note">（仅当前页）</span></span>
+        <button class="secondary" :disabled="busy||taskListLoading||!selectedInactiveCount" @click="setSelectedWordsStatus('enabled')">批量启用</button>
+        <button class="secondary" :disabled="busy||taskListLoading||!selectedEnabledCount" @click="setSelectedWordsStatus('disabled')">批量停用</button>
+        <button class="ghost" :disabled="busy||taskListLoading||!selectedWords.length" @click="selectedWords=[]">取消选择</button>
+      </div>
+      <div class="title-scroll creative-resource-table-wrap"><table class="title-library-table">
+        <thead><tr>
+          <th v-if="admin" class="title-keyword-selection"><input type="checkbox" aria-label="全选当前页关键词" :checked="wordPageSelection.all" :indeterminate="wordPageSelection.some" :disabled="busy||taskListLoading||!selectableWords.length" @change="toggleWordPage" /></th>
+          <th>编码</th><th>{{market.languageName}}词语</th><th>中文释义</th><th>产品分类</th><th>标签</th><th>原文频次</th><th>状态</th><th>操作</th>
+        </tr></thead>
+        <tbody><tr v-for="word in words" :key="word.id" :class="{'title-keyword-selected':selectedWordIds.has(word.id)}">
+          <td v-if="admin" class="title-keyword-selection"><input type="checkbox" :aria-label="`选择关键词 ${word.code}`" :checked="selectedWordIds.has(word.id)" :disabled="busy||taskListLoading" @change="toggleWord(word,$event)" /></td>
+          <td>{{word.code}}</td><td>{{word.phrase}}<small v-if="word.is_borrowed">借词</small></td><td>{{word.translation}}</td><td>{{word.categories.join('、')}}</td><td>{{titleTagLabel(word.tag)}}<small v-if="categoryFields.includes(word.tag)">模板基础字段</small></td><td>{{word.title_frequency}}</td><td>{{labels[word.status]}}<small title="选词优先级，与启用状态独立">{{({preferred:'优先词',normal:'普通词',forbidden:'禁用词'} as Record<string,string>)[word.priority]}}</small></td><td><button class="ghost" @click="showEvidence(word)">来源</button><button v-if="admin" class="ghost" @click="edit(word)">编辑</button><button v-if="admin" class="ghost" :disabled="busy||taskListLoading" :aria-label="`${word.status==='enabled'?'停用':'启用'}关键词 ${word.code}`" @click="setKeywordStatus(word)">{{word.status==='enabled'?'停用':'启用'}}</button></td>
+        </tr></tbody>
+      </table></div>
+      <p v-if="!words.length" class="empty">暂无关键词，请先导入并确认入库。</p><TitlePagination label="关键词" :page="page" :page-size="pageSize" :total="total" :disabled="busy||taskListLoading" @page="changeWordPage" @page-size="changeWordPageSize" />
     </section>
     <section v-if="tab==='stats'" class="title-panel"><div class="title-stat-grid"><div v-for="(label,key) in {generated:'生成标题',adopted:'采纳标题',manual:'人工调整',high_similarity:'高相似标题',coverage_insufficient:'覆盖不足',attempts:'成文调用次数'}" :key="key"><strong>{{stats[key]||0}}</strong><span>{{label}}</span></div></div><p class="title-note">调用次数在请求前记录，可能包括失败请求，不等同于供应商账单。自然流效果需结合真实搜索曝光、点击和转化评估。</p></section>
     <section v-if="tab==='imports'||tab==='stats'" class="title-panel">

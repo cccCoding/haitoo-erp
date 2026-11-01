@@ -7,6 +7,11 @@
 .title-library .title-library-table{width:100%;min-width:940px;border-collapse:collapse;text-align:left;font-size:13px}
 .title-library .title-library-table th{padding:14px 16px;border-bottom:0;background:#faf9fd;color:#8a8397;font-size:12px;font-weight:600;white-space:nowrap}
 .title-library .title-library-table td{padding:14px 16px;border-top:1px solid #eeebf4;border-bottom:0;color:#4d465b;vertical-align:middle;overflow-wrap:anywhere}
+.title-keyword-bulk-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;color:#4d465b;font-size:13px}
+.title-library .title-library-table .title-keyword-selection{width:24px;padding-right:0;text-align:center}
+.title-keyword-selection input[type=checkbox]{display:inline-block;width:16px;height:16px;margin:0;padding:0;accent-color:#6043d4;cursor:pointer}
+.title-keyword-selection input:disabled{cursor:not-allowed}
+.title-library .title-library-table tr.title-keyword-selected td{background:#faf9ff}
 @media(max-width:640px){
   .title-library .title-library-filters>label,.title-library .title-library-filters>label.title-library-search{flex:1 1 100%;width:100%}
   .title-library .title-library-filters>.creative-resource-filter-actions{flex-wrap:wrap}
