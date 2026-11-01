@@ -1145,6 +1145,42 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             self.assertEqual(response.status_code,200,response.text)
             self.assertEqual(response.json(),{'items':[],'total':0,'page':1,'page_size':50})
 
+    def test_task_pagination_sorts_only_ids_and_fetches_large_results_without_sorting(self):
+        from sqlalchemy import event
+        self.enable()
+        large_result = {'items': [{'key': 'large', 'title': 'x' * 400000}]}
+        with self.sessions() as db:
+            market = get_market(db, 1)
+            for index in range(3):
+                db.add(TitleTask(market_id=market.id, user_id=2, kind='batch', state='completed',
+                    request_key=f'large-result-{index}', request_hash=f'large-result-{index}',
+                    result=large_result, snapshot={'note': f'任务 {index}', 'profile': {'keywords': ['y' * 400000]}}))
+            db.commit()
+        statements = []
+        def capture(connection, cursor, statement, parameters, context, executemany):
+            if 'title_tasks' in statement.lower():
+                statements.append(statement)
+        event.listen(self.engine, 'before_cursor_execute', capture)
+        try:
+            response = self.request('GET', '/title-tasks', uid=2, params={'kind': 'batch', 'page': 2, 'page_size': 2})
+        finally:
+            event.remove(self.engine, 'before_cursor_execute', capture)
+        self.assertEqual(response.status_code, 200, response.text[:1000])
+        data = response.json()
+        self.assertEqual((data['total'], data['page'], len(data['items'])), (3, 2, 1))
+        self.assertEqual(data['items'][0]['note'], '任务 0')
+        self.assertEqual(data['items'][0]['result'], large_result)
+        ordered = [statement for statement in statements if 'ORDER BY' in statement.upper()]
+        self.assertEqual(len(ordered), 1)
+        self.assertTrue(ordered[0].startswith('SELECT title_tasks.id \n'), ordered[0])
+        for field in ('result', 'snapshot', 'progress', 'error'):
+            self.assertNotIn(f'title_tasks.{field}', ordered[0])
+        full_rows = [statement for statement in statements if 'title_tasks.result' in statement]
+        self.assertEqual(len(full_rows), 1)
+        self.assertNotIn('ORDER BY', full_rows[0].upper())
+        self.assertIn('title_tasks.id IN', full_rows[0])
+        self.assertTrue(all('title_tasks.snapshot' not in statement for statement in full_rows))
+
     def test_note_and_later_upload_date_do_not_create_a_second_task_for_the_same_file(self):
         with patch('app.title_api.datetime',wraps=datetime) as clock:
             clock.now.return_value=datetime(2026,10,30,23,59)

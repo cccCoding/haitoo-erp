@@ -58,42 +58,64 @@ const categories = computed(()=>dictionaryEntries.value.filter(row=>row.kind==='
 const tags = computed(()=>dictionaryEntries.value.filter(row=>row.kind==='tag'))
 const editableTags = computed(()=>tags.value.filter(row=>editing.value?.tag!=='面料'||row.name!=='材质'))
 const labels: Record<string,string> = {preview:'待确认上传',queued:'排队中',running:'处理中',review:'待确认入库',completed:'已完成',completed_with_errors:'部分失败',failed:'失败',cancelled:'已取消',pending:'未启用',enabled:'启用',disabled:'停用'}
-let timer: ReturnType<typeof setInterval> | undefined, revision = 0, detailRequest = 0, disposed = false, refreshing = false
+let timer: ReturnType<typeof setTimeout> | undefined, revision = 0, detailRequest = 0, disposed = false, refreshing = false
+let sharedDirty = true, pendingReload = false, polling = false
 let loadedReviewCategory = '', loadedReviewTag = '', loadedReviewImported = ''
 let loadedTaskPage = 1, loadedTaskPageSize = 20, loadedReviewOffset = 0, loadedReviewPageSize = 20, loadedWordPage = 1, loadedWordPageSize = 20
 function failureMessage(e: any) { return typeof e.response?.data?.detail === 'string' ? e.response.data.detail : e.message || '操作失败' }
 function failure(e: any) { error.value = failureMessage(e) }
 function importKindLabel(task: any) { return task.import_kind === 'titles' ? '商品标题' : task.import_kind === 'keywords' ? '已整理关键词' : '—' }
-async function load() {
-  if (refreshing) return
+type LoadMode = 'changed' | 'view' | 'poll'
+const runningTask = (task:any) => ['queued','running'].includes(task.state)
+async function load(mode:LoadMode = 'changed') {
+  if(disposed)return
+  if(mode==='changed')sharedDirty=true
+  if (refreshing) { if(mode!=='poll')pendingReload=true;return }
   refreshing = true; taskListLoading.value = true; const current = revision
+  const fetchShared = mode!=='poll'&&sharedDirty
+  const fetchWords = mode!=='poll'&&tab.value==='words'
+  const fetchTasks = ['imports','stats'].includes(tab.value)
+  const fetchStats = tab.value==='stats'&&mode!=='poll'
+  const wasRunning = tasks.value.some(runningTask)
+  if(fetchShared)sharedDirty=false
   try {
     const [market, list, jobs, statistics, dictionaries] = await Promise.all([
-      api.get('/title-market', {...config.value,params:marketParams.value}),
-      api.get('/title-keywords', {...config.value,params:{...marketParams.value,search:search.value,status:status.value,category:category.value,tag:tagFilter.value,page:page.value,page_size:pageSize.value}}),
-      api.get('/title-tasks', {...config.value,params:{...marketParams.value,kind:tab.value==='imports'?'import':'batch',page:taskPage.value,page_size:taskPageSize.value}}),
-      api.get('/title-statistics', {...config.value,params:marketParams.value}),
-      api.get('/title-dictionaries', config.value),
+      fetchShared ? api.get('/title-market', {...config.value,params:marketParams.value}) : null,
+      fetchWords ? api.get('/title-keywords', {...config.value,params:{...marketParams.value,search:search.value,status:status.value,category:category.value,tag:tagFilter.value,page:page.value,page_size:pageSize.value}}) : null,
+      fetchTasks ? api.get('/title-tasks', {...config.value,params:{...marketParams.value,kind:tab.value==='imports'?'import':'batch',page:taskPage.value,page_size:taskPageSize.value}}) : null,
+      fetchStats ? api.get('/title-statistics', {...config.value,params:marketParams.value}) : null,
+      fetchShared ? api.get('/title-dictionaries', config.value) : null,
     ])
-    if (disposed || current !== revision) return
-    updated.value=market.data.updated_at; dictionaryEntries.value=dictionaries.data.items;semanticTags.value=dictionaries.data.semantic_tags;categoryFields.value=dictionaries.data.category_fields||['品类','性别','年龄']
-    words.value=list.data.items; total.value=list.data.total;page.value=list.data.page||1; tasks.value=jobs.data.items; taskTotal.value=jobs.data.total; taskPage.value=jobs.data.page||1; stats.value=statistics.data
-    selectedWords.value=selectedWords.value.filter(selected=>selectableWords.value.some(word=>word.id===selected.id))
-    loadedTaskPage=taskPage.value;loadedTaskPageSize=taskPageSize.value
-    loadedWordPage=page.value;loadedWordPageSize=pageSize.value
-  } catch(e:any) { if(!disposed && current===revision){taskPage.value=loadedTaskPage;taskPageSize.value=loadedTaskPageSize;page.value=loadedWordPage;pageSize.value=loadedWordPageSize;failure(e)} }
-  finally { refreshing=false; taskListLoading.value=false; if(!disposed && current!==revision)void load() }
+    if (disposed || current !== revision) { if(fetchShared)sharedDirty=true;return }
+    if(market&&dictionaries){updated.value=market.data.updated_at;dictionaryEntries.value=dictionaries.data.items;semanticTags.value=dictionaries.data.semantic_tags;categoryFields.value=dictionaries.data.category_fields||['品类','性别','年龄']}
+    if(list){
+      words.value=list.data.items;total.value=list.data.total;page.value=list.data.page||1
+      selectedWords.value=selectedWords.value.filter(selected=>selectableWords.value.some(word=>word.id===selected.id))
+      loadedWordPage=page.value;loadedWordPageSize=pageSize.value
+    }
+    if(jobs){tasks.value=jobs.data.items;taskTotal.value=jobs.data.total;taskPage.value=jobs.data.page||1;loadedTaskPage=taskPage.value;loadedTaskPageSize=taskPageSize.value}
+    if(statistics)stats.value=statistics.data
+    // 任务全部结束时补刷一次统计；运行期间只拉任务进度。
+    if(mode==='poll'&&tab.value==='stats'&&wasRunning&&!tasks.value.some(runningTask)){
+      const {data}=await api.get('/title-statistics',config.value)
+      if(!disposed&&current===revision)stats.value=data
+    }
+  } catch(e:any) { if(fetchShared)sharedDirty=true;if(!disposed && current===revision){taskPage.value=loadedTaskPage;taskPageSize.value=loadedTaskPageSize;page.value=loadedWordPage;pageSize.value=loadedWordPageSize;failure(e)} }
+  finally {
+    refreshing=false;taskListLoading.value=false
+    if(!disposed&&(pendingReload||current!==revision)){pendingReload=false;await load('view')}
+  }
 }
 async function action(run:()=>Promise<void>) {
   if(busy.value)return
   busy.value=true; error.value=''; notice.value=''
   try { await run() } catch(e:any){if(taskDetailId.value!==null)taskError.value=failureMessage(e);else failure(e)} finally{busy.value=false}
 }
-async function changeTaskPage(target: number) { if(taskListLoading.value)return;error.value='';taskPage.value=Math.min(Math.max(1,target),taskPageCount.value);revision++;await load() }
-async function changeTaskPageSize(value:number) { if(taskListLoading.value)return;error.value='';taskPageSize.value=value;taskPage.value=1;revision++;await load() }
-async function changeWordPage(value:number) { if(busy.value||taskListLoading.value)return;selectedWords.value=[];error.value='';page.value=value;revision++;await load() }
+async function changeTaskPage(target: number) { if(taskListLoading.value)return;error.value='';taskPage.value=Math.min(Math.max(1,target),taskPageCount.value);revision++;await load('view') }
+async function changeTaskPageSize(value:number) { if(taskListLoading.value)return;error.value='';taskPageSize.value=value;taskPage.value=1;revision++;await load('view') }
+async function changeWordPage(value:number) { if(busy.value||taskListLoading.value)return;selectedWords.value=[];error.value='';page.value=value;revision++;await load('view') }
 async function changeWordPageSize(value:number) { if(busy.value||taskListLoading.value)return;pageSize.value=value;await searchWords() }
-async function searchWords(){if(busy.value||taskListLoading.value)return;selectedWords.value=[];error.value='';page.value=1;revision++;await load()}
+async function searchWords(){if(busy.value||taskListLoading.value)return;selectedWords.value=[];error.value='';page.value=1;revision++;await load('view')}
 function closeTask() { detailRequest++;taskDetailId.value=null;activeTask.value=null;taskDetailLoading.value=false;taskError.value='';selected.value=[];taskCategoryPending.value=false }
 async function downloadTemplate() {
   await action(async () => {
@@ -185,9 +207,20 @@ async function setSelectedWordsStatus(nextStatus:'enabled'|'disabled') {
     await load()
   })
 }
-watch(tab,()=>{selectedWords.value=[];revision++;tasks.value=[];taskTotal.value=0;taskPage.value=1;loadedTaskPage=1;loadedTaskPageSize=taskPageSize.value;closeTask();void load()})
-onMounted(()=>{void load();timer=setInterval(()=>{if(tasks.value.some(t=>['queued','running'].includes(t.state)))void load();if(activeTask.value&&['queued','running'].includes(activeTask.value.state)&&!taskDetailLoading.value&&!busy.value)void openTask(activeTask.value.id,false)},2500)})
-onUnmounted(()=>{disposed=true;revision++;detailRequest++;if(timer)clearInterval(timer)})
+watch(tab,()=>{selectedWords.value=[];revision++;tasks.value=[];taskTotal.value=0;taskPage.value=1;loadedTaskPage=1;loadedTaskPageSize=taskPageSize.value;closeTask();void load('view')})
+async function pollTasks() {
+  if(disposed||polling)return
+  polling=true
+  if(timer){clearTimeout(timer);timer=undefined}
+  try {
+    if(disposed||document.hidden||busy.value||refreshing)return
+    if(['imports','stats'].includes(tab.value)&&tasks.value.some(runningTask))await load('poll')
+    if(!disposed&&!document.hidden&&!busy.value&&activeTask.value&&runningTask(activeTask.value)&&!taskDetailLoading.value)await openTask(activeTask.value.id,false)
+  } finally { polling=false;if(!disposed&&!document.hidden)timer=setTimeout(pollTasks,5000) }
+}
+function resumePolling() { if(timer){clearTimeout(timer);timer=undefined}if(!document.hidden&&!disposed)void pollTasks() }
+onMounted(()=>{void load();timer=setTimeout(pollTasks,5000);document.addEventListener('visibilitychange',resumePolling)})
+onUnmounted(()=>{disposed=true;revision++;detailRequest++;if(timer)clearTimeout(timer);document.removeEventListener('visibilitychange',resumePolling)})
 </script>
 
 <template>

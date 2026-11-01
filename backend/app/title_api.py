@@ -797,10 +797,15 @@ def tasks(platform: str = 'TikTok', site: str = 'MY', language: str = 'ms', kind
     query = select(TitleTask).where(TitleTask.market_id == market.id, TitleTask.kind == kind)
     if user.role != Role.COMPANY_ADMIN:
         query = query.where(TitleTask.user_id == user.id)
-    total = db.scalar(select(func.count()).select_from(query.subquery()))
+    id_query = query.with_only_columns(TitleTask.id)
+    total = db.scalar(select(func.count()).select_from(id_query.subquery()))
     page = min(page, max(1, (total + page_size - 1) // page_size))
+    # MySQL filesort 会把 SELECT 中的 JSON 结果带入排序缓冲，任务结果较大时
+    # 即使 LIMIT 20 也可能报 1038。先只对 ID 排序分页，再无排序地读取本页数据。
+    identities = list(db.scalars(id_query.order_by(TitleTask.id.desc()).offset((page-1)*page_size).limit(page_size)))
+    by_id = {task.id: task for task in db.scalars(query.where(TitleTask.id.in_(identities)))} if identities else {}
     return {'total': total, 'page': page, 'page_size': page_size,
-        'items': [task_payload(t) for t in db.scalars(query.order_by(TitleTask.id.desc()).offset((page-1)*page_size).limit(page_size))]}
+        'items': [task_payload(by_id[identity]) for identity in identities if identity in by_id]}
 
 
 def task_payload(task, offset=0, limit=100, db=None, category='', tag='', imported=None):
