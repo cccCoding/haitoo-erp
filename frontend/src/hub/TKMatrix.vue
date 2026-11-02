@@ -1,0 +1,600 @@
+<script setup lang="ts">
+import {ref,computed,onMounted,onUnmounted,watch} from 'vue'
+import {useRoute,useRouter} from 'vue-router'
+import axios from 'axios'
+import {dialogFocus as vDialogFocus} from '../dialog-focus'
+import {label,display,percent,windowBuckets,filterParams,deviceSetup,groupRunEvents,environmentSyncTargets} from './matrix'
+import AgentConnectionBanner from './AgentConnectionBanner.vue'
+import MatrixDevices from './MatrixDevices.vue'
+import PlanShopSelect from './PlanShopSelect.vue'
+const props=defineProps<{token:string;user:any}>()
+const emit=defineEmits<{unauthorized:[];'access-change':[enabled:boolean]}>()
+const route=useRoute(),router=useRouter()
+const api=axios.create({baseURL:import.meta.env.VITE_API_URL||'http://localhost:8000'})
+const auth=()=>({headers:{Authorization:`Bearer ${props.token}`}})
+const tab=computed(()=>route.query.tab==='data'?'data':route.query.tab==='automation'?'automation':'environments')
+function setTab(value:string){void router.replace({query:{...route.query,tab:value}})}
+const devices=ref<any[]>([]),operations=ref<any[]>([]),plans=ref<any[]>([]),strategies=ref<any[]>([]),rows=ref<any[]>([]),runs=ref<any[]>([]),stats=ref<any>({windows:[]})
+const activeRun=ref<any>(null),runSummary=ref<Record<string,number>>({})
+const configLoaded=ref(false)
+const accessLoaded=ref(false),access=ref({enabled:false,collect_enabled:false,listing_enabled:false,view_scope:'own',is_admin:false})
+const pairingCode=computed(()=>typeof route.query.hub_agent_pair==='string'?route.query.hub_agent_pair:'')
+const config=ref({enabled:false,listing_enabled:false}),total=ref(0),page=ref(1),size=ref(50),loading=ref(false),busy=ref(false),error=ref(''),notice=ref('')
+const groupOptions=ref<string[]>([])
+const filters=ref({q:'',site:'',group:'',ungrouped:false}),selected=ref<number[]>([]),allFiltered=ref(false)
+const appliedFilters=ref({...filters.value}),selectedEnvs=new Map<number,any>()
+const dialog=ref(''),previewData=ref<any>(null),run=ref<any>(null),events=ref<any[]>([]),logFloor=ref(0),runPage=ref(1),runTotal=ref(0)
+const historyScope=ref<any>(null),historyRuns=ref<any[]>([]),historyPage=ref(1),historyTotal=ref(0),historyLoading=ref(false)
+const runItemId=ref<number|null>(null),runFromHistory=ref(false),logsMore=ref(false)
+let logRequest=0,historyRequest=0
+const logGroups=computed(()=>groupRunEvents(visibleEvents.value))
+const taskNames=(tasks:string[])=>['listing.catalog','shop.collect'].filter(task=>tasks.includes(task)).map(task=>task==='shop.collect'?'店铺采集':'自动上品').join(' + ')
+const timeText=(value:string)=>value?new Date(value).toLocaleString('zh-CN'):'—'
+const detail=ref<any>(null),detailPage=ref(1),detailQ=ref(''),detailTotal=ref(0),shopId=ref<number|null>(null)
+const expandedProductSkus=ref<Record<string,boolean>>({})
+const editor=ref<any>({name:'',operation_id:null,agent_id:null,environment_ids:[],scheduled:false,time:'09:00'})
+const planShops=ref<any[]>([]),planShopsLoading=ref(false),planShopsError=ref('')
+let planShopRequest=0
+const operationEditor=ref<any>({name:'',tasks:[],strategies:{}}),operationEditing=ref<number|null>(null)
+const manual=ref<any>({tasks:[],strategies:{}})
+const previewBatches=computed(()=>previewData.value?.batches||[])
+const runPages=computed(()=>Math.max(1,Math.ceil(runTotal.value/20)))
+const editing=ref<number|null>(null),resolution=ref({item:null as any,action:'retry',evidence:''}),releaseFile=ref<File|null>(null),manifestText=ref(''),releaseEnabled=ref(false),releases=ref<any[]>([])
+const pages=computed(()=>Math.max(1,Math.ceil(total.value/size.value)))
+const ownDevices=computed(()=>devices.value.filter(d=>d.user_id===props.user.id&&d.version!=='协议4'&&d.is_active))
+const syncPending=ref<{id:number;name:string;previous:string|null}[]>([]),syncMessage=ref(''),syncHelp=ref(false)
+let syncDeadline=0,syncRequested=0,syncFailed=0
+const feedbackSource=ref<'error'|'notice'|'sync'>('notice')
+watch(error,value=>{if(value)feedbackSource.value='error'},{flush:'sync'})
+watch(notice,value=>{if(value)feedbackSource.value='notice'},{flush:'sync'})
+watch(syncMessage,value=>{if(value)feedbackSource.value='sync'},{flush:'sync'})
+const feedbackMessage=computed(()=>feedbackSource.value==='error'?error.value:feedbackSource.value==='sync'?syncMessage.value:notice.value)
+
+const selectedCount=computed(()=>allFiltered.value?total.value:selected.value.length)
+const current=computed(()=>run.value||activeRun.value)
+const visibleEvents=computed(()=>events.value.filter(e=>e.seq>logFloor.value))
+const cards=computed(()=>[
+ ['已采集店铺',`${stats.value.collected||0} / ${stats.value.total||0}`],['在售商品',display(stats.value.active)],['商品浏览次数',display(stats.value.views)],['SKU 数量',display(stats.value.sku_count)],
+ ['总曝光',windowBuckets(stats.value.windows,'impressions')],['总点击',windowBuckets(stats.value.windows,'clicks')],['整体 CTR',windowBuckets(stats.value.windows,'ctr')],['有违规店铺',`${stats.value.violations||0} / ${stats.value.violations_covered||0}`]])
+let generation=0,poll:ReturnType<typeof setInterval>|undefined,disposed=false,polling=false
+async function perform(fn:()=>Promise<void>){if(busy.value)return;busy.value=true;error.value='';try{await fn()}catch(e:any){handle(e)}finally{busy.value=false}}
+function handle(e:any){if(e.response?.status===401)emit('unauthorized');error.value=typeof e.response?.data?.detail==='string'?e.response.data.detail:'请求失败，请重试'}
+async function loadRows(){const id=++generation;loading.value=true;try{const {data}=await api.get('/hub-v5/environments',{...auth(),params:{...filterParams(appliedFilters.value),page:page.value,page_size:size.value}});if(disposed||id!==generation)return;rows.value=data.items;total.value=data.total;groupOptions.value=data.groups||[];if(page.value>pages.value){page.value=pages.value;await loadRows()}}catch(e){handle(e)}finally{if(id===generation)loading.value=false}}
+async function loadRuns(){const {data}=await api.get('/hub-v5/runs',{...auth(),params:{page:runPage.value}});runs.value=data.items;runTotal.value=data.total;activeRun.value=data.active;runSummary.value=data.summary||{}}
+async function loadDevices(){
+ const {data}=await api.get('/hub-v5/agents',auth());devices.value=data
+ if(syncPending.value.length&&!busy.value){
+  syncPending.value=syncPending.value.filter(target=>{
+   const device=data.find((d:any)=>d.id===target.id)
+   const updated=Date.parse(device?.sync_at||'')
+   return !Number.isFinite(updated)||updated<=(target.previous?Date.parse(target.previous):0)
+  })
+  const completed=syncRequested-syncFailed-syncPending.value.length
+  if(!syncPending.value.length)syncMessage.value=`环境目录已更新：${completed} 台设备${syncFailed?`；${syncFailed} 台发送失败，请重试`:''}`
+  else if(Date.now()>=syncDeadline){syncMessage.value=`${syncPending.value.map(d=>d.name).join('、')} 尚未完成同步，请检查连接器与 HubStudio 后重试`;syncPending.value=[];syncHelp.value=true}
+  else syncMessage.value=`正在同步环境：${completed} / ${syncRequested-syncFailed} 台设备已更新${syncFailed?`；${syncFailed} 台发送失败`:''}`
+ }
+}
+async function refresh(){await perform(async()=>{
+ await Promise.all([
+  loadDevices(),
+  api.get('/hub-v5/config',auth()).then(({data})=>{config.value=data;configLoaded.value=true}),
+  loadAutomation(),
+  api.get('/supply/strategies',auth()).then(({data})=>{strategies.value=data}),
+  api.get('/hub-v5/shops/metrics',{...auth(),params:filterParams(appliedFilters.value)}).then(({data})=>{stats.value=data}),
+  loadRows(),loadRuns(),
+ ])
+})}
+async function authorizeConnector(){await perform(async()=>{
+ await api.post('/hub-agent/pairings/complete',{code:pairingCode.value},auth())
+ const {hub_agent_pair,...query}=route.query;await router.replace({query})
+ notice.value='连接器已授权，正在等待电脑连接和环境同步';await loadDevices()
+})}
+async function saveConnection(device:any,identity:string){await perform(async()=>{
+ const {data}=await api.put(`/hub-v5/agents/${device.id}/connection`,{hub_identity:identity},auth())
+ devices.value=devices.value.map(d=>d.id===device.id?data:d)
+ notice.value='连接配置已保存，连接器会自动同步当前团队的环境';await loadRows()
+})}
+
+function applyFilters(){appliedFilters.value={...filters.value,group:filters.value.ungrouped?'':filters.value.group};selectedEnvs.clear();selected.value=[];allFiltered.value=false;page.value=1;notice.value='筛选已更新，已清空选择';void refresh()}
+async function toggle(id:number){
+ if(allFiltered.value){await perform(async()=>{await materializeSelection();selected.value=selected.value.filter(value=>value!==id)});return}
+ const env=rows.value.find(r=>r.id===id);if(env)selectedEnvs.set(id,env)
+ selected.value=selected.value.includes(id)?selected.value.filter(v=>v!==id):[...selected.value,id]
+}
+function selectCurrent(){selectedEnvs.clear();selected.value=[];allFiltered.value=true}
+function changeGroup(event:Event){const value=(event.target as HTMLSelectElement).value;filters.value.ungrouped=value==='ungrouped';filters.value.group=value.startsWith('group:')?value.slice(6):''}
+async function materializeSelection(limit=Infinity){
+ const targets:any[]=[]
+ for(let currentPage=1;;currentPage++){
+  const {data}=await api.get('/hub-v5/environments',{...auth(),params:{...filterParams(appliedFilters.value),page:currentPage,page_size:100}})
+  if(data.total>limit){error.value='批量设置最多支持1000个环境，请缩小筛选范围';return false}
+  targets.push(...data.items)
+  if(targets.length>=data.total||!data.items.length)break
+ }
+ selectedEnvs.clear();for(const env of targets)selectedEnvs.set(env.id,env)
+ selected.value=targets.map(env=>env.id);allFiltered.value=false
+ return true
+}
+async function openOverrides(){await perform(async()=>{
+ if(allFiltered.value&&!await materializeSelection(1000))return
+ if(!selected.value.length)return
+ if(selected.value.length>1000){error.value='批量设置最多支持1000个环境，请缩小筛选范围';return}
+ overrideSite.value='keep';overrideActivity.value='keep';dialog.value='override'
+})}
+async function syncEnvironments(){
+ if(syncPending.value.length||busy.value)return
+ await perform(async()=>{
+  syncMessage.value='正在检查在线设备…';syncHelp.value=false
+  try{await loadDevices()}catch(e){syncMessage.value='在线设备读取失败，请重试';throw e}
+  const targets=environmentSyncTargets(devices.value,props.user.id,config.value)
+  if(!targets.length){syncMessage.value='暂无可同步的在线设备，请启动并授权连接器，并在设备管理中配置 Hub 团队 ID';syncHelp.value=true;return}
+  syncRequested=targets.length;syncFailed=0;syncDeadline=Date.now()+60000
+  for(const device of targets){
+   try{await api.post(`/hub-v5/agents/${device.id}/commands`,{kind:'refresh'},auth());syncPending.value.push({id:device.id,name:device.name,previous:device.sync_at||null})}
+   catch(e){syncFailed++;handle(e)}
+  }
+  syncMessage.value=syncPending.value.length?`已请求 ${syncPending.value.length} 台设备同步，等待环境目录更新${syncFailed?`；${syncFailed} 台发送失败`:''}`:'同步请求发送失败，请重试'
+  if(!syncPending.value.length)syncHelp.value=true
+ })
+}
+function openDevices(){error.value='';notice.value='';dialog.value='devices'}
+function dismiss(){if(busy.value)return;if(['plan','operation','manual'].includes(dialog.value))return;if(dialog.value==='deletePlan'){dialog.value='plan';return}if(dialog.value==='deleteOperation'){dialog.value='operation';return}if(!busy.value)close()}
+function close(){++planShopRequest;++historyRequest;historyLoading.value=false;dialog.value='';previewData.value=null;resolution.value={item:null,action:'retry',evidence:''}}
+async function command(device:any,kind:string){await perform(async()=>{await api.post(`/hub-v5/agents/${device.id}/commands`,{kind},auth());notice.value=kind==='refresh'?'已请求同步，完整目录上传后会显示在环境列表中':kind==='pause'?'已暂停此电脑接收新任务':kind==='resume'?'已恢复此电脑接收新任务':'已撤销此电脑授权';await Promise.all([loadDevices(),loadRows()])})}
+async function loadPlanShops(){
+ const request=++planShopRequest,agent=editor.value.agent_id
+ planShops.value=[];planShopsError.value='';planShopsLoading.value=true
+ try{
+  if(!agent)return
+  const {data}=await api.get('/hub-v5/plan-environments',{...auth(),params:{agent_id:agent}})
+  if(request!==planShopRequest||disposed)return
+  planShops.value=data.items
+ }catch(e){if(request===planShopRequest){planShopsError.value='店铺加载失败，请重试';handle(e)}}
+ finally{if(request===planShopRequest)planShopsLoading.value=false}
+}
+async function loadAutomation(){const [p,o]=await Promise.all([api.get('/hub-v5/plans',auth()),api.get('/hub-v5/operations',auth())]);plans.value=p.data;operations.value=o.data}
+function changePlanDevice(){editor.value.environment_ids=[];void loadPlanShops()}
+function edit(plan?:any){
+ editing.value=plan?.id||null
+ editor.value=plan?JSON.parse(JSON.stringify({...plan,expected_revision:plan.revision})):{name:'',operation_id:operations.value[0]?.id||null,agent_id:ownDevices.value[0]?.id||null,environment_ids:[],scheduled:false,time:'09:00'}
+ dialog.value='plan';void loadPlanShops()
+}
+async function savePlan(){await perform(async()=>{
+ const e=editor.value
+ if(!e.environment_ids.length){error.value='请选择计划执行的店铺';return}
+ const payload={name:e.name,operation_id:e.operation_id,agent_id:e.agent_id,environment_ids:e.environment_ids,scheduled:e.scheduled,time:e.time,timezone:'Asia/Shanghai',...(editing.value?{expected_revision:e.expected_revision}:{})}
+ await api.request({url:editing.value?`/hub-v5/plans/${editing.value}`:'/hub-v5/plans',method:editing.value?'PATCH':'POST',data:payload,...auth()});await loadAutomation();close()
+})}
+async function togglePlan(p:any){await perform(async()=>{await api.patch(`/hub-v5/plans/${p.id}`,{name:p.name,operation_id:p.operation_id,agent_id:p.agent_id,environment_ids:p.environment_ids,scheduled:!p.scheduled,time:p.time,expected_revision:p.revision},auth());await loadAutomation()})}
+async function deletePlan(){if(dialog.value!=='deletePlan')return;await perform(async()=>{await api.delete(`/hub-v5/plans/${editing.value}`,{...auth(),params:{expected_revision:editor.value.expected_revision}});await loadAutomation();close()})}
+function editOperation(o?:any){operationEditing.value=o?.id||null;operationEditor.value=o?JSON.parse(JSON.stringify({...o,strategies:{MY:null,...o.strategies}})):{name:'',tasks:access.value.collect_enabled?['shop.collect']:['listing.catalog'],strategies:{MY:null}};dialog.value='operation'}
+async function saveOperation(){await perform(async()=>{const o=operationEditor.value;const payload={name:o.name,tasks:o.tasks,strategies:o.tasks.includes('listing.catalog')&&o.strategies.MY?{MY:Number(o.strategies.MY)}:{},...(operationEditing.value?{expected_revision:o.revision}:{})};await api.request({url:operationEditing.value?`/hub-v5/operations/${operationEditing.value}`:'/hub-v5/operations',method:operationEditing.value?'PATCH':'POST',data:payload,...auth()});await loadAutomation();close()})}
+async function deleteOperation(){if(dialog.value!=='deleteOperation')return;await perform(async()=>{await api.delete(`/hub-v5/operations/${operationEditing.value}`,{...auth(),params:{expected_revision:operationEditor.value.revision}});await loadAutomation();close()})}
+function openManual(){manual.value={tasks:[],strategies:{MY:null}};dialog.value='manual'}
+async function preview(p?:any){await perform(async()=>{
+ executeKey.value=''
+ if(p){const {data}=await api.post(`/hub-v5/plans/${p.id}/preview`,{},auth());previewData.value={...data,batches:[data],environment_count:data.environments.length,manual:false}}
+ else {const {data}=await api.post('/hub-v5/manual/preview',{tasks:manual.value.tasks,strategies:manual.value.tasks.includes('listing.catalog')&&manual.value.strategies.MY?{MY:Number(manual.value.strategies.MY)}:{},environment_ids:selected.value,all_filtered:allFiltered.value,filters:appliedFilters.value},auth());previewData.value={...data,manual:true}}
+ dialog.value='preview'
+})}
+const executeKey=ref('')
+async function execute(){await perform(async()=>{
+ if(!executeKey.value)executeKey.value=crypto.randomUUID()
+ const headers={headers:{...auth().headers,'Idempotency-Key':executeKey.value}}
+ let created:any[]=[]
+ if(previewData.value.manual){const {data}=await api.post('/hub-v5/manual/runs',{previews:previewBatches.value.map((p:any)=>({preview_token:p.preview_token,expected_revision:p.revision}))},headers);created=data.items}
+ else {const p=previewBatches.value[0];const {data}=await api.post(`/hub-v5/plans/${p.plan_id}/runs`,{preview_token:p.preview_token,expected_revision:p.revision},headers);created=[data]}
+ ++logRequest;run.value=created[0]||null;runItemId.value=null;events.value=[];logFloor.value=0;close();executeKey.value='';runPage.value=1;await loadRuns();notice.value=`已创建 ${created.length} 次运行，可在运行记录中查看进度`
+})}
+async function loadHistory(){
+ const request=++historyRequest;historyLoading.value=true
+ try{const {data}=await api.get('/hub-v5/runs',{...auth(),params:{page:historyPage.value,...(historyScope.value?{environment_id:historyScope.value.id}:{})}})
+ if(request!==historyRequest||disposed)return
+ historyRuns.value=data.items;historyTotal.value=data.total
+ }catch(e){if(request===historyRequest)handle(e)}finally{if(request===historyRequest)historyLoading.value=false}
+}
+async function openHistory(row?:any){historyScope.value=row||null;historyPage.value=1;historyRuns.value=[];historyTotal.value=0;error.value='';dialog.value='history';await loadHistory()}
+async function openRun(value:any,itemId:number|null=null,fromHistory=false,showDialog=true){
+ const request=++logRequest
+ const params=itemId?{item_id:itemId}:{}
+ const [r,e]=await Promise.all([api.get(`/hub-v5/runs/${value.id}`,{...auth(),params}),api.get(`/hub-v5/runs/${value.id}/events`,{...auth(),params})])
+ if(request!==logRequest||disposed)return
+ run.value=r.data;runItemId.value=itemId;events.value=e.data;logsMore.value=e.data.length===500;logFloor.value=0;runFromHistory.value=fromHistory;if(showDialog)dialog.value='run'
+}
+async function backToHistory(){dialog.value='history';await loadHistory()}
+async function stopCurrent(){const target=current.value;if(!target)return;await perform(async()=>{await api.post(`/hub-v5/runs/${target.id}/stop`,{},auth());notice.value='已请求停止，正在等待设备安全结束';if(run.value?.id===target.id)await logs();await loadRuns()})}
+async function logs(){
+ if(!run.value)return
+ const request=logRequest,id=run.value.id,itemId=runItemId.value,after=events.value[events.value.length-1]?.seq||0
+ const params={after_seq:after,...(itemId?{item_id:itemId}:{})}
+ const [r,e]=await Promise.all([api.get(`/hub-v5/runs/${id}`,{...auth(),params:itemId?{item_id:itemId}:{}}),api.get(`/hub-v5/runs/${id}/events`,{...auth(),params})])
+ if(request!==logRequest||disposed||run.value?.id!==id)return
+ run.value=r.data;const seen=new Set(events.value.map(event=>event.seq));events.value=[...events.value,...e.data.filter((event:any)=>!seen.has(event.seq))];logsMore.value=e.data.length===500
+}
+async function copyLogs(){await perform(async()=>{await navigator.clipboard.writeText(visibleEvents.value.map(e=>`${e.seq} ${e.created_at} 执行项 ${e.item_id||'—'} 第${e.attempt_number||'—'}次 ${JSON.stringify(e.payload)}`).join('\n'));notice.value='日志已复制'})}
+async function showShop(row:any){if(!row.shop)return;shopId.value=row.shop.id;detail.value=null;detailPage.value=1;detailQ.value='';await loadDetail();if(detail.value)dialog.value='shop'}
+async function loadDetail(){await perform(async()=>{const {data}=await api.get(`/hub-v5/shops/${shopId.value}/snapshots`,{...auth(),params:{page:detailPage.value,q:detailQ.value}});detail.value=data;detailTotal.value=data.total;expandedProductSkus.value={}})}
+function resolveItem(item:any){resolution.value={item,action:item.submission==='unknown'||item.submission==='request_sent'?'confirm-submitted':run.value?.stop_requested?'cancel':item.submission==='confirmed'?'retransmit':'retry',evidence:''};dialog.value='resolve'}
+async function saveResolution(){await perform(async()=>{await api.post(`/hub-v5/run-items/${resolution.value.item.id}/resolve`,{action:resolution.value.action,evidence:resolution.value.evidence},auth());close();await logs();await loadRows()})}
+async function downloadProducts(){await perform(async()=>{const {data}=await api.get(`/hub-v5/shops/${shopId.value}/export`,{...auth(),params:{q:detailQ.value},responseType:'blob'});const url=URL.createObjectURL(data);const a=document.createElement('a');a.href=url;a.download='店铺商品与SKU.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)})}
+async function download(){await perform(async()=>{const {data}=await api.get('/hub-v5/exports',{...auth(),params:filterParams(appliedFilters.value),responseType:'blob'});const url=URL.createObjectURL(data);const a=document.createElement('a');a.href=url;a.download='TK矩阵数据.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)})}
+const overrideSite=ref('keep'),overrideActivity=ref('keep')
+async function saveOverrides(){await perform(async()=>{if(allFiltered.value)throw Error();const targets=selected.value.map(id=>{const row=selectedEnvs.get(id)||rows.value.find(r=>r.id===id);if(!row)throw Error('所选环境已不可用，请重新选择');return {id,expected_revision:row.revision}});await api.patch('/hub-v5/environments/overrides',{environments:targets,...(overrideSite.value==='keep'?{}:{site:overrideSite.value||null}),...(overrideActivity.value==='keep'?{}:{activity_status:overrideActivity.value})},auth());selectedEnvs.clear();selected.value=[];close();await loadRows()})}
+
+async function checkAccess(){
+ const previous=access.value
+ const {data}=await api.get('/hub-v5/access',auth());access.value=data;accessLoaded.value=true;emit('access-change',!!data.enabled)
+ if(!data.enabled||previous.view_scope!==data.view_scope){selected.value=[];allFiltered.value=false;selectedEnvs.clear();++logRequest;run.value=null;events.value=[];historyRuns.value=[];historyScope.value=null;syncPending.value=[];syncMessage.value='';syncHelp.value=false;close()}
+ if(!data.enabled){devices.value=[];rows.value=[];plans.value=[];operations.value=[];runs.value=[];total.value=0}
+ return !previous.enabled&&data.enabled
+}
+const canManageRun=(value:any)=>value&&(access.value.is_admin||value.owner_id===props.user.id)
+watch(()=>props.user.id,()=>{selected.value=[];allFiltered.value=false;void initialize()})
+async function initialize(){try{await checkAccess();if(access.value.enabled)await refresh()}catch(e){handle(e);accessLoaded.value=true}}
+onMounted(()=>{void initialize();poll=setInterval(async()=>{if(polling||busy.value||disposed)return;polling=true;try{const activated=await checkAccess();if(!access.value.enabled)return;if(activated){await refresh();return}await logs();await Promise.all([loadRuns(),loadDevices(),...(dialog.value==='history'&&!historyLoading.value?[loadHistory()]:[])]);if(tab.value==='automation')await loadAutomation();if(tab.value==='data')stats.value=(await api.get('/hub-v5/shops/metrics',{...auth(),params:filterParams(appliedFilters.value)})).data;await loadRows()}catch(e){handle(e)}finally{polling=false}},5000)})
+onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
+</script>
+
+<template>
+<section class="matrix page">
+  <div v-if="!accessLoaded" class="mx-access-state">正在读取矩阵权限…</div>
+  <div v-else-if="!access.enabled" class="mx-access-state"><h2>尚未获得矩阵使用授权</h2><p>请联系公司管理员，在「企业管理 → TK 矩阵」中为你授权。</p><p v-if="error" class="error">{{error}}</p><button @click="initialize">重新检查授权</button></div>
+  <template v-else>
+  <AgentConnectionBanner :token="token">
+    <template #navigation>
+      <nav class="mx-tabs" role="tablist" aria-label="矩阵页面">
+        <button role="tab" :aria-selected="tab==='environments'" :class="{active:tab==='environments'}" @click="setTab('environments')">环境列表 <b>{{total}}</b></button>
+        <button role="tab" :aria-selected="tab==='automation'" :class="{active:tab==='automation'}" @click="setTab('automation')">自动运营</button>
+        <button role="tab" :aria-selected="tab==='data'" :class="{active:tab==='data'}" @click="setTab('data')">数据大屏 <b>{{stats.collected||0}}</b></button>
+      </nav>
+    </template>
+    <span class="mx-device-count">{{devices.filter(d=>d.online).length}} 台设备在线</span>
+    <button class="mx-device-button" @click="openDevices">设备管理</button>
+    <button v-if="canManageRun(current)&&['running','queued'].includes(current.status)" class="mx-danger" :disabled="busy||current.stop_requested" @click="stopCurrent">{{current.stop_requested?'停止请求中':'停止当前运行'}}</button>
+  </AgentConnectionBanner>
+  <div v-if="pairingCode" class="mx-notice mx-pairing" role="status"><p>确认连接此电脑，连接器将同步 HubStudio 环境并接收矩阵任务。</p><button class="primary" :disabled="busy" @click="authorizeConnector">授权此电脑连接器</button></div>
+  <template v-if="!dialog"><div v-if="feedbackMessage" class="mx-feedback" :class="{'is-error':feedbackSource==='error'}" :role="feedbackSource==='error'?'alert':'status'" aria-live="polite"><span>{{feedbackMessage}}</span><button v-if="feedbackSource==='sync'&&syncHelp" @click="openDevices">前往设备管理</button></div></template>
+  <div v-if="configLoaded&&!config.enabled" class="mx-banner">公司矩阵功能尚未启用。<router-link v-if="access.is_admin" to="/settings/tk-matrix?tab=settings">前往矩阵管理设置</router-link><span v-else>请联系公司管理员。</span></div>
+  <div v-if="tab==='data'" class="mx-cards"><article v-for="[name,value] in cards" :key="name"><span>{{name}}</span><strong>{{value}}</strong></article></div>
+  <section v-if="tab!=='automation'" class="mx-panel">
+    <div class="mx-summary"><b>{{tab==='data'?'经营数据总览':'环境列表'}}</b><span>共 {{total}} 个环境 · {{runSummary.running||0}} 项运行中 · {{runSummary.awaiting_attention||0}} 项待人工</span><button :disabled="busy" @click="refresh">刷新数据</button></div>
+    <form class="mx-filters" @submit.prevent="applyFilters">
+      <input v-model="filters.q" class="mx-filter-search" aria-label="搜索环境或店铺" placeholder="搜索环境、编号、店铺或账号"/>
+      <select :value="filters.ungrouped?'ungrouped':filters.group?`group:${filters.group}`:''" class="mx-filter-group" aria-label="分组" @change="changeGroup"><option value="">全部分组</option><option v-for="group in groupOptions" :key="group" :value="group?`group:${group}`:'ungrouped'">{{group||'未分组'}}</option></select>
+      <select v-model="filters.site" class="mx-filter-site" aria-label="站点"><option value="">全部站点</option><option>MY</option><option value="unknown">未知站点</option></select>
+      <div class="mx-filter-actions"><button type="submit" class="primary">筛选</button></div>
+    </form>
+    <div v-if="tab==='environments'" class="mx-toolbar"><button class="mx-sync" :disabled="busy||!!syncPending.length" title="同步当前账号已配置团队的所有在线设备" @click="syncEnvironments"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M20 12a8 8 0 1 1-2.3-5.7L20 9"/></svg>{{syncPending.length?'同步中…':'同步环境'}}</button><button :disabled="loading||busy||!total" title="选择当前筛选条件下的全部环境，包含其他分页" @click="selectCurrent">全选当前</button><button @click="selected=[];allFiltered=false">清空选择</button><button :disabled="!selectedCount||busy||loading" @click="openOverrides">批量设置站点/活跃</button><button class="primary" :disabled="!selectedCount||busy||!config.enabled" @click="openManual">批量执行</button><span class="mx-selected">已选 {{selectedCount}}</span></div>
+    <div v-else class="mx-toolbar"><span>商品管理页快照 · 浏览次数为近28天数据 · 流量分析后续补充</span><button :disabled="busy" @click="download">导出 CSV</button></div>
+    <div class="mx-table-wrap" :aria-busy="loading"><table><thead><tr><th v-if="tab==='environments'">选择</th><th>环境名 / 编号</th><th>分组</th><th>站点</th><template v-if="tab==='environments'"><th>店铺</th><th>绑定账号</th><th title="当前上架的产品数量">产品</th><th title="最近7个完整自然日的订单数量；尚未采集时显示 —">订单</th><th>活跃</th><th>上品 / 执行</th><th>采集</th></template><template v-else><th title="当前在售商品数量">在售商品</th><th>浏览次数</th><th>SKU 数量</th><th>有曝光</th><th>零曝光</th><th>曝光</th><th>点击</th><th>CTR</th><th>有曝光占比</th><th>GMV</th><th>7日访客</th><th>违规分</th><th>采集时间</th></template><th>操作</th></tr></thead><tbody>
+      <tr v-for="row in rows" :key="row.id" :class="{selected:allFiltered||selected.includes(row.id)}"><td v-if="tab==='environments'"><input type="checkbox" :aria-label="`选择环境 ${row.container_code}`" :disabled="busy||loading" :checked="allFiltered||selected.includes(row.id)" @change="toggle(row.id)"/></td><td><b>{{row.name}}</b><small>{{row.container_code}}</small></td><td>{{row.group||'未分组'}}</td><td><span class="mx-tag">{{row.site||'未知'}}</span></td>
+      <template v-if="tab==='environments'"><td>{{row.shop?.name||'待识别'}}<small>{{row.shop?.external_id}}</small></td><td>{{row.account_names.join(' / ')||'—'}}</td><td :title="row.snapshot?.observed_at">{{display(row.snapshot?.active)}}</td><td :title="row.snapshot?.orders==null?'尚未采集订单数据':`${row.snapshot.window_start} — ${row.snapshot.window_end}`">{{display(row.snapshot?.orders)}}</td><td><span :class="{'mx-activity-normal':row.activity_status==='normal','mx-activity-closed':row.activity_status==='closed'}">{{row.activity_status==='normal'?'正常':row.activity_status==='closed'?'封店':'未检测'}}</span></td><td><span class="mx-state" :class="row.latest_item?.status">{{label(row.latest_item?.stage)}}</span><small>{{label(row.latest_item?.submission)}}</small></td><td>{{label(row.latest_item?.collection_status)}}<small v-if="row.snapshot?.stale">数据超过24小时</small></td></template>
+      <template v-else><td>{{display(row.snapshot?.active)}}</td><td>{{display(row.snapshot?.views)}}</td><td>{{display(row.snapshot?.sku_count)}}</td><td>{{display(row.snapshot?.with_impressions)}}</td><td>{{display(row.snapshot?.zero_impressions)}}</td><td>{{display(row.snapshot?.impressions)}}</td><td>{{display(row.snapshot?.clicks)}}</td><td>{{percent(row.snapshot?.ctr)}}</td><td>{{percent(row.snapshot?.exposure_ratio)}}</td><td>{{display(row.snapshot?.gmv)}} {{row.snapshot?.gmv!=null?row.snapshot.currency:''}}</td><td>{{display(row.snapshot?.visitors7d)}}</td><td>{{display(row.snapshot?.violations_score)}}</td><td>{{row.snapshot?.observed_at?new Date(row.snapshot.observed_at).toLocaleString():'未采集'}}<small v-if="row.snapshot?.stale">已过期</small></td></template>
+      <td class="mx-row-actions"><button v-if="tab==='environments'" @click="openHistory(row)">运行记录</button><button v-else :disabled="!row.shop" @click="showShop(row)">商品明细</button></td></tr>
+      <tr v-if="!rows.length"><td :colspan="tab==='environments'?12:17" class="mx-empty">{{loading?'正在加载…':'暂无环境，请启动连接器，并在设备管理中配置连接和同步环境'}}</td></tr></tbody></table></div>
+    <footer class="mx-pagination"><span>共 {{total}} 个环境</span><label>每页 <select v-model.number="size" @change="page=1;loadRows()"><option :value="25">25</option><option :value="50">50</option><option :value="100">100</option></select></label><button :disabled="page<=1||loading" @click="page--;loadRows()">上一页</button><span>{{page}} / {{pages}}</span><button :disabled="page>=pages||loading" @click="page++;loadRows()">下一页</button></footer>
+  </section>
+  <div v-if="tab==='automation'" class="mx-automation">
+    <section class="mx-panel mx-auto-panel"><div class="mx-summary mx-operation-heading"><h2>操作方案 <small>{{operations.length}}</small></h2><a class="mx-strategy-link" href="/supply?tab=strategies">管理货盘策略 ↗</a><button class="primary" :disabled="busy||!config.enabled||(!access.collect_enabled&&!access.listing_enabled)" @click="editOperation()">＋ 新建方案</button></div><p class="mx-panel-description">配置操作与货盘策略，供运营计划复用。</p>
+      <div class="mx-auto-table-wrap"><table class="mx-auto-table mx-operation-table"><thead><tr><th>方案名称</th><th>执行操作</th><th>MY 货盘策略</th><th>关联计划</th><th>操作</th></tr></thead><tbody><tr v-for="o in operations" :key="o.id"><td><b :title="o.name">{{o.name}}</b></td><td>{{taskNames(o.tasks)}}</td><td><span :title="strategies.find(s=>s.id===Number(o.strategies.MY))?.name">{{o.tasks.includes('listing.catalog')?(strategies.find(s=>s.id===Number(o.strategies.MY))?.name||'未配置'):'—'}}</span></td><td>{{o.plans.length}} 个</td><td><button class="mx-text-button" :aria-label="`编辑操作方案 ${o.name}`" @click="editOperation(o)">编辑</button></td></tr><tr v-if="!operations.length"><td colspan="5" class="mx-list-empty">暂无操作方案，点击右上角新建。</td></tr></tbody></table></div>
+    </section>
+    <section class="mx-panel mx-auto-panel"><div class="mx-summary"><h2>运营计划 <small>{{plans.length}}</small></h2><button class="primary" :disabled="busy||!config.enabled||!operations.length" @click="edit()">＋ 新建计划</button></div><p class="mx-panel-description">固定店铺与执行时间，按计划自动运营。</p>
+      <div class="mx-auto-table-wrap"><table class="mx-auto-table mx-plan-table"><thead><tr><th>计划 / 设备</th><th>操作方案</th><th>店铺</th><th>执行时间（UTC+8）</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="p in plans" :key="p.id"><td><b :title="p.name">{{p.name}}</b><small :title="devices.find(d=>d.id===p.agent_id)?.name">{{devices.find(d=>d.id===p.agent_id)?.name||'设备不可用'}}</small></td><td><span :title="p.operation_name">{{p.operation_name}}</span></td><td>{{p.environment_ids.length}} 个</td><td>每日 {{p.time}}<small>{{p.next_fire_at?`下次 ${timeText(p.next_fire_at)}`:'定时已暂停'}}</small></td><td><span class="mx-status-pill" :class="{enabled:p.scheduled}">{{p.scheduled?'已启用':'已暂停'}}</span><small v-if="p.last_fire">{{({created:'已创建运行',missed:'已错过',skipped_busy:'前次未结束',failed:'预检失败',preparing:'准备中',cancelled_changed:'配置已修改'} as any)[p.last_fire.status]}}</small></td><td><div class="mx-auto-actions"><button :disabled="busy||!config.enabled" @click="preview(p)">立即运行</button><button :disabled="busy||!config.enabled" @click="togglePlan(p)">{{p.scheduled?'暂停':'启用'}}</button><button @click="edit(p)">编辑</button></div></td></tr><tr v-if="!plans.length"><td colspan="6" class="mx-list-empty">{{operations.length?'暂无运营计划，点击右上角新建。':'先在左侧创建操作方案，再添加运营计划。'}}</td></tr></tbody></table></div>
+    </section>
+  </div>
+  <div v-if="tab!=='data'" class="mx-bottom">
+    <section class="mx-panel mx-runs-panel"><div class="mx-summary"><h2>全部运行记录 <small>{{runTotal}}</small></h2><button :disabled="busy" @click="perform(loadRuns)">刷新</button></div>
+      <div class="mx-runs-scroll"><table class="mx-runs-table"><thead><tr><th>运行 / 操作</th><th>设备 / 范围</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody><tr v-for="r in runs" :key="r.id" :class="{'is-current':run?.id===r.id}"><td><b>#{{r.id}} · {{taskNames(r.tasks)}}</b><small>{{r.plan_name||'临时执行'}} · {{r.trigger==='scheduled'?'定时':'手动'}}</small></td><td>{{r.device_name||`设备 #${r.agent_id}`}}<small>{{r.items.length}} 个环境</small></td><td><span class="mx-state" :class="r.status">{{label(r.status)}}</span></td><td>{{timeText(r.created_at)}}</td><td><div class="mx-row-actions"><button :disabled="busy" @click="perform(()=>openRun(r,null,false,false))">日志</button><button :disabled="busy" @click="perform(()=>openRun(r))">详情</button></div></td></tr><tr v-if="!runs.length"><td colspan="5" class="mx-list-empty">暂无运行记录</td></tr></tbody></table></div>
+      <footer class="mx-pagination"><span>共 {{runTotal}} 次运行</span><button :disabled="busy||runPage<=1" @click="runPage--;perform(loadRuns)">上一页</button><span>{{runPage}} / {{runPages}}</span><button :disabled="busy||runPage>=runPages" @click="runPage++;perform(loadRuns)">下一页</button></footer>
+    </section>
+    <section class="mx-panel mx-log-panel"><div class="mx-summary"><h2>当前日志</h2><button :disabled="!run" @click="copyLogs">复制</button><button @click="logFloor=events[events.length-1]?.seq||0">清屏</button></div><div class="mx-run-summary" v-if="current"><b>#{{current.id}} {{label(current.status)}}</b><span>{{current.items.filter((i:any)=>['succeeded','partial_success','failed','cancelled'].includes(i.status)).length}} / {{current.items.length}} 个环境结束</span></div><div class="mx-log" role="log" aria-label="运行日志"><div v-for="e in visibleEvents" :key="e.seq"><span>#{{e.seq}}</span> {{e.payload.message||e.payload.stage||e.kind}}</div><p v-if="!visibleEvents.length">{{run?'暂无已上报日志':'点击左侧运行记录的「日志」查看进度'}}</p></div></section>
+  </div>
+  </template>
+</section>
+<div v-if="dialog&&access.enabled" class="modal-backdrop mx-backdrop" @click.self="dismiss"><section :key="dialog" v-dialog-focus="{close:dismiss,busy}" class="modal-card mx-dialog" :class="{'mx-dialog-devices':dialog==='devices','mx-dialog-override':dialog==='override','mx-dialog-manual':dialog==='manual','mx-dialog-editor':['operation','plan'].includes(dialog),'mx-dialog-preview':dialog==='preview'}" role="dialog" aria-modal="true" aria-labelledby="matrix-dialog-title"><div class="mx-summary"><h2 id="matrix-dialog-title">{{({devices:'设备管理',plan:editing?'编辑运营计划':'新建运营计划',deletePlan:'删除运营计划',operation:operationEditing?'编辑操作方案':'新建操作方案',deleteOperation:'删除操作方案',manual:'临时批量执行',preview:'执行预览',run:'运行详情',history:historyScope?'店铺运行记录':'全部运行记录',shop:'商品明细',resolve:'人工核对',override:'批量设置站点/活跃',releases:'签名升级与插件分发'} as any)[dialog]}}</h2><button :disabled="busy" aria-label="关闭弹窗" @click="dialog==='deletePlan'?dialog='plan':dialog==='deleteOperation'?dialog='operation':close()">关闭</button></div>
+<div v-if="feedbackMessage" class="mx-feedback" :class="{'is-error':feedbackSource==='error'}" :role="feedbackSource==='error'?'alert':'status'" aria-live="polite"><span>{{feedbackMessage}}</span><button v-if="feedbackSource==='sync'&&syncHelp" @click="openDevices">前往设备管理</button></div>
+<template v-if="dialog==='devices'">
+  <p class="mx-devices-intro">这里只显示你自己的电脑。连接 HubStudio 并同步环境后，即可回到环境列表操作。</p>
+  <MatrixDevices :devices="devices" :config="config" :busy="busy" @save="saveConnection" @command="command"/>
+</template>
+<form v-if="dialog==='plan'" class="mx-form" @submit.prevent="savePlan">
+<label>计划名称<input v-model="editor.name" required maxlength="120"/></label>
+<label>操作方案<select v-model="editor.operation_id" required><option v-for="o in operations" :key="o.id" :value="o.id">{{o.name}} · {{taskNames(o.tasks)}}</option></select></label>
+<label>执行设备<select v-model="editor.agent_id" required @change="changePlanDevice"><option v-for="d in ownDevices" :key="d.id" :value="d.id">{{d.name}}</option></select></label>
+<div class="mx-plan-shops"><span>计划执行店铺</span><PlanShopSelect v-model="editor.environment_ids" :options="planShops" :loading="planShopsLoading" :error="planShopsError" @retry="loadPlanShops()"/><small>固定名单，最多 1000 个环境。立即运行和定时执行均使用此名单。</small></div>
+<label>每日执行时间（UTC+8）<input v-model="editor.time" type="time" required/></label><label><input v-model="editor.scheduled" type="checkbox"/>启用每日定时执行</label>
+<p>设备离线或暂停时错过不补跑；同一计划前次未结束则跳过；设备忙时按队列串行执行。暂停计划只停止未来触发。</p>
+<div class="mx-actions"><button class="primary" :disabled="busy||planShopsLoading||!!planShopsError||!editor.operation_id||!editor.environment_ids.length">保存计划</button><button v-if="editing" type="button" class="mx-danger" :disabled="busy" @click="dialog='deletePlan'">删除计划</button></div></form>
+<template v-if="dialog==='deletePlan'"><p>确定删除运营计划「{{editor.name}}」？未来不再定时触发，已创建的运行和历史记录保留。</p><div class="mx-actions"><button :disabled="busy" @click="dialog='plan'">取消</button><button class="mx-danger" :disabled="busy" @click="deletePlan">确认删除</button></div></template>
+<form v-if="dialog==='operation'" class="mx-form" @submit.prevent="saveOperation">
+<label>操作方案名称<input v-model="operationEditor.name" required maxlength="120"/></label><fieldset><legend>执行任务</legend><label><input v-model="operationEditor.tasks" type="checkbox" value="listing.catalog" :disabled="!access.listing_enabled&&!operationEditor.tasks.includes('listing.catalog')"/>自动上品</label><label><input v-model="operationEditor.tasks" type="checkbox" value="shop.collect" :disabled="!access.collect_enabled&&!operationEditor.tasks.includes('shop.collect')"/>店铺采集</label></fieldset>
+<template v-if="operationEditor.tasks.includes('listing.catalog')"><label>马来西亚货盘策略（MYR）<select v-model="operationEditor.strategies.MY" required><option :value="null">请选择货盘策略</option><option v-for="s in strategies" :key="s.id" :value="s.id">{{s.name}} · {{s.link_count}} 链接 · {{s.sku_count}} SKU · {{s.price}}</option></select></label><a href="/supply?tab=strategies">管理货盘策略 ↗</a></template>
+<p v-if="operationEditor.plans?.length">保存后将影响以下计划的未来运行：{{operationEditor.plans.map((p:any)=>p.name).join('、')}}。已创建运行继续使用原参数。</p>
+<div class="mx-actions"><button class="primary" :disabled="busy||!operationEditor.tasks.length">保存操作方案</button><button v-if="operationEditing" type="button" class="mx-danger" :disabled="busy||!!operationEditor.plans?.length" @click="dialog='deleteOperation'">删除操作方案</button></div></form>
+<template v-if="dialog==='deleteOperation'"><p>确定删除操作方案「{{operationEditor.name}}」？</p><div class="mx-actions"><button :disabled="busy" @click="dialog='operation'">取消</button><button class="mx-danger" :disabled="busy" @click="deleteOperation">确认删除</button></div></template>
+<form v-if="dialog==='manual'" class="mx-form mx-manual-form" @submit.prevent="preview()">
+<p class="mx-manual-intro">已选择 <b>{{selectedCount}}</b> 个环境，系统自动分配执行设备。</p>
+<fieldset class="mx-manual-tasks"><legend>选择操作</legend><div class="mx-task-options"><label><input v-model="manual.tasks" type="checkbox" value="listing.catalog" :disabled="!access.listing_enabled||!config.listing_enabled"/>1. 自动上品</label><label><input v-model="manual.tasks" type="checkbox" value="shop.collect" :disabled="!access.collect_enabled"/>2. 店铺采集</label></div></fieldset>
+<template v-if="manual.tasks.includes('listing.catalog')"><label>马来西亚货盘策略（MYR）<select v-model="manual.strategies.MY" required><option :value="null">请选择货盘策略</option><option v-for="s in strategies" :key="s.id" :value="s.id">{{s.name}} · {{s.link_count}} 链接 · {{s.price}}</option></select></label></template>
+<div class="mx-manual-footer"><button type="button" :disabled="busy" @click="close">取消</button><button class="primary" :disabled="busy||!manual.tasks.length">预览执行范围</button></div></form>
+<template v-if="dialog==='preview'&&previewData"><p>{{previewData.manual?'临时批量执行':'计划立即运行'}} · {{taskNames(previewData.tasks)}} · {{previewData.environment_count}} 个环境 · {{previewBatches.length}} 台设备</p><ul v-if="previewData.errors.length" class="error"><li v-for="(e,i) in previewData.errors" :key="i">{{e}}</li></ul><section v-for="batch in previewBatches" :key="batch.agent_id" class="mx-preview-batch"><h3>{{devices.find(d=>d.id===batch.agent_id)?.name||`设备 #${batch.agent_id}`}} <small>{{batch.environments.length}} 个环境</small></h3><div v-for="(s,site) in batch.strategies" :key="site" class="mx-device-card"><b>{{site}} · {{s.name}}</b><span>每店 {{s.link_count}} 个商品组 · {{s.sku_count}} SKU · 售价 {{s.price}} MYR</span></div><div class="mx-preview-env"><span v-for="e in batch.environments" :key="e.id">{{e.name}} / {{e.site}} / {{e.container_code}}</span></div></section><p>{{previewData.tasks.includes('listing.catalog')?'本次执行将使用已冻结的环境和货盘参数，并向 TikTok 提交商品。':'本次仅采集店铺数据，不提交商品。'}}</p><div class="mx-manual-footer"><button :disabled="busy" @click="previewData.manual?dialog='manual':close()">{{previewData.manual?'返回调整':'取消'}}</button><button class="primary" :disabled="busy||previewData.errors.length>0" @click="execute">{{busy?'提交中…':'确认创建运行'}}</button></div></template>
+<template v-if="dialog==='run'&&run">
+<div class="mx-actions"><button v-if="runFromHistory" @click="backToHistory">← 返回运行记录</button><button :disabled="busy||!visibleEvents.length" @click="copyLogs">复制日志</button></div>
+<p>#{{run.id}} · 批次{{label(run.status)}} · {{timeText(run.created_at)}} · {{taskNames(run.tasks)}}</p>
+<p class="mx-record-meta">{{run.trigger==='scheduled'?'定时执行':'手动执行'}} · {{run.plan_name||'临时执行'}} · {{run.operation_name}} · {{run.device_name||`设备 #${run.agent_id}`}} · {{run.owner_name||`成员 #${run.owner_id}`}}</p>
+<div v-for="item in run.items" :key="item.id" class="mx-device-card">
+ <b>{{item.environment_name||`环境 #${item.environment_id}`}} · {{label(item.status)}}</b>
+ <span>{{item.shop?`${item.shop.name} / ${item.shop.site} / ${item.shop.external_id||'按环境归档'}`:'当次尚未识别店铺'}} · {{label(item.stage)}}</span>
+ <span>提交：{{label(item.submission)}} · 数据：{{label(item.collection_status)}}</span>
+ <p v-if="item.error" class="error">{{item.error}}</p><p v-if="item.result.listing">已接受 {{item.result.listing.accepted.length}} · 明确拒绝 {{item.result.listing.rejected.length}}</p>
+ <div class="mx-attempts"><span v-for="attempt in item.attempts" :key="attempt.id">第 {{attempt.number}} 次尝试 · {{label(attempt.status)}} · {{timeText(attempt.started_at)}}</span><span v-if="!item.attempts.length">尚未开始执行</span></div>
+ <div class="mx-actions"><button v-if="!runItemId" @click="perform(()=>openRun(run,item.id,runFromHistory))">查看此店铺步骤日志</button><button v-if="canManageRun(run)&&['awaiting_attention','failed','partial_success'].includes(item.status)" @click="resolveItem(item)">人工核对</button></div>
+</div>
+<p class="mx-record-meta">按执行顺序展示已上报的步骤；历史记录未上报的细节无法补回。</p>
+<div class="mx-step-list"><details v-for="group in logGroups" :key="group.key" class="mx-step" open>
+ <summary><b>{{label(group.stage)}}</b><span>{{group.itemId?`执行项 #${group.itemId}`:'批次事件'}} · {{group.attempt?`第 ${group.attempt} 次尝试`:'未关联尝试'}} · {{group.events.length}} 条</span></summary>
+ <div class="mx-step-events"><div v-for="event in group.events" :key="event.seq"><time>{{timeText(event.created_at)}}</time><span>{{event.payload.message||label(event.payload.status||event.payload.stage||event.kind)}}</span><details><summary>事件详情 #{{event.seq}}</summary><pre>{{JSON.stringify(event.payload,null,2)}}</pre></details></div></div>
+</details><p v-if="!logGroups.length" class="mx-empty">{{run.items.some((item:any)=>item.attempts.length)?'暂无可关联到此执行项的日志':'尚未开始执行，暂无步骤日志'}}</p></div>
+<button v-if="logsMore" :disabled="busy" @click="perform(logs)">继续加载日志</button>
+</template>
+<template v-if="dialog==='history'">
+ <div v-if="historyScope" class="mx-history-context"><b>{{historyScope.shop?.name||historyScope.name}}</b><span>{{historyScope.name}} / {{historyScope.container_code}}</span><small>包含此环境的历史，以及当前已识别店铺的关联执行；当次店铺身份以执行详情为准。</small></div>
+ <button :disabled="historyLoading" @click="loadHistory">{{historyLoading?'加载中…':'刷新记录'}}</button>
+ <div :aria-busy="historyLoading"><article v-for="r in historyRuns" :key="r.id" class="mx-history-record">
+  <div class="mx-summary"><b>#{{r.id}} · {{taskNames(r.tasks)}}</b><span>批次{{label(r.status)}}</span></div>
+  <p class="mx-record-meta">{{timeText(r.created_at)}} · {{r.trigger==='scheduled'?'定时执行':'手动执行'}} · {{r.plan_name||'临时执行'}} · {{r.operation_name}} · {{r.device_name||`设备 #${r.agent_id}`}} · {{r.owner_name||`成员 #${r.owner_id}`}}</p>
+  <template v-if="historyScope"><div v-for="item in r.items" :key="item.id" class="mx-history-item"><div><b>{{item.environment_name||`环境 #${item.environment_id}`}} · {{label(item.status)}}</b><small>{{item.shop?`${item.shop.name} / ${item.shop.external_id||'按环境归档'}`:'当次尚未识别店铺'}} · 采集{{label(item.collection_status)}} · 上品{{label(item.submission)}}</small><small v-if="item.result.listing">已接受 {{item.result.listing.accepted.length}} · 明确拒绝 {{item.result.listing.rejected.length}}</small><small v-if="item.error" class="error">{{item.error}}</small></div><button :disabled="busy" @click="perform(()=>openRun(r,item.id,true))">查看步骤日志</button></div></template>
+  <div v-else class="mx-actions"><span>{{r.items.length}} 个环境</span><button :disabled="busy" @click="perform(()=>openRun(r,null,true))">查看批次详情</button></div>
+ </article><p v-if="!historyRuns.length" class="mx-empty">{{historyLoading?'正在加载运行记录…':'暂无运行记录'}}</p></div>
+ <div class="mx-pagination"><button :disabled="historyPage<=1||historyLoading" @click="historyPage--;loadHistory()">上一页</button><span>{{historyPage}} / {{Math.max(1,Math.ceil(historyTotal/20))}} · 共 {{historyTotal}} 次运行</span><button :disabled="historyPage*20>=historyTotal||historyLoading" @click="historyPage++;loadHistory()">下一页</button></div>
+ <details v-if="!historyScope"><summary>历史固定 XLSX 上品记录</summary><slot name="legacy"/></details>
+</template>
+<template v-if="dialog==='shop'&&detail"><p>快照 #{{detail.snapshot?.id||'—'}} · {{detail.snapshot?.observed_at||'尚未采集'}}</p><p v-if="detail.snapshot?.collection_kind==='product_management'">在售 {{display(detail.snapshot.active)}} 个商品 · 浏览次数 {{display(detail.snapshot.views)}} · SKU {{display(detail.snapshot.sku_count)}} 条 · {{detail.snapshot.views_covered}}/{{detail.snapshot.active}} 个商品提供浏览次数。浏览次数取平台近28天字段，未推断精确起止日期。</p><p v-else>{{detail.snapshot?.window_start}} — {{detail.snapshot?.window_end}} · {{detail.snapshot?.timezone}}</p><div class="mx-notice"><span v-for="(state,section) in detail.snapshot?.sections" :key="section">{{({identity:'执行目标',products:'商品分页与SKU',traffic:'商品流量',metrics:'经营指标',health:'健康状态'} as any)[section]}}：{{state==='completed'?'完成':state==='unsupported'?'暂不支持':'失败'}}　</span><p v-for="(reason,section) in detail.snapshot?.reasons" :key="section">{{reason}}</p></div><form class="mx-actions" @submit.prevent="detailPage=1;loadDetail()"><input v-model="detailQ" placeholder="商品名 / 商品ID" aria-label="搜索商品"/><button>搜索</button><button type="button" :disabled="busy||!detail.snapshot" @click="downloadProducts">导出商品及SKU CSV</button></form><div class="mx-product-details"><table><thead><tr><th>商品ID</th><th>名称</th><th>在售</th><th>浏览次数</th><th>SKU 数量</th><th>SKU 明细</th></tr></thead><tbody><tr v-for="p in detail.products" :key="p.external_id"><td>{{p.external_id}}</td><td class="mx-product-name">{{p.name}}</td><td>{{p.active?'是':'否'}}</td><td :title="p.views_reason||''">{{display(p.views)}}</td><td>{{display(p.sku_count)}}</td><td><details v-if="p.skus?.length" @toggle="expandedProductSkus[p.external_id]=($event.target as HTMLDetailsElement).open"><summary>查看 {{p.skus.length}} 条 SKU</summary><table v-if="expandedProductSkus[p.external_id]" class="mx-sku-details"><thead><tr><th>SKU ID</th><th>规格</th><th>商家SKU</th><th>库存</th><th>原价（MYR）</th><th>促销价（MYR）</th></tr></thead><tbody><tr v-for="(sku,i) in p.skus" :key="i"><td>{{sku.external_id||'—'}}</td><td>{{sku.name||'未单独展示'}}</td><td>{{sku.seller_sku||'—'}}</td><td>{{display(sku.stock)}}</td><td>{{sku.price}}</td><td>{{sku.sale_price||'—'}}</td></tr></tbody></table></details><span v-else>—</span></td></tr></tbody></table></div><div class="mx-pagination"><button :disabled="detailPage<=1" @click="detailPage--;loadDetail()">上一页</button><span>{{detailPage}} · 共{{detailTotal}}项</span><button :disabled="detailPage*50>=detailTotal" @click="detailPage++;loadDetail()">下一页</button></div></template>
+<form v-if="dialog==='resolve'" class="mx-form" @submit.prevent="saveResolution"><p>请核对原环境及本次文件的真实平台结果；未知提交不得直接取消或重复导入。</p><label>处理方式<select v-model="resolution.action"><option value="confirm-submitted">确认未知部分已提交</option><option value="confirm-not-submitted">确认未提交并取消，不再执行</option><option value="retry" :disabled="run?.stop_requested||run?.owner_id!==user.id">确认未提交，再重试原文件</option><option value="retransmit" :disabled="run?.stop_requested||run?.owner_id!==user.id">仅重传原采集数据</option><option value="cancel">取消明确未提交项</option></select></label><label>核对依据<textarea v-model="resolution.evidence" required minlength="5" maxlength="1000" rows="4"/></label><button :disabled="busy" class="primary">保存核对结果</button></form>
+<form v-if="dialog==='override'" class="mx-form" @submit.prevent="saveOverrides"><p>对已选 {{selectedCount}} 个环境设置站点或活跃状态，选择“不修改”将保留原值。共享环境需管理员操作。</p><label>站点<select v-model="overrideSite"><option value="keep">不修改</option><option>MY</option><option value="">清除人工覆盖</option></select></label><label>活跃<select v-model="overrideActivity"><option value="keep">不修改</option><option value="normal">正常</option><option value="closed">封店</option><option value="unchecked">未检测</option></select></label><button class="primary" :disabled="busy||(overrideSite==='keep'&&overrideActivity==='keep')">保存</button></form>
+
+</section></div>
+</template>
+
+<style scoped>
+.mx-product-details{overflow:auto;max-height:55vh}.mx-product-details .mx-product-name{min-width:160px;max-width:260px;white-space:normal}.mx-sku-details{margin-top:10px}.mx-product-details summary{cursor:pointer;color:#7053c6}
+
+.mx-automation{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start;gap:16px;margin-top:16px}
+.mx-auto-panel{min-width:0;overflow:hidden}
+.mx-panel-description{margin:0;padding:12px 16px;color:#8a92a2;font-size:12px;line-height:1.7;border-bottom:1px solid #f0f1f5}
+.mx-auto-table-wrap{overflow:auto;max-height:420px}
+.mx-auto-table{table-layout:auto}.mx-operation-table{min-width:470px}.mx-plan-table{min-width:640px}
+.matrix .mx-auto-table th,.matrix .mx-auto-table td{padding:12px;font-size:12px;vertical-align:middle;white-space:nowrap}
+.matrix .mx-auto-table th{font-size:11px}.mx-auto-table td>b,.mx-auto-table td>span:not(.mx-status-pill),.mx-auto-table td>small{display:block;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mx-auto-table td>b{font-weight:500}.mx-auto-table td>small{max-width:180px}.mx-auto-table .mx-auto-actions{margin:0;flex-wrap:nowrap;gap:10px}
+.mx-status-pill{flex:none;border-radius:4px;padding:2px 6px;font-size:11px;color:#8a92a2;background:#f2f3f7}
+.mx-status-pill.enabled{background:#edf8f2;color:#33946c}
+.mx-auto-actions{display:flex;gap:14px;margin-top:3px}
+.matrix .mx-auto-actions button,.matrix .mx-text-button{min-height:26px;padding:2px 0;border:0;background:transparent;color:#7053c6;font-size:12px}
+.mx-operation-heading .mx-strategy-link{margin-left:auto;padding:7px 10px;border:1px solid #e1e4ee;border-radius:6px;color:#7053c6;background:#fff;font-size:12px;line-height:18px;text-decoration:none;white-space:nowrap}.mx-operation-heading .mx-strategy-link:hover{background:#faf8ff;border-color:#c6bbe8}.matrix .mx-operation-heading button:first-of-type{margin-left:0}
+.mx-list-empty{padding:36px 16px!important;text-align:center;color:#9aa3b2;font-size:12px;justify-content:center}
+.mx-summary h2 small{margin-left:5px;font-size:11px;font-weight:400;color:#9aa3b2}
+.mx-runs-panel{display:flex;flex-direction:column;min-width:0;overflow:hidden}
+.mx-runs-scroll{flex:1;overflow:auto;max-height:390px}
+.mx-runs-table{width:100%;border-collapse:collapse}.mx-runs-table th,.mx-runs-table td{padding:12px 14px;font-size:12px;text-align:left;border-bottom:1px solid #edf0f5;white-space:nowrap}
+.mx-runs-table th{font-size:11px;font-weight:500;color:#8a92a2;background:#fafbfe}.mx-runs-table td b{font-size:12px;font-weight:500}.mx-runs-table td small{display:block;margin-top:5px;font-size:11px;color:#8a92a2}
+.mx-runs-table tr.is-current{background:#f8f6fd}.mx-runs-table .mx-row-actions{display:flex;gap:10px}.mx-runs-table .mx-row-actions button{min-height:26px;padding:2px 0;border:0;background:transparent;color:#7053c6;font-size:12px}
+.mx-runs-panel .mx-pagination{border-top:1px solid #edf0f5}
+.mx-dialog.mx-dialog-manual{width:min(600px,calc(100vw - 32px))}.mx-dialog.mx-dialog-editor{width:min(680px,calc(100vw - 32px))}.mx-dialog.mx-dialog-preview{width:min(780px,calc(100vw - 32px))}
+.mx-manual-intro{margin:0;color:#7a8394;font-size:13px}.mx-manual-intro b{color:#6043d4}
+.mx-dialog .mx-manual-tasks{display:block;margin:0;padding:0;border:0}
+.mx-manual-tasks legend{margin-bottom:10px;font-size:12px}.mx-task-options{display:flex;align-items:center;flex-wrap:wrap;gap:20px 36px;padding:16px;border-radius:8px;background:#f5f6fa}
+.mx-dialog .mx-form .mx-task-options label{display:inline-flex;flex-direction:row;align-items:center;gap:9px;font-size:14px;font-weight:400;color:#4e5c71;cursor:pointer}
+.mx-dialog .mx-task-options input[type=checkbox]{width:18px;height:18px}.mx-task-options label:has(input:disabled){opacity:.5;cursor:not-allowed}
+.mx-manual-footer{display:flex;justify-content:flex-end;gap:10px;padding-top:16px;border-top:1px solid #edf0f5}.mx-preview-batch{margin-top:16px;border:1px solid #e4e6ee;border-radius:8px}.mx-preview-batch h3{display:flex;justify-content:space-between;margin:0;padding:12px 14px;font-size:13px;background:#fafbfe;border-radius:8px 8px 0 0}.mx-preview-batch h3 small{font-size:11px;color:#8a92a2;font-weight:400}.mx-preview-batch>.mx-device-card{margin:12px}
+
+.mx-feedback{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 14px;margin:0 0 12px;background:#f2f5fc;border:1px solid #e5e7ee;border-radius:6px;color:#626d85;font-size:12px}
+.mx-feedback button{flex-shrink:0}
+.mx-feedback.is-error{background:#fff2f2;border-color:#f0d1d4;color:#b84a51}
+
+.mx-record-meta{font-size:12px;color:#747d91;line-height:1.7}
+.mx-history-context,.mx-attempts{display:flex;flex-direction:column;gap:6px;margin:12px 0;color:#697287;font-size:12px}
+.mx-history-context b{font-size:16px;color:#34394c}
+.mx-history-record{border:1px solid #e5e7ee;border-radius:8px;padding:16px;margin-top:12px}
+.mx-history-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-top:1px solid #eee}
+.mx-history-item small{display:block;margin-top:6px;overflow-wrap:anywhere}
+.mx-history-item button{flex-shrink:0}
+.mx-step{border:1px solid #e5e7ee;border-radius:8px;margin:10px 0;overflow:hidden}
+.mx-step>summary{padding:12px;cursor:pointer;background:#f8f9fc}
+.mx-step>summary span{margin-left:12px;color:#747d91;font-size:12px}
+.mx-step-events{padding:0 14px}
+.mx-step-events>div{padding:12px 0;border-top:1px solid #eee;overflow-wrap:anywhere}
+.mx-step-events time{display:block;color:#747d91;font-size:11px;margin-bottom:4px}
+.mx-step-events details{font-size:11px;color:#747d91;margin-top:6px}
+.mx-step-events pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto}
+@media(max-width:600px){.mx-history-item{align-items:flex-start;flex-direction:column}.mx-step>summary span{display:block;margin:6px 0 0}}
+
+.mx-dialog.mx-dialog-override{width:min(520px,96vw)}
+.mx-dialog-override .mx-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.mx-dialog-override .mx-form>p{grid-column:1 / -1}
+.mx-dialog-override .mx-form>button{grid-column:1 / -1;justify-self:end}
+
+.mx-access-state{padding:36px 24px;border:1px solid #e5e7ee;border-radius:8px;background:#fff;font-size:13px;color:#7b8496}.mx-access-state h2{font-size:16px;color:#4e5669}.mx-access-state p{line-height:1.8}
+
+.matrix{--mx-accent:#6043d4;--mx-teal:#008d81;--mx-line:#e5e7ee;min-width:0;background:#f6f7fb;color:#34394c}
+.matrix.page{width:100%;max-width:none;margin:0;padding:16px 20px 24px;box-sizing:border-box}
+.matrix *,.mx-dialog *{box-sizing:border-box}
+.mx-summary,.mx-actions,.mx-toolbar,.mx-pagination,.mx-execute{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.matrix button,.mx-dialog button{display:inline-flex;align-items:center;justify-content:center;gap:6px;flex:none;width:auto;min-height:34px;margin:0;padding:6px 11px;border:1px solid #dfe2eb;border-radius:6px;background:#fff;color:#596174;box-shadow:none;font:inherit;font-size:12px;line-height:20px;white-space:nowrap;cursor:pointer}
+.matrix button:hover,.mx-dialog button:hover{border-color:#c7bfdf;background:#faf9fd;color:var(--mx-accent,#6043d4)}
+.matrix button:disabled,.mx-dialog button:disabled{opacity:.45;cursor:not-allowed}
+.matrix button:focus-visible,.mx-dialog button:focus-visible{outline:2px solid #7256e7;outline-offset:2px}
+.matrix .primary,.mx-dialog .primary{border-color:#6043d4;background:#6043d4;color:#fff}
+.matrix .primary:hover,.mx-dialog .primary:hover{border-color:#5235c1;background:#5235c1;color:#fff}
+.matrix .mx-danger,.mx-dialog .mx-danger{color:#b84a51;border-color:#edcdd0;background:#fff}
+.mx-tabs{display:flex;align-items:stretch;align-self:stretch;gap:20px;min-width:0;margin:0;padding:0;background:transparent}
+.matrix .mx-tabs button{gap:7px;width:auto;min-width:0;min-height:44px;margin:0 0 -1px;padding:0 2px;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:#778092;font-size:13px;font-weight:500}
+.matrix .mx-tabs button.active{border-bottom-color:#6043d4;background:transparent;color:#6043d4;font-weight:600}
+.mx-tabs b{min-width:20px;padding:1px 6px;border-radius:10px;background:#ebeef3;color:#7a8292;text-align:center;font-size:10px;font-weight:600;line-height:16px}
+.mx-tabs button.active b{background:#ede8fb;color:#6043d4}
+.mx-device-count{margin-right:2px;padding-left:12px;border-left:1px solid #e0e3eb;color:#7a8292;font-size:12px;line-height:18px;white-space:nowrap}
+.matrix .mx-device-button{min-height:30px;padding:4px 10px}
+.mx-panel{min-width:0;overflow:hidden;border:1px solid var(--mx-line);border-radius:8px;background:#fff}
+.mx-summary{min-height:54px;padding:10px 16px;border-bottom:1px solid var(--mx-line)}
+.mx-summary>b,.mx-summary h2{margin:0;font-size:14px;font-weight:600}
+.mx-summary span{color:#8a92a2;font-size:12px;line-height:20px}
+.mx-summary button:first-of-type{margin-left:auto}
+.mx-filters{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0;padding:12px 16px 8px}
+.matrix .mx-filters input,.matrix .mx-filters select{display:block;flex:1 1 112px;width:112px;min-width:112px;max-width:none;height:36px;min-height:36px;margin:0;padding:7px 10px;border:1px solid #dfe2eb;border-radius:6px;background:#fff;color:#50586b;font:inherit;font-size:12px;font-weight:400;line-height:20px}
+.matrix .mx-filters .mx-filter-search{flex:1.2 1 134px;min-width:134px;max-width:214px}
+.matrix .mx-filters .mx-filter-group{flex:1 1 120px;min-width:120px;max-width:200px}
+.matrix .mx-filters .mx-filter-site{flex:0 1 160px;min-width:140px}
+.mx-filters input::placeholder{color:#989fac}
+.mx-filters input:focus,.mx-filters select:focus{outline:none;border-color:#9f8ade;box-shadow:0 0 0 2px #6043d412}
+.mx-filter-actions{display:flex;align-items:center;flex:none;gap:8px}
+.mx-filter-actions button{min-height:36px}
+.mx-toolbar{gap:8px;padding:8px 16px 12px;border-bottom:1px solid var(--mx-line);font-size:12px}
+.mx-toolbar button{min-height:32px;padding:5px 10px}
+.matrix .mx-sync{background:#2563eb;border-color:#2563eb;color:#fff;font-weight:600}
+.matrix .mx-sync:hover{background:#1d4ed8;border-color:#1d4ed8;color:#fff}
+.mx-selected{margin-left:auto;color:#7e719f;font-size:12px;font-weight:500;white-space:nowrap}
+.mx-table-wrap{min-width:0;overflow:auto;max-height:58vh}
+.mx-table-wrap:has(input[type="checkbox"]){max-height:calc(58vh * 2 / 3)}
+.matrix table,.mx-dialog table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:12px}
+.mx-table-wrap table{min-width:1080px}
+.matrix th,.matrix td,.mx-dialog th,.mx-dialog td{padding:10px 12px;border-bottom:1px solid #edf0f5;text-align:left;line-height:20px}
+.matrix th,.mx-dialog th{position:sticky;top:0;z-index:1;background:#f8f9fc;color:#7b8496;font-size:11px;font-weight:500}
+.matrix td small{display:block;margin-top:2px;color:#929aaa;font-size:10px;line-height:16px}
+.matrix tr.selected{background:#f5f1fd}
+.mx-activity-normal{color:#15803d;font-weight:600}
+.mx-activity-closed{color:#dc2626;font-weight:600}
+.mx-tag{padding:3px 6px;border-radius:4px;background:#efedf8;color:#7765a3}
+.mx-row-actions button{min-height:26px;padding:2px 5px;border:0;background:transparent;color:#6043d4}
+.matrix .mx-empty{padding:48px 16px;text-align:center;color:#9aa3b2;font-size:12px}
+.mx-pagination{min-height:52px;padding:10px 16px;justify-content:flex-end;font-size:12px;color:#8a92a2}
+.mx-pagination>span:first-child{margin-right:auto}
+.mx-pagination select{display:inline-block;width:65px;height:32px;min-height:32px;margin:0;padding:4px 8px;border:1px solid #dfe2eb;border-radius:6px;background:#fff;font:inherit}
+.mx-pagination button{min-height:32px;padding:5px 10px}
+.mx-bottom{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);align-items:stretch;gap:16px;margin-top:16px}
+.mx-operations{display:flex;flex-direction:column;gap:12px;padding:16px;min-height:320px}
+.mx-log-panel{min-width:0;overflow:hidden;display:flex;flex-direction:column;min-height:320px}
+.mx-log-panel>.mx-log{flex:1;max-height:none;min-height:240px;height:0}
+.mx-operations h2{margin:0;font-size:14px;font-weight:600}
+.mx-operations>p{margin:0;color:#8a92a2;font-size:12px;line-height:1.7}
+.mx-operations a{color:#756296;font-size:12px}
+.mx-plans{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr));align-items:stretch;gap:10px;min-height:100px}
+.matrix .mx-plans>.mx-empty{display:flex;align-items:center;justify-content:center;grid-column:1/-1;min-height:100px;margin:0;padding:16px 12px}
+.mx-plans article{min-width:0;min-height:100px;padding:12px;border:1px solid #e5e3ee;border-radius:6px}
+.mx-plan-heading{display:flex;align-items:center;gap:8px;justify-content:space-between}
+.mx-plan-heading label{display:flex;align-items:center;min-width:0;flex:1;margin:0;cursor:pointer}
+.mx-plan-heading label span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mx-plan-schedule{display:inline-flex;align-items:center;margin-top:6px;padding:2px 7px;border-radius:4px;background:#f3f4f8;color:#778095;font-size:11px;line-height:1.7}
+.mx-plans article.chosen{border-color:#a08bdb;background:#faf8ff}
+.mx-plans label{font-size:13px;font-weight:600}
+.mx-plans input{width:auto;margin:0 7px 0 0;accent-color:#6043d4}
+.mx-plans button{min-height:24px;padding:1px 3px;border:0;background:transparent;color:#6043d4}
+.mx-plans small{display:block;margin-top:8px;color:#8a92a2;font-size:11px;line-height:1.8}
+.mx-execute{margin-top:auto;justify-content:space-between;padding-top:12px;border-top:1px solid #edf0f5;font-size:12px;color:#8a92a2}
+.mx-log{min-height:160px;max-height:320px;overflow:auto;padding:14px;background:#1d273b;color:#b7c7d4;font:11px/1.9 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+.mx-log span{color:#8396b0}.mx-log p{margin:0;font:inherit;color:#8396b0}
+.mx-run-summary{display:flex;align-items:center;flex-wrap:wrap;gap:12px;padding:12px 16px;font-size:12px}
+.mx-cards{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.mx-cards article{padding:14px 12px;border:1px solid var(--mx-line);border-radius:8px;background:#fff}
+.mx-cards span{display:block;color:#8a92a2;font-size:11px}
+.mx-cards strong{display:block;margin-top:7px;font-size:19px;font-weight:600;overflow-wrap:anywhere}
+.mx-banner,.mx-notice{margin:0 0 12px;padding:9px 12px;border-radius:6px;font-size:12px;line-height:1.7}
+.mx-banner{background:#fff8e8;color:#a08343}.mx-notice{background:#edf7f3;color:#397a65}.mx-notice p{margin:0}
+.mx-pairing{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.mx-alert{margin:0 0 12px;font-size:12px}
+.mx-backdrop{z-index:70;padding:16px}
+.mx-dialog{display:block;width:min(1000px,calc(100vw - 32px));max-height:90vh;overflow:auto;padding:20px;border-radius:12px;color:#34394c}
+.mx-dialog-devices{width:min(800px,calc(100vw - 32px))}
+.mx-dialog>.mx-summary{min-height:0;margin-bottom:16px;padding:0 0 14px}
+.mx-dialog .mx-summary h2{margin:0;font-size:15px}
+.mx-device-card{display:flex;flex-direction:column;gap:8px;margin:10px 0;padding:14px;border:1px solid #e4e6ee;border-radius:8px;font-size:12px}
+.mx-device-card small{color:#8a92a2;font-size:11px;line-height:1.6}
+.mx-device-heading{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.mx-device-heading b{min-width:0;font-size:13px;font-weight:600;overflow-wrap:anywhere}
+.mx-device-heading>small{margin-left:auto}
+.mx-device-badge{padding:1px 6px;border-radius:4px;background:#f0f1f5;color:#929aaa;font-size:10px;line-height:18px}
+.mx-device-badge.is-online{background:#eaf7f0;color:#31916a}
+.mx-device-connection{display:grid;grid-template-columns:86px minmax(0,1fr) auto;align-items:center;gap:6px 8px;margin:4px 0}
+.mx-dialog .mx-device-connection label{margin:0;color:#737b8d;font-size:12px;font-weight:400}
+.mx-device-connection small{grid-column:2/-1}
+.mx-device-connection button{min-height:36px}
+.mx-device-footer{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding-top:10px;border-top:1px solid #eff0f5}
+.mx-device-footer button{min-height:30px;padding:4px 9px;font-size:11px}
+.mx-devices-empty{padding:24px 12px;text-align:center}
+.mx-dialog input:not([type=checkbox]):not([type=radio]),.mx-dialog select,.mx-dialog textarea{width:100%;min-width:0;margin:0;padding:7px 10px;border:1px solid #dfe2eb;border-radius:6px;background:#fff;color:#50586b;font:inherit;font-size:12px;line-height:20px}
+.mx-dialog input:not([type=checkbox]):not([type=radio]),.mx-dialog select{height:36px}
+.mx-dialog input[type=checkbox],.mx-dialog input[type=radio]{display:inline-block;flex:none;width:14px;height:14px;margin:0;padding:0;accent-color:#6043d4}
+.mx-form{display:flex;flex-direction:column;gap:16px}
+.mx-dialog .mx-form label{display:flex;flex-direction:column;gap:7px;margin:0;font-size:12px;font-weight:500}
+.mx-dialog .mx-form label:has(>input[type=checkbox]){flex-direction:row;align-items:center}
+.mx-form fieldset{display:flex;flex-wrap:wrap;gap:20px;margin:0;padding:12px;border:1px solid #e1e7ec;border-radius:6px}
+.mx-dialog .mx-form fieldset label{display:inline-flex;flex-direction:row;align-items:center}
+.mx-plan-shops{display:flex;flex-direction:column;gap:7px;font-size:12px}.mx-plan-shops>small{line-height:1.6}
+.mx-form textarea{resize:vertical}.mx-form small{max-height:90px;overflow:auto;overflow-wrap:anywhere;color:#8a92a2;font-size:11px}
+.mx-preview-env{display:flex;flex-direction:column;gap:8px;max-height:240px;overflow:auto;padding:12px;font-size:12px}
+.mx-state.succeeded{color:#31916a}.mx-state.awaiting_attention,.mx-state.failed{color:#b84a51}.mx-state.running{color:#7762bb}
+@media(max-width:1500px){.mx-cards{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:1100px){.mx-bottom{grid-template-columns:1fr}.matrix .mx-filters .mx-filter-search{max-width:none}.matrix .mx-filters .mx-filter-group{max-width:none}}
+@media(max-width:700px){
+ .mx-automation{grid-template-columns:1fr}
+ .matrix.page{padding:12px}
+ .mx-tabs{gap:20px}.matrix .mx-tabs button{min-height:40px}
+ .mx-device-count{padding-left:8px;font-size:11px}
+ .mx-summary{gap:6px 10px;padding:10px 12px}.mx-summary span{font-size:11px}
+ .mx-filters{gap:8px;padding:12px 12px 8px}
+ .matrix .mx-filters input,.matrix .mx-filters select,.matrix .mx-filters .mx-filter-group,.matrix .mx-filters .mx-filter-site{flex:1 1 calc(50% - 4px);width:calc(50% - 4px);min-width:0;max-width:none}
+ .matrix .mx-filters .mx-filter-search{flex-basis:100%;width:100%;min-width:0}
+ .mx-filter-actions{width:100%}.mx-filter-actions button{flex:1}
+ .mx-toolbar{gap:6px;padding:8px 12px 12px}.mx-toolbar button{font-size:11px;padding:4px 8px}
+ .mx-pagination{gap:6px;padding:10px 12px}.mx-pagination>span:first-child{width:100%;margin:0}
+ .mx-cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .mx-dialog{padding:16px}.mx-device-connection{grid-template-columns:minmax(0,1fr) auto}.mx-device-connection label,.mx-device-connection small{grid-column:1/-1}
+ .mx-device-heading>small{width:100%;margin:0}.mx-device-footer>.mx-actions{width:100%}
+ .matrix .mx-sync{background:#2563eb;border-color:#2563eb;color:#fff;font-weight:600}
+.matrix .mx-sync:hover{background:#1d4ed8;border-color:#1d4ed8;color:#fff}
+.mx-selected{font-size:11px}
+}
+.mx-dialog .mx-devices-intro{margin:-3px 0 16px;color:#727c8f;font-size:12px;line-height:1.7}
+.mx-company-settings{margin-bottom:18px;padding:12px 14px;border:1px solid #ebe7f3;border-radius:8px;background:#fbfaff}
+.mx-section-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 12px}
+.mx-section-heading h3{display:flex;align-items:center;gap:6px;margin:0;color:#4c5264;font-size:12px;font-weight:600}
+.mx-section-heading h3 span{padding:0 6px;border-radius:8px;background:#efedf6;color:#8a7ca5;font-size:10px;line-height:17px}
+.mx-section-heading>span{color:#8a92a2;font-size:11px}
+.mx-section-heading>button{min-height:30px;padding:4px 10px;font-size:11px}
+.mx-company-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 24px;margin-top:10px}
+.mx-dialog .mx-setting-option{display:flex;align-items:flex-start;gap:8px;margin:0;padding:4px 0;font-weight:400;cursor:pointer}
+.mx-setting-option input[type=checkbox]{margin-top:3px}
+.mx-setting-option>span{display:flex;flex-direction:column;gap:4px}
+.mx-setting-option b{color:#535b6e;font-size:12px;font-weight:500;line-height:20px}
+.mx-setting-option small{color:#838b9c;font-size:11px;font-weight:400;line-height:18px}
+.mx-setting-pending{display:block;margin-top:8px;color:#8a74ac;font-size:11px}
+.mx-device-list-heading{margin-bottom:10px}
+.mx-device-heading b{flex:1 1 180px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.mx-device-heading>small{flex:none}
+.mx-connection-status{display:grid;grid-template-columns:.8fr 1.4fr .8fr;gap:12px;margin:3px 0;padding:10px 0;border-top:1px solid #f0f1f5;border-bottom:1px solid #f0f1f5}
+.mx-connection-status>div{display:flex;flex-direction:column;gap:5px;min-width:0}
+.mx-connection-status span{color:#8a92a2;font-size:11px;line-height:16px}
+.mx-connection-status b{color:#636e82;font-size:11px;font-weight:500;line-height:18px;overflow-wrap:anywhere}
+.mx-connection-status .is-connected{color:#338260}.mx-connection-status .is-pending{color:#b0843b}
+.mx-device-guidance{display:flex;flex-direction:column;gap:4px;padding:9px 11px;border-radius:6px;background:#f7f5fc}
+.mx-device-guidance b{color:#7d68a4;font-size:11px;font-weight:500;line-height:18px}
+.mx-device-guidance span{color:#858096;font-size:11px;line-height:1.6}
+.mx-device-guidance.is-ready{background:#f0f8f4}.mx-device-guidance.is-ready b{color:#3c8a68}.mx-device-guidance.is-ready span{color:#718d80}
+.mx-device-feedback{margin:0 0 12px!important;padding:9px 12px;border-radius:6px;background:#edf7f3;color:#397a65!important;font-size:12px!important;line-height:1.7}
+.mx-device-footer .mx-revoke{padding:4px 3px;border-color:transparent;background:transparent;color:#a55d63}
+.mx-device-footer .mx-revoke:hover{background:#fff5f5;color:#ba434c}
+.mx-device-advanced{margin-top:18px;border-top:1px solid #edf0f5;font-size:12px}
+.mx-device-advanced>summary{width:max-content;padding:12px 0 0;color:#8a92a2;font-size:11px;cursor:pointer}
+.mx-device-advanced>summary:focus-visible{outline:2px solid #7256e7;outline-offset:3px}
+.mx-advanced-item{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;padding:10px 12px;border-radius:6px;background:#f8f9fc}
+.mx-advanced-item>div{min-width:0}.mx-advanced-item b{color:#727b8e;font-size:11px;font-weight:500}
+.mx-dialog .mx-advanced-item p{margin:5px 0 0;color:#939aaa;font-size:11px;line-height:1.7}
+.mx-advanced-item>button,.mx-device-advanced :slotted(button){display:inline-flex;align-items:center;justify-content:center;flex:none;width:auto;min-height:30px;margin:0;padding:4px 10px;border:1px solid #dfe2eb;border-radius:6px;background:#fff;color:#727b8e;font:inherit;font-size:11px;line-height:20px;white-space:nowrap;cursor:pointer}
+@media(max-width:700px){
+ .mx-company-options{grid-template-columns:1fr;gap:6px}.mx-company-settings{padding:12px}
+ .mx-device-list-heading>span{width:100%;font-size:10px}
+ .mx-device-heading b{flex-basis:100%}.mx-device-heading>small{width:auto;margin-left:auto}
+ .mx-connection-status{grid-template-columns:1fr 1.2fr;gap:10px}.mx-connection-status>div:last-child{grid-column:1/-1;flex-direction:row;gap:8px;align-items:center}
+ .mx-advanced-item{align-items:flex-start;flex-direction:column;gap:8px}
+}
+</style>

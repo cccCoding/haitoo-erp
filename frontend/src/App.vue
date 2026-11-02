@@ -31,6 +31,8 @@ import { shippingInsuranceError, shippingInsuranceSelection, type ShippingInsura
 const pageSizeOptions = [20, 50, 100, 500, 1000]
 const SupplyCatalog = defineAsyncComponent(() => import('./SupplyCatalog.vue'))
 const TitleLibrary = defineAsyncComponent(() => import('./TitleLibrary.vue'))
+const TKMatrix = defineAsyncComponent(() => import('./hub/TKMatrix.vue'))
+const MatrixAdmin = defineAsyncComponent(() => import('./hub/MatrixAdmin.vue'))
 const FinancePage = defineAsyncComponent(() => import('./FinancePage.vue'))
 const OperationStatistics = defineAsyncComponent(() => import('./OperationStatistics.vue'))
 const productLibraryPageSizeOptions = [...pageSizeOptions, 2000]
@@ -221,12 +223,11 @@ function openMemberStorage(member:any) { storageMember.value=member }
 
 const route = useRoute()
 const router = useRouter()
-const workspaceRouteNames = new Set(['collection', 'collection-history', 'operation-statistics', 'templates', 'pod', 'creative-resources', 'tasks', 'materials', 'drafts', 'product-library', 'title-library', 'supply', 'miaoshou', 'members', 'finance', 'shops', 'tiktok-catalogs'])
+const workspaceRouteNames = new Set(['collection', 'collection-history', 'operation-statistics', 'matrix-admin', 'templates', 'pod', 'creative-resources', 'tasks', 'materials', 'drafts', 'product-library', 'title-library', 'supply', 'miaoshou', 'members', 'finance', 'shops', 'tiktok-catalogs'])
 const page = computed<string>({
   get: () => workspaceRouteNames.has(String(route.name)) ? String(route.name) : 'templates',
   set: value => { if (workspaceRouteNames.has(value) && value !== route.name) void router.push({ name: value }) },
 })
-const hubAgentPairingCode = ref(new URLSearchParams(location.search).get('hub_agent_pair') || '')
 const email = ref('')
 const password = ref('')
 const user = ref<any>(null), company = ref<any>(null), shops = ref<any[]>([]), templates = ref<any[]>([]), templateGroups = ref<any[]>([]), tasks = ref<any[]>([]), materialAssets = ref<any[]>([]), drafts = ref<any[]>([]), members = ref<any[]>([]), operatorGroups = ref<any[]>([]), aiProviders = ref<any[]>([])
@@ -499,10 +500,11 @@ const editingWhiteImage = ref<any>(null), whiteImageForm = ref({ template_id: nu
 const editingPersonalPrompt = ref<any>(null), personalPromptForm = ref({ template_id: null as number | null, name: '', content: '' })
 const resourceEditorType = ref<'white-images' | 'prompts' | null>(null), resourceEditorError = ref(''), resourceEditorUserId = ref<number | null>(null)
 const resourceEditorTitle = computed(() => resourceEditorType.value==='white-images' ? (editingWhiteImage.value ? '编辑白底图' : '新增白底图') : (editingPersonalPrompt.value ? '编辑创作要求' : '新增创作要求'))
-const nav = [{key:'templates', icon:'▦', label:'产品模板'}, {key:'pod', icon:'✦', label:'AI创作'}, {key:'creative-resources', icon:'▧', label:'创作资源'}, {key:'tasks', icon:'◌', label:'任务中心'}, {key:'materials', icon:'◈', label:'素材库'}, {key:'drafts', icon:'▤', label:'商品草稿'}, {key:'title-library', icon:'▤', label:'标题词库'}, {key:'supply', icon:'▦', label:'公开货盘'}, {key:'miaoshou', icon:'▤', label:'妙手店铺', adminOnly:true}, {key:'shops', icon:'▣', label:'HubStudio管理'}, {key:'tiktok-catalogs', icon:'▧', label:'类目管理', adminOnly:true}, {key:'members', icon:'♙', label:'成员管理', adminOnly:true}, {key:'operation-statistics', icon:'▥', label:'运营统计', adminOnly:true, hidden:false}, {key:'finance', icon:'¥', label:'财务统计', adminOnly:true}, {key:'product-library', icon:'▤', label:'产品统计'}]
+const matrixAuthorized=ref(false)
+const nav = [{key:'templates', icon:'▦', label:'产品模板'}, {key:'pod', icon:'✦', label:'AI创作'}, {key:'creative-resources', icon:'▧', label:'创作资源'}, {key:'tasks', icon:'◌', label:'任务中心'}, {key:'materials', icon:'◈', label:'素材库'}, {key:'drafts', icon:'▤', label:'商品草稿'}, {key:'title-library', icon:'▤', label:'标题词库'}, {key:'supply', icon:'▦', label:'公开货盘'}, {key:'miaoshou', icon:'▤', label:'妙手店铺', adminOnly:true}, {key:'shops', icon:'▣', label:'TK 矩阵'}, {key:'matrix-admin', icon:'▣', label:'矩阵管理', adminOnly:true}, {key:'tiktok-catalogs', icon:'▧', label:'类目管理', adminOnly:true}, {key:'members', icon:'♙', label:'成员管理', adminOnly:true}, {key:'operation-statistics', icon:'▥', label:'运营统计', adminOnly:true, hidden:false}, {key:'finance', icon:'¥', label:'财务统计', adminOnly:true}, {key:'product-library', icon:'▤', label:'产品统计'}]
 const navGroups = [
   { key:'statistics', label:'数据统计', icon:'▥', pages:['product-library', 'finance'] },
-  { key:'enterprise', label:'企业管理', icon:'⚙', pages:['members', 'operation-statistics', 'tiktok-catalogs', 'miaoshou'] },
+  { key:'enterprise', label:'企业管理', icon:'⚙', pages:['members', 'operation-statistics', 'matrix-admin', 'tiktok-catalogs', 'miaoshou'] },
 ]
 const groupedNavKeys = new Set(navGroups.flatMap(group => group.pages))
 const navGroupExpanded = ref<Record<string, boolean>>({})
@@ -604,7 +606,7 @@ const headers = computed(() => ({ Authorization: `Bearer ${token.value}` }))
 const canViewProductStatistics = computed(() => ['company_admin', 'member', 'team_leader'].includes(user.value?.role))
 const isDesignRole = computed(() => ['designer','design_leader'].includes(user.value?.role))
 const designPages = new Set(['templates','pod','creative-resources','tasks'])
-const visibleNav = computed(() => nav.filter(item => !item.hidden && (user.value?.role === 'supply_user' ? item.key === 'supply' : isDesignRole.value ? designPages.has(item.key) : !item.adminOnly || user.value?.role === 'company_admin')))
+const visibleNav = computed(() => nav.filter(item => !item.hidden && (item.key!=='shops'||matrixAuthorized.value) && (user.value?.role === 'supply_user' ? item.key === 'supply' : isDesignRole.value ? designPages.has(item.key) : !item.adminOnly || user.value?.role === 'company_admin')))
 const designGroups = ref<any[]>([]), editingDesignGroup = ref<any>(null), showDesignGroupDialog = ref(false)
 const designGroupForm = ref({name:'',leader_user_id:null as number | null}), designGroupBusy = ref(false), designGroupError = ref('')
 const templateVisibilityBusy = ref<number | null>(null), downloadingTasks = ref(false)
@@ -1515,6 +1517,10 @@ async function refresh() {
   const me = await api.get('/me', h)
   user.value = me.data.user
   company.value = me.data.company
+  matrixAuthorized.value=user.value.role==='company_admin'
+  if(['company_admin','member','team_leader'].includes(user.value.role)){
+    try{matrixAuthorized.value=(await api.get('/hub-v5/access',h)).data.enabled}catch{matrixAuthorized.value=user.value.role==='company_admin'}
+  }
   if (user.value.role === 'supply_user') {
     crossCompanyCollectionEnabled.value = false
     tasks.value=[]; materialAssets.value=[]; templates.value=[]; taskActiveCount.value=0
@@ -1579,16 +1585,7 @@ async function refresh() {
   if (page.value === 'shops') await loadHubUploadTasks()
   await loadMaterialStyles()
   if (page.value === 'creative-resources') await enterCreativeResources()
-  if (hubAgentPairingCode.value) {
-    try {
-      const {data} = await api.post('/hub-agent/pairings/complete', {code:hubAgentPairingCode.value}, h)
-      if (data.status === 'completed') {
-        hubAgentPairingCode.value = ''
-        const url = new URL(location.href); url.searchParams.delete('hub_agent_pair'); history.replaceState({}, '', url)
-        showToast(`本机执行器 ${data.agent_name || ''} 已授权`)
-      }
-    } catch (e:any) { showToast(e.response?.data?.detail || '本机执行器配对失败') }
-  }
+
 }
 async function login() {
   loading.value = true
@@ -3287,11 +3284,9 @@ onUnmounted(() => {
         <div class="ai-storage-summary"><span class="ai-storage-badge" :class="{enabled:grsaiCompanyEnabled}">{{grsaiCompanyEnabled ? '直存已启用' : '直存未启用'}}</span><span>{{grsaiCompanyId ? '公司默认库已配置' : '公司默认库未配置'}}</span></div>
         <section class="draft-table refreshable-list member-list-scroll" :aria-busy="memberListRefreshing"><div class="thead member-grid"><span>成员</span><span>用户代码</span><span>角色</span><span>所属组</span><span>邮箱</span><span>货盘管理权限</span><span>标题词库管理权限</span><span>状态</span><span>加入时间</span><span>操作</span></div><div v-for="member in members" :key="member.id" class="trow member-grid"><span><b>{{member.name}}</b></span><span>{{member.user_code || '—'}}</span><span>{{memberRoleLabel(member)}}</span><span>{{memberIsDesigner(member) ? designGroupName(member.design_group_id) : member.group_id ? operatorGroupName(member.group_id) : '—'}}</span><span>{{member.email}}</span><span class="member-supply-access"><template v-if="member.role === 'member' || member.role === 'team_leader'"><span class="member-permission-status" :class="member.supply_admin ? 'configured' : 'missing'">{{member.supply_admin ? '已授予' : '未授予'}}</span><button :class="member.supply_admin ? 'negative' : 'positive'" :disabled="memberSupplyGrantSaving" :aria-label="`${member.supply_admin ? '撤销' : '授予'} ${member.name} 的货盘管理权限`" @click="toggleMemberSupplyGrant(member)">{{member.supply_admin ? '撤销权限' : '授予权限'}}</button></template><span v-else class="member-permission-status">{{member.role==='company_admin' ? '默认拥有' : '—'}}</span></span><span class="member-supply-access"><template v-if="member.role === 'member' || member.role === 'team_leader'"><span class="member-permission-status" :class="member.title_library_admin ? 'configured' : 'missing'">{{member.title_library_admin ? '已授予' : '未授予'}}</span><button :class="member.title_library_admin ? 'negative' : 'positive'" :disabled="memberTitleGrantSaving" :aria-label="`${member.title_library_admin ? '撤销' : '授予'} ${member.name} 的标题词库管理权限`" @click="toggleMemberTitleGrant(member)">{{member.title_library_admin ? '撤销权限' : '授予权限'}}</button></template><span v-else class="member-permission-status">{{member.role==='company_admin' ? '默认拥有' : '—'}}</span></span><span class="chip" :class="member.is_active ? 'blue' : 'orange'">{{member.is_active ? '启用中' : '已停用'}}</span><span>{{new Date(member.created_at).toLocaleDateString()}}</span><span class="member-row-actions"><template v-if="['member','team_leader','designer','design_leader'].includes(member.role)"><button @click="openMemberDialog(member)">编辑</button><button v-if="!['team_leader','design_leader'].includes(member.role)" :class="member.is_active ? 'negative' : 'positive'" @click="toggleMember(member)">{{member.is_active ? '停用' : '启用'}}</button></template><span class="member-ai-entry"><button type="button" class="member-ai-button" @click="openMemberStorage(member)">AI 配置</button></span></span></div><p v-if="!members.length && !memberListRefreshing" class="empty">暂无公司成员。</p><div v-if="memberListRefreshing" class="list-refresh-overlay" role="status"><i></i><span>正在刷新列表…</span></div></section>
       </section>
-      <section v-else-if="page==='shops'" class="page">
-        <div class="section-heading"><div><span>环境同步和模版上品策略配置在员工电脑的本地执行器工作页完成；这里查看自动上品记录。</span></div></div>
-        <p v-if="shopError && user?.role==='company_admin'" class="error">{{shopError}}</p>
-        <div v-if="user?.role==='company_admin'" class="shop-actions"><span class="miaoshou-status" :class="company?.hubstudio_configured?'configured':'missing'">{{company?.hubstudio_configured?'HubStudio API 已配置':'请配置 HubStudio API'}}</span><button class="secondary" @click="openHubstudioDialog">{{company?.hubstudio_configured?'更新':'配置'}} HubStudio API</button></div>
-        <p>启动新版执行器，在本机工作页同步环境，并配置产品模版对应的允许环境及轮流或随机分配方式。随后在商品草稿导出窗口生成自动上品任务。“已提交”表示上传提交完成，不代表平台审核通过。</p>
+      <MatrixAdmin v-else-if="page==='matrix-admin'&&user?.role==='company_admin'" :token="token" @unauthorized="logout"><template #legacy><button type="button" @click="openHubstudioDialog()">旧版 API 配置</button></template></MatrixAdmin>
+      <TKMatrix v-else-if="page==='shops'" :token="token" :user="user" @unauthorized="logout" @access-change="matrixAuthorized=$event">
+        <template #legacy>
         <div class="section-heading"><h2>自动上品记录</h2><div class="section-heading-actions"><button class="ghost" :disabled="hubUploadLoading" @click="loadHubUploadTasks">{{hubUploadLoading?'刷新中…':'↻ 刷新'}}</button></div></div>
         <div class="hub-upload-filters"><label>模版 <TemplateSelect v-model="hubUploadTemplateId" :disabled="hubUploadLoading" @change="changeHubUploadCreator" :templates="hubUploadTemplates" all-label="全部模版"/></label><label v-if="user?.role==='company_admin'">创建人 <select v-model="hubUploadCreatorId" :disabled="hubUploadLoading" @change="changeHubUploadCreator"><option :value="null">全部成员</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label></div>
         <p v-if="hubUploadError" class="error" role="alert">{{hubUploadError}}</p>
@@ -3302,7 +3297,9 @@ onUnmounted(() => {
           <footer class="draft-pagination"><span>共 {{hubUploadTotal}} 条</span><label>每页 <select v-model.number="hubUploadPageSize" :disabled="hubUploadLoading" @change="changeHubUploadPageSize"><option v-for="size in hubUploadPageSizeOptions" :key="size" :value="size">{{size}}</option></select> 条</label><button :disabled="hubUploadLoading || !!hubUploadError || hubUploadPage===1" @click="changeHubUploadPage(hubUploadPage-1)">上一页</button><span>第 {{hubUploadPage}} / {{hubUploadPageCount}} 页</span><button :disabled="hubUploadLoading || !!hubUploadError || hubUploadPage>=hubUploadPageCount" @click="changeHubUploadPage(hubUploadPage+1)">下一页</button></footer>
           <div v-if="hubUploadLoading" class="list-refresh-overlay" role="status"><i></i><span>正在加载自动上品记录…</span></div>
         </section>
-      </section>
+
+        </template>
+      </TKMatrix>
       <section v-else-if="page==='tiktok-catalogs' && user?.role==='company_admin'" class="page">
         <div class="section-heading"><div><span>按平台与店铺类型管理批量上传模板；上传文件会由对应解析器验证。</span></div><div class="section-heading-actions"><button class="ghost" :disabled="tiktokCatalogListRefreshing" @click="refreshTiktokCatalogList">{{tiktokCatalogListRefreshing ? '刷新中…' : '↻ 刷新'}}</button><button class="primary" @click="openTiktokCatalogCreateDialog">新增类目</button></div></div>
         <div class="catalog-type-tabs"><button :class="{active:tiktokCatalogTypeTab==='tiktok_local'}" @click="tiktokCatalogTypeTab='tiktok_local'">tk本土店</button><button :class="{active:tiktokCatalogTypeTab==='tiktok_cross_border'}" @click="tiktokCatalogTypeTab='tiktok_cross_border'">tk跨境店</button><button :class="{active:tiktokCatalogTypeTab==='shopee_basic'}" @click="tiktokCatalogTypeTab='shopee_basic'">Shopee</button></div>
@@ -3761,7 +3758,7 @@ onUnmounted(() => {
   </div>
   <MemberAISettings v-if="storageMember" :key="storageMember.id" :member="members.find(member=>member.id===storageMember.id) || storageMember" :providers="memberCredentialProviders" :company-storage-id="grsaiCompanyId" :direct-enabled="grsaiCompanyEnabled" :client="api" :authorization="headers" @close="storageMember=null" @changed="refreshMemberList"/>
   <div v-if="showMiaoshouDialog" class="modal-backdrop" @click.self="showMiaoshouDialog=false"><section class="modal-card"><h2>{{company?.miaoshou_configured?'更新':'配置'}}妙手 API Key</h2><p>App ID 和 App Secret 会加密保存，仅用于本公司的店铺同步与商品上架。保存后将立即重新同步店铺。</p><label>App ID<input v-model="miaoshouForm.app_id" maxlength="255" autocomplete="off" placeholder="请输入 App ID" /></label><label>App Secret<input v-model="miaoshouForm.app_secret" type="password" maxlength="500" autocomplete="new-password" placeholder="请输入 App Secret" @keyup.enter="saveMiaoshouAccount" /></label><div class="modal-actions"><button class="ghost" :disabled="miaoshouSaving" @click="showMiaoshouDialog=false">取消</button><button class="primary" :disabled="miaoshouSaving || !miaoshouForm.app_id.trim() || !miaoshouForm.app_secret.trim()" @click="saveMiaoshouAccount">{{miaoshouSaving?'保存中…':'保存并同步'}}</button></div></section></div>
-  <div v-if="showHubstudioDialog && user?.role==='company_admin'" class="modal-backdrop" @click.self="showHubstudioDialog=false"><section class="modal-card"><h2>配置 HubStudio API</h2><p>凭据会加密保存，仅向已认证的本地执行器提供，不返回浏览器。</p><label>App ID<input v-model="hubstudioForm.app_id" maxlength="255" /></label><label>App Secret<input v-model="hubstudioForm.app_secret" type="password" maxlength="2000" /></label><label>团队 Group Code<input v-model="hubstudioForm.group_code" maxlength="120" /></label><div class="modal-actions"><button class="ghost" :disabled="hubstudioSaving" @click="showHubstudioDialog=false">取消</button><button class="primary" :disabled="hubstudioSaving || !hubstudioForm.app_id || !hubstudioForm.app_secret || !hubstudioForm.group_code" @click="saveHubstudioAccount">{{hubstudioSaving?'保存中…':'安全保存'}}</button></div></section></div>
+  <div v-if="showHubstudioDialog && user?.role==='company_admin'" class="modal-backdrop" @click.self="showHubstudioDialog=false"><section class="modal-card"><h2>旧版 HubStudio API 配置</h2><p>用于旧版兼容，凭据加密保存。当前矩阵连接器使用本机 Local API，不依赖这些凭据。</p><label>App ID<input v-model="hubstudioForm.app_id" maxlength="255" /></label><label>App Secret<input v-model="hubstudioForm.app_secret" type="password" maxlength="2000" /></label><label>团队 Group Code<input v-model="hubstudioForm.group_code" maxlength="120" /></label><div class="modal-actions"><button class="ghost" :disabled="hubstudioSaving" @click="showHubstudioDialog=false">取消</button><button class="primary" :disabled="hubstudioSaving || !hubstudioForm.app_id || !hubstudioForm.app_secret || !hubstudioForm.group_code" @click="saveHubstudioAccount">{{hubstudioSaving?'保存中…':'安全保存'}}</button></div></section></div>
   <div v-if="showShopManagersDialog" class="modal-backdrop" @click.self="showShopManagersDialog=false"><section class="modal-card"><h2>分配店铺管理人员</h2><p>{{managingShop?.name}}。被选中的运营成员可在该店铺创建、管理并上架商品。</p><label v-for="member in members.filter(item => item.role === 'member' || item.role === 'team_leader')" :key="member.id" class="manager-option"><input v-model="selectedManagerIds" :value="member.id" type="checkbox" />{{member.name}} <small>{{member.email}}</small></label><p v-if="!members.some(item => item.role === 'member' || item.role === 'team_leader')" class="empty">请先在成员管理中新增运营成员。</p><div class="modal-actions"><button class="ghost" @click="showShopManagersDialog=false">取消</button><button class="primary" :disabled="shopManagersSaving" @click="saveShopManagers">{{shopManagersSaving ? '保存中…' : '保存分配'}}</button></div></section></div>
   <div v-if="editingTemplateNote && user?.role==='design_leader'" class="modal-backdrop" @click.self="!templateNoteSaving && (editingTemplateNote=null)">
     <form class="modal-card template-note-dialog" role="dialog" aria-modal="true" aria-labelledby="template-note-title" @submit.prevent="saveTemplateNote" @keydown.esc="!templateNoteSaving && (editingTemplateNote=null)">

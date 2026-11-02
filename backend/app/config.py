@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
     log_level: str = "INFO"
     log_timezone: str = "Asia/Hong_Kong"
+    # 发布签名公钥，JSON {key_id: base64(Ed25519公钥)}；私钥只放在离线发布环境。
+    matrix_release_public_keys: str = "{}"
+    hub_agent_installer_dir: str = "/opt/haitoo/agent-installers"
     # 仅本机代理兼容：允许图片域名解析到 Fake-IP 保留网段，生产环境保持关闭。
     image_download_allow_fake_ip: bool = False
     # auto 仅在请求来自内部代理时读取 Cloudflare / Nginx 覆写的客户端 IP 头。

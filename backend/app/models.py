@@ -244,12 +244,16 @@ class HubUploadTask(Base):
         Index("ix_hub_upload_tasks_agent_status", "agent_id", "status", "created_at"),
         Index("ix_hub_upload_tasks_shop_status", "shop_id", "status"),
         Index("ix_hub_upload_tasks_owner_queue", "company_id", "created_by", "status", "environment_id"),
+        Index("uq_hub_upload_matrix_item", "matrix_item_id", unique=True),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     shop_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
     agent_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
     created_by: Mapped[int] = mapped_column(index=True)
+    source_kind: Mapped[str] = mapped_column(String(24), default="draft", server_default="draft")
+    matrix_item_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    supply_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     environment_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
     environment_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     container_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -287,6 +291,8 @@ class HubRuntimeLock(Base):
     company_id: Mapped[int] = mapped_column(index=True)
     container_code: Mapped[str] = mapped_column(String(120))
     task_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    matrix_item_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fencing: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class UserShop(Base):
@@ -1017,3 +1023,9 @@ class FinanceImport(Base):
     filename: Mapped[str] = mapped_column(String(255))
     counts: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+# 迁移与测试统一使用同一个 Base 元数据；协议5模型不依赖本模块。
+from .hub_v5.models import (MatrixCompany, MatrixDevice, MatrixEnvironment, MatrixAccess,
+    MatrixSync, MatrixPart, MatrixShop, MatrixPlan, MatrixPlanVersion, MatrixPreview,
+    MatrixRun, MatrixItem, MatrixAttempt, MatrixEvent, MatrixCommand, MatrixAllocation,
+    MatrixCollection, MatrixFire, MatrixAudit, MatrixRelease)

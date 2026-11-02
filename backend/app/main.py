@@ -349,6 +349,16 @@ from .cross_company_collection import router as cross_company_collection_router
 app.include_router(cross_company_collection_router)
 from .supply_catalog import router as supply_catalog_router
 app.include_router(supply_catalog_router)
+from .hub_v5.api import router as matrix_router
+from .hub_v5.releases import router as matrix_releases_router
+app.include_router(matrix_router)
+app.include_router(matrix_releases_router)
+from .hub_v5.management import router as matrix_management_router
+app.include_router(matrix_management_router)
+from .hub_v5.installers import router as agent_installers_router
+app.include_router(agent_installers_router)
+from .hub_v5.limits import MatrixRequestLimit
+app.add_middleware(MatrixRequestLimit)
 app.include_router(material_styles_router)
 from .finance import router as finance_router
 app.include_router(finance_router)
@@ -683,6 +693,8 @@ def create_hub_agent_pairing(payload: HubAgentRegisterInput, db: Session = Depen
 
 @app.post("/hub-agent/pairings/complete")
 def complete_hub_agent_pairing(payload: HubAgentPairingCompleteInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    from .hub_v5.permissions import require_access
+    require_access(db, user)
     pairing = db.get(HubAgentPairing, hashlib.sha256(payload.code.encode()).hexdigest())
     if not pairing or pairing.expires_at < datetime.utcnow():
         raise HTTPException(404, "配对码不存在或已过期，请回到本地执行器重新开始")
@@ -4539,7 +4551,7 @@ def hub_agent_templates(request: Request, db: Session = Depends(get_db)):
 def hub_agent_queue(request: Request, after_id: int = Query(0, ge=0), page_size: int = Query(100, ge=1, le=100), db: Session = Depends(get_db)):
     agent = hub_protocol_agent(request, db)
     hub.sweep_expired(db)
-    rows = db.scalars(select(HubUploadTask).where(HubUploadTask.company_id == agent.company_id, HubUploadTask.created_by == agent.user_id, HubUploadTask.status == "queued", HubUploadTask.id > after_id).order_by(HubUploadTask.id).limit(page_size)).all()
+    rows = db.scalars(select(HubUploadTask).where(HubUploadTask.company_id == agent.company_id, HubUploadTask.created_by == agent.user_id, HubUploadTask.source_kind == "draft", HubUploadTask.status == "queued", HubUploadTask.id > after_id).order_by(HubUploadTask.id).limit(page_size)).all()
     blocked = db.scalars(select(HubUploadTask.container_code).where(HubUploadTask.company_id == agent.company_id, HubUploadTask.status.in_(["running", "awaiting_attention"]), HubUploadTask.container_code.is_not(None))).all()
     return {"items": [hub.task_view(db, row) for row in rows], "next_after_id": rows[-1].id if len(rows) == page_size else None, "blocked_container_codes": sorted(set(blocked))}
 

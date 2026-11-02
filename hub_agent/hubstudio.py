@@ -21,7 +21,7 @@ def seller_url(url):
     host = parsed.hostname or ""
     return (parsed.scheme == "https" and not parsed.username and not parsed.password
             and parsed.port in (None, 443) and bool(re.fullmatch(
-                r"seller(?:-[a-z]{2})?\.tiktok\.com|seller\.tiktokglobalshop\.com|seller\.tiktokshopglobalselling\.com", host)))
+                r"seller(?:-[a-z]{2})?\.tiktok\.com|seller-id\.tokopedia\.com|seller\.tiktokglobalshop\.com|seller\.tiktokshopglobalselling\.com", host)))
 
 
 class HubstudioClient:

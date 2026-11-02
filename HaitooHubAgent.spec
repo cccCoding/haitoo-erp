@@ -5,7 +5,7 @@ a = Analysis(
     ['hub_agent/haitoo_hub_agent.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('hub_agent/static', 'static'), ('hub_agent/trusted_keys.json', '.'), ('hub_agent/agent-version.json', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

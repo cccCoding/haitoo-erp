@@ -150,11 +150,15 @@ def detail(db, task_id, user_id, company_id):
 
 
 def publish_drafts(db, task, operator_id):
+    if task.source_kind != "draft":
+        return
     db.execute(update(ProductDraft).where(ProductDraft.id.in_(task.draft_ids), ProductDraft.company_id == task.company_id).values(status="published", workflow_stage="published", updated_by=operator_id))
 
 
 def task_action(db, task_id, user_id, company_id, action, payload: HubTaskAction):
     original = own_task(db, task_id, user_id, company_id)
+    if original.source_kind != "draft":
+        raise HTTPException(409, "矩阵任务请在 TK 矩阵中核对处理")
     guard = runtime_guard(db, company_id, original.container_code)
     task = lock_row(db, HubUploadTask, task_id)
     expire_locked_task(db, task)
@@ -203,10 +207,15 @@ def claim(db, agent, payload: HubTaskClaimInput):
     lock_row(db, HubAgent, agent.id)
     if db.scalar(select(HubUploadTask.id).where(HubUploadTask.agent_id == agent.id, HubUploadTask.status == "running")):
         db.commit(); return {"task": None}
+    from .hub_v5.models import MatrixItem
+    if db.scalar(select(MatrixItem.id).where(MatrixItem.agent_id == agent.id, MatrixItem.status == "running")):
+        db.commit(); return {"task": None}
     task_id = payload.task_id
     candidate = db.get(HubUploadTask, task_id)
     if not candidate or candidate.company_id != agent.company_id or candidate.created_by != agent.user_id:
         raise HTTPException(404, "上品任务不存在或无权操作")
+    if candidate.source_kind != "draft":
+        raise HTTPException(409, "此任务仅允许协议5矩阵执行器领取")
     if candidate.status != "queued":
         db.commit(); return {"task": None}
     if candidate.template_id is None:
@@ -214,7 +223,7 @@ def claim(db, agent, payload: HubTaskClaimInput):
     if candidate.container_code and candidate.container_code != code:
         raise HTTPException(409, "重试必须使用原环境")
     guard = runtime_guard(db, agent.company_id, code, create=True)
-    if guard.task_id:
+    if guard.task_id or guard.matrix_item_id:
         db.commit(); return {"task": None}
     if db.scalar(select(HubUploadTask.id).where(HubUploadTask.company_id == agent.company_id,
             HubUploadTask.container_code == code, HubUploadTask.status.in_(["running", "awaiting_attention"]))):
@@ -242,6 +251,8 @@ def claimed_task(db, agent, task_id, token):
     original = db.get(HubUploadTask, task_id)
     if not original or original.company_id != agent.company_id or original.created_by != agent.user_id:
         raise HTTPException(404, "任务不存在")
+    if original.source_kind != "draft":
+        raise HTTPException(409, "矩阵任务必须通过协议5校验租约及提交回执")
     guard = runtime_guard(db, original.company_id, original.container_code)
     task = lock_row(db, HubUploadTask, task_id)
     expire_locked_task(db, task)

@@ -10,13 +10,10 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import aiohttp
-from aiohttp.test_utils import TestClient, TestServer
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from hubstudio import HubstudioClient, HubAccount
-from workbench import LocalStatusServer
 
 
 class HubstudioClientTests(unittest.IsolatedAsyncioTestCase):
@@ -81,121 +78,6 @@ class HubstudioClientTests(unittest.IsolatedAsyncioTestCase):
         client.post = AsyncMock(return_value={"statusCode": "0", "debuggingPort": "1234"})
         self.assertEqual(await client.start("env"), 1234)
         self.assertEqual(client.post.await_args.args[1], {"containerCode": "env", "shouldCloseTabsOnOpen": False})
-
-
-class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
-    async def test_chinese_logs_support_utf8_legacy_windows_and_mixed_files(self):
-        old = "2026-10-08 INFO 正在启动环境"
-        new = "2026-10-08 INFO [imported] 商品导入成功"
-        with tempfile.TemporaryDirectory() as directory:
-            log = Path(directory) / "agent.log"
-            self.workbench.log_path = log
-            for encodings in (("utf-8", "utf-8"), ("gbk", "gbk"), ("gbk", "utf-8")):
-                with self.subTest(encodings=encodings):
-                    log.write_bytes(old.encode(encodings[0]) + b"\r\n" + new.encode(encodings[1]) + b"\r\n")
-                    response = await self.client.get("/api/logs")
-                    self.assertEqual((await response.json())["lines"], [old, new])
-
-    async def test_log_tail_discards_partial_multibyte_line_and_limits_lines(self):
-        with tempfile.TemporaryDirectory() as directory:
-            log = Path(directory) / "agent.log"
-            self.workbench.log_path = log
-            expected = [f"中文日志 {i}" for i in range(120)]
-            log.write_bytes(("中" * 30000 + "\n" + "\n".join(expected) + "\n").encode("utf-8"))
-            response = await self.client.get("/api/logs")
-            self.assertEqual((await response.json())["lines"], expected[-100:])
-
-    async def test_clear_logs_requires_csrf_and_preserves_new_appends(self):
-        with tempfile.TemporaryDirectory() as directory:
-            log = Path(directory) / "agent.log"
-            log.write_text("previous log\n")
-            self.workbench.log_path = log
-            response = await self.client.post("/api/logs/clear", json={})
-            self.assertEqual(response.status, 403)
-            self.assertEqual(log.read_text(), "previous log\n")
-            response = await self.client.post("/api/logs/clear", json={}, headers={"Origin": self.workbench.origin, "X-CSRF-Token": self.workbench.csrf})
-            self.assertEqual(response.status, 200)
-            self.assertEqual(log.read_text(), "")
-            with log.open("a") as stream:
-                stream.write("new log\n")
-            self.assertEqual((await (await self.client.get("/api/logs")).json())["lines"], ["new log"])
-        self.backend.request.assert_not_awaited()
-    async def test_abort_is_local_and_requires_csrf(self):
-        self.workbench.abort_callback = AsyncMock(return_value={"ok": True})
-        response = await self.client.post("/api/tasks/12/abort", json={})
-        self.assertEqual(response.status, 403)
-        self.workbench.abort_callback.assert_not_awaited()
-        response = await self.client.post("/api/tasks/12/abort", json={}, headers={"Origin": self.workbench.origin, "X-CSRF-Token": self.workbench.csrf})
-        self.assertEqual(response.status, 200)
-        self.workbench.abort_callback.assert_awaited_once_with(12)
-        self.backend.request.assert_not_awaited()
-    async def asyncSetUp(self):
-        self.backend = MagicMock(); self.backend.request = AsyncMock(return_value={"items": [], "total": 0})
-        self.state = {"user": {"id": 1, "name": "User"}, "paused": False, "environments": []}
-        self.sync = AsyncMock()
-        self.workbench = LocalStatusServer(self.state, lambda: self.backend, self.sync)
-        self.server = TestServer(self.workbench.app())
-        self.client = TestClient(self.server, cookie_jar=aiohttp.CookieJar(unsafe=True))
-        await self.client.start_server()
-        self.workbench.port = self.server.port
-        self.workbench.origin = f"http://127.0.0.1:{self.server.port}"
-        await self.client.get("/")
-
-    async def asyncTearDown(self): await self.client.close()
-
-    async def test_template_picker_asset_is_served_without_opening_other_files(self):
-        response = await self.client.get("/assets/template-picker.js")
-        self.assertEqual(response.status, 200)
-        self.assertIn("createTemplatePicker", await response.text())
-        self.assertEqual((await self.client.get("/assets/workbench.py")).status, 404)
-
-    async def test_csrf_origin_host_and_session(self):
-        for headers in ({}, {"Origin": "https://evil.example", "X-CSRF-Token": self.workbench.csrf}, {"Origin": self.workbench.origin, "X-CSRF-Token": "wrong"}):
-            response = await self.client.post("/api/pause", json={"paused": True}, headers=headers)
-            self.assertEqual(response.status, 403)
-        response = await self.client.post("/api/pause", json={"paused": True}, headers={"Origin": self.workbench.origin, "X-CSRF-Token": self.workbench.csrf})
-        self.assertEqual(response.status, 200)
-        self.assertTrue(self.state["paused"])
-        self.assertEqual((await self.client.get("/api/status", headers={"Host": "evil.example"})).status, 403)
-        self.client.session.cookie_jar.clear()
-        self.assertEqual((await self.client.get("/api/status")).status, 403)
-
-    async def test_status_allowlist_and_task_scope(self):
-        self.state.update({"token": "private", "app_secret": "secret"})
-        response = await self.client.get("/api/status"); data = await response.json()
-        self.assertNotIn("token", data); self.assertNotIn("app_secret", data)
-        await self.client.get("/api/tasks?user_id=99&page=2&status=completed")
-        self.backend.request.assert_awaited_once_with("GET", "/hub-agent/tasks", params={"page": "2", "status": "completed"})
-        self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
-
-    async def test_reopening_page_does_not_start_execution_or_sync(self):
-        await self.client.get("/"); await self.client.get("/")
-        self.sync.assert_not_awaited()
-        self.backend.request.assert_not_awaited()
-
-    async def test_login_requires_csrf_and_never_returns_credentials(self):
-        self.workbench.login_callback = AsyncMock(return_value={"token": "must-not-return"})
-        response = await self.client.post("/api/login", json={"email": "a@b.com", "password": "secret"})
-        self.assertEqual(response.status, 403)
-        self.workbench.login_callback.assert_not_awaited()
-        response = await self.client.post("/api/login", json={"email": "a@b.com", "password": "secret"},
-            headers={"Origin": self.workbench.origin, "X-CSRF-Token": self.workbench.csrf})
-        self.assertEqual(await response.json(), {"ok": True})
-        self.workbench.login_callback.assert_awaited_once_with("a@b.com", "secret")
-
-    async def test_environment_list_and_local_policy_never_upload_directory(self):
-        self.state["environments"] = [{"container_code": "env-1", "name": "Local", "auto_upload_enabled": False}]
-        response = await self.client.get("/api/environments")
-        self.assertEqual((await response.json())[0]["name"], "Local")
-        self.workbench.policy_callback = AsyncMock(return_value={"ok": True})
-        response = await self.client.put("/api/policies/1", json={"template_id": 1, "container_codes": ["env-1"], "mode": "round_robin"},
-            headers={"Origin": self.workbench.origin, "X-CSRF-Token": self.workbench.csrf})
-        self.assertEqual(response.status, 200)
-        self.workbench.policy_callback.assert_awaited_once_with(1, {"template_id": 1, "container_codes": ["env-1"], "mode": "round_robin"})
-        response = await self.client.delete("/api/policies/1")
-        self.assertEqual(response.status, 403)
-        self.backend.request.assert_not_awaited()
-
 
 
 class UploadTests(unittest.IsolatedAsyncioTestCase):
@@ -856,90 +738,51 @@ class UploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(runtime.synced_monotonic)
         runtime.client.post.assert_not_awaited()
 
-    async def test_local_login_saves_only_agent_credential_and_rejects_switch(self):
-        runtime = self.agent.AgentRuntime({"hubstudio_url": "http://127.0.0.1:6873"})
-        client = MagicMock(); client.request = AsyncMock(return_value={"user": {"id": 2, "name": "Employee"}})
-        with patch.object(self.agent, "authorize_computer", AsyncMock(return_value="agent-token")), \
-             patch.object(self.agent, "ERPClient", return_value=client), \
-             patch.object(self.agent.keyring, "set_password") as store, \
-             patch.object(self.agent, "save_config") as save:
-            await runtime.login("a@b.com", "password-secret")
-            self.assertFalse(runtime.state["login_required"])
-            self.assertEqual(runtime.state["user"]["id"], 2)
-            store.assert_called_once_with(self.agent.SERVICE_NAME, self.agent.TOKEN_KEY, "agent-token")
-            self.assertNotIn("password", json.dumps(save.call_args.args[0]))
-            with self.assertRaises(self.agent.ERPRequestError):
-                await runtime.login("other@b.com", "other-secret")
-            runtime.require_login()
-            self.assertIsNone(runtime.client)
-            self.assertTrue(runtime.state["login_required"])
-            self.assertEqual(runtime.state["environments"], [])
-
-    async def test_complete_sync_keeps_directory_in_local_memory(self):
+    async def test_complete_sync_uploads_directory_before_marking_it_fresh(self):
         runtime = self.agent.AgentRuntime({"auto_upload_container_code": "env-2"})
         runtime.client = MagicMock(); runtime.client.request = AsyncMock(return_value={"user": {"id": 1, "name": "User"}})
         runtime.client.post = AsyncMock()
+        runtime.matrix.sync = AsyncMock(return_value=True)
         items = [{"container_code": "env-1", "name": "One", "metadata_fields": {}}, {"container_code": "env-2", "name": "Two", "metadata_fields": {}}]
         with patch.object(self.agent.HubstudioClient, "environments", AsyncMock(return_value=items)), patch.object(self.agent, "save_config") as save:
             await runtime.sync()
         runtime.client.post.assert_not_awaited(); save.assert_not_called()
         self.assertTrue(all("auto_upload_enabled" not in e for e in runtime.state["environments"]))
         self.assertIsNotNone(runtime.synced_monotonic)
+        runtime.matrix.sync.assert_awaited_once_with(items)
 
-    async def test_policy_save_persists_multiple_environments_and_blocks_running_or_stale(self):
-        runtime = self.agent.AgentRuntime({"auto_upload_container_code": "env-1"})
-        runtime.client = MagicMock(); runtime.client.request = AsyncMock(return_value=[{"id": 1, "name": "M05L"}])
-        runtime.state["environments"] = [{"container_code": "env-1", "name": "One"}, {"container_code": "env-2", "name": "Two"}]
-        runtime.synced_monotonic = self.agent.time.monotonic()
-        payload = {"template_id": 1, "container_codes": ["env-1", "env-2"], "mode": "random"}
-        with patch.object(self.agent, "save_config") as save:
-            await runtime.update_policy(1, payload)
-            self.assertNotIn("auto_upload_container_code", save.call_args.args[0])
-            self.assertEqual(runtime.config["upload_policies"]["1"]["container_codes"], ["env-1", "env-2"])
-            runtime.current_claim = {"task": {"id": 1}}
-            with self.assertRaises(self.agent.ERPRequestError): await runtime.update_policy(1, payload)
-            with self.assertRaises(self.agent.ERPRequestError): await runtime.update_policy(1, None)
-            runtime.current_claim = None
-            runtime.synced_monotonic -= 301
-            with self.assertRaises(self.agent.ERPRequestError): await runtime.update_policy(1, payload)
-            await runtime.update_policy(1, None)
-            self.assertEqual(runtime.config["upload_policies"], {})
-
-    async def test_claim_skips_unmatched_pages_and_busy_environment_then_persists_rotation(self):
-        policy = {"template_id": 1, "container_codes": ["env-1", "env-2"], "mode": "round_robin"}
-        runtime = self.agent.AgentRuntime({"upload_policies": {"1": policy}})
-        runtime.synced_monotonic = self.agent.time.monotonic()
-        runtime.state["environments"] = [{"container_code": "env-1", "name": "One"}, {"container_code": "env-2", "name": "Two"}]
-        runtime.client = MagicMock()
-        runtime.client.request = AsyncMock(side_effect=[
-            {"items": [{"id": 1, "template_id": 2}], "next_after_id": 1, "blocked_container_codes": []},
-            {"items": [{"id": 2, "template_id": 1}], "next_after_id": None, "blocked_container_codes": []}])
-        runtime.client.post = AsyncMock(side_effect=[{"task": None}, {"task": {"id": 2}, "claim_token": "token"}])
-        with patch.object(self.agent, "save_config") as save:
-            result = await runtime.claim_next()
-        self.assertEqual(result["task"]["id"], 2)
-        self.assertEqual(runtime.client.post.await_args_list[1].kwargs["json"], {"task_id": 2, "container_code": "env-2", "environment_name": "Two", "confirmed_local": True})
-        self.assertEqual(save.call_args.args[0]["upload_policies"]["1"]["last_container_code"], "env-2")
-        runtime.current_claim = None
-        runtime.client.request = AsyncMock(return_value={"items": [{"id": 1, "template_id": 2}], "next_after_id": None, "blocked_container_codes": []})
-        runtime.client.post.reset_mock()
-        result = await runtime.claim_next()
-        self.assertIsNone(result["task"])
-        runtime.client.post.assert_not_awaited()
-
-    async def test_runtime_claim_uses_policy_and_stops_cleanly(self):
+    async def test_connector_runtime_uses_only_erp_matrix_tasks_and_stops_cleanly(self):
         runtime = self.agent.AgentRuntime({})
-        runtime.synced_monotonic = self.agent.time.monotonic()
         client = MagicMock(); client.request = AsyncMock(return_value={"user": {"id": 1, "name": "User"}})
-        async def claim_next():
+        async def try_next():
             runtime.state["stop"] = True
-            return {"task": None}
-        runtime.claim_next = AsyncMock(side_effect=claim_next)
-        runtime.workbench.start = AsyncMock(); runtime.workbench.close = AsyncMock()
-        runtime.heartbeat_loop = AsyncMock(); runtime.sync_loop = AsyncMock()
-        with patch.object(self.agent.keyring, "get_password", return_value="token"), patch.object(self.agent, "ERPClient", return_value=client), patch.object(self.agent.webbrowser, "open"), patch.object(self.agent, "POLL_SECONDS", 0):
+            return True
+        runtime.matrix.enabled = True
+        runtime.matrix.try_next = AsyncMock(side_effect=try_next)
+        runtime.connector.start = AsyncMock(); runtime.connector.close = AsyncMock()
+        runtime.heartbeat_loop = AsyncMock(); runtime.sync_loop = AsyncMock(); runtime.authorization_loop = AsyncMock()
+        with patch.object(self.agent.keyring, "get_password", return_value="token"), patch.object(self.agent, "ERPClient", return_value=client), patch.object(self.agent.webbrowser, "open") as browser:
             await runtime.run()
-        runtime.claim_next.assert_awaited_once()
+        runtime.matrix.try_next.assert_awaited_once()
+        self.assertFalse(hasattr(runtime, "claim_next"))
+        runtime.connector.close.assert_awaited_once()
+        browser.assert_not_called()
 
+
+    async def test_pairing_uses_erp_page_and_preserves_installation_and_validation_config(self):
+        agent = self.agent
+        config = {'install_uuid': 'stable-installation', 'matrix_collection_validation_sites': ['MY']}
+        response = MagicMock()
+        response.json.side_effect = [{'code': 'one-time-code'}, {'status': 'completed', 'agent_token': 'device-token'}]
+        http = AsyncMock()
+        http.__aenter__.return_value = http
+        http.post.return_value = response; http.get.return_value = response
+        with patch.object(agent.httpx, 'AsyncClient', return_value=http), patch.object(agent.asyncio, 'sleep', AsyncMock()), patch.object(agent.webbrowser, 'open') as browser, patch.object(agent.keyring, 'set_password') as store, patch.object(agent, 'save_config') as save:
+            token = await agent.pair_with_erp(config)
+        self.assertEqual(token, 'device-token')
+        self.assertIn('/settings/shops?tab=environments&hub_agent_pair=one-time-code', browser.call_args.args[0])
+        store.assert_called_once_with(agent.SERVICE_NAME, agent.TOKEN_KEY, 'device-token')
+        self.assertEqual(save.call_args.args[0]['install_uuid'], 'stable-installation')
+        self.assertEqual(config['matrix_collection_validation_sites'], ['MY'])
 
 if __name__ == "__main__": unittest.main()

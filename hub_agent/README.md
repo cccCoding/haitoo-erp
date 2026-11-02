@@ -1,170 +1,85 @@
-# Haitoo HubStudio 本地执行器
+# Haitoo HubStudio 连接器
 
-此执行器安装在员工电脑上，以安装 HubStudio 的当前桌面用户运行。ERP 保存账号任务和固定 XLSX；执行器只在本机内存同步当前可访问环境，原子领取本账号任务，在对应 HubStudio 环境内完成 TikTok 批量上传和导入。环境无需管理员创建店铺、分配人员或绑定电脑。
+本机连接器连接当前桌面用户的 HubStudio，获取环境、上传目录并执行 ERP 下发的矩阵任务。设备、环境、方案、运行、日志及人工处理统一在 ERP 的“TK 矩阵”页面管理。本机不提供工作页、账号密码登录页或业务接口。
 
-它不是 Windows Service，也不能部署到 ERP 服务器。
+连接器必须以员工当前桌面用户运行，不能部署在 ERP 服务器，也不能作为 Windows Service 运行。关闭 ERP 网页不影响已创建的服务器任务；退出连接器会使该电脑离线。
 
-## 部署前提
+## 首次连接
 
-在首次运行本地执行器前，生产 ERP 必须已经发布包含 Hub 执行器接口的后端，且数据库已完成与后端代码匹配的迁移。本地登录使用现有 `/auth/login` 和 `/hub-agents/register` 接口；若返回 HTTP 404，需检查 API 地址和服务器发布版本。
+1. 请公司管理员先在「企业管理 → 矩阵管理 → 成员授权」开放矩阵使用权限；再启动并登录 HubStudio，确认当前团队及 Local API 可用。
+2. 完整解压安装包，运行 macOS 的 `启动并配对.command` 或 Windows 的 `启动并配对.cmd`。日常也可运行托盘程序。
+3. 首次启动自动打开 ERP 的“TK 矩阵”页面。使用 ERP 账号登录，确认是自己启动的连接器后，点击“授权此电脑连接器”。账号密码只在 ERP 登录，电脑令牌仅保存到系统凭据库。
+4. 在 ERP 的“设备管理”中配置当前 HubStudio 团队的稳定 ID。同一团队的多台电脑填写相同 ID；不能用电脑名或邮箱代替。当前已验证的 Local API 列表契约未提供可信的团队身份查询，因此这一项由 ERP 保存，下发给连接器。
+5. 公司管理员在「企业管理 → 矩阵管理 → 功能设置」启用矩阵功能。连接器自动获取完整环境并上传服务器，环境出现在 ERP 列表中；也可在 ERP 点击“同步环境”。
 
-## 使用方式与安全边界
+已有有效电脑授权直接重连；授权失效后重新打开 ERP 配对页面。配对链接十分钟有效，不把电脑令牌放进 URL，也不把 ERP 登录令牌发给回环服务。更新时保留安装身份和配置，不覆盖原有日志或系统凭据。
 
-- 执行器默认请求 `https://api.haitorok.com`。首次启动在本地工作页输入 ERP 邮箱和密码，点击“登录并授权”，由本地程序调用 ERP 登录和电脑注册接口；密码及 ERP 登录 Token 不保存、不返回页面，系统凭据库只保存执行器 Token。腾讯云使用其他域名时，通过 `HAITOO_API_URL` 指定 HTTPS API 地址；显式配置会覆盖本机保存的旧 API 地址。已有电脑授权继续沿用，失效后重新显示登录表单。已授权时不提供切换账号，避免执行中的任务改变身份。
-- 终端名称自动取电脑名称并附加短标识，避免同名电脑注册冲突；终端令牌仅保存到 macOS Keychain 或 Windows Credential Manager，不写入配置文件。
-- 执行器提供本机工作页 `http://127.0.0.1:45679`，不监听局域网。工作页包含环境列表、本账号任务、执行尝试、日志和人工处理；浏览器不持有执行器 Token 或公司 Secret。页面关闭后执行器仍继续工作。
-- 环境列表“账号”列显示该环境绑定的账号，无账号显示 `-`，多个账号同时展示；仅账号名称进入本机环境快照，密码及密钥仍不返回工作页。顶部仅保留暂停领取按钮；执行中的任务在操作列显示“停止”，仅执行此任务的本机可点击。“查看日志”通过弹窗展示任务详情、每次执行日志，支持关闭按钮、Esc 和点击遮罩关闭。环境列表不显示标签和自动上品开关；所有可访问环境都可以加入模版策略。任务列表不显示执行电脑，创建时间紧邻目标环境右侧；重试、确认已提交和取消任务按任务状态显示在操作列，仍要求核对平台后确认操作。任务框固定 420px（窄屏 400px），运行日志框固定 320px，内容在框内滚动；运行日志可复制或清除，清除仅清空本机日志文件，不删除 ERP 任务记录，后续新日志继续显示。
-- TikTok 登录状态保留在 HubStudio 指纹环境内。ERP 不下发 TikTok 账号密码。进入登录页时，任务显示“等待 TikTok 登录”，执行器将页面置前，最多等待 10 分钟；员工在该页面完成登录及验证后自动继续原任务。等待期间不上传、不提交，心跳继续维持任务租约。超时或页面校验失败进入人工处理，保留页面供核对。
-- 领取后通过 Local API 的 `/api/v1/env/list` 按 `containerCodes` 查询当前环境绑定账号，再调用 `/api/v1/account/list` 按账号与名称查询并精确匹配。只允许唯一账号，不读取全公司凭据作为缓存。账号、密码和 2FA 密钥仅保留在本次执行的内存对象中，不写配置、工作页接口或 ERP；日志只记录“本次 1/1 个账号有密码”等可用数量。读取密码需要 HubStudio 当前用户具备“团队设置-编辑-环境-我的账号-密码查看”权限，否则密码返回空，继续等待人工登录。
-- 马来西亚店铺使用已确认的上传地址 `https://seller-my.tiktok.com/product/batch/publish?entry-from=hub&shop_region=MY&step=2`，登录完成后仍返回该完整地址。其他绑定域名暂沿用旧路径，需要对应站点实际验收。ERP 创建任务和执行器上传前均检查 20 MB 上限，执行器只接受 `.xlsx`。登录页只识别当前语言，不切换：简体中文使用“使用邮箱登录”入口，US English / UK English 使用“Log in with email”入口。登录完成并返回上传页后，打开右上角账号菜单，检查并切换为简体中文，再关闭菜单后上传；已登录的环境也执行此检查。菜单入口、切换结果或关闭状态无法确认时转人工处理，尚未上传。切换语言后最多用 30 秒核对账号菜单中的简体中文；页面刷新导致菜单关闭时会重新打开核对，而非只点击一次后等待。任务详情与本机日志同步记录登录成功、检查语言、当前语言、切换开始/结果、关闭账号菜单、开始上传和等待解析；失败记录具体操作步骤。菜单关闭检查兼容退出登录行中同时显示邮箱的情况，避免重复点击把菜单关掉后仍等待语言项。检测到登录页后最多尝试一次邮箱密码登录：先识别是否已有可见邮箱表单；没有时点击“使用邮箱登录”，等待邮箱表单可见后再填入环境绑定的邮箱和密码。只有唯一明确表单才能填写。验证码、2FA、手机号登录及未知表单交给人工处理，不反复提交登录。登录仅定位可见输入框，切换后等待邮箱与密码表单各最多 30 秒；点击登录自动等待按钮启用。失败日志记录具体步骤和异常类型，不记录原始错误、表单内容或密码。当前已确认第 2 步上传页以及“导入成功”完成提示；未知控件不自动点击。
+本机 `127.0.0.1:45679` 只保留 `/health`，供 ERP 检测连接器是否运行，不提供 HTML、业务数据或任务控制。浏览器提示本地网络访问权限时，允许后可正常检测。托盘菜单只提供状态、打开 ERP 和退出。
 
-## 本机 Docker 调试
+## 环境与任务
 
-先退出已有执行器（工作页端口 45679 共用），启动本机 Docker 环境：
+- 连接器每 60 秒从 HubStudio 当前用户及团队获取完整目录。所有分页成功后，按白名单分片上传，服务器原子提交。失败保留上次完整目录，不用部分结果覆盖。
+- 环境名称、编号、分组及绑定账号名称可进入目录；密码、2FA 密钥、代理凭据和 IP 不上传。ERP 按公司及设备访问关系展示环境。
+- Hub 团队身份在 ERP 保存。修改身份会清除该设备的旧目录访问关系，等待重新同步；设备有排队、运行中或待人工处理的运行时，禁止修改身份。
+- 方案、定时、站点覆盖、任务预览、执行、停止及人工处理都在 ERP 操作。公司开关与成员的采集、上品授权均由服务端校验；收回权限后不接新任务，已有任务收到停止请求并保留结果记录。新版连接器只领取 ERP 矩阵任务，不再使用旧本机策略领取协议4任务。历史上品记录和锁保留，旧任务需先核对平台结果再处理。
+- 超过五分钟未成功上传的目录不用于领取新的浏览器任务；固定采集包重传不重新打开浏览器。同环境任务继续使用服务器串行锁和 fencing。
+- 当前仅启用马来西亚（MY）跨境店，商品入口为 `https://seller.tiktokshopglobalselling.com/product/manage?shop_region=MY`。按站点与店铺类型维护入口配置，不回退到本土卖家中心；采集固定使用内置跨境适配。其他站点与本土店暂不支持。公司和成员授权仍由 ERP 控制；能力声明不代表真实页面验收。自动上品仍需签名插件与实际站点验收。
+- 连接器使用当前 HubStudio 登录态，不切换团队；按选中的环境编号启动浏览器并打开商品管理页，不再请求或等待平台店铺身份接口；结果按环境归档。页面登录失效或采集失败时保留本次页面供人工核查，不关闭用户已有页面。
+
+## 本机开发
+
+后端使用项目的本机 Docker 环境，前端优先使用 Vite 热更新。连接器直接运行源码，修改后重启即可，不需要重新打包。先退出已有连接器以释放 45679 端口。
+
+在项目根目录运行：
 
 ```bash
-cd /Users/rock/codespace/haitoo-erp
-./deploy/local.sh up -d --build
 export HAITOO_LOCAL_DEBUG=1
-export HAITOO_API_URL="http://127.0.0.1:8001"
-export HAITOO_PORTAL_URL="http://127.0.0.1:5173"
+export HAITOO_API_URL=http://127.0.0.1:8001
+export HAITOO_PORTAL_URL=http://localhost:5173
 .venv/bin/python hub_agent/haitoo_hub_agent.py console
 ```
 
-源码启动直接使用项目虚拟环境，修改代码后重启即可，无需重新打包。已打包的程序需重新构建，再在设置上述变量的同一终端执行 `bash hub_agent/dist/启动并配对.command`。
+显式启用本机调试后，仅允许回环 HTTP；其他地址仍要求 HTTPS。调试按 API 地址隔离系统凭据和默认配置、日志目录，不影响正式环境授权。`HAITOO_AGENT_DATA_DIR` 可指定开发配置与日志目录。连接器仍连接真实 HubStudio，请使用专用测试环境。
 
-只有显式设置 `HAITOO_LOCAL_DEBUG=1` 才允许 HTTP，地址仅限 `127.0.0.1`、`localhost`、`::1`；其他地址仍要求 HTTPS。调试模式按 API 地址隔离钥匙串授权和默认配置、日志目录，首次在本地工作页使用本机数据库中的 ERP 账号登录授权。它仍会连接真实 HubStudio，执行任务也会操作真实店铺，请使用专用测试环境及商品。
+当前只读采集在浏览器登录会话中按商品列表接口读取 MY 跨境商品管理页“在售”的全部分页、商品ID、近28天浏览次数和完整SKU（平台SKU ID、规格、商家SKU、库存、MYR价格）。通过列表参数批量返回SKU，必要时读取SKU明细接口，无需逐个展开商品。无需日期筛选；商品分析、曝光和点击后续补充。浏览次数取接口 `last_28days_pv` 原值，`--`保持未知，不推断精确日期窗口。遇到安全验证时在本次页面提示人工处理，最多等待10分钟；不修改库存或价格。
 
-回到正式环境前先退出调试执行器，并执行 `unset HAITOO_LOCAL_DEBUG HAITOO_API_URL HAITOO_PORTAL_URL`，然后重新启动。正式环境的原授权不受调试配对影响。
+只读采集由 ERP 后台授权后执行，无需本机配置。旧配置中的 `matrix_collection_validation_sites` 不再控制能力声明；Hub 团队身份始终在 ERP 配置。
 
-## 给员工的首次启动说明
+回到正式环境前退出调试连接器，执行 `unset HAITOO_LOCAL_DEBUG HAITOO_API_URL HAITOO_PORTAL_URL` 后重启。默认正式 API 为 `https://api.haitorok.com`，ERP 为 `https://erp.haitorok.com`。
 
-未签名的内部测试包请优先双击 **启动并配对**，不要直接双击 App：
+## 构建与分发
 
-- macOS：双击 `启动并配对.command`。它会清除当前安装包的下载隔离标记、在 Terminal 显示运行日志，并在状态页可用后打开浏览器。
-- Windows：双击 `启动并配对.cmd`。它会保留命令窗口显示错误，并在状态页可用后打开浏览器。
-
-终端窗口不可关闭；关闭它等同于停止执行器。首次启动后，在本地工作页输入 ERP 邮箱和密码，点击“登录并授权”即可，无需跳转 ERP 网页。本机工作页显示授权、连接、环境和任务状态。同步环境后，在“上品策略”新增产品模版、允许环境（可多选）及分配方式。每个模版独立选择轮流或随机，默认轮流；允许环境使用复选框勾选，轮流按勾选顺序分配；取消勾选后重新勾选可调整顺序。允许环境支持按分组筛选、搜索名称/序号/绑定账号/环境 ID，以及只看已选；切换筛选保留已选环境。筛选和分组变更不会改变已有轮流顺序，也不会自动将分组中新加入的环境纳入策略。已选但不可用的环境单独列出，可取消。每个任务只上到一家环境，本机仍串行执行。员工在 ERP 草稿页直接生成任务，无需选择环境。未匹配策略或没有可用环境的任务继续排队并提示配置，其他已匹配任务继续执行。环境目录不上传 ERP；策略和轮流进度仅保存在本机配置中，重启后保留。旧的唯一环境配置不自动转为策略。执行期间不能修改策略。
-
-如果启动失败，请保留窗口并截图最后的错误信息，同时提供日志文件：
-
-- macOS：`~/Library/Logs/HaitooHubAgent/agent.log`
-- Windows：`%LOCALAPPDATA%\HaitooHubAgent\agent.log`
-
-## macOS 构建与分发
-
-必须在 Mac 上构建：
+macOS 必须在 Mac 构建，Windows 必须在 Windows 构建：
 
 ```bash
-cd /Users/rock/codespace/haitoo-erp/hub_agent
-chmod +x build_macos.sh
+cd hub_agent
 ./build_macos.sh
 ```
 
-构建结果在 `dist/`，发布时必须把以下三项保持在同一目录：
-
-```text
-HaitooHubAgent.app                 日常菜单栏入口
-HaitooHubAgentConsole/             给启动脚本使用的可见终端程序目录
-启动并配对.command                  首次安装与排错入口
-```
-
-内部测试可暂不签名和公证，员工应使用 `启动并配对.command`。正式外部分发前，需使用 Apple Developer ID 对 `.app` 签名并公证，并对控制台程序目录中的可执行文件签名；之后可将 `HaitooHubAgent.app` 安装至 `/Applications`。
-
-日常常驻运行使用当前用户的 LaunchAgent。将 `install/macos/com.haitoo.hub-agent.plist` 的程序路径替换为实际安装路径后，执行：
-
-```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.haitoo.hub-agent.plist
-```
-
-## Windows 构建与分发
-
-必须在 Windows 上构建：
-
 ```powershell
 cd hub_agent
-Set-ExecutionPolicy -Scope Process Bypass
-.\build_windows.ps1
+.\build_windows.ps1 -RunTests
 ```
 
-`dist\` 会包含 `HaitooHubAgent\HaitooHubAgent.exe`、`HaitooHubAgentConsole\HaitooHubAgentConsole.exe` 和 `启动并配对.cmd`。首次安装时请保留两个完整程序目录及启动脚本的相对位置，不能只复制 EXE。正式发布前，对 EXE 和安装包进行代码签名，并使用 Inno Setup 或 WiX 制作安装程序。
+产物必须保留图形程序、控制台程序目录及启动脚本的相对位置。安装包不再打入本机工作页静态资源。正式分发需完成对应平台的代码签名；macOS 还需 Apple 公证。Windows 也可使用仓库中的“构建 Windows 本地执行器”Actions 工作流。
 
-没有 Windows 电脑时，可使用仓库中的 `.github/workflows/hub-agent-windows.yml`：将代码提交并推送到 GitHub 默认分支，在仓库 Actions 中选择“构建 Windows 本地执行器”，点击 Run workflow，并选择要构建的分支。工作流使用 Windows x64 runner 和 Python 3.12，先运行执行器单元测试，再生成两个程序目录并检查工作页静态资源，最后上传完整安装包。失败的测试或打包步骤会中止构建。
+ERP 首次安装下载读取 `hub_agent/dist/HaitooHubAgent-<windows|macos>-<x64|arm64>-<三段版本>.zip`，Compose 将该目录只读挂载到 API；非 Compose 环境通过 `HUB_AGENT_INSTALLER_DIR` 指定。下载须有公司内部登录权限，不提供不存在的包。
 
-运行成功后，在该次运行页面的 Artifacts 下载 `HaitooHubAgent-Windows-x64-运行编号`，完整解压后双击 `启动并配对.cmd`。无需配置 GitHub Secrets，也不会打入本机登录令牌。产物保留 14 天；云端构建只验证测试和打包，HubStudio 启动、邮箱登录及实际导入仍需在员工 Windows 电脑上验收。
+连接器及插件在线升级使用 `trusted_keys.json` 或 `HAITOO_RELEASE_KEYS_FILE` 指定的公钥库。空公钥库拒绝远程包；签名、摘要、平台及协议须全部通过，任务中不切换版本。退出连接器后，可用 `rollback --kind agent` 或 `rollback --kind plugin` 恢复上一已验证版本。
 
-安装完成后，以员工当前账号执行：
+## 验证与日志
 
-```powershell
-.\install\windows\install-startup.ps1
-```
-
-脚本创建“用户登录时”启动的计划任务。不可改用 Windows Service，否则无法可靠控制员工桌面会话中的 HubStudio 浏览器。
-
-## 开发排错命令
-
-仅在开发时使用：
+在项目根目录运行：
 
 ```bash
-/Users/rock/codespace/haitoo-erp/.venv/bin/python -m pip install -r requirements.txt
-/Users/rock/codespace/haitoo-erp/.venv/bin/python haitoo_hub_agent.py console
-/Users/rock/codespace/haitoo-erp/.venv/bin/python haitoo_hub_agent.py tray
-```
-
-`console` 与 `tray` 共用本机工作页和后台执行流程；`console` 同时显示终端日志，`tray` 用于日常菜单栏运行。暂停只停止领取新任务，不取消当前执行。旧版 `register --user-token` 仅保留给兼容性排错，不是员工安装流程。
-
-本机工作页任务操作列为执行中的任务提供“停止”，仅在此电脑正在执行该任务时可用。确认后取消本机执行协程并暂停领取新任务，保留 HubStudio 浏览器页面；任务记录“人工中止”并转为待人工处理，继续保留环境锁。尚未进入导入阶段与可能已经点击导入分别提示；平台已经收到的文件或导入无法通过本机中止撤回。核对平台后可确认已提交、核对后重试或取消任务，再点击“继续领取”。如果中止报告因网络故障未送达，任务会在租约超时后进入人工处理。此功能不修改后端运行中任务的取消接口，也不能中止其他电脑上的任务。
-
-日志先显示“检查 TikTok 登录”，确认上传控件就绪后才显示“上传表格”。登录重定向中断页面导航时会转入登录等待；其他 Playwright 错误在本机日志记录原始堆栈，ERP 仅保存通用提示和异常类型所在的本机日志可用于定位。排错时不要公开原始日志中可能包含的页面及请求信息。
-
-马来西亚第 2 步上传 XLSX 后，先等待本次文件名可见以及正数“款商品准备就绪”提示（各最多 120 秒），再确认唯一可用的“导入”按钮。排除已有的可见导入成功提示并写入“导入商品”日志后点击一次，最多等待 60 秒出现包含“导入成功”的可见文字（不限制商品数量或整句格式），随后记为完成（阶段 imported / 导入成功），不再点击提交或发布按钮。“上传成功”“准备就绪”不作为任务完成依据；导入后结果不明确时转人工核对，避免重复导入。
-
-从文件交给上传页后开始，在等待文件名、商品准备就绪、导入按钮及导入结果期间持续检测可见的“出错商品”/“出错的商品”提示。检测覆盖主页面中的弹窗、可见 iframe 和由当前页面打开的独立弹窗；不检查其他无关页面。点击导入后同时等待成功或数据错误。出现数据错误编辑器时立即记为失败（阶段 import_data_error），原因“上传成功，添加商品失败（数据错误）；请人工查看 TikTok 在线编辑器中的出错商品并处理”，保留浏览器页面供人工处理，不继续点击导入或发布，也不记为成功。数据错误任务不显示重试按钮，接口也拒绝重试；请人工查看错误并修正数据后创建新任务。隐藏的错误提示不触发失败；同时有成功和出错商品时按数据错误失败处理。
-
-等待文件、解析结果及导入按钮期间持续检查可见的“此文件已存在”提示。出现时立即停止，不点击导入或发布，任务标记“失败 / 文件已存在，已中止”，并暂停本机领取新任务。提示员工上传其他文件或查看上传记录核对已有结果，不自动重试、不自动重命名绕过平台重复校验；核对平台后再进行人工处理和恢复领取。
-
-## 同步与任务行为
-
-- 使用 HubStudio 当前客户端登录态和当前团队，调用 Local API；不会拿公司凭据重新登录或切换团队。公司凭据仍在 ERP 配置页加密保存，浏览器不能读取。
-- 官方环境列表契约：[获取环境列表](https://api-docs.hubstudio.cn/380052376e0)，`POST /api/v1/env/list`，分页字段 `current` / `size`，返回 `data.list` / `data.total`。文档明确“用户仅能查询自己有权限的环境信息”。必须全部分页成功才向 ERP 更新访问快照。
-- 官方启动契约：[打开环境](https://api-docs.hubstudio.cn/380052361e0)，`POST /api/v1/browser/start`，使用环境 `containerCode` 和布尔参数，返回 `debuggingPort`。环境名、分组、序号、标签按接口实际返回展示；代理密码、平台账号和 IP 不同步到 ERP。
-- 本账号可使用多台电脑。同环境同时只运行一个任务；每次领取生成独立凭证和执行尝试。失联或异常不自动重试，历史日志不会被覆盖。
-- 重试前必须核对平台，重试复用原 XLSX。运行中不能取消；待处理任务阻止同环境下一项执行。人工确认记录账号与时间。
-- 自动导入只接受明确的“导入成功”提示；未知页面会进入人工处理，不猜测点击。
-
-## 开发验证
-
-在项目根目录执行：
-
-```bash
-PYTHONPATH=backend .venv/bin/python -m unittest discover -s backend/tests -p 'test_hubstudio_tasks.py'
-PYTHONPATH=backend .venv/bin/python -m unittest discover -s backend/tests -p 'test_schema_migrations.py'
-.venv/bin/python -m unittest discover -s hub_agent/tests
+PYTHONPATH=hub_agent .venv/bin/python -m unittest discover -s hub_agent/tests
+PYTHONPATH=backend:backend/tests .venv/bin/python -m unittest discover -s backend/tests -p 'test_tk_matrix.py'
+npm test --prefix frontend
 npm run build --prefix frontend
 ```
 
-策略弹窗浏览器回归测试默认跳过；有已安装的 Chrome 时可单独运行（不连接真实服务）：
+健康探测测试只使用临时回环端口。浏览器专项通过显式 `HAITOO_BROWSER_TESTS=1` 启用，不使用用户店铺会话。
 
-```bash
-HAITOO_BROWSER_TESTS=1 HAITOO_BROWSER_CHANNEL=chrome .venv/bin/python -m unittest discover -s hub_agent/tests -p 'test_policy_picker.py'
-```
+日志统一使用 UTF-8：macOS 默认 `~/Library/Logs/HaitooHubAgent/agent.log`，Windows 默认 `%LOCALAPPDATA%\HaitooHubAgent\agent.log`；本机调试使用对应 API 的隔离子目录。日志可能包含平台页面信息，排错时不要公开原文中的敏感数据。
 
-本机网页测试会临时监听回环测试端口，不连接生产 ERP、HubStudio 或 TikTok。`HAITOO_AGENT_DATA_DIR` 可指定开发/测试配置和日志目录；不设置时保持系统默认目录。打包脚本将工作页静态资源包含在程序内，Mac 和 Windows 分别在对应系统构建。
-
-执行器日志统一以 UTF-8 写入。本机工作页兼容旧版中文 Windows 的 GBK/GB18030 日志，以及升级后新旧编码混合的日志文件。Windows 日志乱码修复需要重新构建并替换本机执行器，退出旧程序后启动新版，无需清除旧日志。
-
-## 领取协议与升级
-
-新版使用 `X-Hub-Protocol: 4`，读取模版目录和按 ID 升序分页的排队任务；根据本机策略提交指定 task_id、目标环境 ID、名称及确认。数据库保存任务模版 ID、名称快照及每次执行目标，运行锁防止多电脑同时执行同环境。快照过期时不领取，失去访问权限的配置环境保留并显示不可用。旧协议返回 426，环境上传接口仍返回 410。ERP 自动上品记录提供模版筛选，可与创建人筛选组合。
-
-ERP 与执行器需保持协议兼容；收到 HTTP 426 时停止领取并检查执行器版本。重新打包与替换执行器前退出旧程序，已有活动任务先核对平台结果。具体发布步骤根据该次变更单独提供。
-
-### 自动上品 Excel 的 R2 存储
-
-新版任务将固定 XLSX 上传到独立私有 R2 桶。数据库保存 `export_url`、文件大小、SHA-256 和 7 天有效期，新的 `export_blob` 为空；历史数据库文件继续可读。数据库中的链接是私有对象地址，执行器通过 ERP 的鉴权下载接口取文件，不使用图片公网域名。
-
-部署前，在对应环境文件中添加 `R2_HUB_EXPORT_BUCKET=<私有桶名>`，已有 R2 endpoint 和访问密钥继续使用，密钥需具备该桶读写和删除权限。桶保持私有，禁止启用公网访问。在 Cloudflare R2 生命周期设置中新增仅匹配 `hub-exports/` 前缀的 7 天删除规则，保留其他规则；该规则同时清理服务停机期间过期文件及意外遗留对象。API 每分钟删除数据库关联的过期文件，失败会重试。任务和日志不随文件删除。
-
-服务更新与数据库迁移遵循[项目通用部署流程](../README.md#数据库迁移与服务更新)，保留原环境文件、加密密钥和数据卷。
-
-文件超时后禁止下载、领取和重试，排队任务显示“文件已过期”，需要重新生成。已提交或待人工处理的任务保留原状态；人工确认仍可用于记录已核对的平台结果。
+具体平台验收状态见 [验证记录](../docs/tk-matrix-validation.md)，签名与快照契约见 [TK 矩阵设计](../docs/tk-matrix-upgrade-design.md)。
