@@ -2346,17 +2346,18 @@ def list_material_assets(
     source_type: str = "",
     created_from: datetime | None = None,
     created_to: datetime | None = None,
+    sku_query: Annotated[str | None, Query(max_length=10000)] = None,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     return query_material_assets(db=db, user=user, page=page, page_size=page_size,
         creator_id=creator_id, template_id=template_id, usage_status=usage_status, style_id=style_id,
-        source_type=source_type, created_from=created_from, created_to=created_to)
+        source_type=source_type, created_from=created_from, created_to=created_to, sku_query=sku_query)
 
 
 def query_material_assets(*, db, user, page, page_size, creator_id=None, template_id=None,
                           usage_status="unused", source_type="", created_from=None,
-                          created_to=None, extra_filters=(), style_id=None):
+                          created_to=None, extra_filters=(), style_id=None, sku_query=None):
     if usage_status not in {"all", "unused", "used"}:
         raise HTTPException(422, "不支持的素材状态")
     if source_type not in {"", "ai_created", "local_upload", "imported", "cross_company"}:
@@ -2376,6 +2377,10 @@ def query_material_assets(*, db, user, page, page_size, creator_id=None, templat
         filters.append(MaterialAsset.template_id == template_id)
     if style_id is not None:
         filters.append(MaterialAsset.style_id.is_(None) if style_id == 0 else MaterialAsset.style_id == style_id)
+    if sku_query:
+        skus = list(dict.fromkeys(sku.strip() for sku in sku_query.splitlines() if sku.strip()))
+        if skus:
+            filters.append(MaterialAsset.sku.in_(skus))
     if usage_status != "all":
         filters.append(MaterialAsset.usage_status == usage_status)
     if created_from is not None:
