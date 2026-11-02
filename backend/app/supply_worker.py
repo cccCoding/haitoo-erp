@@ -195,7 +195,7 @@ async def request_title(api_key, template, requirements):
 
 async def request_market_title(job_id, epoch, index, first_image, session_factory):
     from .title_models import TitleMarket, TitleRecord
-    from .title_service import create_record, generate_record, task_still_active, validate_malay_title
+    from .title_service import create_record, generate_record, remove_forbidden_phrases, task_still_active, validate_malay_title
     with session_factory() as db:
         job = db.get(SupplyJob, job_id)
         market = db.get(TitleMarket, job.snapshot['title_market_id'])
@@ -214,7 +214,8 @@ async def request_market_title(job_id, epoch, index, first_image, session_factor
             db.refresh(record)
             if record.lease_owner or any(word in str(exc) for word in ('执行权', '取消', '正在生成', '账号')):
                 raise
-            fallback = validate_malay_title(profile['fallback_title'], 220)
+            fallback = validate_malay_title(remove_forbidden_phrases(profile['fallback_title'],
+                profile.get('forbidden_phrases', [])), 220)
             record = db.get(TitleRecord, record.id, populate_existing=True)
             record.title = fallback
             record.source = 'fallback'

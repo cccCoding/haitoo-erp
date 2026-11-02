@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from app.ai_providers import ProviderError
 from app.database import Base
 from app.title_models import TitleKeyword, TitleMarket, TitleRecord
-from app.title_service import create_record, generate_record
+from app.title_service import create_record, generate_record, remove_forbidden_phrases
 
 
 class TitleCategoryRequirementsTests(unittest.IsolatedAsyncioTestCase):
@@ -49,10 +49,14 @@ class TitleCategoryRequirementsTests(unittest.IsolatedAsyncioTestCase):
         self.model = model
         with patch('app.title_service.ask_json', new=model):
             result = await generate_record(self.db, record.id, 'test-key')
-        self.assertEqual(model.await_args.args[2]['core_category'], core)
-        self.assertIn(core, model.await_args.args[2]['required_phrases'])
+        expected_core = remove_forbidden_phrases(core, forbidden)
+        self.assertEqual(model.await_args.args[2]['core_category'], expected_core)
+        if expected_core:
+            self.assertIn(expected_core, model.await_args.args[2]['required_phrases'])
         if selected:
-            self.assertIn(selected, model.await_args.args[2]['required_phrases'])
+            expected_selected = remove_forbidden_phrases(selected, forbidden)
+            if expected_selected:
+                self.assertIn(expected_selected, model.await_args.args[2]['required_phrases'])
         return result
 
     async def test_missing_category_retries_with_exact_phrase_and_keeps_model_word_order(self):
@@ -108,32 +112,106 @@ class TitleCategoryRequirementsTests(unittest.IsolatedAsyncioTestCase):
             await self.generate('Gaun Corak Bunga Corak Bunga Corak Bunga', selected='Lengan Panjang')
         self.assertEqual(self.model.await_count, 4)
 
-    async def test_category_still_obeys_forbidden_words(self):
-        expected = '标题包含禁用词：Gaun、Lengan Panjang'
-        with self.assertRaises(ProviderError) as caught:
-            await self.generate('Gaun Lengan Panjang Corak Bunga',
-                                forbidden=['Gaun', 'Lengan Panjang', 'gaun', 'Kapas', 'ga'])
-        self.assertEqual(str(caught.exception), expected)
-        self.assertEqual(self.model.await_args.args[2]['feedback'], expected)
-        self.assertEqual(self.db.get(TitleRecord, self.record_id).error, expected)
+    async def test_forbidden_phrases_are_removed_and_clean_title_is_adopted_immediately(self):
+        result = await self.generate('Gaun Lengan Panjang Corak Bunga Gaya Anggun Selesa',
+                                    forbidden=['Gaun', 'Lengan Panjang', 'gaun', 'Kapas', 'ga'])
+        self.assertEqual(result['title'], 'Corak Bunga Gaya Anggun Selesa')
+        self.assertEqual(result['attempts'], 1)
+        self.assertEqual(self.model.await_count, 1)
+        record = self.db.get(TitleRecord, self.record_id)
+        self.assertEqual(record.title, result['title'])
+        self.assertIsNone(record.error)
+        self.assertEqual(self.model.await_args.args[2]['forbidden'], ['Gaun', 'Lengan Panjang', 'gaun', 'Kapas', 'ga'])
 
     async def test_category_does_not_allow_unconfirmed_claims(self):
-        with self.assertRaisesRegex(ProviderError, '未经确认的属性词或借词：Kapas$'):
+        with self.assertRaisesRegex(ProviderError, '面料或功能词缺少对应的人工确认事实'):
             await self.generate('Gaun Lengan Panjang Corak Bunga Kapas')
 
-    async def test_unconfirmed_words_are_complete_in_title_order_and_case_insensitively_deduplicated(self):
-        expected = '标题新增了未经确认的属性词或借词：Pure、Cotton、Breathable'
-        with self.assertRaises(ProviderError) as caught:
-            await self.generate('Gaun Lengan Panjang Pure Cotton Breathable COTTON Ｃｏｔｔｏｎ')
-        self.assertEqual(str(caught.exception), expected)
-        self.assertEqual(self.model.await_args.args[2]['feedback'], expected)
-        self.assertEqual(self.db.get(TitleRecord, self.record_id).error, expected)
+    async def test_words_outside_facts_selected_keywords_and_grammar_are_accepted(self):
+        title = 'Gaun Lengan Panjang Moden Anggun Selesa Beralun Casual Elegant'
+        result = await self.generate(title)
+        self.assertEqual(result['title'], title)
+        self.assertIsNone(self.db.get(TitleRecord, self.record_id).error)
 
-    async def test_indonesian_unconfirmed_words_are_listed(self):
-        with self.assertRaisesRegex(ProviderError, '未经确认的属性词或借词：Katun、Waterproof$'):
-            await self.generate('Daster Wanita Lengan Panjang Motif Bunga Katun Waterproof',
-                                site='ID', core='Daster Wanita')
+    async def test_indonesian_words_outside_word_list_are_accepted(self):
+        title = 'Daster Wanita Lengan Panjang Motif Bunga Kekinian Santai Casual'
+        result = await self.generate(title, site='ID', core='Daster Wanita')
+        self.assertEqual(result['title'], title)
+
+    async def test_common_malay_title_expressions_pass_without_confirmed_attributes(self):
+        title = 'Gaun Labuh Lengan Panjang Corak Bunga Dengan Potongan Yang Sesuai'
+        result = await self.generate(title)
+        self.assertEqual(result['title'], title)
+        self.assertNotIn('allowed_expression_words', self.model.await_args.args[2])
+        self.assertFalse(any('未经确认' in warning for warning in result['warnings']))
+
+    async def test_common_indonesian_connective_passes_without_confirmed_attribute(self):
+        title = 'Daster Wanita Lengan Panjang Motif Bunga Dengan Potongan Yang Sesuai'
+        result = await self.generate(title, site='ID', core='Daster Wanita')
+        self.assertEqual(result['title'], title)
+        self.assertNotIn('allowed_expression_words', self.model.await_args.args[2])
+
+    async def test_explicitly_forbidden_common_expressions_are_deleted(self):
+        result = await self.generate('Gaun Labuh Lengan Panjang Corak Bunga Yang Sesuai',
+                                     forbidden=['labuh', 'sesuai'])
+        self.assertEqual(result['title'], 'Gaun Lengan Panjang Corak Bunga Yang')
+        self.assertEqual(result['attempts'], 1)
+        self.assertIn('Never include any phrase in forbidden', self.model.await_args.args[1])
+
+    async def test_common_expressions_do_not_allow_unconfirmed_material_or_function(self):
+        with self.assertRaisesRegex(ProviderError, '面料或功能词缺少对应的人工确认事实'):
+            await self.generate('Gaun Labuh Lengan Panjang Corak Bunga Sesuai Kapas Waterproof')
+
+    async def test_forbidden_material_is_deleted_before_claim_validation(self):
+        result = await self.generate('Gaun Lengan Panjang Corak Bunga Kapas', forbidden=['Kapas'])
+        self.assertEqual(result['title'], 'Gaun Lengan Panjang Corak Bunga')
+        self.assertEqual(result['attempts'], 1)
+
+    async def test_removed_selected_phrase_is_not_required_or_reported_as_used(self):
+        result = await self.generate('Gaun Lengan Panjang Corak Bunga Gaya Moden',
+                                    selected='Lengan Panjang', forbidden=['Lengan'])
+        self.assertEqual(result['title'], 'Gaun Panjang Corak Bunga Gaya Moden')
+        self.assertEqual(result['keywords'], [])
+        self.assertIn('Panjang', self.model.await_args.args[2]['required_phrases'])
+
+    async def test_cleanup_does_not_adopt_empty_or_invalid_title(self):
+        title = 'Gaun Lengan Panjang Corak Bunga'
+        with self.assertRaisesRegex(ProviderError, '标题长度须为'):
+            await self.generate(title, forbidden=[title])
+        self.assertIsNone(self.db.get(TitleRecord, self.record_id).title)
+
+    async def test_ban_spanning_category_and_selected_phrase_does_not_reintroduce_removed_words(self):
+        result = await self.generate('Gaun Lengan Panjang Corak Bunga Gaya Anggun Selesa',
+                                    selected='Lengan Panjang', forbidden=['Gaun Lengan'])
+        self.assertEqual(result['title'], 'Panjang Corak Bunga Gaya Anggun Selesa')
+        self.assertEqual(result['attempts'], 1)
+        self.assertEqual(result['keywords'], [])
 
     async def test_blank_model_output_is_not_replaced_with_category(self):
         with self.assertRaisesRegex(ProviderError, '标题长度'):
             await self.generate('   ')
+
+
+class ForbiddenTitleCleanupTests(unittest.TestCase):
+    def test_case_width_and_casefold_expansion_match_existing_ban_rules(self):
+        self.assertEqual(remove_forbidden_phrases('Gaun ＫＡＰＡＳ Straße Lengan Panjang',
+                                                 ['kapas', 'STRASSE']), 'Gaun Lengan Panjang')
+
+    def test_all_occurrences_and_overlapping_phrases_are_removed(self):
+        self.assertEqual(remove_forbidden_phrases('Gaun Kapas Sangat Selesa Moden KAPAS',
+            ['kapas', 'Sangat Selesa', 'Selesa Moden']), 'Gaun')
+
+    def test_word_boundaries_protect_substrings_and_regex_characters_are_literal(self):
+        self.assertEqual(remove_forbidden_phrases('Gaun Linen line C++ Kapas', ['line', 'C++']), 'Gaun Linen Kapas')
+
+    def test_cleanup_handles_whitespace_punctuation_and_newly_exposed_phrases(self):
+        self.assertEqual(remove_forbidden_phrases('Kapas, Gaun - kapas - (Kapas) Lengan Panjang, Kapas',
+            ['kapas']), 'Gaun - Lengan Panjang')
+        self.assertEqual(remove_forbidden_phrases('Gaun sangat kapas sesuai Lengan Panjang',
+            ['kapas', 'sangat sesuai']), 'Gaun Lengan Panjang')
+
+    def test_unmatched_titles_are_unchanged_and_cleanup_is_idempotent(self):
+        original = 'Gaun  Linen Lengan Panjang'
+        self.assertEqual(remove_forbidden_phrases(original, ['', 'kapas']), original)
+        cleaned = remove_forbidden_phrases(original + ' Kapas', ['kapas'])
+        self.assertEqual(remove_forbidden_phrases(cleaned, ['kapas']), cleaned)

@@ -195,7 +195,7 @@ class IndonesiaTitleTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(self.request('GET', '/title-statistics', uid=2, params=ID_MARKET).json()['manual'], 1)
         self.assertEqual(self.request('GET', '/title-statistics', uid=2).json()['manual'], 0)
 
-    def test_generation_rejects_missing_core_forbidden_and_unconfirmed_material_or_function(self):
+    def test_generation_rejects_missing_core_and_unconfirmed_claims_but_removes_forbidden_phrases(self):
         self.configure()
         category = self.request('GET', '/title-dictionaries', params=ID_MARKET).json()['items']
         category = next(row for row in category if row['kind'] == 'category')
@@ -209,8 +209,12 @@ class IndonesiaTitleTests(SupplyFixture, unittest.TestCase):
         forbidden = next(word['id'] for word in words if word['tag'] == '图案')
         self.request('PUT', '/title-profiles/1', json={**ID_MARKET, 'category': '连衣裙', 'gender': '女',
             'age_group': '成人', 'attributes': {'结构设计': '长袖'}, 'forbidden_keyword_ids': [forbidden]})
-        with patch('app.title_service.ask_json', new=self.model()):
-            self.assertEqual(self.generate(request_key='indonesia-forbidden').status_code, 502)
+        with patch('app.title_service.ask_json', new=self.model(ID_TITLE + ' Gaya Santai Kekinian')) as model:
+            response = self.generate(request_key='indonesia-forbidden')
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()['title'], 'Daster Lengan Panjang Gaya Santai Kekinian')
+            self.assertEqual(response.json()['attempts'], 1)
+            self.assertEqual(model.await_count, 1)  # 复用识图缓存，一次成文；删除禁用词后直接采用。
 
     def test_batch_cancel_retry_and_snapshot_language_remain_indonesian(self):
         self.configure()

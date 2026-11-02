@@ -1527,11 +1527,11 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         with patch('app.title_service.ask_json', new=self.model()):
             generated = self.request('POST', '/templates/1/generate-draft-title', uid=2,
                 json={'method': 'library', 'image_url': 'https://img.example/1.png'}).json()
-        payload = {'template_id': 1, 'material_asset_ids': [1], 'title': TITLE+' Kapas Breathable KAPAS', 'generation_id': generated['generation_id']}
+        payload = {'template_id': 1, 'material_asset_ids': [1], 'title': TITLE+' Labuh Sesuai Kapas Breathable KAPAS', 'generation_id': generated['generation_id']}
         rejected = self.request('POST', '/drafts/from-material-assets', uid=2, json=payload)
         self.assertEqual(rejected.status_code, 400)
-        self.assertEqual(rejected.json()['detail'], '人工标题包含未经确认的商品词：Kapas、Breathable；请先更新模板确认属性并重新生成')
-        payload['title'] = 'Gaun Corak Bunga Lengan Panjang'
+        self.assertEqual(rejected.json()['detail'], '面料或功能词缺少对应的人工确认事实')
+        payload['title'] = 'Gaun Labuh Corak Bunga Lengan Panjang Dengan Potongan Yang Sesuai Moden Anggun Casual'
         response = self.request('POST', '/drafts/from-material-assets', uid=2, json=payload)
         self.assertEqual(response.status_code, 200, response.text)
         statistics = self.request('GET', '/title-statistics').json()
@@ -1539,7 +1539,7 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(statistics['adopted'], 0)
         self.assertTrue(all(w['adopted_count'] == 0 for w in self.request('GET', '/title-keywords').json()['items']))
 
-    def test_manual_edit_error_lists_all_matched_forbidden_phrases(self):
+    def test_manual_edit_deletes_all_forbidden_phrases_and_saves_clean_title(self):
         self.enable(); self.profile(); self.import_words()
         with patch('app.title_service.ask_json', new=self.model()):
             generated = self.request('POST', '/templates/1/generate-draft-title', uid=2,
@@ -1550,10 +1550,51 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
                 'forbidden_phrases': ['Lengan Panjang', 'Corak Bunga', 'corak bunga', 'Kapas']}
             db.commit()
         response = self.request('POST', '/drafts/from-material-assets', uid=2, json={
-            'template_id': 1, 'material_asset_ids': [1], 'title': 'Gaun Corak Bunga Lengan Panjang',
+            'template_id': 1, 'material_asset_ids': [1], 'title': 'Gaun Corak Bunga Lengan Panjang Gaya Anggun Selesa Moden Kapas',
             'generation_id': generated['generation_id']})
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()['detail'], '人工标题包含禁用词：Lengan Panjang、Corak Bunga')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['title'], 'Gaun Gaya Anggun Selesa Moden')
+        with self.sessions() as db:
+            draft = db.get(ProductDraft, response.json()['id'])
+            self.assertEqual(draft.title, 'Gaun Gaya Anggun Selesa Moden')
+            manual = db.scalar(select(TitleRecord).where(TitleRecord.source == 'manual'))
+            self.assertEqual(manual.title, draft.title)
+
+    def test_manual_forbidden_cleanup_reuses_ai_title_without_double_counting_adoption(self):
+        self.enable(); self.profile(); self.import_words()
+        with patch('app.title_service.ask_json', new=self.model()):
+            generated = self.request('POST', '/templates/1/generate-draft-title', uid=2,
+                json={'method': 'library', 'image_url': 'https://img.example/1.png'}).json()
+        with self.sessions() as db:
+            record = db.get(TitleRecord, generated['generation_id'])
+            record.snapshot = {**record.snapshot, 'forbidden_phrases': ['Kapas']}
+            db.commit()
+        response = self.request('POST', '/drafts/from-material-assets', uid=2, json={
+            'template_id': 1, 'material_asset_ids': [1], 'title': TITLE + ' Kapas',
+            'generation_id': generated['generation_id']})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['title'], TITLE)
+        saved = self.request('PUT', f"/drafts/{response.json()['id']}", uid=2,
+                             json={'title': TITLE + ' KAPAS'})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()['title'], TITLE)
+        statistics = self.request('GET', '/title-statistics').json()
+        self.assertEqual((statistics['adopted'], statistics['manual']), (1, 0))
+
+    def test_manual_cleanup_of_ban_spanning_category_and_attribute_is_adopted(self):
+        self.enable(); self.profile(); self.import_words()
+        with patch('app.title_service.ask_json', new=self.model()):
+            generated = self.request('POST', '/templates/1/generate-draft-title', uid=2,
+                json={'method': 'library', 'image_url': 'https://img.example/1.png'}).json()
+        with self.sessions() as db:
+            record = db.get(TitleRecord, generated['generation_id'])
+            record.snapshot = {**record.snapshot, 'forbidden_phrases': ['Gaun Lengan']}
+            db.commit()
+        response = self.request('POST', '/drafts/from-material-assets', uid=2, json={
+            'template_id': 1, 'material_asset_ids': [1], 'title': TITLE + ' Gaya Anggun Selesa',
+            'generation_id': generated['generation_id']})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['title'], 'Panjang Corak Bunga Gaya Anggun Selesa')
 
     def test_changed_template_facts_require_regeneration_before_adoption(self):
         self.enable(); self.profile()
@@ -1596,7 +1637,9 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             self.assertIn('冲突', response.json()['detail'])
 
     def test_batch_snapshots_cancel_retry_and_scope(self):
-        self.enable(); self.profile(); self.import_words()
+        self.enable(); self.profile(); self.import_words(content=KEYWORDS + 'kapas,纯棉,连衣裙,材质,否\n')
+        words = self.request('GET', '/title-keywords').json()['items']
+        self.profile(forbidden_keyword_ids=[next(word['id'] for word in words if word['phrase'] == 'kapas')])
         self.request('PUT', '/templates/1', json={'title_template': 'Original category-first style'})
         payload = {'template_id': 1, 'request_key': 'batch-example-01', 'groups': [
             {'key': 'one', 'source': {'source_type': 'material', 'id': 1}},
@@ -1614,16 +1657,19 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         # 修改词库及模板要求不改变已提交任务的快照。
         self.request('PUT', '/templates/1', json={'title_template': 'New writing style'})
         self.request('PATCH', '/title-keywords/1', json={'status': 'disabled'})
-        with patch('app.title_service.ask_json', new=self.model()) as model:
+        with patch('app.title_service.ask_json', new=self.model(TITLE + ' Kapas')) as model:
             self.run_worker()
         compositions = [call.args[2] for call in model.await_args_list if 'selected' in call.args[2]]
         self.assertTrue(compositions)
         self.assertTrue(all(data['template_requirements'] == 'Original category-first style' for data in compositions))
+        self.assertTrue(all(data['forbidden'] == ['kapas'] for data in compositions))
         task = self.request('GET', f'/title-tasks/{identity}', uid=2).json()
         self.assertEqual(task['state'], 'completed', task)
         self.assertEqual(task['progress']['completed'], 2)
         self.assertTrue(task['result']['items']['two']['warnings'])
         self.assertEqual(len(task['result']['items']), 2)
+        self.assertTrue(all(item['title'] == TITLE and item['attempts'] == 1
+                            for item in task['result']['items'].values()))
 
     def test_concurrent_batch_uses_full_generation_pipeline_and_persists_each_record(self):
         self.enable(); self.profile(); self.import_words()
@@ -1744,8 +1790,10 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         with self.sessions() as db:
             job = db.get(SupplyJob, identity)
             market = get_market(db, 1)
+            profile = profile_snapshot(db, market, 1, require_fallback=True)
+            profile['forbidden_phrases'] = ['Longgar']
             job.snapshot = {**job.snapshot, 'title_engine': 'v2', 'title_market_id': market.id,
-                            'title_profile': profile_snapshot(db, market, 1, require_fallback=True)}
+                            'title_profile': profile}
             db.commit()
         # 没有公司密钥时不调用模型，使用审核过的马来语兜底。
         upload = {'key': 'supply-exports/company/1/jobs/1/1/'+'a'*32+'.xlsx', 'sha256': 'b'*64, 'size': 10}
@@ -1759,6 +1807,7 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             self.assertEqual(job.state, 'completed', job.error)
             links = job.checkpoint['links']
             self.assertTrue(all(link['title'].startswith('Gaun Wanita') for link in links))
+            self.assertTrue(all('Longgar' not in link['title'] for link in links))
             self.assertTrue(all(link['title_source'] == 'fallback' for link in links))
             self.assertEqual(len({link['title'] for link in links}), 10)
             records = db.scalars(select(TitleRecord)).all()

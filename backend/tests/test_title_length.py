@@ -86,7 +86,7 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.engine.dispose)
         self.addCleanup(self.db.close)
 
-    async def generate(self, answers, *, supply=False, site='MY', history=None):
+    async def generate(self, answers, *, supply=False, site='MY', history=None, forbidden=()):
         core = 'Daster' if site == 'ID' else 'Gaun'
         self.company_sequence += 1
         market = TitleMarket(company_id=self.company_sequence, platform='TikTok', site=site,
@@ -96,7 +96,7 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         snapshot = {'template_id': 1, 'category': '连衣裙', 'category_localized_name': core,
                     'platform': 'TikTok', 'site': site, 'language': market.language,
                     'attributes': {}, 'keywords': [], 'locked_keyword_ids': [],
-                    'forbidden_keyword_ids': [], 'forbidden_phrases': []}
+                    'forbidden_keyword_ids': [], 'forbidden_phrases': list(forbidden)}
         record = create_record(self.db, market, 1, snapshot, 'https://img.example/1.png', 'length-test', supply=supply)
         record.facts = {'attributes': [
             {'tag': '品类', 'value': '连衣裙', 'localized_value': core, 'source': 'manual'},
@@ -184,6 +184,13 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         result, _ = await self.generate([SHORT, SHORT + ' Kapas', SHORT + ' Kalis Air', ProviderError('failed')])
         self.assertEqual(result['title'], SHORT)
         self.assertEqual(result['attempts'], 4)
+
+    async def test_supply_uses_cleaned_body_for_limits_count_and_link_suffix(self):
+        result, model = await self.generate([MY_220 + ' Kapas'], supply=True, forbidden=['Kapas'])
+        self.assertEqual(result['title'], MY_220)
+        self.assertEqual(result['character_count'], 220)
+        self.assertEqual(len(result['title'] + ' - L01'), 226)
+        self.assertEqual(model.await_count, 1)
 
     async def test_indonesian_titles_use_same_soft_length_policy(self):
         short = 'Daster Wanita Lengan Panjang Motif Bunga'
