@@ -20,7 +20,7 @@ const admin = computed(() => props.user?.role === 'company_admin')
 const platform = 'TikTok'
 const showImport = ref(false)
 const importDialogBody = ref<HTMLElement | null>(null)
-const tab = ref('templates'), updated = ref('')
+const tab = ref('templates')
 const busy = ref(false), error = ref(''), notice = ref(''), search = ref(''), status = ref(''), category = ref(''), tagFilter = ref(''), page = ref(1), pageSize = ref(20)
 const words = ref<any[]>([]), total = ref(0), tasks = ref<any[]>([]), stats = ref<any>({})
 const selectedWords = ref<{ id: number; review_token: string }[]>([])
@@ -87,7 +87,7 @@ async function load(mode:LoadMode = 'changed') {
       fetchShared ? api.get('/title-dictionaries', config.value) : null,
     ])
     if (disposed || current !== revision) { if(fetchShared)sharedDirty=true;return }
-    if(market&&dictionaries){updated.value=market.data.updated_at;dictionaryEntries.value=dictionaries.data.items;semanticTags.value=dictionaries.data.semantic_tags;categoryFields.value=dictionaries.data.category_fields||['品类','性别','年龄']}
+    if(market&&dictionaries){dictionaryEntries.value=dictionaries.data.items;semanticTags.value=dictionaries.data.semantic_tags;categoryFields.value=dictionaries.data.category_fields||['品类','性别','年龄']}
     if(list){
       words.value=list.data.items;total.value=list.data.total;page.value=list.data.page||1
       selectedWords.value=selectedWords.value.filter(selected=>selectableWords.value.some(word=>word.id===selected.id))
@@ -241,7 +241,12 @@ onUnmounted(()=>{disposed=true;revision++;detailRequest++;if(timer)clearTimeout(
 
 <template>
   <section class="title-library">
-    <header class="title-library-heading"><div><p>{{market.siteName}} · {{market.languageName}} <span v-if="updated" title="词库与标题配置最近一次保存的时间，包括保存模板属性、维护产品分类或标签、编辑或合并关键词、审核入库；上传预览、生成标题和刷新页面不会更新。按当前设备时区显示。">· 配置更新于 <time :datetime="updated">{{new Date(updated).toLocaleString()}}</time></span></p></div><div class="title-tools"><template v-if="admin"><button class="primary" :disabled="busy" @click="openImport">上传并预览</button></template></div></header>
+    <header class="title-library-heading">
+      <div class="title-library-market">
+        <slot name="site"><p>{{market.siteName}} · {{market.languageName}}</p></slot>
+      </div>
+      <div class="title-tools"><template v-if="admin"><button class="primary" :disabled="busy" @click="openImport">上传并预览</button></template></div>
+    </header>
     <p v-if="error" class="error" role="alert">{{error}}</p><p v-if="notice" role="status">{{notice}}</p>
     <div class="material-usage-tabs" role="tablist" aria-label="词库功能"><button v-for="item in [{key:'templates',label:'模板配置'},{key:'categories',label:'产品分类'},{key:'tags',label:'标签'},{key:'words',label:'关键词'},{key:'stats',label:'使用统计'},{key:'imports',label:'导入记录'}]" :id="`title-tab-${item.key}`" :key="item.key" role="tab" :aria-selected="tab===item.key" aria-controls="title-tab-content" :class="{active:tab===item.key}" @click="tab=item.key">{{item.label}}</button></div>
     <div id="title-tab-content" role="tabpanel" :aria-labelledby="`title-tab-${tab}`" class="title-tab-content">
@@ -381,6 +386,7 @@ onUnmounted(()=>{disposed=true;revision++;detailRequest++;if(timer)clearTimeout(
 
 <style scoped>
 .title-library-heading{height:auto;padding:0;border:0;background:transparent}
+.title-library-market{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0}
 .title-category-options{display:flex;flex-wrap:wrap;gap:12px;border:1px solid #e2dcf0;border-radius:9px;padding:12px}.title-category-options legend{font-size:13px;color:#756e82}.title-library .material-usage-tabs{margin:0;gap:8px;overflow-x:auto;min-width:0;padding-bottom:2px}.title-library .material-usage-tabs button{font-size:14px;line-height:1.4;white-space:nowrap;flex:none}.title-tab-content{display:grid;gap:18px;min-width:0}.title-dialog-actions{display:flex;justify-content:flex-end;gap:12px}
 .title-edit-dialog input:not([type=checkbox]),.title-edit-dialog select,.title-edit-dialog textarea{box-sizing:border-box;border:1px solid #e2dcf0;border-radius:9px;padding:11px 12px;font:inherit;min-width:0;background:white;color:#302844}.title-tools>select{width:auto;min-width:130px}.title-library input:focus,.title-library select:focus,.title-library textarea:focus{outline:2px solid #c9b9ff;outline-offset:1px}.title-library input[type=checkbox]{width:16px;height:16px;accent-color:#6744d5}.title-tools>button{flex-shrink:0}.title-edit-dialog label input,.title-edit-dialog label select{width:100%}
 .title-library{display:grid;gap:18px}.title-library-heading,.title-tools{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.title-library-heading{justify-content:space-between}.title-library h2,.title-library h3{margin:0}.title-library-heading p,.title-note{margin:0;font-size:13px;line-height:1.7;color:#756e82}.title-panel{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;min-width:0}.title-form{display:grid;gap:14px}.title-form label,.title-panel>details>label{display:grid;gap:6px}.title-form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}.title-original{min-width:200px;max-width:340px;overflow-wrap:anywhere}.title-scroll{overflow:auto;max-height:520px}table{width:100%;border-collapse:collapse;font-size:13px;text-align:left}th{background:#f6f4fa;white-space:nowrap;position:sticky;top:0}th,td{padding:12px;border-bottom:1px solid #ede9f2;vertical-align:middle}td small{display:block;color:#81788d;margin-top:5px}.title-checkbox{display:flex!important;align-items:center;gap:6px}.title-checkbox input{width:auto}.title-stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:16px}.title-stat-grid div{padding:20px;background:#fff;border:1px solid #e7e3f2;border-radius:12px;display:grid;gap:8px}.title-stat-grid strong{font-size:28px;color:#6544ce}.title-edit-dialog{width:min(760px,95vw);max-height:88vh;overflow:auto;display:grid;gap:20px}.title-evidence,.title-task-results article{border-bottom:1px solid #eee;padding:10px 0;overflow-wrap:anywhere}.title-evidence p{line-height:1.6}.title-evidence small{color:#81788d}.title-library details summary{cursor:pointer;font-weight:600;margin-bottom:12px}@media(max-width:700px){.title-dialog-actions{flex-wrap:wrap}}
