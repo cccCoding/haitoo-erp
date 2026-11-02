@@ -43,7 +43,7 @@ class TitleCategoryRequirementsTests(unittest.IsolatedAsyncioTestCase):
                                             ('图案', '花卉', 'Corak Bunga' if site == 'MY' else 'Motif Bunga')]],
             'warnings': []}
         self.db.commit()
-        model = (AsyncMock(side_effect=[{'title': item} for item in title])
+        model = (AsyncMock(side_effect=[{'title': item} for item in title + [title[-1]] * (4 - len(title))])
                  if isinstance(title, list) else AsyncMock(return_value={'title': title}))
         self.record_id = record.id
         self.model = model
@@ -59,9 +59,9 @@ class TitleCategoryRequirementsTests(unittest.IsolatedAsyncioTestCase):
         rewritten = 'Lengan Panjang Gaun Corak Bunga'
         result = await self.generate(['Lengan Panjang Corak Bunga', rewritten], selected='Lengan Panjang')
         self.assertEqual(result['title'], rewritten)
-        self.assertEqual(result['attempts'], 2)
-        self.assertEqual(self.model.await_count, 2)
-        first, retry = self.model.await_args_list
+        self.assertEqual(result['attempts'], 4)
+        self.assertEqual(self.model.await_count, 4)
+        first, retry = self.model.await_args_list[:2]
         self.assertEqual(first.args[2]['feedback'], '')
         self.assertIn('核心品类：Gaun', retry.args[2]['feedback'])
         record = self.db.get(TitleRecord, self.record_id, populate_existing=True)

@@ -207,6 +207,22 @@ async function setSelectedWordsStatus(nextStatus:'enabled'|'disabled') {
     await load()
   })
 }
+async function deleteSelectedWords() {
+  if(!admin.value||busy.value||taskListLoading.value||!selectedWords.value.length)return
+  const selections=[...selectedWords.value]
+  if(!confirm(`确定删除选中的 ${selections.length} 个关键词？将同时移除模板中的面料、必用及禁用词引用和相关词源，已生成标题保留。此操作不可撤销。`))return
+  await action(async()=>{
+    try {
+      const {data}=await api.post('/title-keywords/batch-delete',{...marketParams.value,selections},config.value)
+      selectedWords.value=[]
+      notice.value=`已删除 ${data.deleted} 个关键词`
+    } catch(e:any) {
+      if([400,404,409].includes(e.response?.status)){selectedWords.value=[];await load()}
+      throw e
+    }
+    await load()
+  })
+}
 watch(tab,()=>{selectedWords.value=[];revision++;tasks.value=[];taskTotal.value=0;taskPage.value=1;loadedTaskPage=1;loadedTaskPageSize=taskPageSize.value;closeTask();void load('view')})
 async function pollTasks() {
   if(disposed||polling)return
@@ -243,6 +259,7 @@ onUnmounted(()=>{disposed=true;revision++;detailRequest++;if(timer)clearTimeout(
         <span aria-live="polite">已选 {{selectedWords.length}} 项<span class="title-note">（仅当前页）</span></span>
         <button class="secondary" :disabled="busy||taskListLoading||!selectedInactiveCount" @click="setSelectedWordsStatus('enabled')">批量启用</button>
         <button class="secondary" :disabled="busy||taskListLoading||!selectedEnabledCount" @click="setSelectedWordsStatus('disabled')">批量停用</button>
+        <button class="danger" :disabled="busy||taskListLoading||!selectedWords.length" @click="deleteSelectedWords">批量删除</button>
         <button class="ghost" :disabled="busy||taskListLoading||!selectedWords.length" @click="selectedWords=[]">取消选择</button>
       </div>
       <div class="title-scroll creative-resource-table-wrap"><table class="title-library-table">

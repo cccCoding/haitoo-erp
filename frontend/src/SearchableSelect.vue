@@ -17,6 +17,8 @@ const props = withDefaults(defineProps<{
   noMatchLabel?: string
   multiple?: boolean
   selectedValues?: OptionValue[]
+  bulkSelection?: boolean
+  selectionError?: string
 }>(), {
   valueKey: 'value',
   labelKey: 'label',
@@ -28,9 +30,10 @@ const props = withDefaults(defineProps<{
   noMatchLabel: '没有匹配的类目',
   multiple: false,
   selectedValues: () => [],
+  bulkSelection: false,
 })
 
-const emit = defineEmits<{ 'update:modelValue': [OptionValue]; change: [OptionValue]; toggle: [OptionValue] }>()
+const emit = defineEmits<{ 'update:modelValue': [OptionValue]; change: [OptionValue]; toggle: [OptionValue]; 'select-matched': [OptionValue[]]; 'clear-matched': [OptionValue[]] }>()
 
 const root = ref<HTMLElement | null>(null)
 const listbox = ref<HTMLElement | null>(null)
@@ -61,6 +64,8 @@ const matchedOptions = computed(() => {
 
 const visibleOptions = computed(() => matchedOptions.value.slice(0, props.maxVisible))
 const hiddenCount = computed(() => matchedOptions.value.length - visibleOptions.value.length)
+const matchedValues = computed(() => matchedOptions.value.map(option => option.value))
+const matchedSelectedCount = computed(() => matchedValues.value.filter(value => props.selectedValues.includes(value)).length)
 
 watch(() => props.options, () => {
   if (!props.multiple) keyword.value = ''
@@ -199,6 +204,12 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
           @keydown="onSearchKeydown"
         />
       </div>
+      <div v-if="multiple && bulkSelection" class="search-select-bulk-actions">
+        <span aria-live="polite">已选 {{matchedSelectedCount}} / {{matchedOptions.length}} 项</span>
+        <button type="button" :disabled="disabled || matchedSelectedCount === matchedOptions.length" @click="emit('select-matched', matchedValues)">{{keyword.trim() ? '全选搜索结果' : '全选可选项'}}</button>
+        <button type="button" :disabled="disabled || !matchedSelectedCount" @click="emit('clear-matched', matchedValues)">取消结果选择</button>
+      </div>
+      <p v-if="selectionError" class="search-select-selection-error" role="alert">{{selectionError}}</p>
       <ul ref="listbox" class="search-select-list" role="listbox" :aria-multiselectable="multiple || undefined">
         <li
           v-for="(option, index) in visibleOptions"
@@ -227,3 +238,8 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
     </div>
   </div>
 </template>
+
+<style scoped>
+.search-select-bulk-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin:8px 0;color:#81788d;font-size:12px}.search-select-bulk-actions>span{margin-right:auto}.search-select-bulk-actions>button{padding:5px 7px;border:0;border-radius:6px;background:#f2effb;color:#6047a4;font:inherit;cursor:pointer}.search-select-bulk-actions>button:disabled{opacity:.5;cursor:default}
+.search-select-selection-error{margin:8px 0;color:#b63850;font-size:12px;line-height:1.6}
+</style>

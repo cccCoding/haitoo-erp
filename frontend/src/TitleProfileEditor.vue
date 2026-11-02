@@ -21,7 +21,7 @@ const materialIds = ref<number[]>([]), legacyMaterial = ref(''), materialConflic
 const normalized = (value: string) => value.normalize('NFKC').trim().toLowerCase()
 const availableMaterials = computed(() => materialOptions.value.filter(item => item.categories.some(category => normalized(category) === normalized(form.value.category))))
 const unavailableMaterialIds = computed(() => materialIds.value.filter(id => !availableMaterials.value.some(item => item.id === id)))
-const forbiddenIds = ref<number[]>([])
+const forbiddenIds = ref<number[]>([]), forbiddenError = ref('')
 const busy = ref(false), loaded = ref(false), error = ref(''), notice = ref('')
 const selectorDisabled = computed(() => busy.value || props.readonly || !loaded.value)
 const inCategory = (item: MaterialOption) => item.categories.some(category => normalized(category) === normalized(form.value.category))
@@ -51,15 +51,30 @@ function toggleMaterial(value: string | number | null) {
 function clearMaterials() { materialIds.value = []; legacyMaterial.value = ''; materialConflict.value = '' }
 function toggleForbidden(value: string | number | null) {
   if (selectorDisabled.value || typeof value !== 'number') return
+  forbiddenError.value = ''
   if (forbiddenIds.value.includes(value)) forbiddenIds.value = forbiddenIds.value.filter(id => id !== value)
-  else if (forbiddenIds.value.length >= 100) error.value = '最多选择 100 个禁用关键词'
+  else if (forbiddenIds.value.length >= 200) forbiddenError.value = '最多选择 200 个禁用关键词'
   else forbiddenIds.value = [...forbiddenIds.value, value]
+}
+function selectForbiddenMatches(values: (string | number | null)[]) {
+  if (selectorDisabled.value) return
+  const ids = [...new Set([...forbiddenIds.value, ...values.filter((value): value is number => typeof value === 'number')])]
+  if (ids.length > 200) { forbiddenError.value = `全选后共 ${ids.length} 个禁用关键词，超过 200 个上限，请缩小搜索范围或移除部分已选词`; return }
+  forbiddenIds.value = ids
+  forbiddenError.value = ''
+}
+function clearForbiddenMatches(values: (string | number | null)[]) {
+  if (selectorDisabled.value) return
+  const ids = new Set(values)
+  forbiddenIds.value = forbiddenIds.value.filter(id => !ids.has(id))
+  forbiddenError.value = ''
 }
 let revision = 0
 watch(busy, value => emit('busy', value))
 watch(() => [props.templateId, props.platform, props.site, props.token], async () => {
   const current = ++revision
   error.value = ''; notice.value = ''; busy.value = true; loaded.value = false
+  forbiddenError.value = ''
   try {
     const { data } = await api.get(`/title-profiles/${props.templateId}`, { ...config.value, params: { platform: props.platform, ...titleMarketParams(props.site) } })
     if (current !== revision) return
@@ -154,9 +169,9 @@ async function save() {
         </div>
         <p v-if="!attributes.length" class="profile-empty">尚未设置其他标签。</p>
         <div class="profile-select-field"><span>禁用关键词（选填，可多选）</span>
-          <SearchableSelect :model-value="null" :multiple="true" :selected-values="forbiddenIds" :options="forbiddenChoices" :disabled="selectorDisabled" aria-label="禁用关键词" placeholder="选择禁用关键词" search-placeholder="搜索禁用关键词、中文释义、标签或编码" empty-label="本分类下暂无关键词" no-match-label="没有匹配的关键词" @toggle="toggleForbidden" />
+          <SearchableSelect :model-value="null" :multiple="true" :bulk-selection="true" :selection-error="forbiddenError" :selected-values="forbiddenIds" :options="forbiddenChoices" :disabled="selectorDisabled" aria-label="禁用关键词" placeholder="选择禁用关键词" search-placeholder="搜索禁用关键词、中文释义、标签或编码" empty-label="本分类下暂无关键词" no-match-label="没有匹配的关键词" @toggle="toggleForbidden" @select-matched="selectForbiddenMatches" @clear-matched="clearForbiddenMatches" />
           <div v-if="forbiddenIds.length" class="profile-keyword-chips" aria-label="已选禁用关键词"><span v-for="id in forbiddenIds" :key="id">{{forbiddenLabel(id)}}<button v-if="!readonly" type="button" :disabled="selectorDisabled" :aria-label="`移除禁用关键词 ${forbiddenLabel(id)}`" @click="toggleForbidden(id)">×</button></span></div>
-          <small>选中的关键词不会出现在本模板的词库标题中，最多选择 100 个。</small>
+          <small>选中的关键词不会出现在本模板的词库标题中，最多选择 200 个。</small>
         </div>
         <label v-if="showFallback">{{market.languageName}}货盘兜底标题<textarea v-model="form.fallback_title" rows="2" minlength="25" maxlength="220" /></label>
         <label v-if="showFallback" class="title-checkbox"><input v-model="form.fallback_approved" type="checkbox" />我已审核{{market.languageName}}兜底标题</label>

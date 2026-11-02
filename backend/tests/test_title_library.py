@@ -17,7 +17,7 @@ from app.credentials import encrypt_secret
 from app.models import ProductDraft, ProductTemplate, UserAIProviderCredential
 from app.schema_version import alembic_config
 from app.title_import import extract_row, parse_file
-from app.title_models import TitleEvidence, TitleKeyword, TitleMarket, TitleRecord, TitleTask
+from app.title_models import TitleEvidence, TitleKeyword, TitleMarket, TitleRecord, TitleTask, TitleTemplateProfile
 from app.title_service import (adopt_record, create_record, digest, generate_record, get_market,
     normalized_title, profile_snapshot, similarity, validate_malay_title)
 from app.title_worker import claim_task, run_task
@@ -886,6 +886,115 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         compatible = self.request('POST','/title-keywords/1/review',json={'status':'enabled','review_token':word()['review_token']})
         self.assertEqual(compatible.status_code,200,compatible.text)
 
+    def test_profile_forbidden_keywords_accepts_200_and_rejects_201(self):
+        job = self.upload(content=KEYWORDS + ''.join(f'butang {index},纽扣{index},连衣裙,结构设计,否\n' for index in range(198)))
+        self.request('POST', f"/title-tasks/{job['id']}/start", json={})
+        self.run_worker()
+        task = self.request('GET', f"/title-tasks/{job['id']}", params={'limit': 1000}).json()
+        confirmed = self.request('POST', f"/title-imports/{job['id']}/confirm", json={
+            'selections': [word['index'] for word in task['result']['words']]})
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        ids = [word['id'] for word in self.request('GET', '/title-keywords', params={'page_size': 1000}).json()['items']]
+        self.assertEqual(len(ids), 201)
+        payload = {'category': '连衣裙', 'gender': '女', 'age_group': '成人',
+            'attributes': {}, 'forbidden_keyword_ids': ids[:200]}
+        saved = self.request('PUT', '/title-profiles/1', json=payload)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()['forbidden_keyword_ids'], ids[:200])
+        rejected = self.request('PUT', '/title-profiles/1', json={**payload, 'forbidden_keyword_ids': ids})
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+        self.assertEqual(self.request('GET', '/title-profiles/1').json()['forbidden_keyword_ids'], ids[:200])
+
+    def test_batch_delete_cleans_references_and_preserves_history(self):
+        task_id = self.import_words()
+        self.profile()
+        with self.sessions() as db:
+            market = get_market(db, 1)
+            revision = market.revision
+            profile = db.scalar(select(TitleTemplateProfile).where(TitleTemplateProfile.market_id == market.id))
+            profile.locked_keyword_ids = [1]
+            profile.forbidden_keyword_ids = [2]
+            profile.material_keyword_ids = [1, 3]
+            db.get(TitleKeyword, 3).conflicts = [1, 2]
+            db.add(TitleKeyword(market_id=market.id, code='KW000004', phrase='dress', translation='旧裙装',
+                tag='品类', identity_hash=digest(['dress']), merged_into_id=1, status='disabled'))
+            db.add(TitleRecord(market_id=market.id, user_id=1, template_id=1, request_key='delete-history',
+                category='连衣裙', image_url='image', snapshot={'keywords': [{'id': 1, 'phrase': 'gaun'}]},
+                selected_keywords=[{'id': 1, 'phrase': 'gaun'}], title=TITLE, state='completed'))
+            db.commit()
+            before_task = copy.deepcopy(db.get(TitleTask, task_id).result)
+        words = self.request('GET', '/title-keywords').json()['items']
+        selections = [{'id': word['id'], 'review_token': word['review_token']} for word in words[:2]]
+        response = self.request('POST', '/title-keywords/batch-delete', json={'selections': selections})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {'deleted': 2})
+        remaining = self.request('GET', '/title-keywords').json()['items']
+        self.assertEqual([word['id'] for word in remaining], [3])
+        with self.sessions() as db:
+            self.assertIsNone(db.get(TitleKeyword, 4))
+            self.assertEqual(db.get(TitleKeyword, 3).conflicts, [])
+            self.assertEqual(db.scalars(select(TitleEvidence.keyword_id)).all(), [3])
+            profile = db.scalar(select(TitleTemplateProfile))
+            self.assertEqual(profile.locked_keyword_ids, [])
+            self.assertEqual(profile.forbidden_keyword_ids, [])
+            self.assertEqual(profile.material_keyword_ids, [3])
+            self.assertEqual(get_market(db, 1).revision, revision + 1)
+            self.assertEqual(db.get(TitleTask, task_id).result, before_task)
+            record = db.scalar(select(TitleRecord))
+            self.assertEqual(record.title, TITLE)
+            self.assertEqual(record.selected_keywords, [{'id': 1, 'phrase': 'gaun'}])
+        choices = self.request('GET', '/title-profiles/1').json()['keyword_options']
+        self.assertEqual([word['id'] for word in choices], [3])
+        # 新的导入仍可重新入库被删词，使用新的编码和词源。
+        self.import_words(period='2026-10-30')
+        restored = self.request('GET', '/title-keywords').json()['items']
+        self.assertEqual(len(restored), 3)
+        self.assertTrue(all(word['code'] not in ('KW000001', 'KW000002') for word in restored))
+
+    def test_batch_delete_is_atomic_for_stale_missing_and_merged_words(self):
+        self.import_words()
+        words = self.request('GET', '/title-keywords').json()['items']
+        selections = [{'id': word['id'], 'review_token': word['review_token']} for word in words[:2]]
+        with self.sessions() as db:
+            revision = get_market(db, 1).revision
+        endpoint = '/title-keywords/batch-delete'
+        for invalid, expected in (({'id': words[1]['id'], 'review_token': '0' * 64}, 409),
+                ({'id': 999999, 'review_token': '0' * 64}, 404)):
+            response = self.request('POST', endpoint, json={'selections': [selections[0], invalid]})
+            self.assertEqual(response.status_code, expected, response.text)
+        with self.sessions() as db:
+            db.get(TitleKeyword, words[1]['id']).merged_into_id = words[2]['id']
+            db.commit()
+        response = self.request('POST', endpoint, json={'selections': selections})
+        self.assertEqual(response.status_code, 400, response.text)
+        with self.sessions() as db:
+            self.assertEqual(db.scalar(select(func.count(TitleKeyword.id))), 3)
+            self.assertEqual(db.scalar(select(func.count(TitleEvidence.id))), 3)
+            self.assertEqual(get_market(db, 1).revision, revision)
+
+    def test_batch_delete_enforces_scope_permissions_and_selection_validation(self):
+        self.import_words()
+        word = self.request('GET', '/title-keywords').json()['items'][0]
+        selection = {'id': word['id'], 'review_token': word['review_token']}
+        endpoint = '/title-keywords/batch-delete'
+        for uid, expected in ((2, 403), (3, 403), (5, 404)):
+            response = self.request('POST', endpoint, uid=uid, json={'selections': [selection]})
+            self.assertEqual(response.status_code, expected, response.text)
+        response = self.request('POST', endpoint, json={'site': 'ID', 'language': 'id', 'selections': [selection]})
+        self.assertEqual(response.status_code, 404, response.text)
+        with self.sessions() as db:
+            foreign = get_market(db, 2, create=True)
+            db.add(TitleKeyword(market_id=foreign.id, code='KW000001', phrase='foreign', translation='其他公司',
+                tag='品类', identity_hash=digest(['foreign'])))
+            db.commit()
+            foreign_id = db.scalar(select(TitleKeyword.id).where(TitleKeyword.market_id == foreign.id))
+        response = self.request('POST', endpoint, json={'selections': [selection, {'id': foreign_id, 'review_token': '0' * 64}]})
+        self.assertEqual(response.status_code, 404, response.text)
+        for selections in ([], [selection, selection], [selection] * 1001):
+            response = self.request('POST', endpoint, json={'selections': selections})
+            self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(self.request('GET', '/title-keywords').json()['total'], 3)
+
     def test_batch_disable_only_changes_selected_words_and_advances_configuration_once(self):
         self.import_words()
         words = self.request('GET', '/title-keywords').json()['items']
@@ -1362,7 +1471,7 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             repeat = self.request('POST', '/templates/1/generate-draft-title', uid=2,
                 json={'method': 'library', 'image_url': 'https://img.example/1.png', 'request_key': 'single-record-001'})
             self.assertEqual(repeat.json()['generation_id'], generated['generation_id'])
-            self.assertEqual(model.await_count, 2)
+            self.assertEqual(model.await_count, 5)  # 一次识图，短标题最多四次成文；重放不再调用。
         self.assertEqual(self.request('GET', '/title-statistics').json()['adopted'], 0)
         response = self.request('POST', '/drafts/from-material-assets', uid=2,
             json={'template_id': 1, 'material_asset_ids': [1], 'title': TITLE, 'generation_id': generated['generation_id']})
@@ -1390,12 +1499,12 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             self.request('PUT', '/templates/1', json={'title_template': 'Use a natural short title'})
             stale = self.request('POST', '/templates/1/generate-draft-title', uid=2, json=payload)
             self.assertEqual(stale.status_code, 409, stale.text)
-            self.assertEqual(model.await_count, 2)
+            self.assertEqual(model.await_count, 5)
             fresh = self.request('POST', '/templates/1/generate-draft-title', uid=2,
                                  json={**payload, 'request_key': 'template-style-002'})
             self.assertEqual(fresh.status_code, 200, fresh.text)
             self.assertEqual(model.await_args.args[2]['template_requirements'], 'Use a natural short title')
-            self.assertEqual(model.await_count, 3)  # 表达要求变化不重复识别同一商品事实。
+            self.assertEqual(model.await_count, 9)  # 表达要求变化不重复识图，每条短标题最多四次成文。
 
     def test_title_import_review_exposes_original_and_merge_suggestion(self):
         self.import_words()
@@ -1458,7 +1567,7 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         self.enable(); self.profile()
         malformed = copy.deepcopy(FACTS)
         malformed['attributes'].append({'tag': '材质', 'value': '棉', 'ms': 'kapas', 'evidence': 'looks cotton', 'source': 'image'})
-        with patch('app.title_service.ask_json', new=AsyncMock(side_effect=[malformed, {'title': TITLE}])):
+        with patch('app.title_service.ask_json', new=AsyncMock(side_effect=[malformed] + [{'title': TITLE}] * 4)):
             response = self.request('POST', '/templates/1/generate-draft-title', uid=2, json={'method': 'library', 'image_url': 'https://img.example/1.png'})
             self.assertEqual(response.status_code, 200, response.text)
             self.assertNotIn('材质', [f['tag'] for f in response.json()['facts']['attributes']])

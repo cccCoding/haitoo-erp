@@ -264,7 +264,7 @@ class IndonesiaTitleTests(SupplyFixture, unittest.TestCase):
             db.commit()
             with patch('app.title_service.ask_json', new=AsyncMock(return_value={'title': fixtures.TITLE})) as model:
                 result = asyncio.run(generate_record(db, record.id, 'test-key'))
-            self.assertEqual(model.await_count, 1)
+            self.assertEqual(model.await_count, 4)
             self.assertEqual((result['title'], result['site']), (fixtures.TITLE, 'MY'))
             draft = ProductDraft(company_id=1, created_by=2, template_id=1,
                 title='Gaun Dengan Lengan Panjang Corak Bunga', image_urls=['https://img.example/1.png'])

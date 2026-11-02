@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session, undefer
 
 from .title_markets import TitleMarketSelection, check_market
@@ -59,7 +59,7 @@ class ProfileInput(MarketInput):
     material_keyword_ids: list[Annotated[int, Field(gt=0)]] = Field(default_factory=list, max_length=100)
     category_names: list[str] = Field(default_factory=list, max_length=100)
     locked_keyword_ids: list[int] = Field(default_factory=list, max_length=8)
-    forbidden_keyword_ids: list[int] = Field(default_factory=list, max_length=100)
+    forbidden_keyword_ids: list[int] = Field(default_factory=list, max_length=200)
     fallback_title: str | None = Field(default=None, max_length=220)
     fallback_approved: bool = False
 
@@ -104,7 +104,7 @@ class KeywordSelection(Input):
     review_token: str = Field(min_length=64, max_length=64)
 
 
-class KeywordBatchDisableInput(MarketInput):
+class KeywordBatchInput(MarketInput):
     selections: list[KeywordSelection] = Field(min_length=1, max_length=1000)
 
     @field_validator('selections')
@@ -115,7 +115,7 @@ class KeywordBatchDisableInput(MarketInput):
         return values
 
 
-class KeywordBatchStatusInput(KeywordBatchDisableInput):
+class KeywordBatchStatusInput(KeywordBatchInput):
     status: Literal['enabled', 'disabled']
 
 
@@ -568,7 +568,7 @@ def keywords(platform: str = 'TikTok', site: str = 'MY', language: str = 'ms', s
 
 
 @router.post('/title-keywords/batch-disable')
-def disable_keywords(payload: KeywordBatchDisableInput, user: User = Depends(admin), db: Session = Depends(get_db)):
+def disable_keywords(payload: KeywordBatchInput, user: User = Depends(admin), db: Session = Depends(get_db)):
     return update_keyword_statuses(payload, 'disabled', user, db)
 
 
@@ -605,6 +605,54 @@ def update_keyword_statuses(payload, status, user, db):
         market.updated_at = now
     db.commit()
     return {status: len(changed)}
+
+
+@router.post('/title-keywords/batch-delete')
+def delete_keywords(payload: KeywordBatchInput, user: User = Depends(admin), db: Session = Depends(get_db)):
+    market = market_for(db, user, payload.platform, payload.site, payload.language, lock=True)
+    if not market:
+        raise HTTPException(404, '记录不存在')
+    rows = db.scalars(select(TitleKeyword).where(TitleKeyword.market_id == market.id,
+        TitleKeyword.id.in_([item.id for item in payload.selections]))).all()
+    if len(rows) != len(payload.selections):
+        raise HTTPException(404, '记录不存在')
+    tokens = {item.id: item.review_token for item in payload.selections}
+    # 先验证整个批次，再清理引用和删除，避免部分成功。
+    for row in rows:
+        if row.merged_into_id:
+            raise HTTPException(400, '已合并词不能删除，请刷新列表后重新勾选')
+        if tokens[row.id] != keyword_review_token(row):
+            raise HTTPException(409, '关键词已变更，请刷新列表后重新勾选')
+    deleted_ids = {row.id for row in rows}
+    all_words = db.scalars(select(TitleKeyword).where(TitleKeyword.market_id == market.id)).all()
+    # 同时清理合并到这些词的旧编码，避免以后导入时沿着失效引用合并。
+    while True:
+        aliases = {word.id for word in all_words if word.merged_into_id in deleted_ids} - deleted_ids
+        if not aliases:
+            break
+        deleted_ids.update(aliases)
+    now = datetime.utcnow()
+    for profile in db.scalars(select(TitleTemplateProfile).where(TitleTemplateProfile.market_id == market.id)):
+        changed = False
+        for field in ('locked_keyword_ids', 'forbidden_keyword_ids', 'material_keyword_ids'):
+            current = getattr(profile, field) or []
+            remaining = [identity for identity in current if identity not in deleted_ids]
+            if current != remaining:
+                setattr(profile, field, remaining)
+                changed = True
+        if changed:
+            profile.updated_at = now
+    for word in all_words:
+        if word.id not in deleted_ids and deleted_ids.intersection(word.conflicts):
+            word.conflicts = [identity for identity in word.conflicts if identity not in deleted_ids]
+            word.updated_at = now
+    db.execute(delete(TitleEvidence).where(TitleEvidence.market_id == market.id, TitleEvidence.keyword_id.in_(deleted_ids)))
+    db.execute(delete(TitleKeyword).where(TitleKeyword.market_id == market.id, TitleKeyword.id.in_(deleted_ids)))
+    # 导入和已生成标题中的历史快照保留原样。
+    market.revision += 1
+    market.updated_at = now
+    db.commit()
+    return {'deleted': len(rows)}
 
 
 @router.post('/title-keywords/{identity}/status')
