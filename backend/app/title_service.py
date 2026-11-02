@@ -29,6 +29,7 @@ DICTIONARY_TAGS = [tag for tag in TAGS if tag not in (*CATEGORY_FIELDS, '面料'
 PROFILE_TAGS = [tag for tag in TAGS[:25] if tag not in (*CATEGORY_FIELDS, '面料')]
 GENDERS = ('男', '女', '中性')
 AGE_GROUPS = ('成人', '儿童')
+TITLE_WORD_PATTERN = re.compile(r"[^\W_]+(?:[-'][^\W_]+)*", re.UNICODE)
 VISUAL_TAGS = {"品类", "颜色", "图案", "版型", "长度", "结构设计", "细节元素", "工艺"}
 EXCLUDED_TAGS = {"品牌", "营销修饰", "关键词热度", "关键词竞争度", "搜索语言", "目标市场"}
 MALAY_WORDS = set("baju gaun jubah kurung tudung seluar skirt kemeja jersi tunik kebaya kurta singlet blaus selendang sarung wanita lelaki kanak bayi lengan panjang pendek bunga bercorak corak polos labuh leher bulat longgar saiz besar kapas kain untuk dengan dan berwarna harian pakaian menyusu muslimah hitam putih biru merah hijau ungu kuning coklat berzip".split())
@@ -48,7 +49,27 @@ def normalize(value):
 
 
 def tokens(value):
-    return re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", normalize(value), re.UNICODE)
+    return TITLE_WORD_PATTERN.findall(normalize(value))
+
+
+def unconfirmed_title_words(title, allowed):
+    """沿用原有分词校验，提示按标题顺序去重，并尽量保留原文拼写。"""
+    unknown = set(tokens(title)) - allowed
+    words = {}
+    for word in TITLE_WORD_PATTERN.findall(title):
+        for key in tokens(word):
+            if key in unknown:
+                words.setdefault(key, word)
+    # 兼容字符规范化后才出现的词，避免漏报原校验已拒绝的内容。
+    return list(dict.fromkeys(words.values())) + sorted(unknown - words.keys())
+
+
+def matching_forbidden_phrases(title, phrases):
+    matched = {}
+    for phrase in phrases:
+        if contains_phrase(title, phrase):
+            matched.setdefault(normalize(phrase), phrase)
+    return list(matched.values())
 
 
 def normalized_title(value):
@@ -576,11 +597,13 @@ async def generate_record(db, record_id, api_key=None):
                 missing = [w["phrase"] for w in selected if not contains_phrase(title, w["phrase"])]
                 if missing:
                     raise ProviderError("标题遗漏选定词组：" + "、".join(missing))
-                if any(contains_phrase(title, p) for p in snapshot["forbidden_phrases"]):
-                    raise ProviderError("标题包含禁用词")
+                forbidden = matching_forbidden_phrases(title, snapshot['forbidden_phrases'])
+                if forbidden:
+                    raise ProviderError("标题包含禁用词：" + "、".join(forbidden))
                 allowed = set(tokens(" ".join([localized_value(f) for f in facts["attributes"]] + [w["phrase"] for w in selected]))) | grammar
-                if set(tokens(title)) - allowed:
-                    raise ProviderError("标题新增了未经确认的属性词或借词")
+                unconfirmed = unconfirmed_title_words(title, allowed)
+                if unconfirmed:
+                    raise ProviderError("标题新增了未经确认的属性词或借词：" + "、".join(unconfirmed))
                 validate_confirmed_claims(title, facts['attributes'], selected, market.site, market.language)
                 warnings = list(facts.get("warnings", [])) + ["按首图描述，请核对其他 SKU"]
                 if not any(w["tag"] == "品类" for w in selected):
@@ -681,11 +704,13 @@ def adopt_record(db, draft, user, generation_id=None, *, platform='TikTok'):
             core = next((localized_value(f) for f in facts if f['tag'] == '品类'), None)
             if core and not contains_phrase(draft.title, core):
                 raise ProviderError('人工修改不能删除核心品类')
-            if any(contains_phrase(draft.title, phrase) for phrase in record.snapshot.get('forbidden_phrases', [])):
-                raise ProviderError('人工标题包含禁用词')
+            forbidden = matching_forbidden_phrases(draft.title, record.snapshot.get('forbidden_phrases', []))
+            if forbidden:
+                raise ProviderError('人工标题包含禁用词：' + '、'.join(forbidden))
             allowed = set(tokens(' '.join([localized_value(f) for f in facts] + [w['phrase'] for w in record.selected_keywords]))) | grammar
-            if facts and set(tokens(draft.title)) - allowed:
-                raise ProviderError('人工标题包含未经确认的商品词，请先更新模板确认属性并重新生成')
+            unconfirmed = unconfirmed_title_words(draft.title, allowed) if facts else []
+            if unconfirmed:
+                raise ProviderError('人工标题包含未经确认的商品词：' + '、'.join(unconfirmed) + '；请先更新模板确认属性并重新生成')
             validate_confirmed_claims(draft.title, facts, record.selected_keywords, market.site, market.language)
         except ProviderError as exc:
             raise HTTPException(400, str(exc)) from exc

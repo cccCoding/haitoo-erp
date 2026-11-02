@@ -1527,8 +1527,10 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         with patch('app.title_service.ask_json', new=self.model()):
             generated = self.request('POST', '/templates/1/generate-draft-title', uid=2,
                 json={'method': 'library', 'image_url': 'https://img.example/1.png'}).json()
-        payload = {'template_id': 1, 'material_asset_ids': [1], 'title': TITLE+' Kapas', 'generation_id': generated['generation_id']}
-        self.assertEqual(self.request('POST', '/drafts/from-material-assets', uid=2, json=payload).status_code, 400)
+        payload = {'template_id': 1, 'material_asset_ids': [1], 'title': TITLE+' Kapas Breathable KAPAS', 'generation_id': generated['generation_id']}
+        rejected = self.request('POST', '/drafts/from-material-assets', uid=2, json=payload)
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(rejected.json()['detail'], '人工标题包含未经确认的商品词：Kapas、Breathable；请先更新模板确认属性并重新生成')
         payload['title'] = 'Gaun Corak Bunga Lengan Panjang'
         response = self.request('POST', '/drafts/from-material-assets', uid=2, json=payload)
         self.assertEqual(response.status_code, 200, response.text)
@@ -1536,6 +1538,22 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(statistics['manual'], 1)
         self.assertEqual(statistics['adopted'], 0)
         self.assertTrue(all(w['adopted_count'] == 0 for w in self.request('GET', '/title-keywords').json()['items']))
+
+    def test_manual_edit_error_lists_all_matched_forbidden_phrases(self):
+        self.enable(); self.profile(); self.import_words()
+        with patch('app.title_service.ask_json', new=self.model()):
+            generated = self.request('POST', '/templates/1/generate-draft-title', uid=2,
+                json={'method': 'library', 'image_url': 'https://img.example/1.png'}).json()
+        with self.sessions() as db:
+            record = db.get(TitleRecord, generated['generation_id'])
+            record.snapshot = {**record.snapshot,
+                'forbidden_phrases': ['Lengan Panjang', 'Corak Bunga', 'corak bunga', 'Kapas']}
+            db.commit()
+        response = self.request('POST', '/drafts/from-material-assets', uid=2, json={
+            'template_id': 1, 'material_asset_ids': [1], 'title': 'Gaun Corak Bunga Lengan Panjang',
+            'generation_id': generated['generation_id']})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['detail'], '人工标题包含禁用词：Lengan Panjang、Corak Bunga')
 
     def test_changed_template_facts_require_regeneration_before_adoption(self):
         self.enable(); self.profile()

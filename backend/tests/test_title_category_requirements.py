@@ -109,12 +109,30 @@ class TitleCategoryRequirementsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.model.await_count, 4)
 
     async def test_category_still_obeys_forbidden_words(self):
-        with self.assertRaisesRegex(ProviderError, '标题包含禁用词'):
-            await self.generate('Gaun Lengan Panjang Corak Bunga', forbidden=['Gaun'])
+        expected = '标题包含禁用词：Gaun、Lengan Panjang'
+        with self.assertRaises(ProviderError) as caught:
+            await self.generate('Gaun Lengan Panjang Corak Bunga',
+                                forbidden=['Gaun', 'Lengan Panjang', 'gaun', 'Kapas', 'ga'])
+        self.assertEqual(str(caught.exception), expected)
+        self.assertEqual(self.model.await_args.args[2]['feedback'], expected)
+        self.assertEqual(self.db.get(TitleRecord, self.record_id).error, expected)
 
     async def test_category_does_not_allow_unconfirmed_claims(self):
-        with self.assertRaisesRegex(ProviderError, '未经确认'):
+        with self.assertRaisesRegex(ProviderError, '未经确认的属性词或借词：Kapas$'):
             await self.generate('Gaun Lengan Panjang Corak Bunga Kapas')
+
+    async def test_unconfirmed_words_are_complete_in_title_order_and_case_insensitively_deduplicated(self):
+        expected = '标题新增了未经确认的属性词或借词：Pure、Cotton、Breathable'
+        with self.assertRaises(ProviderError) as caught:
+            await self.generate('Gaun Lengan Panjang Pure Cotton Breathable COTTON Ｃｏｔｔｏｎ')
+        self.assertEqual(str(caught.exception), expected)
+        self.assertEqual(self.model.await_args.args[2]['feedback'], expected)
+        self.assertEqual(self.db.get(TitleRecord, self.record_id).error, expected)
+
+    async def test_indonesian_unconfirmed_words_are_listed(self):
+        with self.assertRaisesRegex(ProviderError, '未经确认的属性词或借词：Katun、Waterproof$'):
+            await self.generate('Daster Wanita Lengan Panjang Motif Bunga Katun Waterproof',
+                                site='ID', core='Daster Wanita')
 
     async def test_blank_model_output_is_not_replaced_with_category(self):
         with self.assertRaisesRegex(ProviderError, '标题长度'):
