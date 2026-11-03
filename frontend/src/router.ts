@@ -6,8 +6,8 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 const RouteOutlet = { template: '<span aria-hidden="true" />' }
 
 export const workspaceRoutes: RouteRecordRaw[] = [
-  { path: '/', redirect: { name: 'dashboard' } },
-  { path: '/dashboard', name: 'dashboard', component: RouteOutlet },
+  { path: '/', redirect: { name: 'templates' } },
+  { path: '/dashboard', redirect: { name: 'templates' } },
   { path: '/templates', name: 'templates', component: RouteOutlet },
   { path: '/creative', name: 'pod', component: RouteOutlet },
   { path: '/creative-resources', name: 'creative-resources', component: RouteOutlet },
@@ -20,11 +20,12 @@ export const workspaceRoutes: RouteRecordRaw[] = [
   { path: '/title-library', name: 'title-library', component: RouteOutlet },
   { path: '/supply', name: 'supply', component: RouteOutlet },
   { path: '/settings/miaoshou', name: 'miaoshou', component: RouteOutlet, meta: { requiresCompanyAdmin: true } },
+  { path: '/settings/operation-statistics', name: 'operation-statistics', component: RouteOutlet, meta: { requiresCompanyAdmin: true } },
   { path: '/settings/members', name: 'members', component: RouteOutlet, meta: { requiresCompanyAdmin: true } },
   { path: '/finance', name: 'finance', component: RouteOutlet, meta: { requiresCompanyAdmin: true } },
   { path: '/settings/shops', name: 'shops', component: RouteOutlet },
   { path: '/settings/tiktok-catalogs', name: 'tiktok-catalogs', component: RouteOutlet, meta: { requiresCompanyAdmin: true } },
-  { path: '/:pathMatch(.*)*', redirect: { name: 'dashboard' } },
+  { path: '/:pathMatch(.*)*', redirect: { name: 'templates' } },
 ]
 
 export const router = createRouter({

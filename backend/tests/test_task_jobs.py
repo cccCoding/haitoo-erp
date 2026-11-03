@@ -1119,7 +1119,7 @@ class TaskJobTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual(response.json(), {"total": 1000, "task_ids": task_ids})
 
-        with patch.dict(main.app.dependency_overrides, {main.get_db: self.fake_get_db, main.current_user: fake_user}):
+        with patch.dict(main.app.dependency_overrides, {main.get_db: self.fake_get_db, main.creative_user: fake_user}):
             asyncio.run(exercise_api())
         with self.session_factory() as db:
             tasks = db.scalars(select(PodTask)).all()

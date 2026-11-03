@@ -71,6 +71,14 @@ def current_internal_user(user: User = Depends(current_user)) -> User:
     return user
 
 
+def current_creative_user(user: User = Depends(current_user)) -> User:
+    """创作业务显式接纳美工，其他业务继续沿用原有内部角色限制。"""
+    if user.role not in {Role.SUPER_ADMIN, Role.COMPANY_ADMIN, Role.MEMBER,
+                         Role.TEAM_LEADER, Role.DESIGNER, Role.DESIGN_LEADER}:
+        raise HTTPException(status_code=403, detail="当前账号没有此操作权限")
+    return user
+
+
 def require_roles(*roles: Role):
     def checker(user: User = Depends(current_user)) -> User:
         if user.role not in roles:

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from .database import get_db
 from .models import MaterialAsset, MaterialStyle, Role, User, UserTemplateWhiteImage
 from .schemas import MaterialStyleBatchInput
-from .security import current_internal_user
+from .security import current_internal_user, current_creative_user
 from .supply_common import lock_company, timestamp
 
 
@@ -42,7 +42,7 @@ def task_style_id(db, task):
 
 @router.get("/material-styles")
 def list_material_styles(template_id: int | None = Query(default=None, ge=1), search: str = "",
-                         user: User = Depends(current_internal_user), db: Session = Depends(get_db)):
+                         user: User = Depends(current_creative_user), db: Session = Depends(get_db)):
     counts = select(MaterialAsset.style_id.label("style_id"), func.count().label("count")).where(
         MaterialAsset.company_id == user.company_id).group_by(MaterialAsset.style_id).subquery()
     white_image_url = UserTemplateWhiteImage.image_url if user.role in {Role.COMPANY_ADMIN, Role.SUPER_ADMIN} else case(
@@ -55,6 +55,9 @@ def list_material_styles(template_id: int | None = Query(default=None, ge=1), se
         counts, counts.c.style_id == MaterialStyle.id).where(MaterialStyle.company_id == user.company_id)
     if template_id is not None:
         query = query.where(MaterialStyle.template_id == template_id)
+    if user.role == Role.DESIGNER:
+        from .design import visible_template_ids
+        query = query.where(MaterialStyle.template_id.in_(visible_template_ids(user)))
     if search.strip():
         query = query.where(MaterialStyle.name.contains(search.strip(), autoescape=True))
     return {"items": [{"id": style.id, "template_id": style.template_id, "name": style.name,

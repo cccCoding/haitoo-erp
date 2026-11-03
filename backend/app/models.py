@@ -14,6 +14,8 @@ class Role(str, enum.Enum):
     COMPANY_ADMIN = "company_admin"
     MEMBER = "member"
     TEAM_LEADER = "team_leader"
+    DESIGNER = "designer"
+    DESIGN_LEADER = "design_leader"
     SUPPLY_USER = "supply_user"
 
 
@@ -63,11 +65,63 @@ class User(Base):
     token_version: Mapped[int] = mapped_column(Integer, default=0)
     role: Mapped[Role] = mapped_column(Enum(Role), default=Role.MEMBER)
     group_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    design_group_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     supply_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     supply_agent_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     supply_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class DesignGroup(Base):
+    __tablename__ = "design_groups"
+    __table_args__ = (UniqueConstraint("company_id", "name", name="uq_design_groups_company_name"),
+                      UniqueConstraint("leader_user_id", name="uq_design_groups_leader"))
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    leader_user_id: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class DesignTemplateVisibility(Base):
+    __tablename__ = "design_template_visibility"
+    company_id: Mapped[int] = mapped_column(primary_key=True)
+    template_id: Mapped[int] = mapped_column(primary_key=True)
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+
+
+class TaskResultReview(Base):
+    __tablename__ = "task_result_reviews"
+    __table_args__ = (UniqueConstraint("task_id", "result_hash", name="uq_task_result_review"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    task_id: Mapped[int] = mapped_column(index=True)
+    result_hash: Mapped[str] = mapped_column(String(64))
+    result_url: Mapped[str] = mapped_column(String(500))
+    rejected: Mapped[bool] = mapped_column(Boolean, default=True)
+    marked_by: Mapped[int] = mapped_column(Integer)
+    marked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CreativeImageEvent(Base):
+    """永久保留采用与首次下载事实；不随素材删除级联清理。"""
+    __tablename__ = "creative_image_events"
+    __table_args__ = (
+        UniqueConstraint("company_id", "user_id", "kind", "sku", name="uq_creative_image_event"),
+        Index("ix_creative_event_company_time", "company_id", "occurred_at"),
+        Index("ix_creative_event_member_time", "company_id", "user_id", "occurred_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column()
+    user_id: Mapped[int] = mapped_column()
+    user_name: Mapped[str] = mapped_column(String(80))
+    kind: Mapped[str] = mapped_column(String(12))
+    sku: Mapped[str] = mapped_column(String(24))
+    task_id: Mapped[int] = mapped_column(Integer)
+    asset_id: Mapped[int] = mapped_column(Integer)
+    request_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class LoginRateLimit(Base):

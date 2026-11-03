@@ -17,6 +17,7 @@ class UserOut(BaseModel):
     email: EmailStr
     role: Role
     group_id: int | None
+    design_group_id: int | None = None
     company_id: int | None
     is_active: bool
     supply_admin: bool = False
@@ -622,8 +623,9 @@ class MemberCreate(BaseModel):
     user_code: str = Field(min_length=2, max_length=2)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
-    role: Literal[Role.MEMBER, Role.TEAM_LEADER] = Role.MEMBER
+    role: Literal[Role.MEMBER, Role.TEAM_LEADER, Role.DESIGNER, Role.DESIGN_LEADER] = Role.MEMBER
     group_id: int | None = Field(default=None, ge=1)
+    design_group_id: int | None = Field(default=None, ge=1)
 
     @field_validator("user_code", mode="before")
     @classmethod
@@ -640,8 +642,9 @@ class MemberUpdate(BaseModel):
     email: EmailStr | None = None
     password: str | None = Field(default=None, min_length=8, max_length=128)
     is_active: bool | None = None
-    role: Literal[Role.MEMBER, Role.TEAM_LEADER] | None = None
+    role: Literal[Role.MEMBER, Role.TEAM_LEADER, Role.DESIGNER, Role.DESIGN_LEADER] | None = None
     group_id: int | None = Field(default=None, ge=1)
+    design_group_id: int | None = Field(default=None, ge=1)
 
     @field_validator("user_code", mode="before")
     @classmethod

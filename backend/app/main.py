@@ -38,7 +38,7 @@ from .product_library_rankings import SnapshotAlreadyRunning, company_run_lock, 
 from .schemas import MAX_PRODUCT_LIBRARY_SELECTION, HubEnvironmentSync, HubEnvironmentToggle, HubTaskClaimInput, HubTaskAction, ProductLibraryShopAssignment, ProductLibraryTitleGenerate, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
 from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, OperatorGroupCreate, OperatorGroupUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
-from .security import (create_access_token, current_internal_user as current_user,
+from .security import (create_access_token, current_internal_user as current_user, current_creative_user as creative_user,
                        current_user as authenticated_user, hash_password, require_roles,
                        validate_supply_user_access, verify_password)
 from .ai_providers import ProviderError, generate_draft_title, provider_supports_user_credentials
@@ -354,6 +354,11 @@ app.include_router(finance_router)
 from .title_api import router as title_router, generate_single
 from .title_service import adopt_record
 app.include_router(title_router)
+from .design import (router as design_router, DESIGN_ROLES, CREATIVE_ROLES, public_template_ids,
+                     visible_template_ids, task_read_filters, readable_task, enrich_task_views,
+                     apply_design_membership)
+from .models import DesignGroup
+app.include_router(design_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins.split(","),
@@ -541,7 +546,7 @@ def login(payload: LoginInput, request: Request, db: Session = Depends(get_db)):
 @app.get("/me")
 def me(user: User = Depends(authenticated_user), db: Session = Depends(get_db)):
     company = db.get(Company, user.company_id) if user.company_id else None
-    group = db.get(OperatorGroup, user.group_id) if user.group_id else None
+    group = (db.get(DesignGroup, user.design_group_id) if user.design_group_id else None) if user.role in DESIGN_ROLES else (db.get(OperatorGroup, user.group_id) if user.group_id else None)
     return {
         "user": UserOut.model_validate(user).model_dump() | {"group_name": group.name if group and group.company_id == user.company_id else None},
         "company": {
@@ -554,7 +559,7 @@ def me(user: User = Depends(authenticated_user), db: Session = Depends(get_db)):
 
 
 @app.patch("/me", response_model=UserOut)
-def update_my_user_code(payload: MyUserCodeUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def update_my_user_code(payload: MyUserCodeUpdate, user: User = Depends(creative_user), db: Session = Depends(get_db)):
     """当前账号只能设置自己的名称和用户代码。"""
     if payload.user_code and user_code_in_use(db, user.company_id, payload.user_code, user.id):
         raise HTTPException(400, "该用户代码已被使用")
@@ -787,7 +792,7 @@ def list_members(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Se
     members = db.scalars(
         select(User).where(
             User.company_id == user.company_id,
-            User.role.in_([Role.COMPANY_ADMIN, *OPERATOR_ROLES]),
+            User.role.in_(CREATIVE_ROLES),
         ).order_by(User.role, User.id.desc())
     ).all()
     member_ids = [member.id for member in members]
@@ -824,6 +829,8 @@ def list_members(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Se
 
 @app.post("/members", response_model=UserOut)
 def create_member(payload: MemberCreate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
+    from .supply_common import lock_company
+    lock_company(db, user.company_id)
     email = str(payload.email).lower()
     if db.scalar(select(User.id).where(User.email == email)):
         raise HTTPException(400, "该邮箱已被使用")
@@ -831,6 +838,10 @@ def create_member(payload: MemberCreate, user: User = Depends(require_roles(Role
         raise HTTPException(400, "该用户代码已被使用")
     if payload.role == Role.TEAM_LEADER and payload.group_id is None:
         raise HTTPException(400, "运营组长必须选择运营组")
+    if payload.role in DESIGN_ROLES and payload.group_id is not None:
+        raise HTTPException(400, "美工不能加入运营组")
+    if payload.role not in DESIGN_ROLES and payload.design_group_id is not None:
+        raise HTTPException(400, "运营成员不能加入美工组")
     group = company_operator_group(db, user.company_id, payload.group_id, lock=True) if payload.group_id else None
     member = User(company_id=user.company_id, email=email, name=payload.name.strip(), user_code=payload.user_code,
                   password_hash=hash_password(payload.password), role=payload.role, group_id=payload.group_id)
@@ -844,6 +855,7 @@ def create_member(payload: MemberCreate, user: User = Depends(require_roles(Role
         if "email" in str(exc.orig).lower():
             raise HTTPException(400, "该邮箱已被使用") from exc
         raise
+    apply_design_membership(db, member, payload.role, payload.design_group_id, True)
     if group and payload.role == Role.TEAM_LEADER:
         old_leader = db.get(User, group.leader_user_id)
         old_leader.role = Role.MEMBER
@@ -854,12 +866,20 @@ def create_member(payload: MemberCreate, user: User = Depends(require_roles(Role
 
 @app.put("/members/{member_id}", response_model=UserOut)
 def update_member(member_id: int, payload: MemberUpdate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
+    from .supply_common import lock_company
+    lock_company(db, user.company_id)
     target_group = company_operator_group(db, user.company_id, payload.group_id, lock=True) if payload.group_id else None
     member = db.scalar(select(User).where(User.id == member_id).with_for_update())
-    if not member or member.company_id != user.company_id or member.role not in OPERATOR_ROLES:
+    if not member or member.company_id != user.company_id or member.role not in (*OPERATOR_ROLES, *DESIGN_ROLES):
         raise HTTPException(404, "成员不存在")
     target_group_id = payload.group_id if "group_id" in payload.model_fields_set else member.group_id
     target_role = payload.role if payload.role is not None else member.role
+    if target_role in DESIGN_ROLES and target_group_id is not None:
+        if "group_id" in payload.model_fields_set:
+            raise HTTPException(400, "美工不能加入运营组")
+        target_group_id = None
+    design_group_id = payload.design_group_id if "design_group_id" in payload.model_fields_set else (member.design_group_id if target_role in DESIGN_ROLES else None)
+    apply_design_membership(db, member, target_role, design_group_id, member.is_active if payload.is_active is None else payload.is_active)
     if target_role == Role.TEAM_LEADER and target_group_id is None:
         raise HTTPException(400, "运营组长必须选择运营组")
     if target_role == Role.TEAM_LEADER and member.role != Role.TEAM_LEADER and target_group is None:
@@ -898,7 +918,7 @@ def update_member(member_id: int, payload: MemberUpdate, user: User = Depends(re
 
 def get_company_credential_user(db: Session, user: User, member_id: int) -> User:
     member = db.get(User, member_id)
-    if not member or member.company_id != user.company_id or member.role not in {Role.COMPANY_ADMIN, *OPERATOR_ROLES}:
+    if not member or member.company_id != user.company_id or member.role not in CREATIVE_ROLES:
         raise HTTPException(404, "公司用户不存在")
     return member
 
@@ -1047,8 +1067,10 @@ def update_miaoshou_account(
 
 
 @app.get("/template-groups")
-def list_template_groups(user: User = Depends(current_user), db: Session = Depends(get_db)):
+def list_template_groups(user: User = Depends(creative_user), db: Session = Depends(get_db)):
     stmt = select(TemplateGroup).where(or_(TemplateGroup.is_platform.is_(True), TemplateGroup.company_id == user.company_id)).order_by(TemplateGroup.is_platform.desc(), TemplateGroup.name)
+    if user.role == Role.DESIGNER:
+        stmt = stmt.where(TemplateGroup.id.in_(select(ProductTemplate.group_id).where(ProductTemplate.id.in_(visible_template_ids(user)))))
     return db.scalars(stmt).all()
 
 
@@ -1075,16 +1097,18 @@ def delete_template_group(group_id: int, user: User = Depends(require_roles(Role
 
 
 @app.get("/templates")
-def list_templates(group_id: int | None = None, q: str | None = None, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def list_templates(group_id: int | None = None, q: str | None = None, user: User = Depends(creative_user), db: Session = Depends(get_db)):
     filters = [ProductTemplate.is_platform.is_(True)]
     if user.company_id:
         filters.append(ProductTemplate.company_id == user.company_id)
-    stmt = select(ProductTemplate).where(or_(*filters))
+    stmt = select(ProductTemplate).where(or_(*filters), ProductTemplate.id.in_(visible_template_ids(user)))
     if group_id is not None:
         stmt = stmt.where(ProductTemplate.group_id == group_id)
     if q:
         stmt = stmt.where(ProductTemplate.name.contains(q.strip()))
-    return [serialize_template(template) for template in db.scalars(stmt.order_by(ProductTemplate.is_platform.desc(), ProductTemplate.id.desc())).all()]
+    public_ids = set(db.scalars(public_template_ids(user.company_id)))
+    return [serialize_template(template) | {"design_public": template.id in public_ids}
+            for template in db.scalars(stmt.order_by(ProductTemplate.is_platform.desc(), ProductTemplate.id.desc())).all()]
 
 
 @app.get("/product-library/import-template")
@@ -1670,7 +1694,7 @@ def get_company_template(db: Session, user: User, template_id: int) -> ProductTe
 
 def get_usable_template(db: Session, user: User, template_id: int) -> ProductTemplate:
     template = db.get(ProductTemplate, template_id)
-    if not template or not (template.is_platform or template.company_id == user.company_id):
+    if not template or db.scalar(select(ProductTemplate.id).where(ProductTemplate.id == template_id, ProductTemplate.id.in_(visible_template_ids(user)))) is None:
         raise HTTPException(404, "产品模板不存在")
     return template
 
@@ -1680,7 +1704,7 @@ def get_resource_owner(db: Session, user: User, requested_user_id: int | None) -
     if owner_id != user.id and user.role != Role.COMPANY_ADMIN:
         raise HTTPException(403, "只能管理自己的模板资源")
     owner = db.get(User, owner_id)
-    if not owner or owner.company_id != user.company_id or owner.role not in {Role.COMPANY_ADMIN, *OPERATOR_ROLES}:
+    if not owner or owner.company_id != user.company_id or owner.role not in CREATIVE_ROLES:
         raise HTTPException(404, "公司用户不存在")
     return owner
 
@@ -1699,7 +1723,7 @@ def list_user_template_resources(
     user_id: int | None = None,
     scope: Literal["own", "company"] = "own",
     white_image_status: Literal["active", "deleted"] = "active",
-    user: User = Depends(current_user),
+    user: User = Depends(creative_user),
     db: Session = Depends(get_db),
 ):
     if scope == "company":
@@ -1721,6 +1745,9 @@ def list_user_template_resources(
     if owner is not None:
         white_image_query = white_image_query.where(UserTemplateWhiteImage.user_id == owner.id)
         prompt_query = prompt_query.where(UserTemplatePrompt.user_id == owner.id)
+    if user.role == Role.DESIGNER:
+        white_image_query = white_image_query.where(UserTemplateWhiteImage.template_id.in_(visible_template_ids(user)))
+        prompt_query = prompt_query.where(UserTemplatePrompt.template_id.in_(visible_template_ids(user)))
     if template_id is not None:
         template = get_usable_template(db, user, template_id)
         white_image_query = white_image_query.where(UserTemplateWhiteImage.template_id == template.id)
@@ -1740,7 +1767,7 @@ def list_user_template_resources(
 @app.post("/user-template-white-images")
 def create_user_template_white_image(
     payload: UserTemplateWhiteImageCreate,
-    user: User = Depends(current_user),
+    user: User = Depends(creative_user),
     db: Session = Depends(get_db),
 ):
     template = get_usable_template(db, user, payload.template_id)
@@ -1775,13 +1802,15 @@ def get_managed_white_image(db: Session, user: User, item_id: int) -> UserTempla
     item = db.get(UserTemplateWhiteImage, item_id)
     if not item or item.company_id != user.company_id or (item.user_id != user.id and user.role != Role.COMPANY_ADMIN):
         raise HTTPException(404, "白底图不存在或无权操作")
+    if user.role == Role.DESIGNER:
+        get_usable_template(db, user, item.template_id)
     return item
 
 
 @app.put("/user-template-white-images/{item_id}")
 def update_user_template_white_image(
     item_id: int, payload: UserTemplateWhiteImageUpdate,
-    user: User = Depends(current_user), db: Session = Depends(get_db),
+    user: User = Depends(creative_user), db: Session = Depends(get_db),
 ):
     from .supply_common import lock_company
     lock_company(db, user.company_id)
@@ -1797,7 +1826,7 @@ def update_user_template_white_image(
 
 
 @app.delete("/user-template-white-images/{item_id}")
-def delete_user_template_white_image(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def delete_user_template_white_image(item_id: int, user: User = Depends(creative_user), db: Session = Depends(get_db)):
     from .supply_common import lock_company
     lock_company(db, user.company_id)
     item = get_managed_white_image(db, user, item_id)
@@ -1811,7 +1840,7 @@ def delete_user_template_white_image(item_id: int, user: User = Depends(current_
 @app.post("/user-template-prompts")
 def create_user_template_prompt(
     payload: UserTemplatePromptCreate,
-    user: User = Depends(current_user), db: Session = Depends(get_db),
+    user: User = Depends(creative_user), db: Session = Depends(get_db),
 ):
     template = get_usable_template(db, user, payload.template_id)
     owner = get_resource_owner(db, user, payload.user_id)
@@ -1833,13 +1862,15 @@ def get_managed_template_prompt(db: Session, user: User, item_id: int) -> UserTe
     item = db.get(UserTemplatePrompt, item_id)
     if not item or item.company_id != user.company_id or (item.user_id != user.id and user.role != Role.COMPANY_ADMIN):
         raise HTTPException(404, "创作要求不存在或无权操作")
+    if user.role == Role.DESIGNER:
+        get_usable_template(db, user, item.template_id)
     return item
 
 
 @app.put("/user-template-prompts/{item_id}")
 def update_user_template_prompt(
     item_id: int, payload: UserTemplatePromptUpdate,
-    user: User = Depends(current_user), db: Session = Depends(get_db),
+    user: User = Depends(creative_user), db: Session = Depends(get_db),
 ):
     item = get_managed_template_prompt(db, user, item_id)
     for field, value in payload.model_dump(exclude_unset=True).items():
@@ -1850,7 +1881,7 @@ def update_user_template_prompt(
 
 
 @app.delete("/user-template-prompts/{item_id}")
-def delete_user_template_prompt(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def delete_user_template_prompt(item_id: int, user: User = Depends(creative_user), db: Session = Depends(get_db)):
     item = get_managed_template_prompt(db, user, item_id)
     db.delete(item); db.commit()
     return {"deleted": True}
@@ -2078,7 +2109,9 @@ SUPPORTED_UPLOAD_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
 @app.post("/uploads/presign")
-def presign_image_upload(payload: ImageUploadPresignInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def presign_image_upload(payload: ImageUploadPresignInput, user: User = Depends(creative_user), db: Session = Depends(get_db)):
+    if user.role in DESIGN_ROLES and payload.category not in {"template-white", "creative"}:
+        raise HTTPException(403, "当前账号不能上传模板图片")
     if payload.category not in DIRECT_UPLOAD_CATEGORIES:
         raise HTTPException(400, "不支持的上传目录")
     if any(item.content_type not in SUPPORTED_UPLOAD_MIME_TYPES for item in payload.files):
@@ -2088,7 +2121,9 @@ def presign_image_upload(payload: ImageUploadPresignInput, user: User = Depends(
 
 
 @app.post("/uploads/complete")
-def complete_image_upload(payload: ImageUploadCompleteInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def complete_image_upload(payload: ImageUploadCompleteInput, user: User = Depends(creative_user), db: Session = Depends(get_db)):
+    if user.role in DESIGN_ROLES and payload.category not in {"template-white", "creative"}:
+        raise HTTPException(403, "当前账号不能上传模板图片")
     if payload.category not in DIRECT_UPLOAD_CATEGORIES:
         raise HTTPException(400, "不支持的上传目录")
     try:
@@ -2115,7 +2150,7 @@ def validate_template_image_url(url: str | None, company_id: int, current: str |
 
 
 @app.post("/uploads/creative-asset/presign")
-def presign_creative_asset(payload: UploadPresignInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def presign_creative_asset(payload: UploadPresignInput, user: User = Depends(creative_user), db: Session = Depends(get_db)):
     if payload.content_type not in {"image/jpeg", "image/png", "image/webp"}:
         raise HTTPException(400, "请上传 JPG、PNG 或 WebP 图片")
     return prepare_upload(db, user, sha256=payload.sha256, mime_type=payload.content_type,
@@ -2199,7 +2234,7 @@ def list_tasks(
     created_to: datetime | None = None,
     sku_query: str | None = Query(default=None, max_length=10000),
     template_id: Annotated[int | None, Query(ge=1)] = None,
-    user: User = Depends(current_user),
+    user: User = Depends(creative_user),
     db: Session = Depends(get_db),
 ):
     if task_type not in {"sku_image", "carousel", "main_image"}:
@@ -2208,15 +2243,11 @@ def list_tasks(
     normalized_created_to = created_to.astimezone(timezone.utc).replace(tzinfo=None) if created_to and created_to.tzinfo else created_to
     if normalized_created_from and normalized_created_to and normalized_created_from > normalized_created_to:
         raise HTTPException(400, "创建开始时间不能晚于结束时间")
-    scope_filters = []
-    if user.role != Role.SUPER_ADMIN:
-        scope_filters.append(PodTask.company_id == user.company_id)
-    if is_operator(user):
-        scope_filters.append(PodTask.created_by == user.id)
+    scope_filters = task_read_filters(user, sku_query)
     filters = list(scope_filters)
     if template_id is not None:
         filters.append(PodTask.template_id == template_id)
-    if not is_operator(user) and creator_id is not None:
+    if user.role in {Role.SUPER_ADMIN, Role.COMPANY_ADMIN, Role.DESIGN_LEADER} and creator_id is not None:
         filters.append(PodTask.created_by == creator_id)
     if status is not None:
         filters.append(PodTask.status == status)
@@ -2224,15 +2255,6 @@ def list_tasks(
         filters.append(PodTask.created_at >= normalized_created_from)
     if normalized_created_to is not None:
         filters.append(PodTask.created_at <= normalized_created_to)
-    if isinstance(sku_query, str) and sku_query:
-        # SKU 在领取生成素材时写入素材库；按行输入时匹配任一 SKU 所属的 SKU 图任务。
-        skus = list(dict.fromkeys(sku.strip() for sku in sku_query.splitlines() if sku.strip()))
-        if skus:
-            matching_task_ids = select(MaterialAsset.source_task_id).where(
-                MaterialAsset.sku.in_(skus),
-                MaterialAsset.source_task_id.is_not(None),
-            )
-            filters.append(PodTask.id.in_(matching_task_ids))
     task_type_counts_stmt = select(PodTask.task_type, func.count()).group_by(PodTask.task_type)
     if scope_filters:
         task_type_counts_stmt = task_type_counts_stmt.where(*scope_filters)
@@ -2260,10 +2282,10 @@ def list_tasks(
     if filters:
         active_stmt = active_stmt.where(*filters)
     return {
-        "items": [
+        "items": enrich_task_views(db, user, tasks, [
             serialize_task_view(task, creator_names.get(task.created_by, "历史记录缺失"), template_names.get(task.template_id, "历史模板已删除"), user, include_details=False)
             for task in tasks
-        ],
+        ]),
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -2274,13 +2296,11 @@ def list_tasks(
 
 
 @app.get("/tasks/{task_id}")
-def get_task_detail(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    task = db.get(PodTask, task_id)
-    if not can_access_task(task, user):
-        raise HTTPException(404, "任务不存在")
+def get_task_detail(task_id: int, sku_query: str | None = Query(None, max_length=10000), user: User = Depends(creative_user), db: Session = Depends(get_db)):
+    task = readable_task(db, user, task_id, sku_query)
     creator = db.get(User, task.created_by)
     template = db.get(ProductTemplate, task.template_id)
-    return serialize_task_view(task, creator.name if creator else "历史记录缺失", template.name if template else "历史模板已删除", user, include_details=True)
+    return enrich_task_views(db, user, [task], [serialize_task_view(task, creator.name if creator else "历史记录缺失", template.name if template else "历史模板已删除", user, include_details=True)])[0]
 
 
 @app.get("/material-assets/import-template")
@@ -2836,7 +2856,9 @@ async def persist_generated_images(urls: list[str], company_id: int, task_id: in
 
 
 @app.post("/tasks")
-def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def create_task(payload: PodTaskCreate, user: User = Depends(creative_user), db: Session = Depends(get_db)):
+    from .supply_common import lock_company
+    lock_company(db, user.company_id)
     template = get_usable_template(db, user, payload.template_id)
     white_image = db.scalar(select(UserTemplateWhiteImage).where(
         UserTemplateWhiteImage.id == payload.white_image_id,
@@ -2906,7 +2928,7 @@ def create_task(payload: PodTaskCreate, user: User = Depends(current_user), db: 
 
 
 @app.get("/ai-providers")
-def list_available_ai_providers(user: User = Depends(current_user), db: Session = Depends(get_db)):
+def list_available_ai_providers(user: User = Depends(creative_user), db: Session = Depends(get_db)):
     """运营端查看可用模型及个人密钥配置状态，不暴露任何凭据内容。"""
     configured_providers = set(db.scalars(select(UserAIProviderCredential.provider).where(
         UserAIProviderCredential.company_id == user.company_id,
@@ -2942,7 +2964,7 @@ def reset_failed_task(task: PodTask) -> None:
 
 
 @app.post("/tasks/batch-retry")
-def batch_retry_tasks(payload: TaskBatchRetry, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def batch_retry_tasks(payload: TaskBatchRetry, user: User = Depends(creative_user), db: Session = Depends(get_db)):
     """校验全部所选任务后，将失败任务批量重置为待提交状态。"""
     task_ids = list(dict.fromkeys(payload.task_ids))
     tasks = [db.get(PodTask, task_id) for task_id in task_ids]
@@ -2958,7 +2980,7 @@ def batch_retry_tasks(payload: TaskBatchRetry, user: User = Depends(current_user
 
 
 @app.post("/tasks/{task_id}/retry")
-def retry_task(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def retry_task(task_id: int, user: User = Depends(creative_user), db: Session = Depends(get_db)):
     """将一条失败任务完整重置为待提交状态。"""
     task = db.get(PodTask, task_id)
     if not can_access_task(task, user):
@@ -2971,7 +2993,7 @@ def retry_task(task_id: int, user: User = Depends(current_user), db: Session = D
 
 
 @app.post("/tasks/{task_id}/claim-materials")
-def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Depends(creative_user), db: Session = Depends(get_db)):
     task = db.get(PodTask, task_id)
     if not can_access_task(task, user):
         raise HTTPException(404, "任务不存在")

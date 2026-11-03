@@ -99,7 +99,8 @@ class SupplySchemaTests(unittest.TestCase):
             config = alembic_config()
             config.output_buffer = output
             with patch("app.config.get_settings", return_value=SimpleNamespace(database_url=f"{dialect}+pymysql://test@localhost/test")):
-                command.upgrade(config, "20261013_36:head", sql=True)
+                # 只验证货盘版本；后续包含在线数据回填的迁移不能整体生成离线 SQL。
+                command.upgrade(config, "20261013_36:20261016_39", sql=True)
             sql = output.getvalue()
             self.assertIn("'SUPPLY_USER'", sql)
             self.assertIn("category_blob MEDIUMBLOB NOT NULL", sql)

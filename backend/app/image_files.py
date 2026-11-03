@@ -217,6 +217,8 @@ def create_material(db, *, image_file: ImageFile, template, owner, request_key: 
         image_file_id=file_id, creation_request_key=request_key)
     asset.is_infringing = is_infringing
     asset.style_id = style_id
+    from .design import record_adoption
+    record_adoption(db, asset)
     if commit:
         db.commit()
     else:
