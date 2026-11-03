@@ -6,9 +6,10 @@ const emit = defineEmits<{changed:[]; preview:[url:string]}>()
 const selected = ref<string[]>([]), busy = ref(false), error = ref('')
 const api = axios.create({baseURL:import.meta.env.VITE_API_URL || 'http://localhost:8000'})
 const key = (id:number,url:string) => JSON.stringify([id,url])
-const images = computed(() => props.tasks.flatMap(task => (task.result_urls || []).map((url:string) => ({task,url,key:key(task.id,url)}))))
+const images = computed(() => props.tasks.flatMap(task => (task.result_urls || []).map((url:string,index:number) => ({task,url,index,key:key(task.id,url)}))))
 const selectable = computed(() => images.value.filter(item=>item.task.can_review))
-function selectAll() { selected.value = selected.value.length===selectable.value.length ? [] : selectable.value.map(item=>item.key) }
+const allSelected = computed(() => selectable.value.length>0 && selectable.value.every(item=>selected.value.includes(item.key)))
+function selectAll() { selected.value = allSelected.value ? [] : selectable.value.map(item=>item.key) }
 function review(task:any,url:string) { return task.result_reviews?.find((item:any)=>item.url===url) }
 async function mark(rejected:boolean, only?:{task:any;url:string}) {
   if (busy.value) return
@@ -27,16 +28,39 @@ function imageUrl(url:string) { return /^https?:\/\//i.test(url) ? url : `${impo
   <section class="result-gallery" :aria-busy="busy">
     <div v-if="selectable.length" class="result-review-toolbar"><button class="secondary" :disabled="busy" @click="selectAll">全选／取消全选</button><span>已选 {{selected.length}} 张</span><button class="secondary" :disabled="busy || !selected.length" @click="mark(true)">批量标记不合格</button><button class="ghost" :disabled="busy || !selected.length" @click="mark(false)">批量取消标记</button></div>
     <p v-if="error" class="error" role="alert">{{error}}</p>
-    <div class="result-gallery-grid"><article v-for="item in images" :key="item.key" :class="{rejected:review(item.task,item.url)?.rejected}">
-      <label v-if="item.task.can_review" class="review-image-select"><input v-model="selected" :value="item.key" type="checkbox" :disabled="busy"/>选择结果图</label>
-      <button class="result-preview" @click="emit('preview',item.url)"><img :src="imageUrl(item.url)" :alt="`任务 #${item.task.id} 结果图`"/></button>
-      <small>任务 #{{item.task.id}}</small><strong v-if="review(item.task,item.url)?.rejected" class="error">不合格</strong>
-      <small v-if="review(item.task,item.url)">{{review(item.task,item.url).marked_by_name}} · {{new Date(review(item.task,item.url).marked_at).toLocaleString()}}{{review(item.task,item.url).rejected ? '' : ' · 已取消标记'}}</small>
-      <button v-if="item.task.can_review" class="ghost" :disabled="busy" @click="mark(!review(item.task,item.url)?.rejected,item)">{{review(item.task,item.url)?.rejected ? '取消不合格标记' : '标记不合格'}}</button>
-    </article></div>
-    <p v-if="!images.length" class="empty">暂无生成结果图。</p>
+    <div class="result-review-table-wrap">
+      <table class="result-review-table" aria-label="结果图质量标记列表">
+        <thead><tr><th class="result-select-cell"><input v-if="selectable.length" type="checkbox" :checked="allSelected" :indeterminate="!allSelected && selected.length>0" :disabled="busy" aria-label="全选可标记结果图" @change="selectAll"/><span v-else>选择</span></th><th>结果图</th><th>任务编号</th><th>质量状态</th><th>标记信息</th><th>操作</th></tr></thead>
+        <tbody>
+          <tr v-for="item in images" :key="item.key" :class="{rejected:review(item.task,item.url)?.rejected,selected:selected.includes(item.key)}">
+            <td class="result-select-cell"><input v-if="item.task.can_review" v-model="selected" :value="item.key" type="checkbox" :disabled="busy" :aria-label="`选择任务 ${item.task.id} 第 ${item.index+1} 张结果图`"/><span v-else>—</span></td>
+            <td><button type="button" class="result-preview" :aria-label="`查看任务 ${item.task.id} 第 ${item.index+1} 张结果图大图`" @click="emit('preview',item.url)"><img :src="imageUrl(item.url)" :alt="`任务 #${item.task.id} 结果图 ${item.index+1}`"/></button></td>
+            <td class="result-task-cell">#{{item.task.id}}</td>
+            <td><span class="result-quality-status" :class="{rejected:review(item.task,item.url)?.rejected}">{{review(item.task,item.url)?.rejected ? '不合格' : review(item.task,item.url) ? '已取消标记' : '未标记'}}</span></td>
+            <td class="result-review-info"><template v-if="review(item.task,item.url)"><span>{{review(item.task,item.url).marked_by_name}}</span><small>{{new Date(review(item.task,item.url).marked_at).toLocaleString()}}</small></template><span v-else>—</span></td>
+            <td class="result-review-actions"><button v-if="item.task.can_review" type="button" class="ghost" :disabled="busy" @click="mark(!review(item.task,item.url)?.rejected,item)">{{review(item.task,item.url)?.rejected ? '取消不合格标记' : '标记不合格'}}</button><span v-else>—</span></td>
+          </tr>
+          <tr v-if="!images.length"><td colspan="6" class="result-review-empty">暂无生成结果图。</td></tr>
+        </tbody>
+      </table>
+    </div>
   </section>
 </template>
 <style scoped>
-.result-review-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:12px 0;font-size:13px}.result-gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px}.result-gallery-grid article{display:flex;flex-direction:column;gap:8px;border:1px solid #e8e3f0;border-radius:10px;padding:12px}.result-gallery-grid article.rejected{border-color:#d24662;background:#fff8fa}.review-image-select{font-size:12px;display:flex;gap:8px;align-items:center}.result-preview{padding:0;width:100%;height:190px}.result-preview img{width:100%;height:100%;object-fit:contain}.result-gallery-grid small{font-size:12px;color:#817b91;overflow-wrap:anywhere}.result-gallery-grid .ghost{font-size:12px;padding:8px 0}
+.result-review-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:12px 0;font-size:13px}
+.result-review-table-wrap{max-height:55vh;overflow:auto;border:1px solid #e8e3f0;border-radius:10px}
+.result-review-table{width:100%;min-width:720px;border-collapse:collapse;font-size:13px;text-align:left}
+.result-review-table th{position:sticky;top:0;z-index:1;background:#faf9fc;color:#817b91;font-size:12px;white-space:nowrap}
+.result-review-table th,.result-review-table td{padding:12px 14px;border-bottom:1px solid #eeeaf5;vertical-align:middle}
+.result-review-table tbody tr:last-child td{border-bottom:0}
+.result-review-table tr.selected{background:#f8f5ff}.result-review-table tr.rejected{background:#fff8fa}
+.result-review-table .result-select-cell{width:48px;text-align:center;padding-left:12px;padding-right:12px}
+.result-select-cell input{width:16px;height:16px;margin:0;accent-color:#7054e7;cursor:pointer}
+.result-preview{display:block;width:76px;height:90px;padding:0;border:1px solid #ebe7f1;border-radius:7px;background:white;overflow:hidden}
+.result-preview img{display:block;width:100%;height:100%;object-fit:contain}
+.result-task-cell{font-weight:600;white-space:nowrap}
+.result-quality-status{display:inline-block;padding:4px 7px;border-radius:6px;background:#f0edf5;color:#817b91;font-size:12px;white-space:nowrap}.result-quality-status.rejected{background:#fce7ec;color:#c53e5b;font-weight:600}
+.result-review-info{min-width:150px;overflow-wrap:anywhere}.result-review-info small{display:block;margin-top:5px;font-size:12px;color:#817b91}
+.result-review-actions{white-space:nowrap}.result-review-actions button{padding:8px 0;font-size:12px}.result-review-actions button:disabled{cursor:wait;opacity:.6}
+.result-review-table .result-review-empty{padding:36px;text-align:center;color:#817b91}
 </style>

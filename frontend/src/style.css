@@ -262,3 +262,5 @@ nav button.subnav{width:calc(100% - 14px);margin:-3px 0 4px 14px;padding:10px 14
 .asset-row .asset-skip-reason{color:#765a1d;overflow-wrap:anywhere;white-space:normal}
 
 .template-public-badge{display:block;width:max-content;padding:4px 8px;border-radius:6px;background:#f1edff;color:#66519b;font-size:12px;margin-top:12px}.template-actions{flex-wrap:wrap}
+
+.result-review-dialog{position:relative}.result-review-dialog>h2{padding-right:30px}
