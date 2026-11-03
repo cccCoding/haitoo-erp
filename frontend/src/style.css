@@ -264,3 +264,8 @@ nav button.subnav{width:calc(100% - 14px);margin:-3px 0 4px 14px;padding:10px 14
 .template-public-badge{display:block;width:max-content;padding:4px 8px;border-radius:6px;background:#f1edff;color:#66519b;font-size:12px;margin-top:12px}.template-actions{flex-wrap:wrap}
 
 .result-review-dialog{position:relative}.result-review-dialog>h2{padding-right:30px}
+
+/* 美工专用模板备注 */
+.template-design-note{margin-top:12px;padding:10px 12px;border:1px solid #e9e3fa;border-radius:9px;background:#f8f6ff;color:#615475;font-size:12px;line-height:1.6}
+.template-design-note strong{font-size:12px;color:#66519b}.template-design-note p{margin:5px 0 0;max-height:160px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.template-note-dialog{width:min(520px,calc(100vw - 32px))}.template-note-dialog h2{font-size:20px;overflow-wrap:anywhere}.template-note-dialog textarea{display:block;width:100%;margin-top:7px;padding:12px;border:1px solid #e2dff0;border-radius:10px;font:inherit;line-height:1.6;resize:vertical}.template-note-dialog small{display:block;margin-top:8px;font-size:12px;color:#807b90}.template-note-dialog .error{margin-top:12px}

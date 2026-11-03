@@ -161,6 +161,71 @@ class DesignDepartmentTests(unittest.TestCase):
         self.assertIn('个人 Grsai 平台密钥',missing_key.json()['detail'])
         self.assertEqual(self.ok(self.request('GET','/ai-providers',2))[0]['credential_configured'],True)
 
+    def test_template_notes_are_shared_only_with_company_design_roles(self):
+        note='保持袖口长度\n印花避开拉链'
+        saved=self.ok(self.request('PATCH','/templates/1/design-note',3,json={'note':f'  {note}  '}))
+        self.assertEqual(saved,{'id':1,'design_note':note})
+        for uid in (2,3,4,6,10):
+            templates=self.ok(self.request('GET','/templates',uid))
+            self.assertEqual(next(t for t in templates if t['id']==1)['design_note'],note)
+        for uid in (1,5,9):
+            templates=self.ok(self.request('GET','/templates',uid))
+            self.assertTrue(all('design_note' not in t and 'note' not in t for t in templates))
+            self.assertNotIn(note,json.dumps(templates,ensure_ascii=False))
+        # 管理员修改模板和公开状态，都不会读到或覆盖美工备注。
+        updated=self.ok(self.request('PUT','/templates/1',1,json={'description':'普通模板说明'}))
+        self.assertNotIn('design_note',updated)
+        visibility=self.ok(self.request('PATCH','/templates/1/design-visibility',1,json={'is_public':False}))
+        self.assertNotIn('design_note',visibility)
+        self.assertFalse(any(t['id']==1 for t in self.ok(self.request('GET','/templates',2))))
+        with self.sessions() as db:
+            self.assertEqual(db.get(DesignTemplateVisibility,(1,1)).note,note)
+            db.get(ProductTemplate,1).supply_public=True
+            root=User(id=12,name='平台管理员',email='root@example.com',password_hash='x',role=Role.SUPER_ADMIN)
+            db.add(root);db.commit()
+            self.tokens[12]=create_access_token(root)
+        for path,uid,params in [('/supply/templates',11,{}),('/admin/data/templates',12,{'company_id':1})]:
+            response=self.request('GET',path,uid,params=params)
+            data=self.ok(response)
+            self.assertNotIn(note,response.text)
+            self.assertNotIn('design_note',response.text)
+            self.assertNotIn('note',response.text)
+        changed=self.ok(self.request('PATCH','/templates/1/design-note',6,json={'note':'另一个组长更新'}))
+        self.assertEqual(changed['design_note'],'另一个组长更新')
+        cleared=self.ok(self.request('PATCH','/templates/1/design-note',3,json={'note':' \n '}))
+        self.assertEqual(cleared['design_note'],'')
+        with self.sessions() as db:
+            row=db.get(DesignTemplateVisibility,(1,1))
+            self.assertIsNone(row.note)
+            self.assertFalse(row.is_public)
+
+    def test_template_notes_require_leader_and_keep_company_and_template_boundaries(self):
+        for uid in (1,2,4,5,7,8,9,10,11):
+            self.assertEqual(self.request('PATCH','/templates/1/design-note',uid,json={'note':'无权修改'}).status_code,403)
+        for payload in ({},{'note':None},{'note':'长'*2001},{'note':'备注','is_public':True}):
+            self.assertEqual(self.request('PATCH','/templates/1/design-note',3,json=payload).status_code,422)
+        for template_id in (4,999):
+            self.assertEqual(self.request('PATCH',f'/templates/{template_id}/design-note',3,json={'note':'跨范围'}).status_code,404)
+        for template_id in (2,3):
+            self.ok(self.request('PATCH',f'/templates/{template_id}/design-note',3,json={'note':f'备注{template_id}'}))
+            with self.sessions() as db:
+                row=db.get(DesignTemplateVisibility,(1,template_id))
+                self.assertFalse(row.is_public)
+        # 平台模板由各公司分别备注，不改变公开状态，也不把备注带到其他公司。
+        with self.sessions() as db:
+            db.get(User,8).role=Role.DESIGN_LEADER
+            db.add(DesignTemplateVisibility(company_id=2,template_id=3,is_public=True,note='其他公司专用'))
+            db.commit()
+        other=self.ok(self.request('GET','/templates',7))
+        self.assertEqual(next(t for t in other if t['id']==3)['design_note'],'其他公司专用')
+        self.ok(self.request('PATCH','/templates/3/design-note',8,json={'note':'其他公司更新'}))
+        ours=self.ok(self.request('GET','/templates',3))
+        self.assertEqual(next(t for t in ours if t['id']==3)['design_note'],'备注3')
+        self.assertEqual(self.request('PATCH','/templates/2/design-note',8,json={'note':'跨公司'}).status_code,404)
+        self.ok(self.request('DELETE','/templates/2',1))
+        with self.sessions() as db:
+            self.assertIsNone(db.get(DesignTemplateVisibility,(1,2)))
+
     def test_design_roles_share_company_resources_without_peer_management(self):
         with self.sessions() as db:
             for uid in (1,3,4,5,9):
@@ -376,6 +441,27 @@ class DesignDepartmentTests(unittest.TestCase):
 
 
 class DesignMigrationTests(unittest.TestCase):
+    def test_template_note_migration_preserves_visibility_and_roundtrip(self):
+        engine=create_engine('sqlite://')
+        with engine.begin() as connection:
+            config=alembic_config(connection)
+            command.upgrade(config,'20261103_60')
+            connection.execute(text('INSERT INTO design_template_visibility (company_id,template_id,is_public) VALUES (1,1,1),(2,1,0)'))
+            command.upgrade(config,'head')
+            rows=connection.execute(text('SELECT company_id,is_public,note FROM design_template_visibility ORDER BY company_id')).all()
+            self.assertEqual([tuple(row) for row in rows],[(1,1,None),(2,0,None)])
+            connection.execute(text("UPDATE design_template_visibility SET note='美工备注' WHERE company_id=1"))
+            command.downgrade(config,'20261103_60')
+            self.assertEqual(connection.execute(text('SELECT is_public FROM design_template_visibility WHERE company_id=1')).scalar_one(),1)
+            command.upgrade(config,'head')
+            self.assertIsNone(connection.execute(text('SELECT note FROM design_template_visibility WHERE company_id=1')).scalar_one())
+        engine.dispose()
+        for dialect in ('mysql','mariadb'):
+            out=StringIO();config=alembic_config();config.output_buffer=out
+            with patch('app.config.get_settings',return_value=SimpleNamespace(database_url=f'{dialect}+pymysql://test@localhost/test')):
+                command.upgrade(config,'20261103_60:20261103_61',sql=True)
+            self.assertIn('ALTER TABLE design_template_visibility ADD COLUMN note TEXT',out.getvalue())
+
     def test_migration_backfills_existing_sku_adoptions_and_roundtrip(self):
         engine=create_engine('sqlite://')
         with engine.begin() as connection:

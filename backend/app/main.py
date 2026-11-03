@@ -357,7 +357,7 @@ app.include_router(title_router)
 from .design import (router as design_router, DESIGN_ROLES, CREATIVE_ROLES, public_template_ids,
                      visible_template_ids, task_read_filters, readable_task, enrich_task_views,
                      apply_design_membership)
-from .models import DesignGroup
+from .models import DesignGroup, DesignTemplateVisibility
 app.include_router(design_router)
 app.add_middleware(
     CORSMiddleware,
@@ -1107,7 +1107,10 @@ def list_templates(group_id: int | None = None, q: str | None = None, user: User
     if q:
         stmt = stmt.where(ProductTemplate.name.contains(q.strip()))
     public_ids = set(db.scalars(public_template_ids(user.company_id)))
+    design_notes = dict(db.execute(select(DesignTemplateVisibility.template_id, DesignTemplateVisibility.note)
+        .where(DesignTemplateVisibility.company_id == user.company_id)).all()) if user.role in DESIGN_ROLES else {}
     return [serialize_template(template) | {"design_public": template.id in public_ids}
+            | ({"design_note": design_notes.get(template.id) or ""} if user.role in DESIGN_ROLES else {})
             for template in db.scalars(stmt.order_by(ProductTemplate.is_platform.desc(), ProductTemplate.id.desc())).all()]
 
 
@@ -2102,6 +2105,7 @@ def delete_template(template_id: int, user: User = Depends(require_roles(Role.CO
         raise HTTPException(400, "该模板已有创作任务，无法删除")
     if db.scalar(select(ProductLibraryProduct.id).where(ProductLibraryProduct.template_id == template.id).limit(1)):
         raise HTTPException(400, "该模版已被产品库使用，无法删除")
+    db.execute(delete(DesignTemplateVisibility).where(DesignTemplateVisibility.template_id == template.id))
     db.delete(template); db.commit()
     return {"deleted": True}
 

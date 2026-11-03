@@ -90,6 +90,7 @@ class DesignTemplateVisibility(Base):
     company_id: Mapped[int] = mapped_column(primary_key=True)
     template_id: Mapped[int] = mapped_column(primary_key=True)
     is_public: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TaskResultReview(Base):

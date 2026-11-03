@@ -136,6 +136,27 @@ def set_visibility(template_id: int, payload: VisibilityInput,
     return {'id': template_id, 'design_public': row.is_public}
 
 
+class DesignNoteInput(BaseModel):
+    model_config = {'extra': 'forbid'}
+    note: str = Field(max_length=2000)
+
+
+@router.patch('/templates/{template_id}/design-note')
+def set_design_note(template_id: int, payload: DesignNoteInput,
+                    user=Depends(require_roles(Role.DESIGN_LEADER)), db: Session = Depends(get_db)):
+    lock_company(db, user.company_id)
+    if db.scalar(select(ProductTemplate.id).where(ProductTemplate.id == template_id,
+            ProductTemplate.id.in_(visible_template_ids(user)))) is None:
+        raise HTTPException(404, '产品模板不存在')
+    row = db.get(DesignTemplateVisibility, (user.company_id, template_id))
+    if row is None:
+        row = DesignTemplateVisibility(company_id=user.company_id, template_id=template_id)
+        db.add(row)
+    row.note = payload.note.strip() or None
+    db.commit()
+    return {'id': template_id, 'design_note': row.note or ''}
+
+
 def company_design_group(db, company_id, group_id):
     group = db.scalar(select(DesignGroup).where(DesignGroup.id == group_id,
         DesignGroup.company_id == company_id).with_for_update())
