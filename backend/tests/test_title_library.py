@@ -1758,35 +1758,36 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             self.assertEqual(task.lease_owner, owner)
         self.assertIsNone(claim_task(self.sessions))
 
-    def test_supply_new_jobs_keep_prompt_engine_and_english_fallback_when_library_is_configured(self):
+    def test_supply_new_jobs_use_library_snapshot_and_require_confirmed_facts(self):
         from app.models import SupplyJob
+        self.enable(); self.profile(fallback_title=None, fallback_approved=False)
         self.request('PUT', '/templates/1', json={'title_template': 'Place product category first'})
-        strategy = self.create_strategy()
-        old = self.submit(strategy)
-        self.request('POST', f'/supply/jobs/{old}/cancel', uid=4, json={})
-        self.profile(fallback_title=None, fallback_approved=False)
+        strategy = self.create_strategy(title_requirements='Emphasize confirmed sleeves')
+        identity = self.submit(strategy)
+        with self.sessions() as db:
+            snap = db.get(SupplyJob, identity).snapshot
+            self.assertEqual(snap['title_engine'], 'v2')
+            self.assertEqual(snap['strategy']['title_site'], 'MY')
+            self.assertEqual(snap['title_profile']['title_template'], 'Place product category first')
+            self.assertEqual(snap['title_profile']['fallback_language'], 'en')
+            self.assertEqual(snap['title_profile']['fallback_title'], snap['template']['supply_fallback_title'])
+            self.assertEqual(snap['title_market_id'], get_market(db, 1).id)
+        self.request('POST', f'/supply/jobs/{identity}/cancel', uid=4, json={})
         category = self.dictionary_items('category')[0]
         self.request('PATCH', f"/title-dictionaries/{category['id']}", json={'enabled': False})
-        # 没有马来语兜底、词库分类停用时，货盘仍按原提示词流程提交。
-        new = self.submit(key='new-prompt-only')
-        with self.sessions() as db:
-            for identity in (old, new):
-                snap = db.get(SupplyJob, identity).snapshot
-                self.assertEqual(snap['title_engine'], 'v1')
-                self.assertIsNone(snap['title_profile'])
-                self.assertIsNone(snap['title_market_id'])
-                self.assertEqual(snap['template']['title_template'], 'Place product category first')
-                self.assertEqual(snap['template']['supply_fallback_title'], db.get(ProductTemplate, 1).supply_fallback_title)
-        template = next(row for row in self.request('GET', '/supply/templates').json() if row['id']==1)
-        self.assertEqual(template['title_engine'], 'v1')
-        self.assertNotEqual(template['supply_fallback_title'], '')
+        response = self.request('POST', '/supply/jobs', uid=4,
+            json={'strategy_id': strategy, 'idempotency_key': 'disabled-library-category'})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn('模板配置', response.json()['detail'])
+        template = next(row for row in self.request('GET', '/supply/templates').json() if row['id'] == 1)
+        self.assertEqual(template['title_engine'], 'v2')
 
     def test_supply_v2_completes_with_malay_fallback_and_records_adoption(self):
         from app.models import SupplyJob
         from app.supply_worker import claim_job, run_job
         self.enable(); self.profile()
         identity = self.submit(key='new-malay-fallback')
-        # 模拟上线前已经提交的词库货盘任务；新任务不会再创建此引擎快照。
+        # 模拟未包含兜底语言字段的历史词库快照，保留兼容验证。
         with self.sessions() as db:
             job = db.get(SupplyJob, identity)
             market = get_market(db, 1)

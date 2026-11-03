@@ -165,6 +165,9 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
 
     def setUp(self):
         super().setUp()
+        self.configure_supply_titles()
+        from app.ai_providers import ProviderError
+        self.enterContext(patch('app.title_service.ask_json', new=AsyncMock(side_effect=ProviderError('测试模型不可用'))))
         from app import supply_worker
         self.worker = supply_worker
         settings = supply_worker.get_settings().model_copy(update={"supply_heartbeat_seconds": 3600})

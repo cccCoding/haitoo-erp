@@ -61,6 +61,7 @@ class ProfileInput(MarketInput):
     locked_keyword_ids: list[int] = Field(default_factory=list, max_length=8)
     forbidden_keyword_ids: list[int] = Field(default_factory=list, max_length=200)
     fallback_title: str | None = Field(default=None, max_length=220)
+    # 仅兼容旧客户端；站点兜底标题设置后即可使用，不再需要审核。
     fallback_approved: bool = False
 
     @field_validator('category')
@@ -437,8 +438,6 @@ def put_profile(template_id: int, payload: ProfileInput, user: User = Depends(ad
     if valid != ids:
         raise HTTPException(400, '包含其他词库或不存在的关键词')
     fallback = payload.fallback_title.strip() if payload.fallback_title else None
-    if payload.fallback_approved and not fallback:
-        raise HTTPException(400, '请填写对应站点语言的兜底标题后再确认审核')
     if fallback:
         try:
             fallback = validate_localized_title(fallback, 220, site=market.site, language=market.language)

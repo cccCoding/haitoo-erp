@@ -10,7 +10,7 @@ const emit = defineEmits<{ saved: []; busy: [value: boolean] }>()
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' })
 const market = computed(() => titleMarket(props.site))
 const config = computed(() => ({ headers: { Authorization: `Bearer ${props.token}` } }))
-const form = ref<any>({ category: '', gender: '', age_group: '', fallback_title: '', fallback_approved: false })
+const form = ref<any>({ category: '', gender: '', age_group: '', fallback_title: '' })
 const attributes = ref<{ tag: string; value: string }[]>([]), tags = ref<string[]>([])
 const categories = ref<{ name: string; localized_name?: string | null; enabled: boolean }[]>([])
 type MaterialOption = { id: number; phrase: string; translation: string; categories: string[] }
@@ -127,8 +127,7 @@ async function save() {
       gender: form.value.gender, age_group: form.value.age_group, attributes: confirmed,
       material_keyword_ids: materialIds.value,
       category_names: [], locked_keyword_ids: [], forbidden_keyword_ids: forbiddenIds.value,
-      fallback_title: form.value.fallback_title?.trim() || null,
-      fallback_approved: !!form.value.fallback_approved }
+      fallback_title: form.value.fallback_title?.trim() || null }
     busy.value = true
     await api.put(`/title-profiles/${props.templateId}`, payload, config.value)
     notice.value = '模板词库配置已保存'; emit('saved')
@@ -174,7 +173,7 @@ async function save() {
           <small>选中的关键词不会出现在本模板的词库标题中，最多选择 200 个。</small>
         </div>
         <label v-if="showFallback">{{market.languageName}}货盘兜底标题<textarea v-model="form.fallback_title" rows="2" minlength="25" maxlength="220" /></label>
-        <label v-if="showFallback" class="title-checkbox"><input v-model="form.fallback_approved" type="checkbox" />我已审核{{market.languageName}}兜底标题</label>
+        <small v-if="showFallback">保存后即可用于货盘生成失败时兜底；未设置时使用公开货盘中配置的兜底标题。</small>
         <button v-if="!readonly" type="submit" class="primary profile-save">{{busy?'保存中…':'保存模板配置'}}</button>
       </fieldset>
     </form>

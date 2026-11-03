@@ -251,8 +251,8 @@ def profile_snapshot(db, market, template_id, *, require_fallback=False):
     issues = profile_issues(profile, category_entry, definitions)
     if issues:
         raise HTTPException(400, '请先到标题词库 → 模板配置，配置商品品类、性别、年龄及确认属性：' + '；'.join(issues))
-    if require_fallback and (not profile.fallback_title or not profile.fallback_approved):
-        raise HTTPException(400, "请先配置并审核对应站点语言的货盘兜底标题")
+    if require_fallback and not (profile.fallback_title or '').strip():
+        raise HTTPException(400, "请先配置对应站点语言的货盘兜底标题")
     attributes, _ = profile_attributes(profile.attributes, definitions)
     observed = select(TitleEvidence.keyword_id, TitleEvidence.source_name, TitleEvidence.source_product,
         TitleEvidence.period).where(TitleEvidence.market_id == market.id, TitleEvidence.source_kind == 'titles').distinct().subquery()

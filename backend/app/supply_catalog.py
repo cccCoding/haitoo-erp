@@ -23,7 +23,8 @@ from .supply_accounts import add_calendar_months, as_utc_naive, supply_user_is_e
 from .supply_common import (ACTIVE_STATES, audit, cancel_user_jobs,
     digest, eligible_materials, is_manager, job_payload,
     lock_company, now, require_admin, require_manager, sizes, template_snapshot,
-    template_version, timestamp, user_can_run, validate_fallback, validate_strategy, validate_template)
+    template_version, timestamp, user_can_run, validate_fallback, validate_strategy, validate_template,
+    supply_title_snapshot)
 
 router = APIRouter(prefix="/supply", tags=["公开货盘"])
 
@@ -89,6 +90,7 @@ class BatchListingInput(ListingInput):
 
 
 class StrategyInput(Input):
+    title_site: Literal['MY', 'ID'] = 'MY'
     infringement_filter: Literal["exclude", "include", "only"] = "exclude"
     name: str = Field(min_length=1, max_length=120)
     category_catalog_id: int = Field(gt=0)
@@ -337,7 +339,7 @@ def templates(user=Depends(supply_actor), db: Session = Depends(get_db)):
         items.append({"id": item.id, "name": item.name, "cover_url": item.cover_url,
             "group_id": item.group_id if item.group_id in groups else None, "group_name": groups.get(item.group_id),
             "description": item.description, "supply_public": item.supply_public,
-            "title_engine": "v1",
+            "title_engine": "v2",
             "supply_fallback_title": item.supply_fallback_title if is_manager(user) else None,
             "sizes": sizes(snapshot), "available_count": len(available)})
     return items
@@ -467,7 +469,7 @@ def catalog_options(identity: int, user=Depends(supply_actor), db: Session = Dep
 
 
 def strategy_payload(item):
-    return {"infringement_filter": "include", **item.parameters, "id": item.id, "name": item.name, "created_at": timestamp(item.created_at)}
+    return {"infringement_filter": "include", "title_site": "MY", **item.parameters, "id": item.id, "name": item.name, "created_at": timestamp(item.created_at)}
 
 
 @router.get("/strategies")
@@ -484,6 +486,8 @@ def save_strategy(payload, user, db, identity=None):
         raise HTTPException(404, "策略不存在")
     if identity and "infringement_filter" not in payload.model_fields_set:
         parameters["infringement_filter"] = item.parameters.get("infringement_filter", "include")
+    if identity and "title_site" not in payload.model_fields_set:
+        parameters["title_site"] = item.parameters.get("title_site", "MY")
     validate_strategy(db, user, parameters)
     item.name, item.parameters = payload.name, parameters
     db.add(item)
@@ -532,7 +536,9 @@ def submit_job(payload: JobInput, user=Depends(supply_actor), db: Session = Depe
         raise HTTPException(404, "策略不存在")
     parameters = copy.deepcopy(strategy.parameters)
     parameters.setdefault("infringement_filter", "include")
+    parameters.setdefault("title_site", "MY")
     template, catalog, snapshot, rows = validate_strategy(db, user, parameters)
+    title_market_id, title_profile = supply_title_snapshot(db, user.company_id, template, parameters['title_site'])
     version = template_version(snapshot)
     candidates = eligible_materials(db, user.company_id, template.id, version, parameters["infringement_filter"])
     # URL 或源 SKU 重复的素材不能用于同一链接，提交时即验证可形成完整组。
@@ -548,7 +554,7 @@ def submit_job(payload: JobInput, user=Depends(supply_actor), db: Session = Depe
         template_id=template.id, category_catalog_id=catalog.id,
         idempotency_key=payload.idempotency_key, request_hash=request_hash,
         snapshot={"strategy": parameters, "template": snapshot, "template_version": version,
-            "title_engine": "v1", "title_profile": None, "title_market_id": None,
+            "title_engine": "v2", "title_profile": title_profile, "title_market_id": title_market_id,
             "catalog_options": copy.deepcopy(catalog_listing_options(catalog)), "catalog_type": catalog.template_type,
             "candidates": candidates, "seed": secrets.token_hex(16), "user_name": actor.name,
             "internal_usage": actor.role != Role.SUPPLY_USER, "expected_rows": rows},

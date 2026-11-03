@@ -59,7 +59,7 @@ onUnmounted(()=>{revision++})
     <TitlePagination label="模板配置" :page="page" :page-size="pageSize" :total="total" :disabled="loading" @page="changePage" @page-size="changePageSize" />
     <div v-if="editing" class="modal-backdrop" @click.self="close"><section v-dialog-focus="{close,busy:editingBusy}" class="modal-card template-config-dialog" role="dialog" aria-modal="true" aria-labelledby="template-config-title">
       <div class="template-config-dialog-heading"><h2 id="template-config-title">{{editing.name}} · 词库配置</h2><button class="ghost" :disabled="editingBusy" aria-label="关闭模板词库配置" @click="close">×</button></div>
-      <TitleProfileEditor :site="site" :token="token" :template-id="editing.id" :readonly="!admin" @busy="editingBusy=$event" @saved="saved" />
+      <TitleProfileEditor :site="site" :token="token" :template-id="editing.id" :readonly="!admin" show-fallback @busy="editingBusy=$event" @saved="saved" />
     </section></div>
   </section>
 </template>

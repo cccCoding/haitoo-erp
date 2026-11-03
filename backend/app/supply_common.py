@@ -119,6 +119,40 @@ def validate_template(template, *, validate_title=True):
     return snapshot
 
 
+def validate_title_fallback(profile):
+    """新货盘快照明确兜底语言；历史词库快照沿用其站点语言。"""
+    from .title_service import remove_forbidden_phrases, validate_localized_title
+    value = remove_forbidden_phrases(profile['fallback_title'], profile.get('forbidden_phrases', []))
+    if profile.get('fallback_language') == 'en':
+        return validate_generated_title(value)
+    return validate_localized_title(value, 220, site=profile.get('site', 'MY'),
+                                    language=profile.get('language', 'ms'))
+
+
+def supply_title_snapshot(db, company_id, template, site):
+    from .title_markets import check_market, market_labels
+    from .title_service import get_market, profile_snapshot
+    check_market(site=site, language='id' if site == 'ID' else 'ms')
+    market = get_market(db, company_id, site=site, language=market_labels(site)['language'], lock=True)
+    if not market:
+        raise HTTPException(400, '请联系公司管理员到标题词库 → 对应站点 → 模板配置，配置商品品类、性别、年龄及确认属性')
+    try:
+        profile = profile_snapshot(db, market, template.id)
+    except HTTPException as exc:
+        if exc.status_code != 400:
+            raise
+        raise HTTPException(400, f"请联系公司管理员完善{market_labels(site)['site_name']}词库配置：{exc.detail}") from exc
+    localized_fallback = bool((profile['fallback_title'] or '').strip())
+    profile['fallback_language'] = market.language if localized_fallback else 'en'
+    if not localized_fallback:
+        profile['fallback_title'] = template.supply_fallback_title
+    try:
+        profile['fallback_title'] = validate_title_fallback(profile)
+    except ProviderError as exc:
+        raise HTTPException(400, f'货盘兜底标题应用禁用词后无效，请检查标题配置：{exc}') from exc
+    return market.id, profile
+
+
 def material_snapshot(asset, version, url=None):
     value = {"id": asset.id, "template_id": asset.template_id, "sku": (asset.sku or "").strip(),
              "url": (url if url is not None else asset.url or "").strip(), "name": asset.name, "template_version": version,

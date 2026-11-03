@@ -195,7 +195,9 @@ async def request_title(api_key, template, requirements):
 
 async def request_market_title(job_id, epoch, index, first_image, session_factory):
     from .title_models import TitleMarket, TitleRecord
-    from .title_service import create_record, generate_record, remove_forbidden_phrases, task_still_active, validate_malay_title
+    from .title_service import create_record, generate_record, task_still_active
+    from .title_markets import market_labels
+    from .supply_common import validate_title_fallback
     with session_factory() as db:
         job = db.get(SupplyJob, job_id)
         market = db.get(TitleMarket, job.snapshot['title_market_id'])
@@ -214,14 +216,17 @@ async def request_market_title(job_id, epoch, index, first_image, session_factor
             db.refresh(record)
             if record.lease_owner or any(word in str(exc) for word in ('执行权', '取消', '正在生成', '账号')):
                 raise
-            fallback = validate_malay_title(remove_forbidden_phrases(profile['fallback_title'],
-                profile.get('forbidden_phrases', [])), 220)
+            fallback = validate_title_fallback(profile)
             record = db.get(TitleRecord, record.id, populate_existing=True)
             record.title = fallback
             record.source = 'fallback'
             record.state = 'generated'
             record.selected_keywords = []
-            record.warnings = ['已使用审核的马来语兜底标题；可能与其他链接高度相似']
+            label = ('兜底标题（对应站点兜底标题未设置）'
+                     if profile.get('fallback_language') == 'en'
+                     else f"{market_labels(profile.get('site', 'MY'))['language_name']}兜底标题")
+            record.warnings = [f'已使用{label}；可能与其他链接高度相似']
+            record.error = None
             db.commit()
             result = {'title': fallback, 'source': 'fallback', 'warnings': record.warnings}
         return {**result, 'generation_id': record.id}

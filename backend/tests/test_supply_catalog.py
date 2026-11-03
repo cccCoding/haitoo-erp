@@ -86,6 +86,17 @@ class SupplyFixture:
         return {"name": "生成策略", "category_catalog_id": 1, "category_name": "女士上装/女士衬衫", "template_id": 1,
                 "price": "19.99", "attributes": {"product_property/100198": "花朵"}, "sku_count": 5, "link_count": 10, **extra}
 
+    def configure_supply_titles(self, site='MY'):
+        from app.title_dictionary import category_values
+        from app.title_models import TitleTemplateProfile
+        from app.title_service import get_market
+        with self.sessions() as db:
+            market = get_market(db, 1, site=site, language='id' if site == 'ID' else 'ms', create=True)
+            category_values(db, market, ['连衣裙'])
+            db.add(TitleTemplateProfile(market_id=market.id, template_id=1, category='连衣裙',
+                gender='女', age_group='成人', attributes={'结构设计': '长袖'}))
+            db.commit()
+
     def create_strategy(self, uid=4, **extra):
         response = self.request("POST", "/supply/strategies", uid=uid, json=self.strategy_input(**extra))
         self.assertEqual(response.status_code, 200, response.text)
@@ -100,6 +111,10 @@ class SupplyFixture:
 
 
 class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.configure_supply_titles()
+
     def test_bothplatforms_strategy_defaults_and_snapshot_keep_insurance(self):
         from app.tiktok_export import parse_listing_options
 

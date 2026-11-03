@@ -3,6 +3,19 @@ import { test } from 'node:test'
 import { createSupplyRequestScope, createSupplySubmissionKeys, emptySupplyStrategy, supplyExpiryInput, supplyExpiryPayload, supplyFileStatus, supplyStrategyPayload, supplyTime, unfinishedSupplyJob, validateSupplyStrategy } from '../src/supply-catalog.ts'
 const valid = () => ({ ...emptySupplyStrategy(), name: '日常女装', category_catalog_id: 1, category_name: 'Dresses', template_id: 1, price: '39.90' })
 
+test('Supply title markets default legacy strategies to MY and preserve ID in payloads', () => {
+  assert.equal(emptySupplyStrategy().title_site, 'MY')
+  const legacy = valid()
+  delete legacy.title_site
+  assert.equal(supplyStrategyPayload(legacy).title_site, 'MY')
+  for (const title_site of ['MY', 'ID']) {
+    const form = { ...valid(), title_site }
+    assert.equal(supplyStrategyPayload(form).title_site, title_site)
+    assert.equal(validateSupplyStrategy(form, 2), '')
+  }
+  assert.match(validateSupplyStrategy({ ...valid(), title_site: 'SG' }, 2), /词库站点/)
+})
+
 test('Expiry editing uses Hong Kong time across day boundaries and validates calendar dates', () => {
   const expiry = Date.parse('2027-01-31T16:00:37Z')
   assert.equal(supplyExpiryInput(expiry), '2027-02-01T00:00:37')

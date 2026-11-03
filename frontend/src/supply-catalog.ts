@@ -1,4 +1,5 @@
 import type { ShippingInsurance } from './tiktok-export'
+import type { TitleSite } from './title-markets'
 
 export interface SupplyUsageTask {
   job_id: number; user_id: number; user_name: string | null; agent_name: string | null;
@@ -61,17 +62,19 @@ export function supplyFileStatus(job: { state: string; file_expired?: boolean; o
   return job.state === 'completed' ? '可下载' : ''
 }
 export interface SupplyStrategyForm {
+  title_site: TitleSite;
   infringement_filter: 'exclude' | 'include' | 'only';
   name: string; category_catalog_id: number | null; category_name: string; template_id: number | null;
   price: string | number; stock: number; cod: string; shipping_insurance: ShippingInsurance | null; attributes: Record<string, string>; sku_count: number;
   link_count: number; title_requirements: string;
 }
 export function emptySupplyStrategy(): SupplyStrategyForm {
-  return { infringement_filter: 'exclude', name: '', category_catalog_id: null, category_name: '', template_id: null, price: '', stock: 999,
+  return { title_site: 'MY', infringement_filter: 'exclude', name: '', category_catalog_id: null, category_name: '', template_id: null, price: '', stock: 999,
     cod: 'Y', shipping_insurance: null, attributes: {}, sku_count: 5, link_count: 10, title_requirements: '' }
 }
 export function supplyStrategyPayload(form: SupplyStrategyForm): SupplyStrategyForm {
   return {
+    title_site: form.title_site ?? 'MY',
     infringement_filter: form.infringement_filter ?? 'include',
     name: form.name.trim(), category_catalog_id: form.category_catalog_id, category_name: form.category_name,
     template_id: form.template_id, price: String(form.price), stock: form.stock, cod: form.cod, shipping_insurance: form.shipping_insurance ?? null,
@@ -80,6 +83,7 @@ export function supplyStrategyPayload(form: SupplyStrategyForm): SupplyStrategyF
   }
 }
 export function validateSupplyStrategy(form: SupplyStrategyForm, sizeCount: number, attributes: { field: string; label?: string; required?: boolean }[] = []): string {
+  if (!['MY', 'ID'].includes(form.title_site ?? 'MY')) return '请选择有效的标题词库站点'
   if (!['exclude', 'include', 'only'].includes(form.infringement_filter)) return '请选择有效的侵权筛选条件'
   if (!form.name.trim()) return '请填写策略名称'
   if (!form.category_catalog_id || !form.category_name) return '请选择类目库和商品类目'
