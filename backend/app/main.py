@@ -1727,8 +1727,8 @@ def list_user_template_resources(
     db: Session = Depends(get_db),
 ):
     if scope == "company":
-        if user.role != Role.COMPANY_ADMIN:
-            raise HTTPException(403, "仅公司管理员可查看全部成员的模板资源")
+        if user.role not in (Role.COMPANY_ADMIN, *DESIGN_ROLES):
+            raise HTTPException(403, "仅公司管理员和美工可查看全部成员的模板资源")
         if user_id is not None:
             raise HTTPException(400, "全部成员范围不能同时指定成员")
         owner = None
@@ -1754,13 +1754,17 @@ def list_user_template_resources(
         prompt_query = prompt_query.where(UserTemplatePrompt.template_id == template.id)
     white_images = db.scalars(white_image_query.order_by(UserTemplateWhiteImage.id.desc())).all()
     prompts = db.scalars(prompt_query.order_by(UserTemplatePrompt.id.desc())).all()
+    owner_ids = {item.user_id for item in [*white_images, *prompts]}
+    owner_names = dict(db.execute(select(User.id, User.name).where(
+        User.company_id == user.company_id, User.id.in_(owner_ids),
+    )).all()) if owner_ids else {}
     return {
         "user_id": owner.id if owner is not None else None,
         "scope": scope,
         "white_image_status": white_image_status,
         "template_id": template_id,
-        "white_images": [serialize_record(item) for item in white_images],
-        "prompts": [serialize_record(item) for item in prompts],
+        "white_images": [serialize_record(item) | {"user_name": owner_names.get(item.user_id, "历史成员")} for item in white_images],
+        "prompts": [serialize_record(item) | {"user_name": owner_names.get(item.user_id, "历史成员")} for item in prompts],
     }
 
 
@@ -2860,15 +2864,18 @@ def create_task(payload: PodTaskCreate, user: User = Depends(creative_user), db:
     from .supply_common import lock_company
     lock_company(db, user.company_id)
     template = get_usable_template(db, user, payload.template_id)
-    white_image = db.scalar(select(UserTemplateWhiteImage).where(
+    white_image_query = select(UserTemplateWhiteImage).where(
         UserTemplateWhiteImage.id == payload.white_image_id,
         UserTemplateWhiteImage.company_id == user.company_id,
-        UserTemplateWhiteImage.user_id == user.id,
         UserTemplateWhiteImage.template_id == template.id,
         UserTemplateWhiteImage.deleted_at.is_(None),
-    ))
+    )
+    if user.role not in DESIGN_ROLES:
+        white_image_query = white_image_query.where(UserTemplateWhiteImage.user_id == user.id)
+    white_image = db.scalar(white_image_query)
     if not white_image:
-        raise HTTPException(400, "请选择当前模板下自己的产品白底图")
+        raise HTTPException(400, "请选择当前模板下本公司的有效产品白底图" if user.role in DESIGN_ROLES
+                            else "请选择当前模板下自己的产品白底图")
     if not registered_image_url(white_image.image_url, user.company_id, db):
         raise HTTPException(400, "所选产品白底图地址无效，请重新上传")
     raw_print_urls = payload.print_urls or ([payload.print_url] if payload.print_url else [])

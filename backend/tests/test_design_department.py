@@ -114,7 +114,7 @@ class DesignDepartmentTests(unittest.TestCase):
                 response=self.request('GET',path,uid)
                 self.assertIn(response.status_code,(403,404),f'{uid} {path}: {response.text}')
             self.assertEqual(self.request('GET','/user-template-resources',uid,params={'user_id':5}).status_code,403)
-            self.assertEqual(self.request('GET','/user-template-resources',uid,params={'scope':'company'}).status_code,403)
+            self.ok(self.request('GET','/user-template-resources',uid,params={'scope':'company'}))
             self.assertEqual(self.request('POST','/templates',uid,json={'name':'TEST'}).status_code,403)
             self.assertEqual(self.request('POST','/uploads/presign',uid,json={'category':'template','files':[{'content_type':'image/png','content_length':5,'sha256':'a'*64}]}).status_code,403)
         with patch.object(main,'prepare_upload',return_value={'upload_url':'https://upload.example'}) as upload:
@@ -156,8 +156,90 @@ class DesignDepartmentTests(unittest.TestCase):
         created=self.ok(self.request('POST','/tasks',2,json=payload))
         self.assertEqual(created['items'][0]['created_by'],2)
         self.assertEqual(created['items'][0]['status'],'queued')
-        self.assertEqual(self.request('POST','/tasks',3,json=payload).status_code,400)
+        missing_key=self.request('POST','/tasks',3,json=payload)
+        self.assertEqual(missing_key.status_code,400)
+        self.assertIn('个人 Grsai 平台密钥',missing_key.json()['detail'])
         self.assertEqual(self.ok(self.request('GET','/ai-providers',2))[0]['credential_configured'],True)
+
+    def test_design_roles_share_company_resources_without_peer_management(self):
+        with self.sessions() as db:
+            for uid in (1,3,4,5,9):
+                db.add(UserTemplateWhiteImage(id=100+uid,company_id=1,user_id=uid,template_id=1,
+                    name='同名白底',image_url=f'https://images.example/white-{uid}.png'))
+                db.add(UserTemplatePrompt(id=100+uid,company_id=1,user_id=uid,template_id=1,
+                    name='同名要求',content=f'成员{uid}的提示词'))
+            db.add_all([
+                UserTemplateWhiteImage(id=200,company_id=2,user_id=7,template_id=1,
+                    name='其他公司',image_url='https://images.example/foreign-white.png'),
+                UserTemplatePrompt(id=200,company_id=2,user_id=7,template_id=1,name='其他公司',content='不应可见'),
+                UserTemplateWhiteImage(id=201,company_id=1,user_id=5,template_id=1,
+                    name='已删除白底',image_url='https://images.example/deleted-white.png',deleted_at=datetime.utcnow()),
+            ])
+            db.commit()
+        for uid in (2,3):
+            data=self.ok(self.request('GET','/user-template-resources',uid,
+                params={'scope':'company','template_id':1}))
+            self.assertEqual(data['scope'],'company')
+            self.assertIsNone(data['user_id'])
+            for key in ('white_images','prompts'):
+                self.assertEqual({item['user_id'] for item in data[key]},{1,2,3,4,5,9})
+                self.assertTrue(all(item['company_id']==1 and item['template_id']==1 for item in data[key]))
+                self.assertTrue(all(item['user_name']==f"成员{item['user_id']}" for item in data[key]))
+            self.assertEqual(self.request('GET','/user-template-resources',uid,
+                params={'scope':'company','user_id':5}).status_code,400)
+            # 创作资源管理默认仍只列本人；共享读取不赋予代建、编辑、删除权限。
+            own=self.ok(self.request('GET','/user-template-resources',uid))
+            self.assertTrue(all(item['user_id']==uid for item in own['white_images']+own['prompts']))
+            for path,payload in [('/user-template-white-images/105',{'name':'修改他人白底'}),
+                                 ('/user-template-prompts/105',{'name':'修改他人要求','content':'新内容'})]:
+                self.assertEqual(self.request('PUT',path,uid,json=payload).status_code,404)
+                self.assertEqual(self.request('DELETE',path,uid).status_code,404)
+            self.assertEqual(self.request('POST','/user-template-prompts',uid,
+                json={'template_id':1,'user_id':5,'name':'代建要求','content':'新内容'}).status_code,403)
+        visible=self.ok(self.request('GET','/user-template-resources',2,params={'scope':'company'}))
+        self.assertTrue(all(item['template_id']==1 for item in visible['white_images']+visible['prompts']))
+        self.assertEqual(self.request('GET','/user-template-resources',2,
+            params={'scope':'company','template_id':2}).status_code,404)
+        for uid in (5,9):
+            self.assertEqual(self.request('GET','/user-template-resources',uid,
+                params={'scope':'company'}).status_code,403)
+
+    def test_shared_white_image_tasks_keep_creator_and_source_style(self):
+        from tests.image_file_helpers import index_urls
+        from app.models import MaterialStyle
+        from app.credentials import encrypt_secret
+        with self.sessions() as db:
+            index_urls(db,1,['https://images.example/white.png','https://images.example/print.png'])
+            for uid in (2,3):
+                db.add(UserAIProviderCredential(company_id=1,user_id=uid,provider='grsai',
+                    secret_encrypted=encrypt_secret(f'test-key-{uid}')))
+            for image_id,company_id,template_id,deleted_at in [(100,1,1,None),(101,2,1,None),
+                    (102,1,2,None),(103,1,1,datetime.utcnow())]:
+                db.add(UserTemplateWhiteImage(id=image_id,company_id=company_id,user_id=5 if company_id==1 else 7,
+                    template_id=template_id,name=f'共享白底{image_id}',image_url='https://images.example/white.png',
+                    deleted_at=deleted_at))
+            db.add(UserTemplatePrompt(id=100,company_id=1,user_id=5,template_id=1,name='共享提示词',content='保留共享印花'))
+            db.commit()
+        for uid in (2,3):
+            resources=self.ok(self.request('GET','/user-template-resources',uid,
+                params={'scope':'company','template_id':1}))
+            prompt=next(item for item in resources['prompts'] if item['id']==100)
+            payload={'template_id':1,'white_image_id':100,'creative_requirement':prompt['content'],
+                'print_urls':['https://images.example/print.png']}
+            task=self.ok(self.request('POST','/tasks',uid,json=payload))['items'][0]
+            self.assertEqual((task['created_by'],task['company_id'],task['status']),(uid,1,'queued'))
+            self.assertEqual(task['parameters']['white_image_id'],100)
+            self.assertEqual(task['parameters']['white_image_name'],'共享白底100')
+            self.assertEqual(task['parameters']['white_image_url'],'https://images.example/white.png')
+            self.assertEqual(task['parameters']['creative_requirement'],prompt['content'])
+            with self.sessions() as db:
+                style=db.get(MaterialStyle,task['parameters']['style_id'])
+                self.assertEqual((style.created_by,style.source_white_image_id),(5,100))
+            for invalid_id in (101,102,103,999):
+                self.assertEqual(self.request('POST','/tasks',uid,json=payload|{'white_image_id':invalid_id}).status_code,400)
+        self.assertEqual(self.request('POST','/tasks',2,json=payload|{'template_id':2,'white_image_id':102}).status_code,404)
+        for uid in (5,9):
+            self.assertEqual(self.request('POST','/tasks',uid,json=payload|{'white_image_id':1}).status_code,400)
 
     def test_design_members_group_creation_handover_and_role_transition(self):
         created=self.ok(self.request('POST','/members',json={'name':'新美工','email':'new@example.com',
