@@ -14,7 +14,7 @@ from sqlalchemy import create_engine, func, inspect, select
 from app import main
 from app.ai_providers import ProviderError
 from app.credentials import encrypt_secret
-from app.models import ProductDraft, ProductTemplate, UserAIProviderCredential
+from app.models import MaterialAsset, ProductDraft, ProductTemplate, Role, User, UserAIProviderCredential
 from app.schema_version import alembic_config
 from app.title_import import extract_row, parse_file
 from app.title_models import TitleEvidence, TitleKeyword, TitleMarket, TitleRecord, TitleTask, TitleTemplateProfile
@@ -97,6 +97,98 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         async def answer(key, instructions, data, **kwargs):
             return copy.deepcopy(FACTS) if 'manual' in data else {'title': title}
         return AsyncMock(side_effect=answer)
+
+    def test_title_library_grants_are_admin_only_and_independent_of_supply_permissions(self):
+        for uid in (2, 3, 4, 5):
+            response = self.request('POST', '/title-library/grants/2', uid=uid, json={'enabled': True})
+            self.assertIn(response.status_code, (403, 404))
+        for target, status in ((4, 400), (5, 404), (999, 404), (1, 400)):
+            self.assertEqual(self.request('POST', f'/title-library/grants/{target}', json={'enabled': True}).status_code, status)
+        for uid in (2, 3):
+            self.assertEqual(self.request('PUT', '/title-market', uid=uid, json={'enabled': True}).status_code, 403)
+            granted = self.request('POST', f'/title-library/grants/{uid}', json={'enabled': True})
+            self.assertEqual(granted.status_code, 200, granted.text)
+            self.assertTrue(granted.json()['title_library_admin'])
+            me = self.request('GET', '/me', uid=uid).json()['user']
+            self.assertTrue(me['title_library_admin'])
+            self.assertEqual(me['supply_admin'], uid == 3)
+            self.assertEqual(self.request('PUT', '/title-market', uid=uid, json={'enabled': True}).status_code, 200)
+            self.assertEqual(self.request('POST', '/title-library/grants/2', uid=uid, json={'enabled': False}).status_code, 403)
+        self.assertEqual(self.request('GET', '/supply/managers', uid=2).status_code, 403)
+        self.assertEqual(self.request('GET', '/members', uid=2).status_code, 403)
+        members = self.request('GET', '/members').json()
+        self.assertTrue(next(member for member in members if member['id'] == 2)['title_library_admin'])
+
+    def test_granted_manager_can_manage_shared_import_keywords_dictionaries_and_profiles(self):
+        task_id = self.import_words()
+        self.assertEqual(self.request('GET', f'/title-tasks/{task_id}', uid=2).status_code, 404)
+        self.request('POST', '/title-library/grants/2', json={'enabled': True})
+        self.assertEqual(self.request('GET', f'/title-tasks/{task_id}', uid=2).status_code, 200)
+        self.assertIn(task_id, [task['id'] for task in self.request('GET', '/title-tasks', uid=2).json()['items']])
+        word = self.request('GET', '/title-keywords', uid=2).json()['items'][0]
+        response = self.request('POST', f"/title-keywords/{word['id']}/status", uid=2,
+            json={'status': 'disabled', 'review_token': word['review_token']})
+        self.assertEqual(response.status_code, 200, response.text)
+        category = self.request('POST', '/title-dictionaries/category', uid=2, json={'name': '词库管理员分类'})
+        self.assertEqual(category.status_code, 200, category.text)
+        updated = self.request('PATCH', f"/title-dictionaries/{category.json()['id']}", uid=2, json={'description': '可维护'})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(self.request('DELETE', f"/title-dictionaries/{category.json()['id']}", uid=2).status_code, 200)
+        profile = self.request('PUT', '/title-profiles/1', uid=2,
+            json={'category': '连衣裙', 'gender': '女', 'age_group': '成人', 'attributes': {}})
+        self.assertEqual(profile.status_code, 200, profile.text)
+        self.assertEqual(self.request('PUT', '/title-profiles/2', uid=2,
+            json={'category': '连衣裙', 'gender': '女', 'age_group': '成人'}).status_code, 404)
+        self.assertEqual(self.request('GET', f'/title-tasks/{task_id}', uid=5).status_code, 404)
+        # 管理词库不放宽素材所有权检查。
+        with self.sessions() as db:
+            db.get(MaterialAsset, 1).claimed_by = 3
+            db.commit()
+        response = self.request('POST', '/title-generation-jobs', uid=2, json={'template_id': 1,
+            'request_key': 'permission-material-scope', 'groups': [{'key': 'foreign', 'source': {'id': 1}}]})
+        self.assertEqual(response.status_code, 404, response.text)
+
+    def test_granted_member_import_runs_and_revocation_blocks_same_token_and_worker(self):
+        self.request('POST', '/title-library/grants/2', json={'enabled': True})
+        self.request('POST', '/title-dictionaries/category', uid=2, json={'name': '连衣裙', 'localized_name': 'Gaun'})
+        response = self.request('POST', '/title-imports', uid=2,
+            files={'file': ('member.csv', KEYWORDS.encode())}, data={'kind': 'keywords'})
+        self.assertEqual(response.status_code, 200, response.text)
+        task = response.json()
+        self.confirm_new_categories(task)
+        self.assertEqual(self.request('POST', f"/title-tasks/{task['id']}/start", uid=2).status_code, 200)
+        self.run_worker()
+        review = self.request('GET', f"/title-tasks/{task['id']}", uid=2).json()
+        self.assertEqual(review['state'], 'review', review)
+        confirmed = self.request('POST', f"/title-imports/{task['id']}/confirm", uid=2,
+            json={'selections': [word['index'] for word in review['result']['words']]})
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        second = self.request('POST', '/title-imports', uid=2,
+            files={'file': ('second.csv', (KEYWORDS + 'longgar,宽松,连衣裙,版型,否\n').encode())}, data={'kind': 'keywords'}).json()
+        self.confirm_new_categories(second)
+        self.assertEqual(self.request('POST', f"/title-tasks/{second['id']}/start", uid=2).status_code, 200)
+        self.request('POST', '/title-library/grants/2', json={'enabled': False})
+        self.assertFalse(self.request('GET', '/me', uid=2).json()['user']['title_library_admin'])
+        self.assertEqual(self.request('GET', '/title-import-template', uid=2).status_code, 403)
+        self.assertEqual(self.request('PUT', '/title-market', uid=2, json={'enabled': True}).status_code, 403)
+        self.assertEqual(self.request('POST', f"/title-imports/{task['id']}/confirm", uid=2, json={'selections': []}).status_code, 403)
+        self.assertEqual(self.request('GET', '/title-keywords', uid=2).status_code, 200)
+        self.run_worker()
+        failed = self.request('GET', f"/title-tasks/{second['id']}").json()
+        self.assertEqual(failed['state'], 'failed', failed)
+        self.assertIn('标题词库管理权限', failed['error'])
+
+    def test_title_permission_does_not_admit_designer_or_external_roles(self):
+        for role in (Role.DESIGNER, Role.DESIGN_LEADER, Role.SUPPLY_USER):
+            with self.subTest(role=role):
+                with self.sessions() as db:
+                    user = db.get(User, 2)
+                    user.role = role
+                    user.title_library_admin = True
+                    user.supply_expires_at = datetime.utcnow() + timedelta(days=30)
+                    db.commit()
+                self.assertEqual(self.request('POST', '/title-library/grants/2', json={'enabled': True}).status_code, 400)
+                self.assertEqual(self.request('GET', '/title-import-template', uid=2).status_code, 403)
 
     def test_import_confirmation_enables_all_selected_words_even_for_legacy_false_flag(self):
         for index, legacy in enumerate(({}, {'enable': False}, {'enable': True})):

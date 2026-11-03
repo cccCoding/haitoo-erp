@@ -16,6 +16,7 @@ from .logging_config import configure_logging
 from .models import Company, Role, User
 from .title_import import extract_row
 from .title_models import TitleImportWord, TitleMarket, TitleRecord, TitleTask
+from .title_permissions import is_title_manager
 from .title_service import credential, digest, generate_record, normalize, record_payload
 
 logger = logging.getLogger(__name__)
@@ -61,8 +62,8 @@ def change_task(identity, owner, callback, session_factory=SessionLocal):
         company = db.get(Company, market.company_id)
         if not user or not user.is_active or user.company_id != market.company_id or not company or not company.is_active or user.role not in {Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER}:
             raise ProviderError('任务账号或公司已停用')
-        if task.kind == 'import' and user.role != Role.COMPANY_ADMIN:
-            raise ProviderError('导入账号不再具有管理员权限')
+        if task.kind == 'import' and not is_title_manager(user):
+            raise ProviderError('导入账号不再具有标题词库管理权限')
         result = callback(db, task, market)
         task.updated_at = datetime.utcnow()
         db.commit()

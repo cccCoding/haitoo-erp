@@ -17,6 +17,7 @@ from .ai_providers import ProviderError
 from .database import get_db
 from .models import MaterialAsset, ProductTemplate, Role, User
 from .security import require_roles
+from .title_permissions import is_title_manager, require_title_manager
 from .title_import import MAX_BYTES, TITLE_COLUMN_NAMES, keyword_column_names, IMPORT_OPTIONAL_COLUMNS, confirm_import, parse_file
 from .title_models import TitleCategoryMerge, TitleDictionaryEntry, TitleEvidence, TitleImportWord, TitleKeyword, TitleMarket, TitleRecord, TitleTask, TitleTemplateProfile
 from .title_service import (TAGS, CATEGORY_FIELDS, DICTIONARY_TAGS, PROFILE_TAGS, GENDERS, AGE_GROUPS,
@@ -31,11 +32,30 @@ from .title_categories import (category_index, category_summary, display_categor
 
 router = APIRouter()
 reader = require_roles(Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER)
-admin = require_roles(Role.COMPANY_ADMIN)
+admin = require_title_manager
 
 
 class Input(BaseModel):
     model_config = {'extra': 'forbid'}
+
+
+class GrantInput(Input):
+    enabled: bool
+
+
+@router.post('/title-library/grants/{identity}')
+def grant_title_manager(identity: int, payload: GrantInput,
+                        user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
+    from .supply_common import lock_company
+    lock_company(db, user.company_id)
+    member = db.scalar(select(User).where(User.id == identity).with_for_update())
+    if not member or member.company_id != user.company_id:
+        raise HTTPException(404, '成员不存在')
+    if member.role not in (Role.MEMBER, Role.TEAM_LEADER):
+        raise HTTPException(400, '只能向本公司成员或组长分配标题词库管理权限')
+    member.title_library_admin = payload.enabled
+    db.commit()
+    return {'id': member.id, 'title_library_admin': member.title_library_admin}
 
 
 class MarketInput(Input, TitleMarketSelection):
@@ -193,7 +213,7 @@ def scoped_row(db, model, identity, user):
 
 def task_for(db, identity, user):
     task = scoped_row(db, TitleTask, identity, user)
-    if user.role != Role.COMPANY_ADMIN and task.user_id != user.id:
+    if not is_title_manager(user) and task.user_id != user.id:
         raise HTTPException(404, '任务不存在')
     return task
 
@@ -842,7 +862,7 @@ def tasks(platform: str = 'TikTok', site: str = 'MY', language: str = 'ms', kind
     if not market:
         return {'items': [], 'total': 0, 'page': 1, 'page_size': page_size}
     query = select(TitleTask).where(TitleTask.market_id == market.id, TitleTask.kind == kind)
-    if user.role != Role.COMPANY_ADMIN:
+    if not is_title_manager(user):
         query = query.where(TitleTask.user_id == user.id)
     id_query = query.with_only_columns(TitleTask.id)
     total = db.scalar(select(func.count()).select_from(id_query.subquery()))
@@ -982,8 +1002,8 @@ def cancel_task(identity: int, user: User = Depends(reader), db: Session = Depen
 @router.post('/title-tasks/{identity}/retry')
 def retry_task(identity: int, user: User = Depends(reader), db: Session = Depends(get_db)):
     task = task_for(db, identity, user)
-    if task.kind == 'import' and user.role != Role.COMPANY_ADMIN:
-        raise HTTPException(403, '只有管理员可以重试导入')
+    if task.kind == 'import' and not is_title_manager(user):
+        raise HTTPException(403, '只有拥有标题词库管理权限的人员可以重试导入')
     if task.kind == 'import':
         db.scalar(select(TitleMarket).where(TitleMarket.id == task.market_id).with_for_update().execution_options(populate_existing=True))
         task = db.scalar(select(TitleTask).options(undefer(TitleTask.snapshot)).where(TitleTask.id == task.id).with_for_update().execution_options(populate_existing=True))
@@ -1064,7 +1084,7 @@ def statistics(platform: str = 'TikTok', site: str = 'MY', language: str = 'ms',
     if not market:
         return {'generated': 0, 'adopted': 0, 'manual': 0, 'high_similarity': 0, 'attempts': 0}
     query = select(TitleRecord).where(TitleRecord.market_id == market.id)
-    if user.role != Role.COMPANY_ADMIN:
+    if not is_title_manager(user):
         query = query.where(TitleRecord.user_id == user.id)
     rows = db.scalars(query).all()
     return {'generated': sum(bool(r.title) and r.source == 'ai' for r in rows),

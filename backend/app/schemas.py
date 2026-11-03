@@ -21,6 +21,7 @@ class UserOut(BaseModel):
     company_id: int | None
     is_active: bool
     supply_admin: bool = False
+    title_library_admin: bool = False
     supply_agent_id: int | None = None
     supply_expires_at: datetime | None = None
     created_at: datetime

@@ -14,6 +14,20 @@ from app.schema_version import alembic_config, assert_schema_current, schema_hea
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_title_library_permission_migration_preserves_users_without_granting_access(self):
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, '20261102_59')
+            connection.execute(text("INSERT INTO users "
+                "(id, company_id, name, email, password_hash, role, is_active, token_version, created_at) "
+                "VALUES (1, 1, '运营', 'operator@example.com', 'hash', 'MEMBER', 1, 0, CURRENT_TIMESTAMP)"))
+            command.upgrade(config, 'head')
+            self.assertEqual(connection.execute(text(
+                'SELECT name, title_library_admin FROM users WHERE id=1')).one(), ('运营', 0))
+            command.downgrade(config, '20261102_59')
+            self.assertNotIn('title_library_admin', {column['name'] for column in inspect(connection).get_columns('users')})
+            self.assertEqual(connection.execute(text('SELECT name FROM users WHERE id=1')).scalar_one(), '运营')
+
     def test_result_concurrency_preserves_intervals_and_tasks(self):
         with self.engine.begin() as connection:
             config = alembic_config(connection)

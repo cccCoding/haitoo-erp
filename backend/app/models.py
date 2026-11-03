@@ -68,6 +68,7 @@ class User(Base):
     design_group_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     supply_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    title_library_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     supply_agent_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     supply_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

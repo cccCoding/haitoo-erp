@@ -16,7 +16,8 @@ const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://loca
 const market = computed(() => titleMarket(props.site))
 const marketParams = computed(() => ({ platform: 'TikTok', ...titleMarketParams(props.site) }))
 const config = computed(() => ({ params: marketParams.value, headers: { Authorization: `Bearer ${props.token}` } }))
-const admin = computed(() => props.user?.role === 'company_admin')
+const admin = computed(() => props.user?.role === 'company_admin' || (
+  ['member', 'team_leader'].includes(props.user?.role) && props.user?.title_library_admin === true))
 const platform = 'TikTok'
 const showImport = ref(false)
 const importDialogBody = ref<HTMLElement | null>(null)
