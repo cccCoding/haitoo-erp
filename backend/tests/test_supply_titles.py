@@ -87,7 +87,7 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
             response = self.request('POST', '/supply/jobs', uid=4,
                 json={'strategy_id': strategy, 'idempotency_key': f'missing-{field}'})
             self.assertEqual(response.status_code, 400, response.text)
-            self.assertIn('模板配置', response.json()['detail'])
+            self.assertEqual(response.json()['detail'], '请联系管理员完善印尼站点该模板的词库配置')
             with self.sessions() as db:
                 setattr(self.profile(db, 'ID'), field, original)
                 db.commit()

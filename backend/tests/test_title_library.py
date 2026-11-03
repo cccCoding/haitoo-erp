@@ -1778,7 +1778,7 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         response = self.request('POST', '/supply/jobs', uid=4,
             json={'strategy_id': strategy, 'idempotency_key': 'disabled-library-category'})
         self.assertEqual(response.status_code, 400, response.text)
-        self.assertIn('模板配置', response.json()['detail'])
+        self.assertEqual(response.json()['detail'], '请联系管理员完善马来西亚站点该模板的词库配置')
         template = next(row for row in self.request('GET', '/supply/templates').json() if row['id'] == 1)
         self.assertEqual(template['title_engine'], 'v2')
 

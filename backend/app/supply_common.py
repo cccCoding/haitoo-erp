@@ -133,15 +133,16 @@ def supply_title_snapshot(db, company_id, template, site):
     from .title_markets import check_market, market_labels
     from .title_service import get_market, profile_snapshot
     check_market(site=site, language='id' if site == 'ID' else 'ms')
+    configuration_error = f"请联系管理员完善{market_labels(site)['site_name']}站点该模板的词库配置"
     market = get_market(db, company_id, site=site, language=market_labels(site)['language'], lock=True)
     if not market:
-        raise HTTPException(400, '请联系公司管理员到标题词库 → 对应站点 → 模板配置，配置商品品类、性别、年龄及确认属性')
+        raise HTTPException(400, configuration_error)
     try:
         profile = profile_snapshot(db, market, template.id)
     except HTTPException as exc:
         if exc.status_code != 400:
             raise
-        raise HTTPException(400, f"请联系公司管理员完善{market_labels(site)['site_name']}词库配置：{exc.detail}") from exc
+        raise HTTPException(400, configuration_error) from exc
     localized_fallback = bool((profile['fallback_title'] or '').strip())
     profile['fallback_language'] = market.language if localized_fallback else 'en'
     if not localized_fallback:
