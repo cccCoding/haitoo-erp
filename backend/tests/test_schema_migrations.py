@@ -14,6 +14,25 @@ from app.schema_version import alembic_config, assert_schema_current, schema_hea
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_task_list_indexes_preserve_tasks_and_support_scoped_pagination(self):
+        names = {
+            'ix_pod_tasks_company_type_id_status': ['company_id', 'task_type', 'id', 'status'],
+            'ix_pod_tasks_company_creator_type_id_status': ['company_id', 'created_by', 'task_type', 'id', 'status'],
+        }
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, '20261104_63')
+            connection.execute(PodTask.__table__.insert().values(id=900, company_id=1, template_id=1,
+                created_by=1, status=TaskStatus.COMPLETED, parameters={}, result_urls=[], result_map=[]))
+            command.upgrade(config, 'head')
+            indexes = {row['name']: row['column_names'] for row in inspect(connection).get_indexes('pod_tasks')}
+            for name, columns in names.items():
+                self.assertEqual(indexes[name], columns)
+            self.assertEqual(connection.execute(text('SELECT status FROM pod_tasks WHERE id=900')).scalar_one(), 'COMPLETED')
+            command.downgrade(config, '20261104_63')
+            self.assertTrue(set(names).isdisjoint(row['name'] for row in inspect(connection).get_indexes('pod_tasks')))
+            self.assertEqual(connection.execute(text('SELECT COUNT(*) FROM pod_tasks')).scalar_one(), 1)
+
     def test_title_library_permission_migration_preserves_users_without_granting_access(self):
         with self.engine.begin() as connection:
             config = alembic_config(connection)

@@ -397,6 +397,9 @@ class PodTask(Base):
         Index("ix_pod_tasks_provider_model", "provider", "provider_model"),
         # Worker 按状态取队列快照，并按创建顺序稳定处理。
         Index("ix_pod_tasks_status_created_at_id", "status", "created_at", "id"),
+        # 列表按编号倒序分页；状态放在尾部，让统计可只读索引而不读取任务 JSON。
+        Index("ix_pod_tasks_company_type_id_status", "company_id", "task_type", "id", "status"),
+        Index("ix_pod_tasks_company_creator_type_id_status", "company_id", "created_by", "task_type", "id", "status"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)

@@ -24,6 +24,7 @@ import { titleMarket, titleMarkets, titleMarketParams, invalidateTitleMarket, ty
 import { batchTitleRequest, createBatchTitleGenerator, emptyTitleGenerationProgress, hasValidBatchTitles, isUnfinishedTitle, titleGenerationStatusLabels, type BatchTitleGroup } from './batch-title-generation'
 import { createPersistentTitleGenerator } from './persistent-title-generation'
 import { createTaskBatchRetrier } from './task-batch-retry'
+import { createTaskPageLoader } from './task-page-loader'
 import { shippingInsuranceError, shippingInsuranceSelection, type ShippingInsurance } from './tiktok-export'
 
 const pageSizeOptions = [20, 50, 100, 500, 1000]
@@ -166,7 +167,7 @@ async function openImagePreparation() {
   } else showImagePreparationDialog.value=true
   if(!aiPreparationInline.value) showImagePreparationDialog.value=true
 }
-watch(token,()=>{ stopImagePreparation(); aiCandidates.value={}; aiReviewContext.value=null })
+watch(token,()=>{ taskPageLoader.cancel(); stopImagePreparation(); aiCandidates.value={}; aiReviewContext.value=null }, { flush: 'sync' })
 const isAdoptionRequest=(url:string)=>/\/(claim-materials|images\/confirm|apply)$/.test(url) || url.endsWith('/drafts/batch-image-review/confirm')
 api.interceptors.request.use(async config=>{
   if(isAdoptionRequest(config.url || '')) {
@@ -1085,6 +1086,12 @@ function applyTaskPage(data: any) {
 async function changeTaskPageSize() { if (taskListRefreshing.value) return; currentTaskPage.value = 1; selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList() }
 async function changeTaskPage(targetPage: number) { if (taskListRefreshing.value) return; currentTaskPage.value = Math.min(Math.max(1, targetPage), taskPageCount.value); selectedTaskIds.value = []; syncTaskUrl(); await refreshTaskList() }
 function taskQueryParams() { return { page: currentTaskPage.value, page_size: taskPageSize.value, task_type: activeTaskType.value, creator_id: appliedTaskFilters.value.creator_id ?? undefined, status: appliedTaskFilters.value.status || undefined, created_from: appliedTaskFilters.value.created_from || undefined, created_to: appliedTaskFilters.value.created_to || undefined, sku_query: activeTaskType.value==='sku_image' ? appliedTaskFilters.value.sku_query.trim() || undefined : undefined, template_id: activeTaskType.value==='sku_image' ? appliedTaskFilters.value.template_id ?? undefined : undefined } }
+const taskPageLoader = createTaskPageLoader(
+  async (params: ReturnType<typeof taskQueryParams>, signal) => (await api.get('/tasks', {
+    headers: headers.value, params, signal, timeout: 30000,
+  })).data,
+  applyTaskPage,
+)
 function snapshotTaskTab() {
   taskTabStates.value[activeTaskType.value] = { page:currentTaskPage.value, pageSize:taskPageSize.value, creator:taskCreatorFilterId.value, status:taskStatusFilter.value, from:taskCreatedFrom.value, to:taskCreatedTo.value, skuQuery:taskSkuQuery.value, templateId:taskTemplateFilterId.value, applied:{...appliedTaskFilters.value} }
 }
@@ -1519,8 +1526,8 @@ async function refresh() {
     if (!creatorFiltersInitialized.value) {
       taskCreatorFilterId.value=null;appliedTaskFilters.value.creator_id=null;creatorFiltersInitialized.value=true
     }
-    const [t,g,task,providers]=await Promise.all([api.get('/templates',h),api.get('/template-groups',h),api.get('/tasks',{...h,params:taskQueryParams()}),api.get('/ai-providers',h)])
-    templates.value=t.data;templateGroups.value=g.data;applyTaskPage(task.data);aiProviders.value=providers.data
+    const [t,g,,providers]=await Promise.all([api.get('/templates',h),api.get('/template-groups',h),refreshTaskList(),api.get('/ai-providers',h)])
+    templates.value=t.data;templateGroups.value=g.data;aiProviders.value=providers.data
     shops.value=[];drafts.value=[];materialAssets.value=[];managedShops.value=[];operatorGroups.value=[];designGroups.value=[];tiktokCatalogs.value=[]
     members.value=user.value.role==='design_leader' ? (await api.get('/design-team-members',h)).data : []
     if(!templates.value.some(item=>item.id===selectedTemplateId.value)) selectedTemplateId.value=templates.value[0]?.id ?? null
@@ -1543,8 +1550,8 @@ async function refresh() {
     draftCreatorFilterId.value = user.value.id
     creatorFiltersInitialized.value = true
   }
-  const [s, t, g, task, material, d, providers, catalogs] = await Promise.all([api.get('/shops',h), api.get('/templates',h), api.get('/template-groups',h), api.get('/tasks',{...h,params:taskQueryParams()}), api.get('/material-assets',{...h,params:materialQueryParams()}), api.get('/drafts',{...h,params:{creator_id:draftCreatorFilterId.value,template_id:draftTemplateFilterId.value,tab:activeDraftTab.value,work_status:activeDraftWorkStatus.value,page:currentDraftPage.value,page_size:draftPageSize.value}}), api.get('/ai-providers',h), api.get('/category-catalogs',h)])
-  shops.value=s.data; templates.value=t.data; templateGroups.value=g.data; applyTaskPage(task.data); applyMaterialPage(material.data); drafts.value=d.data.items; draftTotal.value=d.data.total; draftTabCounts.value=d.data.tab_counts; draftWorkStatusCounts.value=d.data.work_status_counts; aiProviders.value=providers.data; tiktokCatalogs.value=catalogs.data
+  const [s, t, g, , material, d, providers, catalogs] = await Promise.all([api.get('/shops',h), api.get('/templates',h), api.get('/template-groups',h), refreshTaskList(), api.get('/material-assets',{...h,params:materialQueryParams()}), api.get('/drafts',{...h,params:{creator_id:draftCreatorFilterId.value,template_id:draftTemplateFilterId.value,tab:activeDraftTab.value,work_status:activeDraftWorkStatus.value,page:currentDraftPage.value,page_size:draftPageSize.value}}), api.get('/ai-providers',h), api.get('/category-catalogs',h)])
+  shops.value=s.data; templates.value=t.data; templateGroups.value=g.data; applyMaterialPage(material.data); drafts.value=d.data.items; draftTotal.value=d.data.total; draftTabCounts.value=d.data.tab_counts; draftWorkStatusCounts.value=d.data.work_status_counts; aiProviders.value=providers.data; tiktokCatalogs.value=catalogs.data
   // 后台停用当前所选模型后，刷新时立即切换到仍启用的默认模型，避免提交已停用的值。
   if (!availableAiProviders.value.some(item => item.provider === creativeProvider.value)) {
     creativeProvider.value = availableAiProviders.value.find(item => item.is_default)?.provider || availableAiProviders.value[0]?.provider || ''
@@ -1868,14 +1875,20 @@ function taskStatusClass(status?: string) { return status === 'awaiting_selectio
 async function refreshTaskList(options: { throwOnError?: boolean } = {}) {
   try {
     taskListRefreshing.value = true
-    const { data } = await api.get('/tasks', { headers: headers.value, params: taskQueryParams() })
-    applyTaskPage(data)
-    if (showTaskDetailDialog.value && viewingTask.value) viewingTask.value = (await api.get(`/tasks/${viewingTask.value.id}`, { headers: headers.value, params:taskDetailParams() })).data
+    await taskPageLoader.load(taskQueryParams())
   } catch (e: any) {
     if (options.throwOnError) throw e
-    showToast(e.response?.data?.detail || '刷新任务列表失败')
+    showToast(e.response?.data?.detail || (e.code === 'ECONNABORTED' ? '任务列表加载超时，请缩小筛选范围后重试' : '刷新任务列表失败'))
   }
   finally { taskListRefreshing.value = false }
+  // 详情单独更新，避免列表已返回后仍被详情请求的耗时遮挡。
+  if (showTaskDetailDialog.value && viewingTask.value) {
+    const taskId = viewingTask.value.id
+    try {
+      const { data } = await api.get(`/tasks/${taskId}`, { headers: headers.value, params:taskDetailParams(), timeout:30000 })
+      if (showTaskDetailDialog.value && viewingTask.value?.id === taskId) viewingTask.value = data
+    } catch { /* 保留当前详情，下次打开时重新加载。 */ }
+  }
 }
 async function copyProviderTaskId(task: any) { if (!task.provider_task_id) return; try { await navigator.clipboard.writeText(task.provider_task_id); showToast('外部任务 ID 已复制') } catch { showToast('复制失败，请手动复制') } }
 async function openTaskDetail(task: any) { viewingTask.value = task; showTaskDetailDialog.value = true; taskDetailLoading.value = true; try { viewingTask.value = (await api.get(`/tasks/${task.id}`, { headers: headers.value, params:taskDetailParams() })).data } catch (e:any) { showToast(e.response?.data?.detail || '加载任务详情失败') } finally { taskDetailLoading.value = false } }
@@ -2990,8 +3003,8 @@ api.interceptors.response.use(
 )
 let taskResultPollingTimer: ReturnType<typeof setInterval> | undefined
 async function refreshPendingTaskResults() {
-  if (!token.value || user.value?.role === 'supply_user' || !taskActiveCount.value) return
-  try { applyTaskPage((await api.get('/tasks', { headers: headers.value, params: taskQueryParams() })).data) } catch { /* 保留上一次任务状态，等待下次轮询。 */ }
+  if (!token.value || user.value?.role === 'supply_user' || !taskActiveCount.value || taskListRefreshing.value || document.hidden || !['tasks','pod','drafts'].includes(page.value)) return
+  try { await taskPageLoader.load(taskQueryParams(), { background:true }) } catch { /* 保留上一次任务状态，等待下次轮询。 */ }
 }
 onMounted(() => {
   if (token.value) refresh().catch(logout)
@@ -3004,6 +3017,7 @@ onMounted(() => {
 })
 let productLibraryStatisticsPollingTimer: ReturnType<typeof setInterval> | undefined
 onUnmounted(() => {
+  taskPageLoader.cancel()
   imagePreparer.cancel()
   showMaterialTransferResults.value=false
   materialBatchTitleGenerator.reset()
@@ -3269,7 +3283,7 @@ onUnmounted(() => {
         <div class="section-heading operator-groups-heading"><h2>美工组</h2><button class="primary" @click="openDesignGroupDialog()">新增美工组</button></div>
         <div class="operator-group-list"><MemberGroupCard v-for="group in designGroups" :key="group.id" :group="group" :members="members.filter(member=>member.design_group_id===group.id)" :role-label="memberRoleLabel" rename-label="编辑" @rename="openDesignGroupDialog(group)" @remove="deleteDesignGroup(group)" /><p v-if="!designGroups.length" class="operator-groups-empty">暂无美工组；先新增普通美工，再指定组长创建美工组。</p></div>
         <div class="section-heading company-members-heading"><h2>公司成员 <small>共 {{members.length}} 人</small></h2><div class="section-heading-actions"><button class="ghost" @click="openCompanyStorage">AI 存储设置</button><button class="primary" @click="openMemberDialog()">新增成员</button></div></div>
-        <div class="ai-storage-summary"><span class="ai-storage-badge" :class="{enabled:grsaiCompanyEnabled}">{{grsaiCompanyEnabled ? '直存已启用' : '直存未启用'}}</span><span>{{grsaiCompanyId ? '公司默认库已配置' : '公司默认库未配置'}}</span><small>候选图保留 30 天，采用后永久保存</small></div>
+        <div class="ai-storage-summary"><span class="ai-storage-badge" :class="{enabled:grsaiCompanyEnabled}">{{grsaiCompanyEnabled ? '直存已启用' : '直存未启用'}}</span><span>{{grsaiCompanyId ? '公司默认库已配置' : '公司默认库未配置'}}</span></div>
         <section class="draft-table refreshable-list member-list-scroll" :aria-busy="memberListRefreshing"><div class="thead member-grid"><span>成员</span><span>用户代码</span><span>角色</span><span>所属组</span><span>邮箱</span><span>货盘管理权限</span><span>标题词库管理权限</span><span>状态</span><span>加入时间</span><span>操作</span></div><div v-for="member in members" :key="member.id" class="trow member-grid"><span><b>{{member.name}}</b></span><span>{{member.user_code || '—'}}</span><span>{{memberRoleLabel(member)}}</span><span>{{memberIsDesigner(member) ? designGroupName(member.design_group_id) : member.group_id ? operatorGroupName(member.group_id) : '—'}}</span><span>{{member.email}}</span><span class="member-supply-access"><template v-if="member.role === 'member' || member.role === 'team_leader'"><span class="member-permission-status" :class="member.supply_admin ? 'configured' : 'missing'">{{member.supply_admin ? '已授予' : '未授予'}}</span><button :class="member.supply_admin ? 'negative' : 'positive'" :disabled="memberSupplyGrantSaving" :aria-label="`${member.supply_admin ? '撤销' : '授予'} ${member.name} 的货盘管理权限`" @click="toggleMemberSupplyGrant(member)">{{member.supply_admin ? '撤销权限' : '授予权限'}}</button></template><span v-else class="member-permission-status">{{member.role==='company_admin' ? '默认拥有' : '—'}}</span></span><span class="member-supply-access"><template v-if="member.role === 'member' || member.role === 'team_leader'"><span class="member-permission-status" :class="member.title_library_admin ? 'configured' : 'missing'">{{member.title_library_admin ? '已授予' : '未授予'}}</span><button :class="member.title_library_admin ? 'negative' : 'positive'" :disabled="memberTitleGrantSaving" :aria-label="`${member.title_library_admin ? '撤销' : '授予'} ${member.name} 的标题词库管理权限`" @click="toggleMemberTitleGrant(member)">{{member.title_library_admin ? '撤销权限' : '授予权限'}}</button></template><span v-else class="member-permission-status">{{member.role==='company_admin' ? '默认拥有' : '—'}}</span></span><span class="chip" :class="member.is_active ? 'blue' : 'orange'">{{member.is_active ? '启用中' : '已停用'}}</span><span>{{new Date(member.created_at).toLocaleDateString()}}</span><span class="member-row-actions"><template v-if="['member','team_leader','designer','design_leader'].includes(member.role)"><button @click="openMemberDialog(member)">编辑</button><button v-if="!['team_leader','design_leader'].includes(member.role)" :class="member.is_active ? 'negative' : 'positive'" @click="toggleMember(member)">{{member.is_active ? '停用' : '启用'}}</button></template><span class="member-ai-entry"><button type="button" class="member-ai-button" @click="openMemberStorage(member)">AI 配置</button></span></span></div><p v-if="!members.length && !memberListRefreshing" class="empty">暂无公司成员。</p><div v-if="memberListRefreshing" class="list-refresh-overlay" role="status"><i></i><span>正在刷新列表…</span></div></section>
       </section>
       <section v-else-if="page==='shops'" class="page">

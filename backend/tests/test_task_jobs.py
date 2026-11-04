@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import create_engine, func, inspect, select, text
+from sqlalchemy import create_engine, event, func, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -519,6 +519,32 @@ class TaskJobTests(unittest.TestCase):
                     created_from=datetime(2026, 9, 10), created_to=datetime(2026, 9, 9),
                     user=db.get(User, 1), db=db,
                 )
+
+    def test_task_list_aggregates_once_per_scope_and_clamps_empty_and_last_pages(self):
+        for status in (TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.COMPLETED, TaskStatus.FAILED):
+            self.add_task(status=status)
+        statements = []
+        def capture(conn, cursor, statement, parameters, context, executemany):
+            if 'count(' in statement.lower() and 'pod_tasks' in statement:
+                statements.append(statement)
+        with self.session_factory() as db:
+            user = db.get(User, 1)
+            event.listen(self.engine, 'before_cursor_execute', capture)
+            try:
+                result = main.list_tasks(page=999, page_size=3, creator_id=None, user=user, db=db)
+            finally:
+                event.remove(self.engine, 'before_cursor_execute', capture)
+            self.assertEqual(len(statements), 2)
+            self.assertEqual(result['total'], 4)
+            self.assertEqual(result['page'], 2)
+            self.assertEqual(len(result['items']), 1)
+            self.assertEqual(result['active_count'], 2)
+            self.assertEqual(result['status_counts'], {'queued': 1, 'running': 1, 'completed': 1, 'failed': 1})
+            self.assertEqual(result['task_type_counts'], {'sku_image': 4, 'carousel': 0, 'main_image': 0})
+            empty = main.list_tasks(page=999, page_size=3, creator_id=None, template_id=999, user=user, db=db)
+            self.assertEqual((empty['total'], empty['active_count'], empty['page']), (0, 0, 1))
+            self.assertEqual(empty['status_counts'], {})
+            self.assertEqual(empty['items'], [])
 
     def test_sku_image_tasks_can_be_filtered_by_multiline_skus(self) -> None:
         matching_task_id = self.add_task(status=TaskStatus.COMPLETED)

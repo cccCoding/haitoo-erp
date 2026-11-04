@@ -2275,10 +2275,11 @@ def list_tasks(
         task_type_counts_stmt = task_type_counts_stmt.where(*scope_filters)
     task_type_counts = {kind: count for kind, count in db.execute(task_type_counts_stmt).all()}
     filters.append(PodTask.task_type == task_type)
-    total_stmt = select(func.count()).select_from(PodTask)
-    if filters:
-        total_stmt = total_stmt.where(*filters)
-    total = db.scalar(total_stmt) or 0
+    # 同一筛选范围只聚合一次；总量和处理中数量直接从状态分组推导。
+    status_stmt = select(PodTask.status, func.count()).where(*filters).group_by(PodTask.status)
+    status_counts = {status.value: count for status, count in db.execute(status_stmt).all()}
+    total = sum(status_counts.values())
+    active_count = sum(status_counts.get(status.value, 0) for status in (TaskStatus.QUEUED, TaskStatus.RUNNING))
     page_count = max(1, (total + page_size - 1) // page_size)
     page = min(page, page_count)
     stmt = select(PodTask)
@@ -2289,13 +2290,6 @@ def list_tasks(
     creator_names = {member.id: member.name for member in db.scalars(select(User).where(User.id.in_(creator_ids))).all()} if creator_ids else {}
     template_ids = {task.template_id for task in tasks}
     template_names = {template.id: template.name for template in db.scalars(select(ProductTemplate).where(ProductTemplate.id.in_(template_ids))).all()} if template_ids else {}
-    status_stmt = select(PodTask.status, func.count()).group_by(PodTask.status)
-    if filters:
-        status_stmt = status_stmt.where(*filters)
-    status_counts = {status.value: count for status, count in db.execute(status_stmt).all()}
-    active_stmt = select(func.count()).select_from(PodTask).where(PodTask.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]))
-    if filters:
-        active_stmt = active_stmt.where(*filters)
     prefetch_candidate_views(db, tasks)
     return {
         "items": enrich_task_views(db, user, tasks, [
@@ -2306,7 +2300,7 @@ def list_tasks(
         "page": page,
         "page_size": page_size,
         "status_counts": status_counts,
-        "active_count": db.scalar(active_stmt) or 0,
+        "active_count": active_count,
         "task_type_counts": {kind: task_type_counts.get(kind, 0) for kind in ("sku_image", "carousel", "main_image")},
     }
 
