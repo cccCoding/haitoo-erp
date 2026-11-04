@@ -13,6 +13,16 @@ from .product_library_rankings import cleanup_expired_snapshots, recover_interru
 
 
 async def run_forever(kind: str) -> None:
+    if kind == "image-prepare":
+        from .image_prepare_worker import run_worker
+        current = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGTERM, current.cancel)
+        try:
+            await run_worker()
+        finally:
+            loop.remove_signal_handler(signal.SIGTERM)
+        return
     if kind == "result":
         from .result_worker import run_result_worker
         current = asyncio.current_task()
@@ -42,7 +52,7 @@ async def run_forever(kind: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Haitoro 印花任务数据库 Worker")
-    parser.add_argument("kind", choices=("submit", "result", "product-library-rankings"))
+    parser.add_argument("kind", choices=("submit", "result", "product-library-rankings", "image-prepare"))
     args = parser.parse_args()
     configure_logging()
     assert_schema_current(engine)

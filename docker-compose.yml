@@ -73,6 +73,11 @@ services:
       LOGIN_CLIENT_IP_SOURCE: ${LOGIN_CLIENT_IP_SOURCE:-auto}
       # 模型平台密钥由公司管理员在成员管理中按员工配置。
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
+      GRSAI_DIRECT_STORAGE_ENABLED: ${GRSAI_DIRECT_STORAGE_ENABLED:-false}
+      R2_AI_PENDING_BUCKET: ${R2_AI_PENDING_BUCKET:-}
+      R2_AI_PENDING_PUBLIC_BASE_URL: ${R2_AI_PENDING_PUBLIC_BASE_URL:-}
+      R2_AI_STORAGE_ACCESS_KEY_ID: ${R2_AI_STORAGE_ACCESS_KEY_ID:-}
+      R2_AI_STORAGE_SECRET_ACCESS_KEY: ${R2_AI_STORAGE_SECRET_ACCESS_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       # Cloudflare R2 S3 API 凭据仅通过部署环境注入，切勿提交到仓库。
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
@@ -122,6 +127,11 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
+      GRSAI_DIRECT_STORAGE_ENABLED: ${GRSAI_DIRECT_STORAGE_ENABLED:-false}
+      R2_AI_PENDING_BUCKET: ${R2_AI_PENDING_BUCKET:-}
+      R2_AI_PENDING_PUBLIC_BASE_URL: ${R2_AI_PENDING_PUBLIC_BASE_URL:-}
+      R2_AI_STORAGE_ACCESS_KEY_ID: ${R2_AI_STORAGE_ACCESS_KEY_ID:-}
+      R2_AI_STORAGE_SECRET_ACCESS_KEY: ${R2_AI_STORAGE_SECRET_ACCESS_KEY:-}
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
@@ -150,6 +160,11 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
+      GRSAI_DIRECT_STORAGE_ENABLED: ${GRSAI_DIRECT_STORAGE_ENABLED:-false}
+      R2_AI_PENDING_BUCKET: ${R2_AI_PENDING_BUCKET:-}
+      R2_AI_PENDING_PUBLIC_BASE_URL: ${R2_AI_PENDING_PUBLIC_BASE_URL:-}
+      R2_AI_STORAGE_ACCESS_KEY_ID: ${R2_AI_STORAGE_ACCESS_KEY_ID:-}
+      R2_AI_STORAGE_SECRET_ACCESS_KEY: ${R2_AI_STORAGE_SECRET_ACCESS_KEY:-}
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
@@ -228,6 +243,38 @@ services:
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       TITLE_WORKER_CONCURRENCY: ${TITLE_WORKER_CONCURRENCY:-3}
       TITLE_ITEM_CONCURRENCY: ${TITLE_ITEM_CONCURRENCY:-10}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # 仅处理已选中候选的元数据和 R2 内部复制，不下载图片正文。
+  image-prepare-worker:
+    build:
+      context: ./backend
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
+    logging: *default-logging
+    command: python -m app.task_worker image-prepare
+    stop_grace_period: 30s
+    environment:
+      DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
+      SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_BUCKET: ${R2_BUCKET:-haitoo-images-prod}
+      R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
+      GRSAI_DIRECT_STORAGE_ENABLED: ${GRSAI_DIRECT_STORAGE_ENABLED:-false}
+      R2_AI_PENDING_BUCKET: ${R2_AI_PENDING_BUCKET:-}
+      R2_AI_PENDING_PUBLIC_BASE_URL: ${R2_AI_PENDING_PUBLIC_BASE_URL:-}
+      R2_AI_STORAGE_ACCESS_KEY_ID: ${R2_AI_STORAGE_ACCESS_KEY_ID:-}
+      R2_AI_STORAGE_SECRET_ACCESS_KEY: ${R2_AI_STORAGE_SECRET_ACCESS_KEY:-}
+      IMAGE_PREPARE_CONCURRENCY: ${IMAGE_PREPARE_CONCURRENCY:-4}
+      IMAGE_PREPARE_COMPANY_CONCURRENCY: ${IMAGE_PREPARE_COMPANY_CONCURRENCY:-2}
+      IMAGE_PREPARE_LEASE_SECONDS: ${IMAGE_PREPARE_LEASE_SECONDS:-90}
     depends_on:
       migrate:
         condition: service_completed_successfully

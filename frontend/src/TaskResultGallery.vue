@@ -4,6 +4,16 @@ import axios from 'axios'
 const props = defineProps<{tasks:any[]; token:string}>()
 const emit = defineEmits<{changed:[]; preview:[url:string]}>()
 const selected = ref<string[]>([]), busy = ref(false), error = ref('')
+const broken = ref<Record<string,boolean>>({})
+function candidate(task:any,url:string) { return task.result_images?.find((item:any)=>item.source_url===url) }
+function displayUrl(task:any,url:string) { return candidate(task,url)?.display_url || url }
+function availability(task:any,url:string) {
+  const item=candidate(task,url)
+  if(item?.state==='ready') return '已永久保存'
+  if(item?.state==='invalid') return item.error || '候选图不可采用'
+  if(item?.state==='expired' || item?.expires_at && item.expires_at<=Date.now()) return '候选图已过期，无法采用'
+  return item?.expires_at ? `保留至 ${new Date(item.expires_at).toLocaleDateString()}` : ''
+}
 const api = axios.create({baseURL:import.meta.env.VITE_API_URL || 'http://localhost:8000'})
 const key = (id:number,url:string) => JSON.stringify([id,url])
 const images = computed(() => props.tasks.flatMap(task => (task.result_urls || []).map((url:string,index:number) => ({task,url,index,key:key(task.id,url)}))))
@@ -34,7 +44,7 @@ function imageUrl(url:string) { return /^https?:\/\//i.test(url) ? url : `${impo
         <tbody>
           <tr v-for="item in images" :key="item.key" :class="{rejected:review(item.task,item.url)?.rejected,selected:selected.includes(item.key)}">
             <td class="result-select-cell"><input v-if="item.task.can_review" v-model="selected" :value="item.key" type="checkbox" :disabled="busy" :aria-label="`选择任务 ${item.task.id} 第 ${item.index+1} 张结果图`"/><span v-else>—</span></td>
-            <td><button type="button" class="result-preview" :aria-label="`查看任务 ${item.task.id} 第 ${item.index+1} 张结果图大图`" @click="emit('preview',item.url)"><img :src="imageUrl(item.url)" :alt="`任务 #${item.task.id} 结果图 ${item.index+1}`"/></button></td>
+            <td><button type="button" class="result-preview" :aria-label="`查看任务 ${item.task.id} 第 ${item.index+1} 张结果图大图`" @click="emit('preview',displayUrl(item.task,item.url))"><img :src="imageUrl(displayUrl(item.task,item.url))" :alt="`任务 #${item.task.id} 结果图 ${item.index+1}`" @error="broken[item.key]=true" @load="broken[item.key]=false"/></button><small>{{availability(item.task,item.url)}}</small><small v-if="broken[item.key]">图片加载失败</small></td>
             <td class="result-task-cell">#{{item.task.id}}</td>
             <td><span class="result-quality-status" :class="{rejected:review(item.task,item.url)?.rejected}">{{review(item.task,item.url)?.rejected ? '不合格' : review(item.task,item.url) ? '已取消标记' : '未标记'}}</span></td>
             <td class="result-review-info"><template v-if="review(item.task,item.url)"><span>{{review(item.task,item.url).marked_by_name}}</span><small>{{new Date(review(item.task,item.url).marked_at).toLocaleString()}}</small></template><span v-else>—</span></td>

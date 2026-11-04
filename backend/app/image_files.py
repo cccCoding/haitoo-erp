@@ -23,6 +23,8 @@ def digest(value: str | bytes) -> str:
 
 
 def by_content(db, company_id: int, sha256: str, *, current: bool = False):
+    if not sha256:
+        return None
     stmt = select(ImageFile).where(ImageFile.company_id == company_id, ImageFile.sha256 == sha256)
     return db.scalar(stmt.with_for_update() if current else stmt)
 
@@ -99,6 +101,10 @@ def register_bytes(db, company_id: int, content: bytes, *, source_url: str | Non
 def ingest_url(db, company_id: int, url: str, *, max_r2_bytes: int | None = MAX_IMAGE_BYTES,
                release_before_storage: bool = False) -> ImageFile:
     url = url.strip()
+    from .ai_images import require_prepared
+    prepared = require_prepared(db, company_id, url)
+    if prepared:
+        return prepared
     existing = by_url(db, company_id, url)
     if existing:
         return existing
@@ -231,6 +237,9 @@ def ingest_cross_url(db, target_company_id: int, source_company_id: int, url: st
     if existing:
         return existing
     source_file = by_url(db, source_company_id, url)
+    if source_file and not source_file.sha256:
+        from .ai_images import copy_registered_file
+        return copy_registered_file(db, target_company_id, source_file, url)
     if source_file:
         existing = by_content(db, target_company_id, source_file.sha256)
         if existing:
@@ -264,6 +273,11 @@ def resolve_export_images(db, company_id: int, products: list[dict]) -> None:
         *(item.get("image_url") for item in product.get("sku_images") or []),
         product.get("size_chart_url")] if url))
     mappings = {}
+    from .ai_images import require_prepared
+    from .ai_image_storage import is_pending_url
+    for url in urls:
+        if is_pending_url(url):
+            require_prepared(db, company_id, url)
     for offset in range(0, len(urls), 400):
         records = db.execute(select(ImageAddress, ImageFile).join(ImageFile, ImageFile.id == ImageAddress.image_file_id).where(
             ImageAddress.company_id == company_id, ImageFile.company_id == company_id,

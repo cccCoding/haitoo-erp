@@ -69,7 +69,9 @@ def _request_for(task: PodTask, template: ProductTemplate) -> GenerationRequest:
         quality=parameters["quality"],
         company_id=task.company_id,
         task_id=task.id,
-        idempotency_key=f"haitoro-task-{task.id}",
+        idempotency_key=f"haitoro-task-{task.id}" + (f"-{task.storage_context['run_id']}" if (task.storage_context or {}).get("mode") == "direct" else ""),
+        storage_id=(task.storage_context or {}).get("oss_id"),
+        storage_path=(task.storage_context or {}).get("path"),
     )
 
 
@@ -116,7 +118,13 @@ async def submit_task_once(task_id: int) -> str:
             raise ProviderError("产品模板不存在或任务缺少产品白底图")
         if not setting or not setting.enabled:
             raise ProviderError("任务所选模型已停用或不存在")
+        from .ai_images import freeze_storage_context, generation_reference
+        freeze_storage_context(db, task)
+        if task.status != TaskStatus.QUEUED:
+            return "skipped"
         request = _request_for(task, template)
+        request.template_url = generation_reference(db, task.company_id, request.template_url)
+        request.print_urls = [generation_reference(db, task.company_id, url) for url in request.print_urls]
         api_key = _task_api_key(db, task, setting)
         initial_result, _, _ = await submit_async_generation(task.provider or "", request, api_key)
         provider_task_id = initial_result.get("id")

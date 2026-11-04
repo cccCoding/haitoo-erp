@@ -2,12 +2,15 @@
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
+import { candidateUnavailable, createImagePreparer, type AICandidate, type AIPreparation } from './ai-image-preparation'
 import SearchableSelect from './SearchableSelect.vue'
 import ShopDataHeading from './ShopDataHeading.vue'
 import CrossCompanyCollection from './CrossCompanyCollection.vue'
 import MaterialTransferDialog from './MaterialTransferDialog.vue'
 import CreativeUploadNotice from './CreativeUploadNotice.vue'
 import TaskResultGallery from './TaskResultGallery.vue'
+import AIImagePreparationPanel from './AIImagePreparationPanel.vue'
+import MemberAISettings from './MemberAISettings.vue'
 import MemberGroupCard from './MemberGroupCard.vue'
 import { uploadCreativeImages, type CreativeSubmissionNotice } from './creative-upload'
 import InfringementToggle from './InfringementToggle.vue'
@@ -34,6 +37,186 @@ const hubUploadPageSizeOptions = [25, 50, 100, 500, 1000]
 
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' })
 const token = ref(localStorage.getItem('haitoro_token') || '')
+
+const aiCandidates = ref<Record<string,AICandidate>>({})
+const aiPreparationProgress = ref<AIPreparation | null>(null), aiPreparationRetrying = ref(false)
+const aiPreparationBusy = ref(false), aiPreparationSubmitting = ref(false), aiPreparationError = ref('')
+const aiPreparationJobId = ref<number | null>(null), showImagePreparationDialog = ref(false)
+const aiReviewContext = ref<any>(null)
+const aiPreparationFailed = computed(() => !!aiPreparationError.value || !!aiPreparationProgress.value?.failed)
+const aiPreparationRunning = computed(() => aiPreparationBusy.value || aiPreparationRetrying.value || aiPreparationProgress.value?.state === 'running')
+const aiPreparationInline = computed(() => aiReviewContext.value?.kind === 'claim' && showBatchClaimDialog.value || aiReviewContext.value?.kind === 'review' && showBatchImageReviewDialog.value || aiReviewContext.value?.kind === 'workspace' && showDraftImageDialog.value)
+function preparationMessage(exc:any) { return typeof exc.response?.data?.detail === 'string' ? exc.response.data.detail : exc.message || '图片保存失败，请稍后重试' }
+function preparationStorageKey() { return user.value ? `haitoro_image_preparation:${user.value.company_id}:${user.value.id}` : null }
+function savePreparationReference() {
+  const key=preparationStorageKey()
+  if(!key || !aiPreparationJobId.value) return
+  try { localStorage.setItem(key,JSON.stringify({id:aiPreparationJobId.value,context:aiReviewContext.value})) } catch { /* 存储空间不可用时，本页仍可继续等待。 */ }
+}
+function updateImagePreparation(data:AIPreparation) {
+  aiPreparationError.value=''
+  aiPreparationProgress.value=data
+  aiPreparationJobId.value=data.id
+  savePreparationReference()
+  for (const item of data.items) {
+    const existing=aiCandidates.value[item.source_url] || {id:item.candidate_id,source_url:item.source_url,display_url:item.source_url,state:item.state}
+    const next={...existing,state:item.state,error:item.error,display_url:item.url || existing.display_url}
+    aiCandidates.value[item.source_url]=next
+    if(item.url) aiCandidates.value[item.url]=next
+  }
+}
+const imagePreparer = createImagePreparer(api, () => `Bearer ${token.value}`, updateImagePreparation, undefined, data=>{
+  updateImagePreparation(data)
+  if(!aiPreparationInline.value && !showImagePreparationDialog.value) void monitorImagePreparation()
+})
+function rememberCandidates(value:any) {
+  if(!value || typeof value!=='object') return
+  if(Array.isArray(value)) { value.forEach(rememberCandidates); return }
+  if(Array.isArray(value.result_images)) for(const item of value.result_images) {
+    aiCandidates.value[item.source_url]=item
+    aiCandidates.value[item.display_url]=item
+  }
+  for(const [key,item] of Object.entries(value)) if(!['result_images','parameters','result_map'].includes(key)) rememberCandidates(item)
+}
+function originalCandidateUrl(url:string) { return aiCandidates.value[url]?.source_url || url }
+function candidateSelectable(url:string) { return !candidateUnavailable(aiCandidates.value[url]) }
+function candidateStatusText(url:string) {
+  const item=aiCandidates.value[url]
+  if(!item) return ''
+  if(item.state==='ready') return '已永久保存'
+  if(candidateUnavailable(item)) return item.error || '候选图已过期，无法采用'
+  return item.expires_at ? `候选图保留至 ${new Date(item.expires_at).toLocaleDateString()}` : ''
+}
+async function prepareImageUrls(urls:string[]) {
+  const candidates=urls.map(url=>aiCandidates.value[url]).filter((item):item is AICandidate=>Boolean(item))
+  const invalid=candidates.find(item=>candidateUnavailable(item))
+  if(invalid) throw new Error(invalid.error || '所选候选图已过期，无法采用')
+  const ids=[...new Set(candidates.filter(item=>item.state!=='ready').map(item=>item.id))]
+  if(!ids.length) return
+  if(aiPreparationBusy.value || aiPreparationRetrying.value) throw new Error('图片正在保存，请勿重复提交')
+  if(aiPreparationProgress.value?.state==='running' && ids.some(id=>!aiPreparationProgress.value!.items.some(item=>item.candidate_id===id))) throw new Error('已有一批图片正在保存，请先在任务中心查看进度')
+  imagePreparer.cancel()
+  aiPreparationBusy.value=true; aiPreparationError.value=''; aiPreparationSubmitting.value=false
+  if(!aiPreparationInline.value) showImagePreparationDialog.value=true
+  try { await imagePreparer.prepare(ids) }
+  catch(exc) { if(!preparationMessage(exc).includes('停止等待')) aiPreparationError.value=preparationMessage(exc); throw exc }
+  finally { aiPreparationBusy.value=false }
+}
+async function retryImagePreparation() {
+  if(!aiPreparationProgress.value || aiPreparationRunning.value) return
+  imagePreparer.cancel()
+  aiPreparationRetrying.value=true
+  aiPreparationError.value=''
+  try { await imagePreparer.retry(aiPreparationProgress.value.id); showToast('图片已永久保存，请确认审核') }
+  catch(e:any) { if(!preparationMessage(e).includes('停止等待')) aiPreparationError.value=preparationMessage(e) }
+  finally { aiPreparationRetrying.value=false }
+}
+function stopImagePreparation() { imagePreparer.cancel(); aiPreparationProgress.value=null; aiPreparationJobId.value=null; aiPreparationError.value=''; aiPreparationSubmitting.value=false; showImagePreparationDialog.value=false }
+function clearImagePreparation() {
+  const key=preparationStorageKey()
+  if(key) { try { localStorage.removeItem(key) } catch { /* 浏览器禁用本地存储不影响已完成的审核。 */ } }
+  stopImagePreparation(); aiReviewContext.value=null
+}
+async function monitorImagePreparation() {
+  const id=aiPreparationJobId.value
+  if(!id) return
+  try { await imagePreparer.resume(id) }
+  catch(exc:any) { if(aiPreparationJobId.value===id && !String(exc.message).includes('停止等待')) aiPreparationError.value=preparationMessage(exc) }
+}
+function backgroundImagePreparation() {
+  if(aiPreparationSubmitting.value) return
+  imagePreparer.cancel()
+  showImagePreparationDialog.value=false
+  if(aiReviewContext.value?.kind==='claim') showBatchClaimDialog.value=false
+  if(aiReviewContext.value?.kind==='review') showBatchImageReviewDialog.value=false
+  if(aiReviewContext.value?.kind==='workspace') showDraftImageDialog.value=false
+  // 只恢复进度查询，不延续被关闭页面中的审核提交。
+  void monitorImagePreparation()
+}
+function adjustImagePreparation() { clearImagePreparation() }
+function closeImageWorkspace() {
+  if(aiPreparationSubmitting.value) return
+  if(aiReviewContext.value?.kind==='workspace' && aiPreparationRunning.value) backgroundImagePreparation()
+  else if(!imageConfirmSaving.value) showDraftImageDialog.value=false
+}
+async function restoreImagePreparation() {
+  const key=preparationStorageKey()
+  if(!key) return
+  try {
+    const saved=JSON.parse(localStorage.getItem(key) || 'null')
+    if(saved && Number.isSafeInteger(saved.id) && saved.id>0) { aiPreparationJobId.value=saved.id; aiReviewContext.value=saved.context; await monitorImagePreparation() }
+  } catch { /* 忽略已损坏的本地进度记录。 */ }
+}
+async function openImagePreparation() {
+  if(!aiPreparationBusy.value && !aiPreparationRetrying.value) { imagePreparer.cancel(); void monitorImagePreparation() }
+  const context=aiReviewContext.value
+  if(context?.kind==='claim') {
+    selectedTaskIds.value=context.taskIds
+    await openBatchClaimDialog(context.taskIds)
+    selectedBatchClaimImages.value=new Set(context.selected)
+    batchClaimInfringement.value={...context.infringement}
+  } else if(context?.kind==='review') {
+    selectedDraftIds.value=context.draftIds
+    await openBatchImageReview(context.taskType,context.draftIds,true)
+    batchImageReviewSelections.value={...context.selections}
+    batchCarouselReviewNextStage.value=context.nextStage
+  } else if(context?.kind==='workspace') {
+    await openImageWorkspace({id:context.draftId},context.mode)
+    if(imageDraft.value) { imageDraft.value.carousel_items=context.items; carouselConfirmNextStage.value=context.nextStage }
+  } else showImagePreparationDialog.value=true
+  if(!aiPreparationInline.value) showImagePreparationDialog.value=true
+}
+watch(token,()=>{ stopImagePreparation(); aiCandidates.value={}; aiReviewContext.value=null })
+const isAdoptionRequest=(url:string)=>/\/(claim-materials|images\/confirm|apply)$/.test(url) || url.endsWith('/drafts/batch-image-review/confirm')
+api.interceptors.request.use(async config=>{
+  if(isAdoptionRequest(config.url || '')) {
+    const requestToken=token.value
+    const payload=config.data || {}
+    const urls=[...(payload.result_urls || []),...(payload.result_url ? [payload.result_url] : []),
+      ...(payload.image_items || []).map((item:any)=>item.result_url),
+      ...(payload.selections || []).flatMap((item:any)=>item.result_urls || [])]
+    await prepareImageUrls(urls)
+    if(requestToken!==token.value) throw new Error('登录状态已变化，请重新确认审核')
+    if(aiPreparationProgress.value) aiPreparationSubmitting.value=true
+  }
+  return config
+})
+api.interceptors.response.use(response=>{
+  if(!response.config.headers?.Authorization || String(response.config.headers.Authorization)===`Bearer ${token.value}`) {
+    rememberCandidates(response.data)
+    if(isAdoptionRequest(response.config.url || '') && aiPreparationProgress.value?.state==='ready') clearImagePreparation()
+  }
+  return response
+},exc=>{
+  if(isAdoptionRequest(exc.config?.url || '')) aiPreparationSubmitting.value=false
+  return Promise.reject(exc)
+})
+const grsaiCompanyId=ref(''), grsaiCompanyEnabled=ref(false), grsaiOverrideCount=ref(0), grsaiStorageSaving=ref(false)
+const storageMember=ref<any>(null), showCompanyStorage=ref(false), companyStorageDraft=ref(''), companyStorageError=ref('')
+function openCompanyStorage() { companyStorageDraft.value=grsaiCompanyId.value; companyStorageError.value=''; showCompanyStorage.value=true }
+async function loadGrsaiStorage() {
+  const {data}=await api.get('/company/grsai-storage',{headers:{Authorization:`Bearer ${token.value}`}})
+  grsaiCompanyId.value=data.storage_id || ''; grsaiCompanyEnabled.value=data.direct_enabled; grsaiOverrideCount.value=data.override_count
+}
+async function saveGrsaiStorage() {
+  grsaiStorageSaving.value=true
+  try {
+    await api.put('/company/grsai-storage',{storage_id:companyStorageDraft.value.trim() || null},{headers:headers.value})
+    await loadGrsaiStorage(); showCompanyStorage.value=false; showToast('公司默认存储库已保存')
+  } catch(e:any) { companyStorageError.value=typeof e.response?.data?.detail==='string' ? e.response.data.detail : '保存失败，请检查存储库 ID' }
+  finally {grsaiStorageSaving.value=false}
+}
+async function resetGrsaiStorage() {
+  if(!confirm(`将 ${grsaiOverrideCount.value} 位成员的单独存储设置恢复为公司默认，包含停用成员。API Key 保持不变。确认继续？`)) return
+  grsaiStorageSaving.value=true
+  try {
+    const {data}=await api.post('/members/grsai-storage/use-company-default',{}, {headers:headers.value})
+    await refreshMemberList(); showToast(`已更新 ${data.updated} 个成员的存储设置`)
+  } catch(e:any) {showToast(e.response?.data?.detail || '更新失败')}
+  finally {grsaiStorageSaving.value=false}
+}
+function openMemberStorage(member:any) { storageMember.value=member }
+
 const route = useRoute()
 const router = useRouter()
 const workspaceRouteNames = new Set(['collection', 'collection-history', 'operation-statistics', 'templates', 'pod', 'creative-resources', 'tasks', 'materials', 'drafts', 'product-library', 'title-library', 'supply', 'miaoshou', 'members', 'finance', 'shops', 'tiktok-catalogs'])
@@ -45,6 +228,8 @@ const hubAgentPairingCode = ref(new URLSearchParams(location.search).get('hub_ag
 const email = ref('')
 const password = ref('')
 const user = ref<any>(null), company = ref<any>(null), shops = ref<any[]>([]), templates = ref<any[]>([]), templateGroups = ref<any[]>([]), tasks = ref<any[]>([]), materialAssets = ref<any[]>([]), drafts = ref<any[]>([]), members = ref<any[]>([]), operatorGroups = ref<any[]>([]), aiProviders = ref<any[]>([])
+const canEditMyAccount = computed(() => user.value?.role === 'company_admin')
+watch(()=>user.value ? `${user.value.company_id}:${user.value.id}` : '',()=>{ stopImagePreparation(); aiReviewContext.value=null; if(user.value) void restoreImagePreparation() })
 const loading = ref(false), error = ref('')
 const toast = ref('')
 const crossCompanyCollectionEnabled = ref(false)
@@ -55,7 +240,6 @@ const showMemberDialog = ref(false), editingMember = ref<any>(null), memberForm 
 const memberSupplyGrantSaving = ref(false)
 const memberTitleGrantSaving = ref(false)
 const showOperatorGroupDialog = ref(false), editingOperatorGroup = ref<any>(null), operatorGroupForm = ref({ name: '', leader_user_id: null as number | null }), operatorGroupSaving = ref(false), operatorGroupError = ref('')
-const showMemberCredentialDialog = ref(false), credentialMember = ref<any>(null), credentialProvider = ref<any>(null), credentialApiKey = ref(''), credentialSaving = ref(false)
 const showMyAccountDialog = ref(false), myName = ref(''), myUserCode = ref(''), myAccountSaving = ref(false)
 const managedShops = ref<any[]>([]), shopLoading = ref(false), shopError = ref('')
 const showMiaoshouDialog = ref(false), miaoshouForm = ref({ app_id: '', app_secret: '' }), miaoshouSaving = ref(false)
@@ -687,6 +871,8 @@ function batchReviewSelectedCount(draft:any) { return batchReviewTasks(draft).fi
 function batchReviewTotalTasks() { return batchImageReviewDrafts.value.reduce((total,draft)=>total+batchReviewTasks(draft).length,0) }
 function batchReviewChosenTasks() { return Object.values(batchImageReviewSelections.value).filter(urls=>urls.length).length }
 function toggleBatchReviewResult(task:any,url:string) {
+  if(batchImageReviewSaving.value || aiPreparationRunning.value) return
+  if(!candidateSelectable(url)) { showToast(candidateStatusText(url)); return }
   if (task.status !== 'awaiting_selection') return
   const selected=batchImageReviewSelections.value[task.id] || []
   const next=batchImageReviewType.value==='main_image'
@@ -695,34 +881,37 @@ function toggleBatchReviewResult(task:any,url:string) {
   batchImageReviewSelections.value={...batchImageReviewSelections.value,[task.id]:next}
 }
 function selectAllBatchReviewTasks(draft?:any) {
+  if(batchImageReviewSaving.value || aiPreparationRunning.value) return
   const targets=draft ? [draft] : batchImageReviewDrafts.value
   const next={...batchImageReviewSelections.value}
-  for (const item of targets) for (const task of batchReviewPendingTasks(item)) next[task.id]=batchImageReviewType.value==='main_image' ? [task.result_urls[0]] : [...task.result_urls]
+  for (const item of targets) for (const task of batchReviewPendingTasks(item)) next[task.id]=batchImageReviewType.value==='main_image' ? task.result_urls.filter(candidateSelectable).slice(0,1) : task.result_urls.filter(candidateSelectable)
   batchImageReviewSelections.value=next
 }
 function clearBatchReviewDraft(draft:any) {
+  if(batchImageReviewSaving.value || aiPreparationRunning.value) return
   const next={...batchImageReviewSelections.value}
   for (const task of batchReviewPendingTasks(draft)) next[task.id]=[]
   batchImageReviewSelections.value=next
 }
-async function openBatchImageReview(type:'carousel'|'main_image') {
+async function openBatchImageReview(type:'carousel'|'main_image', draftIds:number[]=selectedDraftIds.value, restoring=false) {
   const eligible=type==='carousel' ? batchCarouselReviewEligible.value : batchMainImageReviewEligible.value
-  if (!eligible) { showToast(`请选择同处于待审核状态的${type==='carousel'?'轮播图':'首图'}草稿`); return }
+  if (!eligible && !restoring) { showToast(`请选择同处于待审核状态的${type==='carousel'?'轮播图':'首图'}草稿`); return }
   batchImageReviewType.value=type; batchImageReviewDrafts.value=[]; batchImageReviewSelections.value={}; batchCarouselReviewNextStage.value='main_image_pending'; showBatchImageReviewDialog.value=true
   try {
     batchImageReviewLoading.value=true
-    const {data}=await api.get('/drafts/batch-image-review',{headers:headers.value,params:{draft_ids:selectedDraftIds.value,task_type:type},paramsSerializer:{indexes:null}})
+    const {data}=await api.get('/drafts/batch-image-review',{headers:headers.value,params:{draft_ids:draftIds,task_type:type},paramsSerializer:{indexes:null}})
     batchImageReviewDrafts.value=data.items || []
     const adopted:Record<number,string[]>={}
     for (const draft of batchImageReviewDrafts.value) for (const task of batchReviewTasks(draft)) {
       const adoptedUrls=(draft.carousel_items || []).filter((item:any)=>item.task_id===task.id).map((item:any)=>item.image_url)
-      adopted[task.id]=adoptedUrls.length ? adoptedUrls : (task.selected_result_url ? [task.selected_result_url] : [])
+      adopted[task.id]=adoptedUrls.length ? adoptedUrls.map(originalCandidateUrl) : (task.selected_result_url ? [task.selected_result_url] : [])
     }
     batchImageReviewSelections.value=adopted
   } catch(e:any) { showToast(e.response?.data?.detail || '加载批量审核候选图失败'); showBatchImageReviewDialog.value=false }
   finally { batchImageReviewLoading.value=false }
 }
 async function confirmBatchImageReview() {
+  if(batchImageReviewSaving.value || aiPreparationRunning.value) return
   const selections=batchImageReviewDrafts.value.flatMap(draft=>batchReviewTasks(draft).flatMap((task:any)=>{
     const result_urls=batchImageReviewSelections.value[task.id] || []
     return result_urls.length ? [{draft_id:draft.id,task_id:task.id,result_urls}] : []
@@ -730,6 +919,7 @@ async function confirmBatchImageReview() {
   if (!selections.length) { showToast('请至少选择一张候选图后再确认'); return }
   try {
     batchImageReviewSaving.value=true
+    aiReviewContext.value={kind:'review',draftIds:batchImageReviewDrafts.value.map(draft=>draft.id),taskType:batchImageReviewType.value,selections:JSON.parse(JSON.stringify(batchImageReviewSelections.value)),nextStage:batchCarouselReviewNextStage.value}
     const {data}=await api.post('/drafts/batch-image-review/confirm',{task_type:batchImageReviewType.value,selections,...(batchImageReviewType.value==='carousel'?{next_stage:batchCarouselReviewNextStage.value}:{})},{headers:headers.value})
     showBatchImageReviewDialog.value=false; selectedDraftIds.value=[]; await refreshDraftList()
     const stageLabel=batchImageReviewType.value==='carousel' ? (batchCarouselReviewNextStage.value==='ready_to_publish'?'待发布':'首图创作') : '待发布'
@@ -849,6 +1039,7 @@ watch(showBatchClaimDialog, () => { batchClaimHoverPreview.value = null })
 watch(batchClaiming, () => { batchClaimHoverPreview.value = null })
 function batchClaimImageKey(taskId: number, url: string) { return `${taskId}:${url}` }
 function toggleBatchClaimImage(taskId: number, url: string) {
+  if(!candidateSelectable(url)) { showToast(candidateStatusText(url)); return }
   if (batchClaiming.value) return
   const key = batchClaimImageKey(taskId, url)
   if (selectedBatchClaimImages.value.has(key)) selectedBatchClaimImages.value.delete(key)
@@ -1361,6 +1552,7 @@ async function refresh() {
   if (user.value.role === 'company_admin') {
     const [companyMembers, companyGroups, companyShops, companyDesignGroups] = await Promise.all([api.get('/members', h), api.get('/operator-groups', h), api.get('/shops/manage', h), api.get('/design-groups', h)])
     members.value = companyMembers.data
+    await loadGrsaiStorage()
     operatorGroups.value = companyGroups.data
     designGroups.value = companyDesignGroups.data
     managedShops.value = companyShops.data
@@ -1670,7 +1862,7 @@ function validateNewTemplate() {
 }
 async function createTemplate() { if (!editingTemplate.value && !validateNewTemplate()) return; if (editingTemplate.value && !newTemplateName.value.trim()) { templateFormTab.value='basic'; showToast('请输入模板名称'); return } if (editingTemplate.value && [newPackageWeight.value,newPackageLength.value,newPackageWidth.value,newPackageHeight.value].some(value => value === null || value <= 0)) { templateFormTab.value='logistics'; showToast('请完整填写物流信息'); return } const ai_prompts=newTemplateAiPrompts.value.map(item=>({name:item.name.trim(),content:item.content.trim()})).filter(item=>item.name || item.content); if (ai_prompts.some(item=>!item.name || !item.content)) { templateFormTab.value='ai-prompts'; showToast('请完整填写 AI生成素材提示的名称和内容，或删除空白项'); return } try { templateSaving.value = true; const [uploadedCoverUrl, uploadedSizeChartUrl] = await Promise.all([uploadCover(), uploadSizeChart()]); const cover_url=uploadedCoverUrl ?? editingTemplate.value?.cover_url ?? null; const size_chart_url=uploadedSizeChartUrl ?? editingTemplate.value?.size_chart_url ?? null; const sizeOptions=newSkuSizeOptions.value.map(value=>value.trim()).filter(Boolean); const sku_specifications={size:{name:'尺码',options:sizeOptions}}; const payload={name:newTemplateName.value.trim(),description:newTemplateDescription.value.trim() || null,title_template:newTemplateTitleTemplate.value.trim() || null,product_description:newTemplateProductDescription.value.trim() || null,size_chart_url,group_id:newTemplateGroupId.value,cover_url,package_weight:newPackageWeight.value,package_length:newPackageLength.value,package_width:newPackageWidth.value,package_height:newPackageHeight.value,sku_specifications,ai_prompts,color_count:1,sku_count:Math.max(1,sizeOptions.length)}; if(editingTemplate.value) await api.put(`/templates/${editingTemplate.value.id}`,payload,{headers:headers.value}); else await api.post('/templates',payload,{headers:headers.value}); showTemplateDialog.value=false; await refresh() } catch (e:any) { error.value=e.response?.data?.detail || e?.message || '保存模板失败' } finally { templateSaving.value = false } }
 async function deleteTemplate(template:any) { if (!confirm(`确定删除模板「${template.name}」吗？`)) return; try { await api.delete(`/templates/${template.id}`,{headers:headers.value}); if(selectedTemplateId.value===template.id) selectedTemplateId.value=templates.value.find(t=>t.id!==template.id)?.id || null; await refresh() } catch (e:any) { error.value=e.response?.data?.detail || '删除模板失败' } }
-function imageUrl(url?: string) { return url ? (url.startsWith('/') ? `${api.defaults.baseURL}${url}` : url) : '' }
+function imageUrl(url?: string) { const value=url ? aiCandidates.value[url]?.display_url || url : ''; return value.startsWith('/') ? `${api.defaults.baseURL}${value}` : value }
 const taskStatusLabel: Record<string, string> = { queued: '排队中', running: '处理中', awaiting_selection: '待审核', completed: '已完成', failed: '失败' }
 function taskStatusClass(status?: string) { return status === 'awaiting_selection' ? 'purple' : status === 'completed' ? 'blue' : status === 'failed' ? 'orange' : 'purple' }
 async function refreshTaskList(options: { throwOnError?: boolean } = {}) {
@@ -1964,9 +2156,9 @@ async function createDraftImageTasks(type:'carousel'|'main_image') {
 }
 function isWorkspaceTaskSelected(task:any,url:string) {
   if(!imageDraft.value) return false
-  if(task.task_type==='main_image') return (imageDraft.value.carousel_items || []).some((item:any)=>item.task_id===task.id && item.image_url===url)
+  if(task.task_type==='main_image') return (imageDraft.value.carousel_items || []).some((item:any)=>item.task_id===task.id && originalCandidateUrl(item.image_url)===originalCandidateUrl(url))
   const sku=String(task.parameters?.source_sku || '')
-  return imageDraft.value.carousel_items?.some((item:any)=>item.sku===sku && item.image_url===url)
+  return imageDraft.value.carousel_items?.some((item:any)=>item.sku===sku && originalCandidateUrl(item.image_url)===originalCandidateUrl(url))
 }
 function isTaskResultSelected(task:any,url:string) {
   return showDraftImageDialog.value && imageDraft.value?.id===Number(task.parameters?.draft_id)
@@ -1975,6 +2167,7 @@ function isTaskResultSelected(task:any,url:string) {
 }
 function taskHasSuccessfulResult(task:any) { return ['awaiting_selection','completed'].includes(task?.status) && !!task?.result_urls?.[0] }
 function stageCarouselTaskResult(task:any,url:string) {
+  if(!candidateSelectable(url)) { showToast(candidateStatusText(url)); return }
   if(!imageDraft.value) return
   const sku=String(task.parameters?.source_sku || '')
   if(!sku){showToast('该任务缺少来源 SKU');return}
@@ -1994,6 +2187,7 @@ function stageCarouselTaskResult(task:any,url:string) {
   showToast('已暂存为轮播图，确认后保存到草稿')
 }
 function stageMainTaskResult(task:any,url:string,removeSku?:string) {
+  if(!candidateSelectable(url)) { showToast(candidateStatusText(url)); return }
   if(!imageDraft.value) return
   const existing=(imageDraft.value.carousel_items || []).filter((item:any)=>item.source_type!=='main_image')
   if(!removeSku && existing.length===9){
@@ -2032,7 +2226,7 @@ function toggleWorkspaceCarouselTask(task:any) {
   if(isWorkspaceTaskSelected(task,url)){
     resetFinalImageOrder()
     const sourceSku=String(task.parameters?.source_sku || '')
-    const remaining=(imageDraft.value.carousel_items || []).filter((item:any)=>!(item.task_id===task.id && item.image_url===url))
+    const remaining=(imageDraft.value.carousel_items || []).filter((item:any)=>!(item.task_id===task.id && originalCandidateUrl(item.image_url)===originalCandidateUrl(url)))
     const sourceImage=imageDraft.value.sku_items?.find((item:any)=>item.sku===sourceSku && item.image_url)
     if(sourceImage && !remaining.some((item:any)=>item.sku===sourceSku)) {
       remaining.push({sku:sourceSku,image_url:sourceImage.image_url,task_id:null,source_type:'sku'})
@@ -2065,7 +2259,7 @@ function toggleWorkspaceMainTask(task:any) {
 function dropFinalImage(targetUrl:string){if(!draggedFinalImageUrl.value || draggedFinalImageUrl.value===targetUrl)return;const items=[...draftFinalImageItems.value];const from=items.findIndex((item:any)=>item.image_url===draggedFinalImageUrl.value),to=items.findIndex((item:any)=>item.image_url===targetUrl);if(from<0 || to<0)return;const [moved]=items.splice(from,1);items.splice(to,0,moved);stagedFinalImageItems.value=items;draggedFinalImageUrl.value=''}
 function removeFinalImage(imageUrl:string){const items=draftFinalImageItems.value.filter((item:any)=>item.image_url!==imageUrl);if(items.length===draftFinalImageItems.value.length)return;if(!items.length){showToast('请至少保留一张 SKU 图或轮播图');return}stagedFinalImageItems.value=items;draggedFinalImageUrl.value='';showToast('已从最终商品图片中移除，确认后保存到草稿')}
 async function openImageWorkspaceFromTask(task:any){const draftId=task?.parameters?.draft_id;if(!draftId)return;showTaskDetailDialog.value=false;page.value='drafts';await openImageWorkspace({id:draftId},task.task_type==='carousel'?'carousel':'full',task.task_type==='main_image');if(task.task_type==='carousel' && task.parameters?.source_sku)selectedImageSkus.value=[task.parameters.source_sku];await nextTick();document.getElementById(task.task_type==='main_image'?'main-image-workspace-section':'carousel-workspace-section')?.scrollIntoView({behavior:'smooth',block:'start'})}
-async function confirmDraftImages(){if(!imageDraft.value)return;if(!draftFinalImageItems.value.length){showToast('请至少保留一张 SKU 图或轮播图后再保存');return}try{imageConfirmSaving.value=true;const isConfirmingCarousel=imageDraft.value.workflow_stage==='carousel_pending';const payload={image_items:draftFinalImageItems.value.map((item:any)=>({result_url:item.image_url,sku:item.sku || null,task_id:item.task_id || null})),...(isConfirmingCarousel?{next_stage:carouselConfirmNextStage.value}:{})};imageDraft.value=(await api.post(`/drafts/${imageDraft.value.id}/images/confirm`,payload,{headers:headers.value})).data;await refreshDraftList();showDraftImageDialog.value=false;showToast(isConfirmingCarousel?(carouselConfirmNextStage.value==='ready_to_publish'?'轮播图已确认，商品已进入待发布':'轮播图已确认，请继续首图创作'):'商品图片已保存到草稿')}catch(e:any){showToast(e.response?.data?.detail || '保存商品图片失败')}finally{imageConfirmSaving.value=false}}
+async function confirmDraftImages(){if(!imageDraft.value || imageConfirmSaving.value || aiPreparationRunning.value)return;if(!draftFinalImageItems.value.length){showToast('请至少保留一张 SKU 图或轮播图后再保存');return}try{imageConfirmSaving.value=true;aiReviewContext.value={kind:'workspace',draftId:imageDraft.value.id,mode:imageWorkspaceMode.value,items:JSON.parse(JSON.stringify(imageDraft.value.carousel_items || [])),nextStage:carouselConfirmNextStage.value};const isConfirmingCarousel=imageDraft.value.workflow_stage==='carousel_pending';const payload={image_items:draftFinalImageItems.value.map((item:any)=>({result_url:item.image_url,sku:item.sku || null,task_id:item.task_id || null})),...(isConfirmingCarousel?{next_stage:carouselConfirmNextStage.value}:{})};imageDraft.value=(await api.post(`/drafts/${imageDraft.value.id}/images/confirm`,payload,{headers:headers.value})).data;await refreshDraftList();showDraftImageDialog.value=false;showToast(isConfirmingCarousel?(carouselConfirmNextStage.value==='ready_to_publish'?'轮播图已确认，商品已进入待发布':'轮播图已确认，请继续首图创作'):'商品图片已保存到草稿')}catch(e:any){showToast(e.response?.data?.detail || '保存商品图片失败')}finally{imageConfirmSaving.value=false}}
 async function saveDraftEdit() {
   const title = draftEditTitle.value.trim()
   if (!editingDraft.value || title.length < 25 || title.length > 255) { draftEditError.value = '商品标题长度须为 25-255 个字符'; return }
@@ -2486,30 +2680,37 @@ async function deleteTiktokCatalog(catalog:any) {
 function toggleTaskSelection(taskId: number) { selectedTaskIds.value = selectedTaskIds.value.includes(taskId) ? selectedTaskIds.value.filter(id => id !== taskId) : [...selectedTaskIds.value, taskId] }
 function taskCanBeSelected(task:any) { return task.can_manage && task.status==='failed' || activeTaskType.value==='sku_image' && Boolean(task.adopted_images?.length || task.can_review && task.result_count || task.can_manage && ['awaiting_selection','completed'].includes(task.status) && task.result_count) }
 function toggleAllSelectableTasks() { selectedTaskIds.value = allSelectableTasksSelected.value ? [] : selectablePagedTasks.value.map(task => task.id) }
-async function openBatchClaimDialog() {
-  if (!selectedClaimableTaskIds.value.length) { showToast('请至少选择一个可审核任务'); return }
+async function openBatchClaimDialog(taskIds:number[]=selectedClaimableTaskIds.value) {
+  if (!taskIds.length) { showToast('请至少选择一个可审核任务'); return }
   showBatchClaimDialog.value = true; batchClaimLoading.value = true; batchClaimItems.value = []; batchClaimInfringement.value = {}; selectedBatchClaimImages.value = new Set(); batchClaimCompleted.value = 0; batchClaimTotal.value = 0; batchClaimFailed.value = 0
   try {
-    const details = await loadTaskDetails(selectedClaimableTaskIds.value)
+    const details = await loadTaskDetails(taskIds)
     batchClaimItems.value = details.flatMap(task => (task.result_urls || []).map((url: string) => ({ taskId: task.id, taskLabel: `任务 #${task.id}`, url })))
-    selectedBatchClaimImages.value = new Set(batchClaimItems.value.map(item => batchClaimImageKey(item.taskId, item.url)))
+    selectedBatchClaimImages.value = new Set(batchClaimItems.value.filter(item=>candidateSelectable(item.url)).map(item => batchClaimImageKey(item.taskId, item.url)))
     if (!batchClaimItems.value.length) showToast('所选任务没有可审核图片')
   } catch (e:any) { showBatchClaimDialog.value = false; showToast(e.response?.data?.detail || '加载批量审核内容失败') }
   finally { batchClaimLoading.value = false }
 }
 async function confirmBatchClaim() {
-  if (batchClaimLoading.value || batchClaiming.value) return
+  if (batchClaimLoading.value || batchClaiming.value || aiPreparationRunning.value) return
   const groups=groupedBatchClaimItems.value.map(group=>({...group,urls:group.urls.filter(url=>selectedBatchClaimImages.value.has(batchClaimImageKey(group.taskId,url)))}))
-  const requestHeaders={...headers.value}
-  const items=groups.flatMap(group=>(group.urls.length ? group.urls : [null]).map(url=>{ const isInfringing=url ? Boolean(batchClaimInfringement.value[batchClaimImageKey(group.taskId,url)]) : false; return transferItem(`任务 #${group.taskId}${url ? '' : '（不采用图片）'}`,async(force,requestKey)=>{
-    const {data}=await api.post(`/tasks/${group.taskId}/claim-materials`,{
-      result_urls:url ? [url] : [],force_create:force,request_key:requestKey,is_infringing:isInfringing,
-    },{headers:requestHeaders})
-    return data.items[0] || {outcome:'created'}
-  },url ? imageUrl(url) : undefined) }))
-  showBatchClaimDialog.value=false
-  selectedTaskIds.value=[]
-  openMaterialTransfers(items)
+  aiReviewContext.value={kind:'claim',taskIds:groups.map(group=>group.taskId),selected:[...selectedBatchClaimImages.value],infringement:{...batchClaimInfringement.value}}
+  batchClaiming.value=true
+  try {
+    await prepareImageUrls(groups.flatMap(group=>group.urls))
+    const requestHeaders={...headers.value}
+    const items=groups.flatMap(group=>(group.urls.length ? group.urls : [null]).map(url=>{ const isInfringing=url ? Boolean(batchClaimInfringement.value[batchClaimImageKey(group.taskId,url)]) : false; return transferItem(`任务 #${group.taskId}${url ? '' : '（不采用图片）'}`,async(force,requestKey)=>{
+      const {data}=await api.post(`/tasks/${group.taskId}/claim-materials`,{
+        result_urls:url ? [url] : [],force_create:force,request_key:requestKey,is_infringing:isInfringing,
+      },{headers:requestHeaders})
+      return data.items[0] || {outcome:'created'}
+    },url ? imageUrl(url) : undefined) }))
+    showBatchClaimDialog.value=false
+    selectedTaskIds.value=[]
+    clearImagePreparation()
+    openMaterialTransfers(items)
+  } catch(e:any) { if(!preparationMessage(e).includes('停止等待')) showToast(preparationMessage(e)) }
+  finally { batchClaiming.value=false }
 }
 async function retryTaskResult(task: any) {
   try {
@@ -2686,6 +2887,7 @@ async function refreshMemberList() {
     memberListRefreshing.value = true
     const [memberResponse, groupResponse, designResponse] = await Promise.all([api.get('/members', { headers: headers.value }), api.get('/operator-groups', { headers: headers.value }), api.get('/design-groups', { headers: headers.value })])
     members.value = memberResponse.data
+    await loadGrsaiStorage()
     operatorGroups.value = groupResponse.data
     designGroups.value = designResponse.data
   } catch(e:any) { showToast(e.response?.data?.detail || '刷新成员列表失败') }
@@ -2715,8 +2917,8 @@ async function deleteOperatorGroup(group:any) {
   catch(e:any) { showToast(e.response?.data?.detail || '删除运营组失败') }
 }
 function openMemberDialog(member?: any) { editingMember.value=member || null; memberForm.value={name:member?.name || '',user_code:member?.user_code || '',email:member?.email || '',password:'',is_active:member?.is_active ?? true,role:member?.role || 'member',group_id:member?.group_id ?? null,design_group_id:member?.design_group_id ?? null}; memberFormError.value=''; showMemberDialog.value=true }
-function openMyAccountDialog() { myName.value=user.value?.name || ''; myUserCode.value=user.value?.user_code || ''; showMyAccountDialog.value=true }
-async function saveMyUserCode() { const name=myName.value.trim(), userCode=myUserCode.value.trim(); if (!name) { showToast('请输入管理员名称'); return } if (userCode && [...userCode].length !== 2) { showToast('用户代码必须恰好为两个字符'); return } try { myAccountSaving.value=true; const {data}=await api.patch('/me',{name,user_code:userCode || null},{headers:headers.value}); user.value=data; showMyAccountDialog.value=false; showToast('账户设置已保存') } catch(e:any) { showToast(e.response?.data?.detail || '保存账户设置失败') } finally { myAccountSaving.value=false } }
+function openMyAccountDialog() { if (!canEditMyAccount.value) return; myName.value=user.value?.name || ''; myUserCode.value=user.value?.user_code || ''; showMyAccountDialog.value=true }
+async function saveMyUserCode() { if (!canEditMyAccount.value) return; const name=myName.value.trim(), userCode=myUserCode.value.trim(); if (!name) { showToast('请输入管理员名称'); return } if (userCode && [...userCode].length !== 2) { showToast('用户代码必须恰好为两个字符'); return } try { myAccountSaving.value=true; const {data}=await api.patch('/me',{name,user_code:userCode || null},{headers:headers.value}); user.value=data; showMyAccountDialog.value=false; showToast('账户设置已保存') } catch(e:any) { showToast(e.response?.data?.detail || '保存账户设置失败') } finally { myAccountSaving.value=false } }
 async function saveMember() {
   const name=memberForm.value.name.trim(), userCode=memberForm.value.user_code.trim(), email=memberForm.value.email.trim()
   memberFormError.value=''
@@ -2753,11 +2955,7 @@ async function toggleMemberTitleGrant(member:any) {
   } catch(e:any) { showToast(e.response?.data?.detail || '更新标题词库管理权限失败') }
   finally { memberTitleGrantSaving.value = false }
 }
-function openMemberCredentialDialog(member:any, provider:any) { credentialMember.value=member; credentialProvider.value=provider; credentialApiKey.value=''; showMemberCredentialDialog.value=true }
-function memberCredentialKey() { return credentialProvider.value?.credential_provider || credentialProvider.value?.provider }
-function memberCredentialPreview() { return credentialMember.value?.ai_provider_credential_previews?.[memberCredentialKey()] || '' }
-async function saveMemberCredential() { if (!credentialMember.value || !credentialProvider.value || !credentialApiKey.value.trim()) { showToast('请输入平台密钥'); return } try { credentialSaving.value=true; await api.put(`/members/${credentialMember.value.id}/ai-provider-credentials/${credentialProvider.value.provider}`,{api_key:credentialApiKey.value.trim()},{headers:headers.value}); showMemberCredentialDialog.value=false; await refresh(); showToast(`${credentialProvider.value.credential_display_name || credentialProvider.value.display_name} 平台密钥已安全保存`) } catch(e:any) { showToast(e.response?.data?.detail || '保存平台密钥失败') } finally { credentialSaving.value=false } }
-async function clearMemberCredential() { if (!credentialMember.value || !credentialProvider.value || !confirm(`确定清除 ${credentialMember.value.name} 的 ${credentialProvider.value.credential_display_name || credentialProvider.value.display_name} 平台密钥吗？`)) return; try { credentialSaving.value=true; await api.delete(`/members/${credentialMember.value.id}/ai-provider-credentials/${credentialProvider.value.provider}`,{headers:headers.value}); showMemberCredentialDialog.value=false; await refresh(); showToast('平台密钥已清除') } catch(e:any) { showToast(e.response?.data?.detail || '清除平台密钥失败') } finally { credentialSaving.value=false } }
+
 async function loadMiaoshouShops() { try { shopLoading.value=true; shopError.value=''; await api.post('/miaoshou/shops',{}, {headers:headers.value}); await refresh(); return true } catch(e:any) { shopError.value=e.response?.data?.detail || '获取妙手店铺失败'; return false } finally { shopLoading.value=false } }
 function openMiaoshouDialog() { miaoshouForm.value={app_id:'',app_secret:''}; shopError.value=''; showMiaoshouDialog.value=true }
 async function saveMiaoshouAccount() {
@@ -2806,6 +3004,7 @@ onMounted(() => {
 })
 let productLibraryStatisticsPollingTimer: ReturnType<typeof setInterval> | undefined
 onUnmounted(() => {
+  imagePreparer.cancel()
   showMaterialTransferResults.value=false
   materialBatchTitleGenerator.reset()
   document.removeEventListener('pointerdown', closeProductLibraryShopFilterOnOutsideClick)
@@ -2836,7 +3035,7 @@ onUnmounted(() => {
         </div>
       </nav>
     </aside>
-    <section class="content"><header><div><h1>{{ pageTitle }}</h1></div><div class="context"><button class="member account-button" :disabled="user?.role==='supply_user'" @click="openMyAccountDialog">{{user?.name}} · {{memberRoleLabel(user)}}{{user?.group_name ? ` · ${user.group_name}` : ''}}{{user?.user_code ? ` · ${user.user_code}` : ''}}</button><button class="ghost" @click="logout">退出</button></div></header>
+    <section class="content"><header><div><h1>{{ pageTitle }}</h1></div><div class="context"><button v-if="canEditMyAccount" class="member account-button" @click="openMyAccountDialog">{{user?.name}} · {{memberRoleLabel(user)}}{{user?.group_name ? ` · ${user.group_name}` : ''}}{{user?.user_code ? ` · ${user.user_code}` : ''}}</button><span v-else class="member">{{user?.name}} · {{memberRoleLabel(user)}}{{user?.group_name ? ` · ${user.group_name}` : ''}}{{user?.user_code ? ` · ${user.user_code}` : ''}}</span><button class="ghost" @click="logout">退出</button></div></header>
       <TitleLibrary v-if="page==='title-library'" :token="token" :user="user" />
       <SupplyCatalog v-if="page==='supply'" :token="token" :user="user" :initial-tab="String(route.query.tab || '')" @unauthorized="logout" />
       <OperationStatistics v-else-if="page==='operation-statistics' && user?.role==='company_admin'" :token="token" />
@@ -2847,6 +3046,7 @@ onUnmounted(() => {
         <div class="mode-tabs"><button>灵感参考</button><button class="active">印花贴合</button><button>创作变体</button></div><section class="pod-panel"><div class="pod-heading personal-resource-heading"><div><h2>印花贴合</h2><p>上传印花素材，选择产品模板和{{isDesignRole ? '本公司任意成员的' : '个人'}}白底图，生成 AI 创作效果图。</p></div><div class="personal-resource-actions"><button class="secondary" @click="openPersonalResourcesDialog()">管理白底图与创作要求</button></div><label class="requirement-label">创作要求 <b>*</b><span v-if="selectedTemplateAiPrompts().length || personalPrompts.length" class="prompt-picker"><select v-model="creativePromptIndex" @change="applyTemplateAiPrompt"><option value="">选择创作要求</option><optgroup v-if="selectedTemplateAiPrompts().length" label="产品模板创作要求"><option v-for="(prompt,index) in selectedTemplateAiPrompts()" :key="`template-${index}`" :value="`template:${index}`">{{prompt.name}}</option></optgroup><optgroup v-if="personalPrompts.length" :label="isDesignRole ? '本公司创作要求' : '我的创作要求'"><option v-for="prompt in personalPrompts" :key="`personal-${prompt.id}`" :value="`personal:${prompt.id}`">{{creativeResourceLabel(prompt)}}</option></optgroup></select><small>选择后会填充至下方，仍可自行修改。</small></span><textarea v-model="creativeRequirement" maxlength="1000" placeholder="例如：保留花朵细节，色彩清晰自然，印花完整贴合布料"></textarea></label></div><div class="pod-grid"><article><label>创作素材</label><label class="upload floral" :class="{hasAsset:creativeAssets.length, invalid:creativeAssetError}"><input type="file" multiple accept="image/png,image/jpeg,image/webp" @change="onCreativeAssetChange"/><img v-if="creativeAssets.length" :src="creativeAssets[0].preview" alt="印花素材预览"/><template v-else><b>✿</b><span>点击上传印花图</span><small>JPG、PNG、WebP，单张最大 3MB</small></template><button v-if="creativeAssets.length" type="button" class="asset-count" @click.prevent="showCreativeAssetsDialog=true">{{creativeAssets.length}}</button></label><p v-if="creativeAssetError" class="creative-asset-error" role="alert">{{creativeAssetError}}</p><button v-if="creativeAssets.length" class="manage-assets" @click="showCreativeAssetsDialog=true">管理 {{creativeAssets.length}} 张印花图</button></article><article class="white-image-picker"><label>产品模板</label><select v-model="selectedTemplateId" @change="onCreativeTemplateChange"><option v-for="t in templates" :key="t.id" :value="t.id">{{t.name}}</option></select><section v-if="isDesignRole && selectedTemplate?.design_note" class="template-design-note" aria-label="美工备注"><strong>美工备注</strong><p>{{selectedTemplate.design_note}}</p></section><label class="white-image-label">产品白底图 <b>*</b></label><select v-model="selectedWhiteImageId" :disabled="personalResourcesLoading || !personalWhiteImages.length"><option :value="null">{{personalWhiteImages.length ? '请选择白底图' : '尚未设置白底图'}}</option><option v-for="item in personalWhiteImages" :key="item.id" :value="item.id">{{creativeResourceLabel(item)}}</option></select><div v-if="selectedWhiteImage" class="product-preview template-preview"><img :src="imageUrl(selectedWhiteImage.image_url)" :alt="selectedWhiteImage.name"/></div><div v-else class="white-image-empty"><span>{{personalWhiteImages.length ? '请从上方选择一张白底图' : '尚未设置该模板的白底图，请先设置'}}</span><button v-if="!personalWhiteImages.length" @click="openPersonalResourcesDialog('white-images')">立即设置</button></div></article><article class="settings"><label class="settings-title">创作参数</label><div class="parameter-fields"><label class="parameter-field"><span>AI模型</span><select v-model="creativeProvider" :disabled="!availableAiProviders.length"><option v-if="!availableAiProviders.length" value="">暂无后台已启用的模型</option><option v-for="provider in availableAiProviders" :key="provider.provider" :value="provider.provider">{{provider.display_name}} · {{provider.model}}{{provider.credential_configured ? '' : ' · 未配置密钥'}}</option></select><small v-if="!availableAiProviders.length">请联系超级管理员在后台启用至少一个模型。</small></label><label class="parameter-field"><span>画面比例</span><select v-model="creativeRatio" :disabled="providerUsesFixedSquare(creativeProvider)"><option>1:1</option><option>3:4</option></select></label><label class="parameter-field"><span>清晰度</span><select value="1K"><option>1K</option></select></label></div></article><aside class="estimate"><div v-if="creativeUploading" class="upload-progress"><span>已处理 {{creativeProcessedCount}} / {{creativeAssets.length}}，已上传 {{creativeUploadedCount}} 张，已跳过 {{creativeSkippedCount}} 张</span><progress :max="creativeAssets.length" :value="creativeProcessedCount"></progress><small>损坏图片会自动跳过；上传完成后将按模型配置创建独立任务，中断后可继续未完成图片。</small></div><button class="primary full" :disabled="!availableAiProviders.length || creativeUploading || !selectedWhiteImageId || Boolean(creativeCredentialError)" @click="createTask">{{creativeUploading ? `处理中 ${creativeProcessedCount}/${creativeAssets.length}` : '✦ 开始印花贴合'}}</button><p v-if="creativeCredentialError || creativeSubmitError" class="creative-submit-error" role="alert">{{creativeCredentialError || creativeSubmitError}}</p></aside></div></section></section>
       <section v-else-if="page==='tasks'" class="page">
         <CreativeUploadNotice :notice="creativeUploadNotice" @close="creativeUploadNotice=null" />
+        <button v-if="aiPreparationJobId" class="image-preparation-entry" type="button" @click="openImagePreparation"><span><strong>{{aiPreparationProgress?.state==='ready' ? '图片已永久保存，待确认审核' : aiPreparationFailed ? '图片保存未完成' : '图片正在后台保存'}}</strong><small v-if="aiPreparationProgress">已保存 {{aiPreparationProgress.ready}} / {{aiPreparationProgress.total}} 张<span v-if="aiPreparationProgress.failed"> · {{aiPreparationProgress.failed}} 张未成功</span></small></span><b>查看进度</b></button>
         <nav class="task-type-tabs" aria-label="任务类型">
           <button v-for="(label,type) in taskTypeLabels" :key="type" :class="{active:activeTaskType===type}" :disabled="taskListRefreshing" @click="switchTaskType(type)">
             <i class="task-type-tabs-icon" aria-hidden="true">{{type==='sku_image'?'🖼':type==='carousel'?'🎞':'🏷'}}</i>
@@ -2856,7 +3056,7 @@ onUnmounted(() => {
           </button>
         </nav>
         <div class="section-heading task-center-heading"><div><span>筛选条件设置后需点击搜索；可多选失败任务批量重试，SKU 图任务可批量审核、下载已审核图片；组长可标记不合格结果。</span><div class="task-filter-row"><label v-if="activeTaskType==='sku_image'" class="task-sku-search">SKU 批量查询<textarea v-model="taskSkuQuery" rows="3" placeholder="每行输入一个SKU"></textarea></label><label v-if="activeTaskType==='sku_image'">模版<select v-model="taskTemplateFilterId"><option :value="null">全部模版</option><option v-for="template in templates" :key="template.id" :value="template.id">{{template.name}}</option></select></label><label>状态<select v-model="taskStatusFilter"><option value="">全部状态</option><option v-for="(label,status) in taskStatusLabel" :key="status" :value="status">{{label}}</option></select></label><label v-if="['company_admin','design_leader'].includes(user?.role)">创作人<select v-model="taskCreatorFilterId"><option :value="null">全部创作人</option><option v-for="member in members" :key="member.id" :value="member.id">{{member.name}}</option></select></label><label>创建开始时间<input v-model="taskCreatedFrom" type="datetime-local"/></label><label>创建结束时间<input v-model="taskCreatedTo" type="datetime-local"/></label><button class="primary task-search-button" :disabled="taskListRefreshing" @click="searchTasks">{{taskListRefreshing ? '搜索中…' : '搜索'}}</button></div></div></div>
-        <div v-if="selectedTaskIds.length" class="task-batch-bar"><strong>已选择 {{selectedTaskIds.length}} 个任务</strong><span class="task-batch-actions"><button v-if="pagedTasks.some(task=>selectedTaskIds.includes(task.id) && task.adopted_images?.length)" class="secondary" :disabled="downloadingTasks" @click="downloadSelectedTasks">{{downloadingTasks ? '打包中…' : '批量下载 SKU 图'}}</button><button v-if="pagedTasks.some(task=>selectedTaskIds.includes(task.id) && task.can_review && task.result_count)" class="secondary" :disabled="resultReviewLoading" @click="openResultReviewDialog">批量标记结果</button><button v-if="selectedRetryTaskIds.length" class="primary" :disabled="batchRetryingTasks || taskListRefreshing" @click="retrySelectedTasks">{{batchRetryingTasks ? '批量重试中…' : `批量重试（${selectedRetryTaskIds.length}）`}}</button><button v-if="activeTaskType==='sku_image' && selectedClaimableTaskIds.length" class="primary" :disabled="batchClaimLoading || batchClaiming || batchRetryingTasks" @click="openBatchClaimDialog">批量审核（{{selectedClaimableTaskIds.length}}）</button></span></div>
+        <div v-if="selectedTaskIds.length" class="task-batch-bar"><strong>已选择 {{selectedTaskIds.length}} 个任务</strong><span class="task-batch-actions"><button v-if="pagedTasks.some(task=>selectedTaskIds.includes(task.id) && task.adopted_images?.length)" class="secondary" :disabled="downloadingTasks" @click="downloadSelectedTasks">{{downloadingTasks ? '打包中…' : '批量下载 SKU 图'}}</button><button v-if="pagedTasks.some(task=>selectedTaskIds.includes(task.id) && task.can_review && task.result_count)" class="secondary" :disabled="resultReviewLoading" @click="openResultReviewDialog">批量标记结果</button><button v-if="selectedRetryTaskIds.length" class="primary" :disabled="batchRetryingTasks || taskListRefreshing" @click="retrySelectedTasks">{{batchRetryingTasks ? '批量重试中…' : `批量重试（${selectedRetryTaskIds.length}）`}}</button><button v-if="activeTaskType==='sku_image' && selectedClaimableTaskIds.length" class="primary" :disabled="batchClaimLoading || batchClaiming || batchRetryingTasks" @click="openBatchClaimDialog()">批量审核（{{selectedClaimableTaskIds.length}}）</button></span></div>
         <section class="draft-table task-table refreshable-list" :aria-busy="taskListRefreshing">
           <div class="thead task-list-grid"><label class="material-checkbox material-select-all"><input type="checkbox" :checked="allSelectableTasksSelected" :indeterminate="someSelectableTasksSelected" :disabled="!selectablePagedTasks.length" aria-label="全选本页可批量操作任务" @change="toggleAllSelectableTasks"/><span>选择</span></label><span>任务编号</span><span>任务类型</span><span>创作素材</span><span>产品模版</span><span>AI模型</span><span>创建时间</span><span>创建人</span><span>外部任务 ID</span><span>状态</span><span>结果</span><span>处理信息</span><span>操作</span></div>
           <div v-for="task in pagedTasks" :key="task.id" class="trow task-list-grid" :class="{selected:selectedTaskIds.includes(task.id)}"><label class="material-checkbox"><input v-if="taskCanBeSelected(task)" type="checkbox" :checked="selectedTaskIds.includes(task.id)" :aria-label="`选择任务 ${task.id}`" @change="toggleTaskSelection(task.id)"/></label><strong>#{{task.id}}</strong><span>{{taskTypeLabel(task)}}</span><button v-if="task.parameters?.print_url" type="button" class="task-material-thumbnail" title="查看创作素材" aria-label="查看创作素材大图" @click.stop.prevent="openImagePreview(task.parameters.print_url, '创作素材')"><img :src="imageUrl(task.parameters.print_url)" alt="创作素材"/></button><span v-else>—</span><span>{{task.template_name || '—'}}</span><span class="ai-model-cell"><b>{{task.provider === 'grsai' ? 'Grsai' : task.provider || '默认模型'}}</b><small v-if="task.provider_model">{{task.provider_model}}</small></span><span>{{new Date(task.created_at).toLocaleString()}}</span><span>{{task.created_by_name || '历史记录缺失'}}</span><span class="provider-task-id"><code>{{task.provider_task_id || '—'}}</code><button v-if="task.provider_task_id" class="copy-icon-button" title="复制外部任务 ID" aria-label="复制外部任务 ID" @click="copyProviderTaskId(task)">⧉</button></span><span class="task-progress-cell"><span class="chip" :class="taskStatusClass(task.status)">{{taskStatusLabel[task.status] || task.status || '—'}}</span><small>{{task.progress?.total_prints || 0}} 张参考图 · 已提交 {{task.submit_attempts || 0}} 次</small><small v-if="task.rejected_count" class="error">{{task.rejected_count}} 张不合格</small><small v-if="task.adopted_images?.length">已采用 {{task.adopted_images.length}} 张</small></span><button v-if="task.result_urls?.[0]" type="button" class="task-material-thumbnail" title="查看结果图" aria-label="查看首张结果图" @click.stop.prevent="openImagePreview(task.result_urls[0], `任务 #${task.id} 结果图`)"><img :src="imageUrl(task.result_urls[0])" :alt="`任务 #${task.id} 结果图`"/></button><span v-else>—</span><span :class="{error: task.status==='failed'}">{{task.failure_reason || '—'}}</span><span class="task-actions"><button class="secondary" @click="openTaskDetail(task)">查看详情</button><button v-if="activeTaskType!=='sku_image'" class="secondary" @click="openImageWorkspaceFromTask(task)">打开草稿</button><button v-if="task.can_manage && task.status==='failed'" class="secondary" :disabled="retryingTaskId===task.id || batchRetryingTasks" @click="retryTaskResult(task)">{{retryingTaskId===task.id ? '重试中…' : '重试任务'}}</button></span></div>
@@ -3068,8 +3268,9 @@ onUnmounted(() => {
         </div>
         <div class="section-heading operator-groups-heading"><h2>美工组</h2><button class="primary" @click="openDesignGroupDialog()">新增美工组</button></div>
         <div class="operator-group-list"><MemberGroupCard v-for="group in designGroups" :key="group.id" :group="group" :members="members.filter(member=>member.design_group_id===group.id)" :role-label="memberRoleLabel" rename-label="编辑" @rename="openDesignGroupDialog(group)" @remove="deleteDesignGroup(group)" /><p v-if="!designGroups.length" class="operator-groups-empty">暂无美工组；先新增普通美工，再指定组长创建美工组。</p></div>
-        <div class="section-heading member-list-heading"><div class="member-list-title"><h2>公司成员</h2><span>共 {{members.length}} 人</span></div><button class="primary" @click="openMemberDialog()">新增成员</button></div>
-        <section class="draft-table refreshable-list member-list-scroll" :aria-busy="memberListRefreshing"><div class="thead member-grid"><span>成员</span><span>用户代码</span><span>角色</span><span>所属组</span><span>邮箱</span><span>货盘管理权限</span><span>标题词库管理权限</span><span>状态</span><span>加入时间</span><span>操作</span></div><div v-for="member in members" :key="member.id" class="trow member-grid"><span><b>{{member.name}}</b></span><span>{{member.user_code || '—'}}</span><span>{{memberRoleLabel(member)}}</span><span>{{memberIsDesigner(member) ? designGroupName(member.design_group_id) : member.group_id ? operatorGroupName(member.group_id) : '—'}}</span><span>{{member.email}}</span><span class="member-supply-access"><template v-if="member.role === 'member' || member.role === 'team_leader'"><span class="member-permission-status" :class="member.supply_admin ? 'configured' : 'missing'">{{member.supply_admin ? '已授予' : '未授予'}}</span><button :class="member.supply_admin ? 'negative' : 'positive'" :disabled="memberSupplyGrantSaving" :aria-label="`${member.supply_admin ? '撤销' : '授予'} ${member.name} 的货盘管理权限`" @click="toggleMemberSupplyGrant(member)">{{member.supply_admin ? '撤销权限' : '授予权限'}}</button></template><span v-else class="member-permission-status">{{member.role==='company_admin' ? '默认拥有' : '—'}}</span></span><span class="member-supply-access"><template v-if="member.role === 'member' || member.role === 'team_leader'"><span class="member-permission-status" :class="member.title_library_admin ? 'configured' : 'missing'">{{member.title_library_admin ? '已授予' : '未授予'}}</span><button :class="member.title_library_admin ? 'negative' : 'positive'" :disabled="memberTitleGrantSaving" :aria-label="`${member.title_library_admin ? '撤销' : '授予'} ${member.name} 的标题词库管理权限`" @click="toggleMemberTitleGrant(member)">{{member.title_library_admin ? '撤销权限' : '授予权限'}}</button></template><span v-else class="member-permission-status">{{member.role==='company_admin' ? '默认拥有' : '—'}}</span></span><span class="chip" :class="member.is_active ? 'blue' : 'orange'">{{member.is_active ? '启用中' : '已停用'}}</span><span>{{new Date(member.created_at).toLocaleDateString()}}</span><span class="member-row-actions"><template v-if="['member','team_leader','designer','design_leader'].includes(member.role)"><button @click="openMemberDialog(member)">编辑</button><button v-if="!['team_leader','design_leader'].includes(member.role)" :class="member.is_active ? 'negative' : 'positive'" @click="toggleMember(member)">{{member.is_active ? '停用' : '启用'}}</button></template><button v-for="provider in memberCredentialProviders" :key="provider.credential_provider" class="credential-button" :class="member.ai_provider_credentials?.[provider.credential_provider] ? 'configured' : 'missing'" @click="openMemberCredentialDialog(member, provider)">{{provider.credential_display_name}} 密钥 · {{member.ai_provider_credentials?.[provider.credential_provider] ? '已配置' : '待配置'}}</button></span></div><p v-if="!members.length && !memberListRefreshing" class="empty">暂无公司成员。</p><div v-if="memberListRefreshing" class="list-refresh-overlay" role="status"><i></i><span>正在刷新列表…</span></div></section>
+        <div class="section-heading company-members-heading"><h2>公司成员 <small>共 {{members.length}} 人</small></h2><div class="section-heading-actions"><button class="ghost" @click="openCompanyStorage">AI 存储设置</button><button class="primary" @click="openMemberDialog()">新增成员</button></div></div>
+        <div class="ai-storage-summary"><span class="ai-storage-badge" :class="{enabled:grsaiCompanyEnabled}">{{grsaiCompanyEnabled ? '直存已启用' : '直存未启用'}}</span><span>{{grsaiCompanyId ? '公司默认库已配置' : '公司默认库未配置'}}</span><small>候选图保留 30 天，采用后永久保存</small></div>
+        <section class="draft-table refreshable-list member-list-scroll" :aria-busy="memberListRefreshing"><div class="thead member-grid"><span>成员</span><span>用户代码</span><span>角色</span><span>所属组</span><span>邮箱</span><span>货盘管理权限</span><span>标题词库管理权限</span><span>状态</span><span>加入时间</span><span>操作</span></div><div v-for="member in members" :key="member.id" class="trow member-grid"><span><b>{{member.name}}</b></span><span>{{member.user_code || '—'}}</span><span>{{memberRoleLabel(member)}}</span><span>{{memberIsDesigner(member) ? designGroupName(member.design_group_id) : member.group_id ? operatorGroupName(member.group_id) : '—'}}</span><span>{{member.email}}</span><span class="member-supply-access"><template v-if="member.role === 'member' || member.role === 'team_leader'"><span class="member-permission-status" :class="member.supply_admin ? 'configured' : 'missing'">{{member.supply_admin ? '已授予' : '未授予'}}</span><button :class="member.supply_admin ? 'negative' : 'positive'" :disabled="memberSupplyGrantSaving" :aria-label="`${member.supply_admin ? '撤销' : '授予'} ${member.name} 的货盘管理权限`" @click="toggleMemberSupplyGrant(member)">{{member.supply_admin ? '撤销权限' : '授予权限'}}</button></template><span v-else class="member-permission-status">{{member.role==='company_admin' ? '默认拥有' : '—'}}</span></span><span class="member-supply-access"><template v-if="member.role === 'member' || member.role === 'team_leader'"><span class="member-permission-status" :class="member.title_library_admin ? 'configured' : 'missing'">{{member.title_library_admin ? '已授予' : '未授予'}}</span><button :class="member.title_library_admin ? 'negative' : 'positive'" :disabled="memberTitleGrantSaving" :aria-label="`${member.title_library_admin ? '撤销' : '授予'} ${member.name} 的标题词库管理权限`" @click="toggleMemberTitleGrant(member)">{{member.title_library_admin ? '撤销权限' : '授予权限'}}</button></template><span v-else class="member-permission-status">{{member.role==='company_admin' ? '默认拥有' : '—'}}</span></span><span class="chip" :class="member.is_active ? 'blue' : 'orange'">{{member.is_active ? '启用中' : '已停用'}}</span><span>{{new Date(member.created_at).toLocaleDateString()}}</span><span class="member-row-actions"><template v-if="['member','team_leader','designer','design_leader'].includes(member.role)"><button @click="openMemberDialog(member)">编辑</button><button v-if="!['team_leader','design_leader'].includes(member.role)" :class="member.is_active ? 'negative' : 'positive'" @click="toggleMember(member)">{{member.is_active ? '停用' : '启用'}}</button></template><span class="member-ai-entry"><button type="button" class="member-ai-button" @click="openMemberStorage(member)">AI 配置</button></span></span></div><p v-if="!members.length && !memberListRefreshing" class="empty">暂无公司成员。</p><div v-if="memberListRefreshing" class="list-refresh-overlay" role="status"><i></i><span>正在刷新列表…</span></div></section>
       </section>
       <section v-else-if="page==='shops'" class="page">
         <div class="section-heading"><div><span>环境同步和模版上品策略配置在员工电脑的本地执行器工作页完成；这里查看自动上品记录。</span></div></div>
@@ -3128,26 +3329,28 @@ onUnmounted(() => {
       <p>审核任务与图片；选中的图片表示采用，否则废弃。</p>
       <div v-if="batchClaimLoading" class="empty">正在加载任务结果…</div>
       <template v-else>
-        <button type="button" class="ghost batch-claim-select-all" :disabled="batchClaiming || !batchClaimItems.length" @click="toggleAllBatchClaimImages">{{allBatchClaimImagesSelected ? '全部取消' : '全选'}}</button>
-        <InfringementActions :disabled="!selectedBatchClaimImages.size || batchClaiming" @set="setBatchClaimInfringement"/><div class="batch-claim-table">
+        <button type="button" class="ghost batch-claim-select-all" :disabled="batchClaiming || aiPreparationRunning || !batchClaimItems.length" @click="toggleAllBatchClaimImages">{{allBatchClaimImagesSelected ? '全部取消' : '全选'}}</button>
+        <InfringementActions :disabled="!selectedBatchClaimImages.size || batchClaiming || aiPreparationRunning" @set="setBatchClaimInfringement"/><div class="batch-claim-table">
           <table aria-label="AI 图片批量审核">
             <colgroup><col class="batch-claim-task-column"/><col/><col class="batch-claim-infringement-column"/></colgroup>
             <thead><tr><th scope="col">任务</th><th scope="col">图</th><th scope="col">是否侵权</th></tr></thead>
             <tbody v-for="group in groupedBatchClaimItems" :key="group.taskId">
               <tr v-for="(url,index) in group.urls" :key="url" class="batch-claim-row">
                 <th v-if="index===0" scope="rowgroup" :rowspan="group.urls.length">{{group.taskLabel}}</th>
-                <td><button type="button" class="batch-claim-image" :class="{selected:selectedBatchClaimImages.has(batchClaimImageKey(group.taskId,url))}" :disabled="batchClaiming" :aria-pressed="selectedBatchClaimImages.has(batchClaimImageKey(group.taskId,url))" :aria-label="`采用${group.taskLabel}结果图 ${index+1}`" @click="toggleBatchClaimImage(group.taskId,url)" @pointerenter="showBatchClaimHoverPreview($event,url,`${group.taskLabel} 结果图 ${index+1}`)" @pointerleave="batchClaimHoverPreview=null" @focus="showBatchClaimHoverPreview($event,url,`${group.taskLabel} 结果图 ${index+1}`)" @blur="batchClaimHoverPreview=null">
+                <td><button type="button" class="batch-claim-image" :class="{selected:selectedBatchClaimImages.has(batchClaimImageKey(group.taskId,url))}" :disabled="batchClaiming || aiPreparationRunning || !candidateSelectable(url)" :aria-pressed="selectedBatchClaimImages.has(batchClaimImageKey(group.taskId,url))" :aria-label="`采用${group.taskLabel}结果图 ${index+1}`" @click="toggleBatchClaimImage(group.taskId,url)" @pointerenter="showBatchClaimHoverPreview($event,url,`${group.taskLabel} 结果图 ${index+1}`)" @pointerleave="batchClaimHoverPreview=null" @focus="showBatchClaimHoverPreview($event,url,`${group.taskLabel} 结果图 ${index+1}`)" @blur="batchClaimHoverPreview=null">
                   <img :src="imageUrl(url)" :alt="`${group.taskLabel} 结果图 ${index+1}`"/>
-                </button></td>
-                <td><InfringementToggle :model-value="!!batchClaimInfringement[batchClaimImageKey(group.taskId,url)]" :disabled="batchClaiming" @update:model-value="batchClaimInfringement[batchClaimImageKey(group.taskId,url)]=$event"/></td>
+                </button><small>{{candidateStatusText(url)}}</small></td>
+                <td><InfringementToggle :model-value="!!batchClaimInfringement[batchClaimImageKey(group.taskId,url)]" :disabled="batchClaiming || aiPreparationRunning" @update:model-value="batchClaimInfringement[batchClaimImageKey(group.taskId,url)]=$event"/></td>
               </tr>
             </tbody>
           </table>
           <p v-if="!groupedBatchClaimItems.length" class="empty">没有待审核任务。</p>
         </div>
       </template>
-      <div v-if="batchClaiming || batchClaimCompleted" class="batch-claim-progress"><span>审核进度 {{batchClaimCompleted}} / {{batchClaimTotal}}<b v-if="batchClaimFailed"> · 失败 {{batchClaimFailed}}</b></span><progress :max="batchClaimTotal || 1" :value="batchClaimCompleted"></progress><small>正在处理审核结果，请勿关闭窗口。</small></div>
-      <div class="modal-actions"><button class="ghost" :disabled="batchClaiming" @click="showBatchClaimDialog=false">取消</button><button class="primary" :disabled="batchClaimLoading || batchClaiming || !groupedBatchClaimItems.length" @click="confirmBatchClaim">{{batchClaiming ? `审核中 ${batchClaimCompleted}/${batchClaimTotal}` : '确认'}}</button></div>
+      <footer class="image-review-footer">
+        <AIImagePreparationPanel v-if="aiReviewContext?.kind==='claim' && (aiPreparationProgress || aiPreparationBusy || aiPreparationError)" :progress="aiPreparationProgress" :busy="aiPreparationRunning" :continue-review="batchClaiming" :error="aiPreparationError" @retry="retryImagePreparation" @adjust="adjustImagePreparation" @background="backgroundImagePreparation"/>
+        <div class="modal-actions"><button class="ghost" :disabled="batchClaiming" @click="showBatchClaimDialog=false">取消</button><button class="primary" :disabled="batchClaimLoading || batchClaiming || aiPreparationRunning || (aiReviewContext?.kind==='claim' && aiPreparationFailed) || !groupedBatchClaimItems.length" @click="confirmBatchClaim">{{batchClaiming ? '正在保存图片…' : '确认审核'}}</button></div>
+      </footer>
     </section>
   </div>
   <Teleport to="body">
@@ -3206,8 +3409,8 @@ onUnmounted(() => {
       <div class="modal-actions"><button class="ghost" :disabled="batchMainImageSaving" @click="showBatchMainImageDialog=false">取消</button><button class="primary" :disabled="batchMainImageSaving" @click="createBatchMainImageTasks">{{batchMainImageSaving?'创建中…':'开始创作主图'}}</button></div>
     </section>
   </div>
-  <div v-if="showBatchImageReviewDialog" class="modal-backdrop" @click.self="!batchImageReviewSaving && (showBatchImageReviewDialog=false)"><section class="modal-card batch-image-review-dialog"><button class="modal-close" :disabled="batchImageReviewSaving" @click="showBatchImageReviewDialog=false">×</button><h2>批量审核{{batchImageReviewType==='carousel' ? '轮播图' : '首图'}}</h2><p>每条草稿至少选择一张候选图即可确认并进入下一阶段。</p><div v-if="batchImageReviewLoading" class="empty">正在加载候选图…</div><template v-else><div class="batch-review-toolbar"><strong>已选 {{batchReviewChosenTasks()}} / {{batchReviewTotalTasks()}} 个任务</strong><button class="secondary" @click="selectAllBatchReviewTasks()">{{batchImageReviewType==='carousel' ? '所有任务选全部' : '所有任务选首张'}}</button></div><section class="batch-review-list"><article v-for="draft in batchImageReviewDrafts" :key="draft.id" class="batch-review-draft"><header><div><b>#{{draft.id}}</b><span :title="draft.title">{{draft.title}}</span><small>{{batchReviewSelectedCount(draft)}} / {{batchReviewTasks(draft).length}} 已选</small></div><span><button class="ghost" @click="selectAllBatchReviewTasks(draft)">{{batchImageReviewType==='carousel' ? '本草稿选全部' : '本草稿选首张'}}</button><button class="ghost" @click="clearBatchReviewDraft(draft)">清除</button></span></header><div v-for="task in batchReviewTasks(draft)" :key="task.id" class="batch-review-task"><strong>{{batchImageReviewType==='carousel' ? `SKU：${task.parameters?.source_sku || '—'}` : `首图任务 #${task.id}`}}</strong><div><button v-for="url in task.result_urls" :key="url" type="button" :class="{selected:(batchImageReviewSelections[task.id] || []).includes(url)}" @click="toggleBatchReviewResult(task,url)"><img :src="imageUrl(url)" alt="候选图"/><i v-if="(batchImageReviewSelections[task.id] || []).includes(url)">✓</i></button></div></div><p v-if="!batchReviewTasks(draft).length" class="empty">该草稿暂无可审核的候选图。</p></article></section><div class="batch-review-footer"><div v-if="batchImageReviewType==='carousel'" class="carousel-confirm-next-step"><small>已选择图片的草稿下一步</small><label><input v-model="batchCarouselReviewNextStage" type="radio" value="main_image_pending"/>进入首图创作</label><label><input v-model="batchCarouselReviewNextStage" type="radio" value="ready_to_publish"/>直接到待发布</label></div><small v-else>已选择图片的草稿将进入待发布。</small><div class="modal-actions"><button class="ghost" :disabled="batchImageReviewSaving" @click="showBatchImageReviewDialog=false">取消</button><button class="primary" :disabled="batchImageReviewSaving" @click="confirmBatchImageReview">{{batchImageReviewSaving?'确认中…':`确认审核 ${batchReviewChosenTasks()} 个任务`}}</button></div></div></template></section></div>
-  <div v-if="showMyAccountDialog" class="modal-backdrop" @click.self="showMyAccountDialog=false"><section class="modal-card"><h2>账号设置</h2><p>可修改当前管理员名称和用户代码；用户代码留空可清除，且在本公司内不可重复。</p><label>管理员名称<input v-model="myName" maxlength="80" placeholder="请输入管理员名称" /></label><label>用户代码 <small>（两个字符）</small><input v-model="myUserCode" maxlength="2" placeholder="例如：CN" /></label><div class="modal-actions"><button class="ghost" @click="showMyAccountDialog=false">取消</button><button class="primary" :disabled="myAccountSaving" @click="saveMyUserCode">{{myAccountSaving ? '保存中…' : '保存'}}</button></div></section></div>
+  <div v-if="showBatchImageReviewDialog" class="modal-backdrop" @click.self="!batchImageReviewSaving && (showBatchImageReviewDialog=false)"><section class="modal-card batch-image-review-dialog"><button class="modal-close" :disabled="batchImageReviewSaving" @click="showBatchImageReviewDialog=false">×</button><h2>批量审核{{batchImageReviewType==='carousel' ? '轮播图' : '首图'}}</h2><p>每条草稿至少选择一张候选图即可确认并进入下一阶段。</p><div v-if="batchImageReviewLoading" class="empty">正在加载候选图…</div><template v-else><div class="batch-review-toolbar"><strong>已选 {{batchReviewChosenTasks()}} / {{batchReviewTotalTasks()}} 个任务</strong><button class="secondary" @click="selectAllBatchReviewTasks()">{{batchImageReviewType==='carousel' ? '所有任务选全部' : '所有任务选首张'}}</button></div><section class="batch-review-list"><article v-for="draft in batchImageReviewDrafts" :key="draft.id" class="batch-review-draft"><header><div><b>#{{draft.id}}</b><span :title="draft.title">{{draft.title}}</span><small>{{batchReviewSelectedCount(draft)}} / {{batchReviewTasks(draft).length}} 已选</small></div><span><button class="ghost" @click="selectAllBatchReviewTasks(draft)">{{batchImageReviewType==='carousel' ? '本草稿选全部' : '本草稿选首张'}}</button><button class="ghost" @click="clearBatchReviewDraft(draft)">清除</button></span></header><div v-for="task in batchReviewTasks(draft)" :key="task.id" class="batch-review-task"><strong>{{batchImageReviewType==='carousel' ? `SKU：${task.parameters?.source_sku || '—'}` : `首图任务 #${task.id}`}}</strong><div><button v-for="url in task.result_urls" :key="url" type="button" :class="{selected:(batchImageReviewSelections[task.id] || []).includes(url)}" :disabled="batchImageReviewSaving || aiPreparationRunning || !candidateSelectable(url)" @click="toggleBatchReviewResult(task,url)"><img :src="imageUrl(url)" alt="候选图"/><small>{{candidateStatusText(url)}}</small><i v-if="(batchImageReviewSelections[task.id] || []).includes(url)">✓</i></button></div></div><p v-if="!batchReviewTasks(draft).length" class="empty">该草稿暂无可审核的候选图。</p></article></section><div class="batch-review-footer image-review-footer"><AIImagePreparationPanel v-if="aiReviewContext?.kind==='review' && (aiPreparationProgress || aiPreparationBusy || aiPreparationError)" :progress="aiPreparationProgress" :busy="aiPreparationRunning" :continue-review="aiPreparationBusy" :submitting="aiPreparationSubmitting" :error="aiPreparationError" @retry="retryImagePreparation" @adjust="adjustImagePreparation" @background="backgroundImagePreparation"/><div v-if="batchImageReviewType==='carousel'" class="carousel-confirm-next-step"><small>已选择图片的草稿下一步</small><label><input v-model="batchCarouselReviewNextStage" type="radio" value="main_image_pending"/>进入首图创作</label><label><input v-model="batchCarouselReviewNextStage" type="radio" value="ready_to_publish"/>直接到待发布</label></div><small v-else>已选择图片的草稿将进入待发布。</small><div class="modal-actions"><button class="ghost" :disabled="batchImageReviewSaving" @click="showBatchImageReviewDialog=false">取消</button><button class="primary" :disabled="batchImageReviewSaving || aiPreparationRunning || (aiReviewContext?.kind==='review' && aiPreparationFailed)" @click="confirmBatchImageReview">{{batchImageReviewSaving?(aiPreparationSubmitting ? '正在提交审核…' : '正在保存图片…'):`确认审核 ${batchReviewChosenTasks()} 个任务`}}</button></div></div></template></section></div>
+  <div v-if="canEditMyAccount && showMyAccountDialog" class="modal-backdrop" @click.self="showMyAccountDialog=false"><section class="modal-card"><h2>账号设置</h2><p>可修改当前管理员名称和用户代码；用户代码留空可清除，且在本公司内不可重复。</p><label>管理员名称<input v-model="myName" maxlength="80" placeholder="请输入管理员名称" /></label><label>用户代码 <small>（两个字符）</small><input v-model="myUserCode" maxlength="2" placeholder="例如：CN" /></label><div class="modal-actions"><button class="ghost" @click="showMyAccountDialog=false">取消</button><button class="primary" :disabled="myAccountSaving" @click="saveMyUserCode">{{myAccountSaving ? '保存中…' : '保存'}}</button></div></section></div>
   <div v-if="showMaterialDraftDialog" class="modal-backdrop" @click.self="showMaterialDraftDialog=false">
     <section class="modal-card material-draft-dialog">
       <button class="modal-close" @click="showMaterialDraftDialog=false">×</button>
@@ -3294,9 +3497,9 @@ onUnmounted(() => {
   <div v-if="showShopeeExportDialog" class="modal-backdrop" @click.self="!shopeeExportLoading && (showShopeeExportDialog=false)"><section class="modal-card tiktok-export-dialog"><button class="modal-close" :disabled="shopeeExportLoading" @click="showShopeeExportDialog=false">×</button><h2>导出 Shopee 批量上传表格</h2><p>已选择 {{selectedDrafts.length}} 条同一产品模板的商品草稿。变体名称固定使用 Color 和 Size。</p><div v-if="shopeeExportLoading && !shopeeExportOptions" class="empty">正在读取 Shopee 模板选项…</div><template v-else><section class="tiktok-export-grid"><label>Shopee 类目库 <b class="required">*</b><select v-model="shopeeExportCatalogId" @change="changeShopeeExportCatalog"><option :value="null" disabled>请选择类目库</option><option v-for="catalog in shopeeCatalogs" :key="catalog.id" :value="catalog.id">{{catalog.name}}</option></select></label><div class="export-field">商品类目 <b class="required">*</b><SearchableSelect v-model="shopeeExportCategoryId" :options="shopeeExportOptions?.categories || []" value-key="id" label-key="name" placeholder="请选择商品类目" search-placeholder="搜索类目名称，空格分隔多个关键词"/></div><label>默认售价 <b class="required">*</b><input v-model.number="shopeeExportDefaultPrice" type="number" min="0.10" max="1000000000" step="0.01" placeholder="请输入售价"/></label><label>默认库存 <b class="required">*</b><input v-model.number="shopeeExportDefaultQuantity" type="number" min="0" max="10000000" step="1"/></label></section><section class="tiktok-attribute-section"><h3>物流渠道 <b class="required">*</b></h3><p>至少选择一个渠道，导出时所选渠道写为 {{shopeeExportOptions?.shipping_channels?.[0]?.on_value || 'On'}}，其余写为 {{shopeeExportOptions?.shipping_channels?.[0]?.off_value || 'Off'}}。</p><div class="shopee-channel-options"><label v-for="channel in shopeeExportOptions?.shipping_channels || []" :key="channel.field"><input v-model="shopeeExportChannels" type="checkbox" :value="channel.field"/>{{channel.name}}</label></div></section><section class="tiktok-product-overrides"><h3>单品售价与库存</h3><p>主商品货号和整合规格编号使用草稿 ID；危险物品留空。售价与库存留空时使用默认值。</p><div class="tiktok-override-head"><span>商品</span><span>售价覆盖</span><span>库存覆盖</span></div><div v-for="draft in selectedDrafts" :key="draft.id" class="tiktok-override-row"><strong>#{{draft.id}} {{draft.title}}</strong><input v-model.number="shopeeExportOverrides[draft.id].price" type="number" min="0.10" max="1000000000" step="0.01" placeholder="使用默认售价"/><input v-model.number="shopeeExportOverrides[draft.id].quantity" type="number" min="0" max="10000000" step="1" placeholder="使用默认库存"/></div></section></template><p v-if="shopeeExportError" class="error material-draft-error">{{shopeeExportError}}</p><div class="modal-actions"><button class="ghost" :disabled="shopeeExportLoading" @click="showShopeeExportDialog=false">取消</button><button class="primary" :disabled="shopeeExportLoading || !shopeeExportOptions" @click="exportSelectedDraftsToShopee">{{shopeeExportLoading ? '生成中…' : '生成并下载'}}</button></div></section></div>
   <div v-if="showDraftEditDialog" class="modal-backdrop" @click.self="showDraftEditDialog=false"><section class="modal-card material-draft-dialog"><button class="modal-close" @click="showDraftEditDialog=false">×</button><h2>编辑商品草稿</h2><p>可修改商品标题和产品描述。</p><label>产品标题<input v-model="draftEditTitle" minlength="25" maxlength="255" placeholder="请输入 25-255 个字符"/></label><label>产品描述<textarea v-model="draftEditProductDescription" class="draft-edit-description" maxlength="5000" placeholder="请输入产品描述"></textarea></label><section class="draft-edit-section"><strong>SKU 图 <small class="draft-edit-hint">共 {{draftEditSkus.length}} 个</small></strong><div class="draft-edit-preview"><div v-for="item in draftEditSkus" :key="item.sku" class="draft-edit-image-item"><code :title="item.sku">{{item.sku}}</code><button title="放大查看" @click="openImagePreview(item.image_url, item.sku)"><img :src="imageUrl(item.image_url)" :alt="item.sku"/></button></div></div><p v-if="!draftEditSkus.length" class="draft-edit-empty">该草稿暂无 SKU 图。</p></section><section class="draft-edit-section"><strong>产品图片 <small class="draft-edit-hint">首图 + 其余轮播图</small></strong><div class="draft-edit-preview"><div v-for="(url,index) in editingDraft?.image_urls" :key="url" class="draft-edit-image-item"><code>{{index===0 ? '首图' : draftSkuForImage(editingDraft, url)}}</code><button title="放大查看" @click="openImagePreview(url, editingDraft?.title || '商品素材')"><img :src="imageUrl(url)" :alt="editingDraft?.title || '商品素材'"/></button></div></div></section><section v-if="editingDraft?.size_chart_url" class="draft-edit-section"><strong>尺码图</strong><button class="draft-edit-size-chart-button" title="放大查看" @click="openImagePreview(editingDraft.size_chart_url, '尺码图')"><img class="draft-edit-size-chart" :src="imageUrl(editingDraft.size_chart_url)" alt="尺码图"/></button></section><p v-if="draftEditError" class="error material-draft-error">{{draftEditError}}</p><div class="modal-actions"><button class="ghost" @click="showDraftEditDialog=false">取消</button><button class="primary" :disabled="draftEditSaving" @click="saveDraftEdit">{{draftEditSaving ? '保存中…' : '保存修改'}}</button></div></section></div>
   <div v-if="showTaskDetailDialog && viewingTask?.task_type!=='sku_image'" class="modal-backdrop image-result-backdrop" @click.self="showTaskDetailDialog=false"><section class="modal-card image-result-dialog"><button class="modal-close" @click="showTaskDetailDialog=false">×</button><h2>{{taskTypeLabel(viewingTask)}}任务 #{{viewingTask?.id}}</h2><p>{{viewingTask?.parameters?.source_sku ? `来源 SKU：${viewingTask.parameters.source_sku}` : `参考 ${viewingTask?.parameters?.reference_urls?.length || 0} 张${viewingTask?.parameters?.reference_mode==='random_sku' ? 'SKU 图' : viewingTask?.parameters?.reference_mode==='random_carousel' ? '轮播图' : '图片'}`}}</p><div class="modal-actions"><button class="secondary" @click="openImageWorkspaceFromTask(viewingTask)">打开对应商品草稿</button></div><div class="image-task-candidates"><article v-for="url in viewingTask?.result_urls || []" :key="url"><button class="candidate-preview" @click="openImagePreview(url,'生成结果')"><img :src="imageUrl(url)" alt="生成结果"/></button><button class="primary" :disabled="isTaskResultSelected(viewingTask,url)" @click="applyImageTaskResult(viewingTask,url)">{{isTaskResultSelected(viewingTask,url)?'已采用':viewingTask?.task_type==='carousel'?'采用为轮播图':'采用为首图'}}</button></article><p v-if="!(viewingTask?.result_urls?.length)" class="empty">任务完成后可在这里选择采用结果。</p></div></section></div>
-  <div v-if="showDraftImageDialog" class="modal-backdrop image-workspace-backdrop" @click.self="showDraftImageDialog=false">
+  <div v-if="showDraftImageDialog" class="modal-backdrop image-workspace-backdrop" @click.self="closeImageWorkspace">
     <section class="modal-card image-workspace" :class="{'carousel-image-workspace':imageWorkspaceMode==='carousel'}">
-      <button class="modal-close" @click="showDraftImageDialog=false">×</button>
+      <button class="modal-close" @click="closeImageWorkspace">×</button>
       <header class="image-workspace-header">
         <div class="image-workspace-header-text">
           <small>商品草稿 #{{imageDraft?.id}}</small>
@@ -3511,6 +3714,7 @@ onUnmounted(() => {
             </section>
           </main>
         </div>
+        <div v-if="aiReviewContext?.kind==='workspace' && (aiPreparationProgress || aiPreparationBusy || aiPreparationError)" class="image-workspace-preparation"><AIImagePreparationPanel :progress="aiPreparationProgress" :busy="aiPreparationRunning" :continue-review="aiPreparationBusy" :submitting="aiPreparationSubmitting" :error="aiPreparationError" @retry="retryImagePreparation" @adjust="adjustImagePreparation" @background="backgroundImagePreparation"/></div>
         <div class="modal-actions image-workspace-actions">
           <div v-if="imageDraft?.workflow_stage==='carousel_pending'" class="carousel-confirm-next-step">
             <small>确认轮播图后</small>
@@ -3518,7 +3722,7 @@ onUnmounted(() => {
             <label><input v-model="carouselConfirmNextStage" type="radio" value="ready_to_publish"/>直接到待发布</label>
           </div>
           <small v-else>{{imageWorkspaceMode==='carousel' ? '采用轮播图后点击确认，将保存轮播图。' : '采用、移除和拖动排序仅在当前弹窗暂存；确认后一次保存到草稿。'}}</small>
-          <button class="primary" :disabled="imageConfirmSaving || !!imageTaskCreatingType" @click="confirmDraftImages">{{imageConfirmSaving ? '保存中…' : imageDraft?.workflow_stage==='carousel_pending' ? (carouselConfirmNextStage==='ready_to_publish' ? '确认轮播图并到待发布' : '确认轮播图并进入首图创作') : imageDraft?.workflow_stage==='main_image_pending' ? '确认主图并进入待发布' : '保存到草稿'}}</button>
+          <button class="primary" :disabled="imageConfirmSaving || aiPreparationRunning || (aiReviewContext?.kind==='workspace' && aiPreparationFailed) || !!imageTaskCreatingType" @click="confirmDraftImages">{{imageConfirmSaving ? '保存中…' : imageDraft?.workflow_stage==='carousel_pending' ? (carouselConfirmNextStage==='ready_to_publish' ? '确认轮播图并到待发布' : '确认轮播图并进入首图创作') : imageDraft?.workflow_stage==='main_image_pending' ? '确认主图并进入待发布' : '保存到草稿'}}</button>
         </div>
       </template>
     </section>
@@ -3531,7 +3735,16 @@ onUnmounted(() => {
   <div v-if="showMemberDialog" class="modal-backdrop" @click.self="showMemberDialog=false"><section class="modal-card"><h2>{{editingMember ? '编辑成员' : '新增成员'}}</h2><p>{{editingMember ? '留空密码即可保持原密码不变。' : '姓名、用户代码、邮箱和密码为必填项。'}}</p><label>姓名 <b class="required">*</b><input v-model="memberForm.name" maxlength="80" placeholder="请输入姓名" /></label><label>用户代码 <b class="required">*</b><input v-model="memberForm.user_code" maxlength="2" placeholder="例如：CN（两个字符）" /></label><label>邮箱 <b class="required">*</b><input v-model="memberForm.email" type="email" placeholder="name@example.com" /></label><label>登录密码<input v-model="memberForm.password" type="password" minlength="8" :placeholder="editingMember ? '留空则不修改' : '至少 8 个字符'" /></label><label>角色<select v-model="memberForm.role" @change="resetMemberGroup" :disabled="['team_leader','design_leader'].includes(editingMember?.role)"><option value="member">普通运营／组员</option><option value="team_leader">运营组长</option><option value="designer">普通美工</option><option value="design_leader">美工组长</option></select></label><label>{{memberIsDesigner(memberForm) ? '美工组' : '运营组'}}<select v-if="memberIsDesigner(memberForm)" v-model="memberForm.design_group_id" :disabled="editingMember?.role==='design_leader'"><option :value="null">未分组</option><option v-for="group in designGroups" :key="group.id" :value="group.id">{{group.name}}</option></select><select v-else v-model="memberForm.group_id" :disabled="editingMember?.role==='team_leader'"><option :value="null">未分组</option><option v-for="group in operatorGroups" :key="group.id" :value="group.id">{{group.name}}</option></select></label><p v-if="['team_leader','design_leader'].includes(memberForm.role) && !['team_leader','design_leader'].includes(editingMember?.role)" class="operator-group-hint">保存后，该组原组长将自动转为组员。</p><p v-if="['team_leader','design_leader'].includes(editingMember?.role)" class="operator-group-hint">要调整当前组长的角色、分组或状态，请先为本组任命新组长。</p><p v-if="memberFormError" class="error modal-error">{{memberFormError}}</p><div class="modal-actions"><button class="ghost" @click="showMemberDialog=false">取消</button><button class="primary" :disabled="memberSaving" @click="saveMember">{{memberSaving ? '保存中…' : '保存'}}</button></div></section></div>
   <div v-if="showDesignGroupDialog" class="modal-backdrop" @click.self="!designGroupBusy && (showDesignGroupDialog=false)"><section class="modal-card"><h2>{{editingDesignGroup ? '编辑美工组' : '新增美工组'}}</h2><label>组名<input v-model="designGroupForm.name" maxlength="80"/></label><label v-if="!editingDesignGroup">组长<select v-model="designGroupForm.leader_user_id"><option :value="null">请选择普通美工</option><option v-for="member in members.filter(item=>item.role==='designer' && item.is_active)" :key="member.id" :value="member.id">{{member.name}}</option></select></label><p class="operator-group-hint">每组一名组长；在成员编辑中任命新组长时，原组长自动转为普通美工。</p><p v-if="designGroupError" class="error">{{designGroupError}}</p><div class="modal-actions"><button class="ghost" :disabled="designGroupBusy" @click="showDesignGroupDialog=false">取消</button><button class="primary" :disabled="designGroupBusy" @click="saveDesignGroup">{{designGroupBusy ? '保存中…' : '保存'}}</button></div></section></div>
   <div v-if="showResultReviewDialog" class="modal-backdrop" @click.self="showResultReviewDialog=false"><section v-dialog-focus="{close:()=>{showResultReviewDialog=false}}" class="modal-card batch-claim-dialog result-review-dialog" role="dialog" aria-modal="true" aria-labelledby="result-review-heading"><button class="modal-close" aria-label="关闭结果审核" @click="showResultReviewDialog=false">×</button><h2 id="result-review-heading">结果图质量标记</h2><p>标记可取消，不影响采用、下载和统计。</p><p v-if="resultReviewLoading">正在加载结果图…</p><TaskResultGallery v-else :tasks="resultReviewTasks" :token="token" @preview="openImagePreview($event,'生成结果')" @changed="refreshReviewedTasks"/></section></div>
-  <div v-if="showMemberCredentialDialog" class="modal-backdrop" @click.self="showMemberCredentialDialog=false"><section class="modal-card"><h2>配置 {{credentialProvider?.credential_display_name || credentialProvider?.display_name}} 平台密钥</h2><p>{{credentialMember?.name}} 将在{{credentialProvider?.provider === 'deepseek' ? '生成英文商品标题' : '创建和查询 AI 图像任务'}}时使用自己的密钥。密钥会加密保存，前端仅显示脱敏预览。</p><p v-if="memberCredentialPreview()" class="credential-preview">当前密钥：<code>{{memberCredentialPreview()}}</code></p><label>API Key<input v-model="credentialApiKey" type="password" maxlength="2000" autocomplete="new-password" :placeholder="memberCredentialPreview() ? '输入新密钥以替换当前配置' : '请输入新的平台密钥'" @keyup.enter="saveMemberCredential" /></label><div class="modal-actions credential-modal-actions"><button v-if="credentialMember?.ai_provider_credentials?.[memberCredentialKey()]" class="negative" :disabled="credentialSaving" @click="clearMemberCredential">清除密钥</button><span></span><button class="ghost" :disabled="credentialSaving" @click="showMemberCredentialDialog=false">取消</button><button class="primary" :disabled="credentialSaving || !credentialApiKey.trim()" @click="saveMemberCredential">{{credentialSaving ? '保存中…' : '安全保存'}}</button></div></section></div>
+  <div v-if="showImagePreparationDialog && !aiPreparationInline" class="modal-backdrop image-preparation-backdrop" @click.self="backgroundImagePreparation">
+    <section v-dialog-focus="{close:backgroundImagePreparation,busy:aiPreparationSubmitting}" class="modal-card image-preparation-dialog" role="dialog" aria-modal="true" aria-labelledby="image-preparation-title"><header class="ai-settings-header"><div><span class="ai-settings-eyebrow">审核前保存</span><h2 id="image-preparation-title">图片永久保存</h2></div><button class="ai-dialog-close" :disabled="aiPreparationSubmitting" @click="backgroundImagePreparation">关闭</button></header><AIImagePreparationPanel :progress="aiPreparationProgress" :busy="aiPreparationRunning" :continue-review="aiPreparationBusy" :submitting="aiPreparationSubmitting" :error="aiPreparationError" @retry="retryImagePreparation" @adjust="adjustImagePreparation" @background="backgroundImagePreparation"/><p class="ai-settings-help">后台保存不代表已完成审核；返回原页面确认后才会采用。</p></section>
+  </div>
+  <div v-if="showCompanyStorage" class="modal-backdrop" @click.self="!grsaiStorageSaving && (showCompanyStorage=false)">
+    <section v-dialog-focus="{close:()=>{showCompanyStorage=false},busy:grsaiStorageSaving}" class="modal-card ai-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="company-storage-title">
+      <header class="ai-settings-header"><div><span class="ai-settings-eyebrow">公司默认设置</span><h2 id="company-storage-title">AI 存储设置</h2><p>统一设置成员生成图片时使用的存储库。</p></div><button class="ai-dialog-close" :disabled="grsaiStorageSaving" aria-label="关闭存储设置" @click="showCompanyStorage=false">关闭</button></header>
+      <form @submit.prevent="saveGrsaiStorage"><div class="ai-settings-body"><div class="ai-key-status"><strong>Grsai 图片直存</strong><span class="ai-storage-badge" :class="{enabled:grsaiCompanyEnabled}">{{grsaiCompanyEnabled ? '已启用' : '未启用'}}</span></div><p v-if="!grsaiCompanyEnabled" class="ai-settings-note">直存开关尚未启用，当前新任务使用原转存流程。启用需修改部署配置。</p><label class="ai-settings-field">公司默认存储库 ID<input v-model="companyStorageDraft" maxlength="120" :disabled="grsaiStorageSaving" placeholder="填写 Grsai 存储库 ID"/><small>新成员自动继承。留空时，继承公司默认的成员使用原转存流程。</small></label><p class="ai-settings-help">候选图保留 30 天；采用后永久保存。设置变更仅影响后续新任务。</p><div v-if="grsaiOverrideCount" class="ai-storage-reset"><div><strong>{{grsaiOverrideCount}} 位成员使用单独设置</strong><p>恢复后统一继承公司默认，平台密钥保持不变。</p></div><button type="button" class="ghost" :disabled="grsaiStorageSaving" @click="resetGrsaiStorage">恢复公司默认</button></div><p v-else class="ai-settings-inheritance">当前全员使用公司默认</p><p v-if="companyStorageError" class="ai-settings-feedback error" role="alert">{{companyStorageError}}</p></div><footer class="ai-settings-footer"><span></span><button type="button" class="ghost" :disabled="grsaiStorageSaving" @click="showCompanyStorage=false">取消</button><button type="submit" class="primary" :disabled="grsaiStorageSaving">{{grsaiStorageSaving ? '保存中…' : '保存设置'}}</button></footer></form>
+    </section>
+  </div>
+  <MemberAISettings v-if="storageMember" :key="storageMember.id" :member="members.find(member=>member.id===storageMember.id) || storageMember" :providers="memberCredentialProviders" :company-storage-id="grsaiCompanyId" :direct-enabled="grsaiCompanyEnabled" :client="api" :authorization="headers" @close="storageMember=null" @changed="refreshMemberList"/>
   <div v-if="showMiaoshouDialog" class="modal-backdrop" @click.self="showMiaoshouDialog=false"><section class="modal-card"><h2>{{company?.miaoshou_configured?'更新':'配置'}}妙手 API Key</h2><p>App ID 和 App Secret 会加密保存，仅用于本公司的店铺同步与商品上架。保存后将立即重新同步店铺。</p><label>App ID<input v-model="miaoshouForm.app_id" maxlength="255" autocomplete="off" placeholder="请输入 App ID" /></label><label>App Secret<input v-model="miaoshouForm.app_secret" type="password" maxlength="500" autocomplete="new-password" placeholder="请输入 App Secret" @keyup.enter="saveMiaoshouAccount" /></label><div class="modal-actions"><button class="ghost" :disabled="miaoshouSaving" @click="showMiaoshouDialog=false">取消</button><button class="primary" :disabled="miaoshouSaving || !miaoshouForm.app_id.trim() || !miaoshouForm.app_secret.trim()" @click="saveMiaoshouAccount">{{miaoshouSaving?'保存中…':'保存并同步'}}</button></div></section></div>
   <div v-if="showHubstudioDialog && user?.role==='company_admin'" class="modal-backdrop" @click.self="showHubstudioDialog=false"><section class="modal-card"><h2>配置 HubStudio API</h2><p>凭据会加密保存，仅向已认证的本地执行器提供，不返回浏览器。</p><label>App ID<input v-model="hubstudioForm.app_id" maxlength="255" /></label><label>App Secret<input v-model="hubstudioForm.app_secret" type="password" maxlength="2000" /></label><label>团队 Group Code<input v-model="hubstudioForm.group_code" maxlength="120" /></label><div class="modal-actions"><button class="ghost" :disabled="hubstudioSaving" @click="showHubstudioDialog=false">取消</button><button class="primary" :disabled="hubstudioSaving || !hubstudioForm.app_id || !hubstudioForm.app_secret || !hubstudioForm.group_code" @click="saveHubstudioAccount">{{hubstudioSaving?'保存中…':'安全保存'}}</button></div></section></div>
   <div v-if="showShopManagersDialog" class="modal-backdrop" @click.self="showShopManagersDialog=false"><section class="modal-card"><h2>分配店铺管理人员</h2><p>{{managingShop?.name}}。被选中的运营成员可在该店铺创建、管理并上架商品。</p><label v-for="member in members.filter(item => item.role === 'member' || item.role === 'team_leader')" :key="member.id" class="manager-option"><input v-model="selectedManagerIds" :value="member.id" type="checkbox" />{{member.name}} <small>{{member.email}}</small></label><p v-if="!members.some(item => item.role === 'member' || item.role === 'team_leader')" class="empty">请先在成员管理中新增运营成员。</p><div class="modal-actions"><button class="ghost" @click="showShopManagersDialog=false">取消</button><button class="primary" :disabled="shopManagersSaving" @click="saveShopManagers">{{shopManagersSaving ? '保存中…' : '保存分配'}}</button></div></section></div>

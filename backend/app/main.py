@@ -46,6 +46,7 @@ from .credentials import decrypt_secret, encrypt_secret
 from .creative_resource_sizes import read_white_image_sizes
 from .storage import ExportMissingError, upload_hub_export, read_hub_export, delete_hub_export, StorageError
 from .image_files import (InvalidImageUploadError, by_url, create_material, file_ticket, finish_upload, ingest_url, prepare_upload, resolve_export_images, ticket_file)
+from .ai_images import candidate_views, prefetch_candidate_views, source_result_url, require_prepared
 from .logging_config import configure_logging
 from .tiktok_export import build_workbook as build_tiktok_workbook, catalog_listing_options, category_base_requirements, parse_listing_options, resolve_shipping_insurance, validate_attributes
 from .shopee_export import build_workbook as build_shopee_workbook, parse_listing_options as parse_shopee_listing_options
@@ -359,6 +360,8 @@ from .design import (router as design_router, DESIGN_ROLES, CREATIVE_ROLES, publ
                      apply_design_membership)
 from .models import DesignGroup, DesignTemplateVisibility
 app.include_router(design_router)
+from .ai_images import router as ai_images_router
+app.include_router(ai_images_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins.split(","),
@@ -420,6 +423,7 @@ def serialize_record(record) -> dict:
         column.name: timestamp_ms(value) if isinstance(value := getattr(record, column.name), datetime)
         else value.value if isinstance(value, Enum) else value
         for column in record.__table__.columns
+        if not isinstance(record, PodTask) or column.name not in {"storage_context", "provider_result_urls"}
     }
 
 
@@ -559,8 +563,8 @@ def me(user: User = Depends(authenticated_user), db: Session = Depends(get_db)):
 
 
 @app.patch("/me", response_model=UserOut)
-def update_my_user_code(payload: MyUserCodeUpdate, user: User = Depends(creative_user), db: Session = Depends(get_db)):
-    """当前账号只能设置自己的名称和用户代码。"""
+def update_my_user_code(payload: MyUserCodeUpdate, user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Session = Depends(get_db)):
+    """公司管理员只能设置自己的名称和用户代码，其他成员由管理员统一维护。"""
     if payload.user_code and user_code_in_use(db, user.company_id, payload.user_code, user.id):
         raise HTTPException(400, "该用户代码已被使用")
     if payload.name is not None:
@@ -813,6 +817,8 @@ def list_members(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db: Se
     ).all()
     return [
         UserOut.model_validate(member).model_dump() | {
+            "grsai_storage_mode": member.grsai_storage_mode,
+            "grsai_storage_id": member.grsai_storage_id,
             "ai_provider_credentials": {
                 provider.provider: (member.id, provider.credential_provider) in configured
                 for provider in enabled_providers
@@ -2214,6 +2220,7 @@ def serialize_task_view(task: PodTask, creator_name: str, template_name: str, vi
         parameters["creative_requirement"] = None
         parameters["private_creative_configuration"] = True
     result = serialize_record(task) | {
+        "result_images": candidate_views(task) if include_details else candidate_views(task)[:1],
         # 配置键用于区分 Grsai 的模型，不应暴露为面向运营人员的平台名称。
         "provider": "grsai" if task.provider in {"grsai", "grsai-gpt-image-2"} else task.provider,
         "provider_key": task.provider,
@@ -2289,6 +2296,7 @@ def list_tasks(
     active_stmt = select(func.count()).select_from(PodTask).where(PodTask.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]))
     if filters:
         active_stmt = active_stmt.where(*filters)
+    prefetch_candidate_views(db, tasks)
     return {
         "items": enrich_task_views(db, user, tasks, [
             serialize_task_view(task, creator_names.get(task.created_by, "历史记录缺失"), template_names.get(task.template_id, "历史模板已删除"), user, include_details=False)
@@ -2962,6 +2970,8 @@ def list_available_ai_providers(user: User = Depends(creative_user), db: Session
 
 def reset_failed_task(task: PodTask) -> None:
     """清除上一次执行结果，使失败任务可以按原参数重新提交。"""
+    task.storage_context = None
+    task.provider_result_urls = None
     task.status = TaskStatus.QUEUED
     task.provider_task_id = None
     task.failure_reason = None
@@ -3010,8 +3020,8 @@ def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Dep
         raise HTTPException(404, "任务不存在")
     if task.status not in (TaskStatus.AWAITING_SELECTION, TaskStatus.COMPLETED) or not task.result_urls:
         raise HTTPException(400, "任务尚未生成可领取的图片")
-    selected_urls = list(dict.fromkeys(payload.result_urls))
-    if any(url not in task.result_urls for url in selected_urls):
+    selected_urls = list(dict.fromkeys(source_result_url(db, task, url) for url in payload.result_urls))
+    if any(not url or url not in task.result_urls for url in selected_urls):
         raise HTTPException(400, "包含不属于该任务的图片")
     claimed_count = 0
     duplicates = 0
@@ -3022,6 +3032,8 @@ def claim_task_materials(task_id: int, payload: ClaimMaterials, user: User = Dep
         if not template or not owner:
             raise HTTPException(400, "任务缺少产品模板或创作人信息")
         validate_material_sku_source(template, owner)
+        for url in selected_urls:
+            require_prepared(db, task.company_id, url)
         for url in selected_urls:
             image_file = ingest_url(db, task.company_id, url)
             result = create_material(db, image_file=image_file, template=template, owner=owner,
@@ -3422,6 +3434,7 @@ def draft_image_task_views(db: Session, user: User, draft_id: int, task_type: st
         filters.append(PodTask.created_by == user.id)
     rows = db.scalars(select(PodTask).where(*filters).order_by(PodTask.id.desc()).limit(300)).all()
     matched = [task for task in rows if task.draft_id == draft_id or (task.parameters or {}).get("draft_id") == draft_id][:limit]
+    prefetch_candidate_views(db, matched)
     if not matched:
         return []
     creator_ids = {task.created_by for task in matched}
@@ -3672,9 +3685,10 @@ def apply_draft_image_result(draft_id: int, task_id: int, payload: DraftImageApp
     task_draft_id = task.draft_id or (task.parameters or {}).get("draft_id")
     if not can_access_task(task, user) or task_draft_id != draft.id:
         raise HTTPException(404, "图片任务不存在")
-    if task.task_type not in {"carousel", "main_image"} or payload.result_url not in (task.result_urls or []):
+    result_url = source_result_url(db, task, payload.result_url)
+    if task.task_type not in {"carousel", "main_image"} or not result_url:
         raise HTTPException(400, "请选择该任务生成的候选图片")
-    saved_url = ingest_url(db, draft.company_id, payload.result_url).url
+    saved_url = ingest_url(db, draft.company_id, result_url).url
     carousel_items = draft_base_carousel_items(draft)
     if task.task_type == "carousel":
         sku = str((task.parameters or {}).get("source_sku") or "")
@@ -3704,7 +3718,7 @@ def apply_draft_image_result(draft_id: int, task_id: int, payload: DraftImageApp
         })
     draft.carousel_items = carousel_items
     draft.updated_by = user.id
-    task.selected_result_url = payload.result_url
+    task.selected_result_url = result_url
     task.status = TaskStatus.COMPLETED
     db.commit(); db.refresh(draft)
     return serialize_record(draft) | {"published_image_urls": draft_published_images(draft)}
@@ -3739,6 +3753,10 @@ def confirm_batch_image_review(payload: BatchImageReviewConfirm, user: User = De
     selections_by_draft: dict[int, list] = {}
     for selection in payload.selections:
         task = tasks[selection.task_id]
+        normalized = [source_result_url(db, task, url) for url in selection.result_urls]
+        if any(url is None for url in normalized):
+            raise HTTPException(400, "包含不属于任务的图片")
+        selection.result_urls = normalized
         task_draft_id = task.draft_id or (task.parameters or {}).get("draft_id")
         valid = (can_access_task(task, user) and task.task_type == payload.task_type and task_draft_id == selection.draft_id
                  and task.status in {TaskStatus.AWAITING_SELECTION, TaskStatus.COMPLETED} and all(url in (task.result_urls or []) for url in selection.result_urls))
@@ -3929,9 +3947,13 @@ def confirm_draft_images(draft_id: int, payload: DraftImagesConfirm | None = Non
                 and (selection.task_id is None or selection.task_id == item.get("task_id"))
             ), None)
             if existing:
+                require_prepared(db, draft.company_id, existing["image_url"])
                 ordered_items.append(existing)
                 if existing.get("task_id"):
-                    selected_tasks[int(existing["task_id"])] = selection.result_url
+                    existing_task = db.get(PodTask, int(existing["task_id"]))
+                    selected_tasks[int(existing["task_id"])] = (
+                        source_result_url(db, existing_task, selection.result_url) or existing_task.selected_result_url or selection.result_url
+                    ) if existing_task else selection.result_url
                 continue
 
             sku_item = next((
@@ -3944,11 +3966,12 @@ def confirm_draft_images(draft_id: int, payload: DraftImagesConfirm | None = Non
 
             task = db.get(PodTask, selection.task_id) if selection.task_id else None
             parameters = task.parameters if task else {}
+            result_url = source_result_url(db, task, selection.result_url) if task else None
             valid_task = (
                 can_access_task(task, user)
                 and task.task_type in {"carousel", "main_image"}
                 and parameters.get("draft_id") == draft.id
-                and selection.result_url in (task.result_urls or [])
+                and result_url is not None
             )
             if task and task.task_type == "carousel":
                 valid_task = valid_task and str(parameters.get("source_sku") or "") == selection.sku
@@ -3958,13 +3981,15 @@ def confirm_draft_images(draft_id: int, payload: DraftImagesConfirm | None = Non
                 raise HTTPException(400, "最终商品图片不是该草稿 SKU 图或图片任务的有效结果")
             ordered_items.append({
                 "sku": selection.sku,
-                "image_url": selection.result_url,
+                "image_url": ingest_url(db, draft.company_id, result_url).url,
                 "task_id": task.id,
                 "source_type": task.task_type,
             })
-            selected_tasks[task.id] = selection.result_url
+            selected_tasks[task.id] = result_url
 
         fallback_signature = [(item.get("sku"), item.get("image_url")) for item in sku_items]
+        if len(ordered_items) != len({item.get("image_url") for item in ordered_items}):
+            raise HTTPException(400, "最终商品图片不能重复")
         selected_signature = [(item.get("sku"), item.get("image_url")) for item in ordered_items]
         draft.carousel_items = [] if not ordered_items or selected_signature == fallback_signature else ordered_items
 
@@ -3982,6 +4007,10 @@ def confirm_draft_images(draft_id: int, payload: DraftImagesConfirm | None = Non
             if selected_url:
                 task.status = TaskStatus.COMPLETED
     images = draft_published_images(draft)
+    for url in images:
+        require_prepared(db, draft.company_id, url)
+    if len(images) != len(set(images)):
+        raise HTTPException(400, "最终商品图片不能重复")
     if not images:
         raise HTTPException(400, "请至少保留一张 SKU 图或轮播图后再保存")
     if len(images) > 9:

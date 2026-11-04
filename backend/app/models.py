@@ -1,6 +1,7 @@
 import enum
 from decimal import Decimal
 from datetime import date, datetime
+from uuid import uuid4
 from sqlalchemy import Boolean, Date, DateTime, Enum, Float, Index, Integer, JSON, LargeBinary, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import DATETIME as MYSQL_DATETIME, MEDIUMBLOB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -32,6 +33,7 @@ class Company(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    grsai_storage_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     cross_company_collect_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     miaoshou_app_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     miaoshou_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -60,6 +62,8 @@ class User(Base):
     company_id: Mapped[int | None] = mapped_column(nullable=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(80))
+    grsai_storage_mode: Mapped[str] = mapped_column(String(16), default="inherit", server_default="inherit")
+    grsai_storage_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     user_code: Mapped[str | None] = mapped_column(String(2), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     token_version: Mapped[int] = mapped_column(Integer, default=0)
@@ -414,6 +418,8 @@ class PodTask(Base):
     # 已明确忽略的失败不再阻塞商品草稿的制作流程。
     failure_ignored: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     result_map: Mapped[list] = mapped_column(JSON, default=list)
+    storage_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    provider_result_urls: Mapped[list | None] = mapped_column(JSON, nullable=True)
     submit_attempts: Mapped[int] = mapped_column(Integer, default=0)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -533,12 +539,18 @@ class SupplyJob(Base):
 
 
 class ImageFile(Base):
-    """只登记已校验并保存的图片；不存储检查或入库状态。"""
+    """只登记永久保存的图片；AI 来源仅检查元数据，其他来源完整解码。"""
     __tablename__ = "image_files"
-    __table_args__ = (UniqueConstraint("company_id", "sha256", name="uq_image_file_content"),)
+    __table_args__ = (
+        UniqueConstraint("company_id", "sha256", name="uq_image_file_content"),
+        UniqueConstraint("company_id", "source_type", "source_ref", name="uq_image_file_source"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
-    sha256: Mapped[str] = mapped_column(String(64))
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(30), default="content", server_default="content")
+    source_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    validation_method: Mapped[str] = mapped_column(String(30), default="full_decode", server_default="full_decode")
     object_key: Mapped[str] = mapped_column(String(500))
     url: Mapped[str] = mapped_column(String(500))
     mime_type: Mapped[str] = mapped_column(String(40))
@@ -555,6 +567,61 @@ class ImageAddress(Base):
     url_hash: Mapped[str] = mapped_column(String(64))
     url: Mapped[str] = mapped_column(Text)
     image_file_id: Mapped[int] = mapped_column(Integer, index=True)
+
+
+class AIImageCandidate(Base):
+    """受控 Grsai 直存候选；只有被请求采用的候选才进入复制队列。"""
+    __tablename__ = "ai_image_candidates"
+    __table_args__ = (
+        UniqueConstraint("task_id", "run_id", "url_hash", name="uq_ai_candidate_result"),
+        UniqueConstraint("storage_uid", name="uq_ai_candidate_storage_uid"),
+        Index("ix_ai_candidate_queue", "state", "available_at", "lease_expires_at"),
+        Index("ix_ai_candidate_task", "company_id", "task_id", "run_id"),
+        Index("ix_ai_candidate_address", "company_id", "url_hash"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # 仅新登记候选分配随机身份；NULL 表示沿用既有编号路径，保留复制恢复能力。
+    storage_uid: Mapped[str | None] = mapped_column(String(32), nullable=True, default=lambda: uuid4().hex)
+    company_id: Mapped[int] = mapped_column(index=True)
+    task_id: Mapped[int] = mapped_column(Integer)
+    run_id: Mapped[str] = mapped_column(String(32))
+    position: Mapped[int] = mapped_column(Integer)
+    source_url: Mapped[str] = mapped_column(String(500))
+    url_hash: Mapped[str] = mapped_column(String(64))
+    bucket: Mapped[str] = mapped_column(String(120))
+    object_key: Mapped[str] = mapped_column(String(500))
+    etag: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    state: Mapped[str] = mapped_column(String(20), default="pending")
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    image_file_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    requested_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_epoch: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AIImagePreparation(Base):
+    __tablename__ = "ai_image_preparations"
+    __table_args__ = (UniqueConstraint("company_id", "user_id", "request_key", name="uq_ai_preparation_request"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(index=True)
+    user_id: Mapped[int] = mapped_column(Integer)
+    request_key: Mapped[str] = mapped_column(String(128))
+    request_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AIImagePreparationItem(Base):
+    __tablename__ = "ai_image_preparation_items"
+    job_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    candidate_id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
 
 
 class SupplyJobMaterial(Base):

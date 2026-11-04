@@ -12,11 +12,11 @@ from threading import BoundedSemaphore
 import time
 from urllib.parse import urlsplit
 
-from sqlalchemy import create_engine, func, select, update
+from sqlalchemy import create_engine, func, inspect, select, update
 from sqlalchemy.orm import sessionmaker
 
 from app.database import SessionLocal, engine
-from app.models import MaterialAsset, PodTask, ProductDraft, ProductTemplate, UserTemplateWhiteImage
+from app.models import AIImageCandidate, ImageAddress, ImageFile, MaterialAsset, PodTask, ProductDraft, ProductTemplate, UserTemplateWhiteImage
 from app.image_files import by_url, ingest_url, product_library_image_urls, register_bytes
 from app.schema_version import assert_schema_current, schema_heads
 from app.storage import r2_object_key
@@ -141,9 +141,11 @@ def _open_report(path):
     return path.open("a", encoding="utf-8")
 
 
-def _process_group(rows, *, apply, prepare, cache, session_factory, max_r2_bytes):
+def _process_group(rows, *, apply, prepare, cache, session_factory, max_r2_bytes, metadata_only=False):
     first = rows[0]
     company, url = first["company_id"], first["url"]
+    if metadata_only:
+        return [{**row, "result": "skipped_ai"} for row in rows]
     try:
         if prepare:
             hit = cache.prepare(company, url)
@@ -205,9 +207,23 @@ def run(*, apply=False, prepare=False, cache_dir=None, company_id=None, report=N
         raise ValueError("历史 R2 图片上限须至少为 3 MiB，也可不限制")
     started = time.monotonic()
     groups = {}
+    metadata_only = set()
     with session_factory() as db:
         for row in references(db, company_id):
             groups.setdefault((row["company_id"], row["url"]), []).append(row)
+        # 旧库预缓存仍只读取旧字段；新库中明确跳过 AI 候选和无哈希正式文件。
+        schema = inspect(db.connection())
+        if schema.has_table("image_files") and schema.has_table("image_addresses"):
+            query = select(ImageAddress.company_id, ImageAddress.url).join(ImageFile,
+                ImageFile.id == ImageAddress.image_file_id).where(ImageFile.sha256.is_(None))
+            if company_id is not None:
+                query = query.where(ImageAddress.company_id == company_id)
+            metadata_only.update(map(tuple, db.execute(query)))
+        if schema.has_table("ai_image_candidates"):
+            query = select(AIImageCandidate.company_id, AIImageCandidate.source_url)
+            if company_id is not None:
+                query = query.where(AIImageCandidate.company_id == company_id)
+            metadata_only.update(map(tuple, db.execute(query)))
     if retry_from:
         failures = _failed_addresses(retry_from)
         groups = {key: rows for key, rows in groups.items() if key in failures}
@@ -226,7 +242,8 @@ def run(*, apply=False, prepare=False, cache_dir=None, company_id=None, report=N
     def process(rows):
         with semaphores[host(rows)]:
             return _process_group(rows, apply=apply, prepare=prepare, cache=cache,
-                session_factory=session_factory, max_r2_bytes=max_r2_bytes)
+                session_factory=session_factory, max_r2_bytes=max_r2_bytes,
+                metadata_only=(rows[0]["company_id"], rows[0]["url"]) in metadata_only)
 
     counts = Counter()
     output = []

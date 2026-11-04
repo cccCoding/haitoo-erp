@@ -49,6 +49,8 @@ class QueryContext:
     model: str | None
     api_key: str | None
     credential_error: str | None = None
+    storage_context: dict | None = None
+    raw_urls: list | None = None
 
 
 def read_schedule() -> tuple[int, float, list[TaskRef]]:
@@ -73,8 +75,12 @@ def read_context(task_id: int) -> QueryContext | None:
         setting = db.get(AIProviderSetting, task.provider)
         ref = TaskRef(task.id, task.provider_task_id, task.company_id, task.created_by,
                       setting.credential_provider if setting else task.provider or "")
+        storage = task.storage_context
+        raw = task.provider_result_urls if (storage or {}).get("mode") == "direct" else None
+        if raw is not None:
+            return QueryContext(ref, task.provider or "", task.provider_model, None, storage_context=storage, raw_urls=raw)
         try:
-            return QueryContext(ref, task.provider or "", task.provider_model, jobs._task_api_key(db, task, setting))
+            return QueryContext(ref, task.provider or "", task.provider_model, jobs._task_api_key(db, task, setting), storage_context=storage)
         except ProviderError as exc:
             return QueryContext(ref, task.provider or "", task.provider_model, None, str(exc))
 
@@ -84,7 +90,8 @@ def write_result(context: QueryContext, *, reason: str | None = None,
     """短事务内映射结果，原子校验状态和外部任务 ID，避免旧查询覆盖重试任务。"""
     with result_db() as db:
         task = db.get(PodTask, context.ref.id)
-        if not task or task.status != TaskStatus.RUNNING or task.provider_task_id != context.ref.provider_task_id:
+        if (not task or task.status != TaskStatus.RUNNING or task.provider_task_id != context.ref.provider_task_id
+                or (context.storage_context or {}).get("run_id") != (task.storage_context or {}).get("run_id")):
             return "skipped"
         values = {"failure_reason": reason}
         outcome = "retry" if reason else "pending"
@@ -98,10 +105,13 @@ def write_result(context: QueryContext, *, reason: str | None = None,
         if terminal:
             values.update(status=TaskStatus.FAILED, failure_reason=reason, completed_at=datetime.utcnow())
             outcome = "failed"
-        changed = db.execute(update(PodTask).where(
+        conditions = [
             PodTask.id == context.ref.id, PodTask.status == TaskStatus.RUNNING,
             PodTask.provider_task_id == context.ref.provider_task_id,
-        ).values(**values).execution_options(synchronize_session=False)).rowcount
+        ]
+        if (context.storage_context or {}).get("run_id"):
+            conditions.append(PodTask.storage_context["run_id"].as_string() == context.storage_context["run_id"])
+        changed = db.execute(update(PodTask).where(*conditions).values(**values).execution_options(synchronize_session=False)).rowcount
         db.commit()
         return outcome if changed else "skipped"
 
@@ -216,26 +226,36 @@ async def process_result(task_id: int, *, client: httpx.AsyncClient | None = Non
         if query_started is None:
             outcome = "cooldown"
             return outcome
-        if metrics:
+        if metrics and context.raw_urls is None:
             metrics.requests += 1
         if enqueued_at is not None:
             timings["queue_wait_ms"] = query_started - enqueued_at
-        if last_polls is not None:
+        if last_polls is not None and context.raw_urls is None:
             if task_id in last_polls:
                 timings["poll_gap_ms"] = query_started - last_polls[task_id]
             last_polls[task_id] = query_started
         try:
             kwargs = {"client": client} if client is not None else {}
-            urls = await jobs.poll_async_generation(context.provider, context.ref.provider_task_id, context.api_key, **kwargs)
+            urls = context.raw_urls if context.raw_urls is not None else await jobs.poll_async_generation(context.provider, context.ref.provider_task_id, context.api_key, **kwargs)
         finally:
             timings["query_ms"] = clock() - query_started
         if urls is not None:
-            stage = "转存"
+            stage = "候选登记" if (context.storage_context or {}).get("mode") == "direct" else "转存"
             persist_started = clock()
             try:
-                urls = await jobs.persist_generated_images(urls, context.ref.company_id, task_id)
+                if (context.storage_context or {}).get("mode") == "direct":
+                    from .ai_images import persist_candidates
+                    urls = await asyncio.to_thread(persist_candidates, task_id, context.ref.provider_task_id,
+                        context.storage_context["run_id"], urls, result_db)
+                    if urls is None:
+                        outcome = "skipped"
+                        return outcome
+                else:
+                    urls = await jobs.persist_generated_images(urls, context.ref.company_id, task_id)
             finally:
                 timings["persist_ms"] = clock() - persist_started
+                if (context.storage_context or {}).get("mode") == "direct":
+                    timings["candidate_registration_ms"] = clock() - persist_started
         stage = "结果落库"
         outcome = await asyncio.to_thread(write_result, context, urls=urls)
         return outcome

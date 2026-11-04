@@ -80,6 +80,9 @@ def collect(db, settings, *, company_id=None, object_sizes=None):
         canonical_valid = object_sizes is None or object_sizes.get(row.object_key) == row.size_bytes
         if not canonical_valid:
             values["invalid_canonical_files"] += 1
+        if not row.sha256:
+            # AI 文件按来源复用，没有内容哈希；地址关系不能作为内容重复证明。
+            continue
         for key in sorted(keys[identity] - protected):
             # 地址映射跨公司或对应多个内容时，不能认定为本公司的重复实体对象。
             if len(owners[key]) != 1 or f"/company/{row.company_id}/" not in f"/{key}":

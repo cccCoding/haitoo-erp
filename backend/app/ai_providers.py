@@ -57,6 +57,8 @@ class GenerationRequest:
     company_id: int
     task_id: int
     idempotency_key: str
+    storage_id: str | None = None
+    storage_path: str | None = None
 
 
 def build_prompt(parameters: dict, template_name: str) -> str:
@@ -85,6 +87,8 @@ class GrsaiProvider:
         images = [_public_url(request.template_url), *[_public_url(url) for url in request.print_urls]]
         base_url = settings.grsai_base_url.rstrip("/")
         headers = {"Authorization": f"Bearer {api_key}", "Idempotency-Key": request.idempotency_key}
+        if request.storage_id:
+            headers.update({"oss-id": request.storage_id, "oss-path": request.storage_path})
         payload: dict[str, Any] = {
             "model": request.model,
             "prompt": request.prompt,

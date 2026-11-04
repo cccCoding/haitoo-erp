@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     login_client_ip_source: Literal["peer", "auto"] = "peer"
     # Grsai 异步图像生成接口，用于印花贴合。
     grsai_base_url: str = "https://grsaiapi.com"
+    grsai_direct_storage_enabled: bool = False
+    r2_ai_pending_bucket: str | None = None
+    r2_ai_pending_public_base_url: str | None = None
+    r2_ai_storage_access_key_id: str | None = None
+    r2_ai_storage_secret_access_key: str | None = None
+    image_prepare_concurrency: int = Field(default=4, ge=1, le=20)
+    image_prepare_company_concurrency: int = Field(default=2, ge=1, le=20)
+    image_prepare_lease_seconds: int = Field(default=90, gt=15)
     # 标题模型采用 OpenAI 兼容接口，密钥按业务归属从数据库读取。
     deepseek_base_url: str = "https://api.deepseek.com"
     title_jaccard_threshold: float = Field(default=0.85, ge=0, le=1)

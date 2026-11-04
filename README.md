@@ -479,9 +479,23 @@ export R2_SECRET_ACCESS_KEY='...'
 export R2_BUCKET='haitoro-images-prod'
 export R2_ENDPOINT='https://<account-id>.r2.cloudflarestorage.com'
 export R2_PUBLIC_BASE_URL='https://img.haitoro.com'
-# 是否复制模型生成结果到 R2；默认 true，建议生产环境保持 true。
-export AI_GENERATED_IMAGE_UPLOAD_TO_R2='true'
 ```
+
+### Grsai 直存候选图片
+
+默认保持服务器转存。启用直存时，Grsai 写入独立候选桶，系统只读取元数据；采用后由 `image-prepare-worker` 调用 R2 内部复制至正式桶，不经过服务器下载、上传图片正文，也不做内容哈希或完整解码校验。本地上传、普通外链导入仍完整校验并按内容去重。用户主动下载图片与 ZIP 不受影响。
+
+在同一 Cloudflare 账号和 jurisdiction 下建立独立 pending 桶，绑定独立 HTTPS 图片域名，配置全桶对象 30 天删除、域名短缓存（建议 5 分钟）；正式图片前缀不配置自动删除。仅向 Grsai 提供 pending 桶的对象读写凭据。ERP 另配可访问 pending 和正式图片两个桶的对象读写凭据，保留旧 R2 凭据及其他私有导出桶权限。
+
+配置 `R2_AI_PENDING_BUCKET`、`R2_AI_PENDING_PUBLIC_BASE_URL`、`R2_AI_STORAGE_ACCESS_KEY_ID`、`R2_AI_STORAGE_SECRET_ACCESS_KEY` 后，才启用 `GRSAI_DIRECT_STORAGE_ENABLED=true`。在 Grsai 控制台配置 R2 存储库并检测，取得的存储库 ID 填入公司成员管理的默认存储库。成员可继承默认、单独配置或保留原转存方式；全员恢复公司默认不会修改 API Key。不同 ID 也必须指向本环境的候选桶。
+
+提交前冻结存储配置和执行路径，后续修改设置不影响已提交任务。审核时显示图片准备进度，复制成功后才提交采用；停止等待或关闭页面不会取消后台准备，再次确认可复用已准备文件。临时失败可重试，不会重新付费生成。未采用候选满 30 天禁止采用，R2 实际删除可能延迟；已永久保存的图片继续可用，取消采用不删除共享文件。
+
+新候选在登记时生成并持久化随机存储标识，正式路径为 `images/company/{company_id}/ai/{storage_uid}.{扩展名}`，重试与重复采用复用同一路径。历史候选和正式图片继续使用原路径，不重命名；对象名不作为访问鉴权。正式对象按不可变文件缓存，修改内容时应保存为新文件。已有随机存储标识后不可删除该字段回退到按编号命名的代码，以免丢失复制恢复所需身份。
+
+R2 请求失败日志记录 `operation`、`stage`、`error_code`、`http_status`、`request_id`、源/目标桶及对象 key；Worker 同时记录候选 ID 和重试结果。`target_head`、`source_head`、`copy`、`verify_target` 分别对应目标探测、源检查、内部复制和复制核验。正常的目标不存在不会触发告警；日志不输出密钥、签名 URL 或第三方错误消息。
+
+复制队列使用 MySQL 租约恢复，默认全局并发 4、单公司并发 2，可通过 `IMAGE_PREPARE_CONCURRENCY` 和 `IMAGE_PREPARE_COMPANY_CONCURRENCY` 调整。`IMAGE_PREPARE_LEASE_SECONDS` 默认 90，须大于固定的 15 秒续租间隔。关闭直存开关只影响新提交任务，仍须保留已提交直存任务与准备 Worker 的处理能力；存在无哈希正式文件后，不能直接回退到要求 SHA256 必填的旧版本。
 
 ## 商品草稿图片制作
 
@@ -572,7 +586,7 @@ SKU 图任务支持批量审核：弹窗默认选中全部结果图，可全选�
 
 超级管理员后台“平台概览”会显示待处理、运行中、重试中、最终失败、最早排队时长、每模型积压、近一小时吞吐和近 15 分钟失败率。默认在待处理超过 200 个任务、最早排队超过 10 分钟或近 15 分钟失败率超过 10% 时标红。
 
-R2 不会自动删除对象。可在 Bucket 的 **Settings → Object Lifecycle Rules** 创建生命周期规则：使用前缀 `generated/` 可只清理 AI 生成图，例如设置“创建 90 天后删除”；模板、素材和尺码图使用其他前缀，不受该规则影响。`AI_GENERATED_IMAGE_UPLOAD_TO_R2=false` 时，结果直接保存 Grsai 临时 URL，这些 URL 可能过期。
+正式桶中的历史图片和已采用图片不设置自动过期，不能仅依据 `generated/` 等历史路径判断是否仍被引用。直存候选使用独立 pending 桶，在 **Settings → Object Lifecycle Rules** 配置全桶 30 天删除；采用后由系统复制到正式桶，原候选等待生命周期清理。
 
 > Docker Compose 中的密码仅用于本地开发。生产环境必须通过密钥管理服务配置数据库密码、JWT 密钥和妙手凭据加密密钥。
 
