@@ -11,6 +11,7 @@ from sqlalchemy import select, update
 
 from .models import (Company, ImageFile, MaterialAsset, ProductTemplate, Role, SupplyAudit,
                      SupplyJob, User)
+from .supply_title_rules import MINIMUM, MAXIMUM
 from .ai_providers import ProviderError, validate_generated_title
 from .supply_accounts import supply_user_is_expired
 from .tiktok_export import catalog_listing_options, category_base_requirements, resolve_shipping_insurance, validate_attributes
@@ -98,8 +99,8 @@ def sizes(snapshot):
 
 def validate_fallback(title):
     value = " ".join(str(title or "").split())
-    if not 25 <= len(value) <= 220 or not re.search(r"[A-Za-z]", value):
-        raise HTTPException(400, "货盘基础标题须为 25–220 个字符的英文商品描述")
+    if not MINIMUM <= len(value) <= MAXIMUM or not re.search(r"[A-Za-z]", value):
+        raise HTTPException(400, f"货盘基础标题须为 {MINIMUM}–{MAXIMUM} 个字符的英文商品描述")
     try:
         validate_generated_title(value)
     except ProviderError as exc:
@@ -123,9 +124,11 @@ def validate_title_fallback(profile):
     """新货盘快照明确兜底语言；历史词库快照沿用其站点语言。"""
     from .title_service import remove_forbidden_phrases, validate_localized_title
     value = remove_forbidden_phrases(profile['fallback_title'], profile.get('forbidden_phrases', []))
+    if not MINIMUM <= len(value) <= MAXIMUM:
+        raise ProviderError(f'货盘兜底标题长度须为 {MINIMUM}–{MAXIMUM} 个字符，实际 {len(value)} 字符')
     if profile.get('fallback_language') == 'en':
         return validate_generated_title(value)
-    return validate_localized_title(value, 220, site=profile.get('site', 'MY'),
+    return validate_localized_title(value, MAXIMUM, site=profile.get('site', 'MY'),
                                     language=profile.get('language', 'ms'))
 
 
@@ -213,10 +216,12 @@ def unique_title(value, fallback, link_index):
     base = unicodedata.normalize("NFKC", " ".join(str(value or "").split())).strip('"\' ')
     try:
         validate_generated_title(base)
+        if len(base) > MAXIMUM:
+            raise ProviderError('货盘标题超过正文上限')
     except ProviderError:
         base = validate_fallback(fallback)
     suffix = f" - L{link_index + 1:02d}"
-    return base[:255 - len(suffix)].rstrip() + suffix
+    return base + suffix
 
 
 def normalize_title(value):

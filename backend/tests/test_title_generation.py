@@ -51,6 +51,24 @@ class TitleGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request['headers']['Authorization'], 'Bearer supply-key')
         self.assertEqual(request['json']['model'], 'deepseek-flash')
         self.assertEqual(request['json']['thinking'], {'type': 'disabled'})
+        self.assertIn('180-200', request['json']['messages'][0]['content'])
+        self.assertIn('25-230', request['json']['messages'][0]['content'])
+
+    async def test_legacy_supply_request_enforces_230_character_body_without_truncation(self):
+        from app.supply_worker import request_title
+        for length in (230, 231):
+            title = 'Printed Dress ' + 'a' * (length - len('Printed Dress '))
+            response = httpx.Response(200, request=httpx.Request('POST', 'https://api.deepseek.com/chat/completions'),
+                json={'choices': [{'finish_reason': 'stop', 'message': {'content': title}}]})
+            client = AsyncMock()
+            client.post.return_value = response
+            with patch('app.supply_worker.httpx.AsyncClient') as factory:
+                factory.return_value.__aenter__.return_value = client
+                if length == 230:
+                    self.assertEqual(await request_title('test-key', {}, ''), title)
+                else:
+                    with self.assertRaisesRegex(ProviderError, '25–230'):
+                        await request_title('test-key', {}, '')
 
     async def generate(self, content='Floral Long Sleeve Everyday Dress', *, status=200, payload=None, **requirements):
         response = httpx.Response(status, json=payload if payload is not None else {

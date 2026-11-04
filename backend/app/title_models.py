@@ -2,6 +2,7 @@
 from datetime import datetime
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from .supply_title_rules import MAXIMUM as SUPPLY_TITLE_MAXIMUM
 from .database import Base
 
 
@@ -33,7 +34,7 @@ class TitleTemplateProfile(Base):
     category_names: Mapped[list] = mapped_column(JSON, default=list)
     locked_keyword_ids: Mapped[list] = mapped_column(JSON, default=list)
     forbidden_keyword_ids: Mapped[list] = mapped_column(JSON, default=list)
-    fallback_title: Mapped[str | None] = mapped_column(String(220), nullable=True)
+    fallback_title: Mapped[str | None] = mapped_column(String(SUPPLY_TITLE_MAXIMUM), nullable=True)
     fallback_approved: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

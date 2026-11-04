@@ -16,6 +16,7 @@ from sqlalchemy.orm import aliased
 
 from .config import get_settings
 from .credentials import decrypt_secret
+from .supply_title_rules import MINIMUM, MAXIMUM, TARGET_MINIMUM, TARGET_MAXIMUM
 from .ai_providers import DEEPSEEK_TITLE_MODEL, ProviderError, validate_generated_title
 from .database import SessionLocal
 from .models import Company, ProductTemplate, SupplyJob, SupplyJobMaterial, User
@@ -182,7 +183,7 @@ async def request_title(api_key, template, requirements):
         response = await client.post(f"{settings.deepseek_base_url.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"}, json={"model": DEEPSEEK_TITLE_MODEL,
                 "thinking": {"type": "disabled"},
-                "messages": [{"role": "system", "content": "Write one factual English TikTok product title, 25-220 characters. Return only the title. Do not invent brand, material, pattern, medical claims or benefits."},
+                "messages": [{"role": "system", "content": f"Write one factual English TikTok product title. Prefer {TARGET_MINIMUM}-{TARGET_MAXIMUM} characters; hard limit {MINIMUM}-{MAXIMUM} including spaces and punctuation. Return only the title. Do not invent brand, material, pattern, medical claims or benefits."},
                     {"role": "user", "content": f"Product: {template.get('name', '')}\nFacts: {template.get('product_description', '')}\nTemplate requirements: {template.get('title_template') or ''}\nAdditional requirements: {requirements}"}],
                 "temperature": 0.7})
         response.raise_for_status()
@@ -190,7 +191,10 @@ async def request_title(api_key, template, requirements):
         value = choice["message"]["content"]
         if not isinstance(value, str) or choice.get("finish_reason", "stop") != "stop":
             raise ValueError("AI 标题格式不符合要求")
-        return validate_generated_title(value.strip())
+        value = validate_generated_title(value.strip())
+        if not MINIMUM <= len(value) <= MAXIMUM:
+            raise ProviderError(f"货盘标题长度须为 {MINIMUM}–{MAXIMUM} 个字符，实际 {len(value)}")
+        return value
 
 
 async def request_market_title(job_id, epoch, index, first_image, session_factory):

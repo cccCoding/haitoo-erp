@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session, undefer
 
 from .title_markets import TitleMarketSelection, check_market
+from .supply_title_rules import MAXIMUM as SUPPLY_TITLE_MAXIMUM
 from .ai_providers import ProviderError
 from .database import get_db
 from .models import MaterialAsset, ProductTemplate, Role, User
@@ -80,7 +81,7 @@ class ProfileInput(MarketInput):
     category_names: list[str] = Field(default_factory=list, max_length=100)
     locked_keyword_ids: list[int] = Field(default_factory=list, max_length=8)
     forbidden_keyword_ids: list[int] = Field(default_factory=list, max_length=200)
-    fallback_title: str | None = Field(default=None, max_length=220)
+    fallback_title: str | None = Field(default=None, max_length=SUPPLY_TITLE_MAXIMUM)
     # 仅兼容旧客户端；站点兜底标题设置后即可使用，不再需要审核。
     fallback_approved: bool = False
 
@@ -460,7 +461,7 @@ def put_profile(template_id: int, payload: ProfileInput, user: User = Depends(ad
     fallback = payload.fallback_title.strip() if payload.fallback_title else None
     if fallback:
         try:
-            fallback = validate_localized_title(fallback, 220, site=market.site, language=market.language)
+            fallback = validate_localized_title(fallback, SUPPLY_TITLE_MAXIMUM, site=market.site, language=market.language)
         except ProviderError as exc:
             raise HTTPException(400, str(exc)) from exc
     profile = db.scalar(select(TitleTemplateProfile).where(TitleTemplateProfile.market_id == market.id,

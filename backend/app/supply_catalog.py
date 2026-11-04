@@ -11,6 +11,7 @@ from sqlalchemy import case, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .supply_title_rules import MAXIMUM as SUPPLY_TITLE_MAXIMUM
 from .ai_providers import DEEPSEEK_TITLE_MODEL
 from .credentials import decrypt_secret, encrypt_secret
 from .database import get_db
@@ -78,7 +79,7 @@ class GrantInput(Input):
 
 class TemplatePatch(Input):
     supply_public: bool | None = None
-    supply_fallback_title: str | None = Field(default=None, max_length=220)
+    supply_fallback_title: str | None = Field(default=None, max_length=SUPPLY_TITLE_MAXIMUM)
 
 
 class ListingInput(Input):

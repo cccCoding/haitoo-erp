@@ -95,7 +95,7 @@ class TitleCategoryRequirementsTests(unittest.IsolatedAsyncioTestCase):
             await self.generate('Daster Lengan Panjang Wanita Motif Bunga', site='ID', core='Daster Wanita')
 
     async def test_titles_cannot_exceed_regular_or_supply_length_limit(self):
-        for supply, maximum in ((False, 255), (True, 220)):
+        for supply, maximum in ((False, 255), (True, 230)):
             with self.subTest(supply=supply):
                 raw = ('Gaun ' + 'Lengan Panjang ' * 20)[:maximum] + 'a'
                 with self.assertRaisesRegex(ProviderError, f'25–{maximum}'):

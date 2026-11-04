@@ -21,6 +21,7 @@ from .credentials import decrypt_secret
 from .models import Company, ProductTemplate, Role, User, UserAIProviderCredential
 from .title_models import (TitleAttributeCache, TitleEvidence, TitleKeyword, TitleMarket,
                            TitleRecord, TitleTask, TitleTemplateProfile)
+from . import supply_title_rules as supply_rules
 
 logger = logging.getLogger(__name__)
 
@@ -183,11 +184,22 @@ def title_rules(site='MY', language='ms'):
     return (INDONESIAN_WORDS, INDONESIAN_CLAIMS) if site == 'ID' else (MALAY_WORDS, PROTECTED_CLAIMS)
 
 
+class TitleLengthError(ProviderError):
+    def __init__(self, label, value, maximum):
+        self.length = len(value.strip()) if isinstance(value, str) else None
+        self.reason = ('invalid_type' if self.length is None else 'empty' if not self.length
+                       else 'short' if self.length < 25 else 'overlong')
+        detail = {'invalid_type': '返回类型错误，title 必须为字符串', 'empty': '返回标题为空',
+                  'short': f'实际 {self.length} 字符，不足 {25 - (self.length or 0)} 字符',
+                  'overlong': f'实际 {self.length} 字符，超出 {(self.length or 0) - maximum} 字符'}[self.reason]
+        super().__init__(f'{label}标题长度须为 25–{maximum} 个字符；{detail}')
+
+
 def validate_localized_title(title, maximum=255, *, site='MY', language='ms'):
     words, _ = title_rules(site, language)
     label = market_labels(site)['language_name']
     if not isinstance(title, str) or not 25 <= len(title.strip()) <= maximum:
-        raise ProviderError(f"{label}标题长度须为 25–{maximum} 个字符")
+        raise TitleLengthError(label, title, maximum)
     title = title.strip()
     if any(c in title for c in ('\n', '\r', '"', '*', '`', '<', '>')) or any(unicodedata.category(c).startswith("C") for c in title):
         raise ProviderError("标题须为单行纯文本，不能包含 Markdown 或控制字符")
@@ -342,7 +354,7 @@ def choose_keywords(snapshot, candidates, counts, turn=0, *, facts=None, core=No
     ordered = sorted(candidates, key=lambda w: (w["id"] not in required,
         w["tag"] != "品类", w["priority"] != "preferred", counts.get(w["id"], 0),
         -w.get('evidence_frequency', 0), w["selected_count"], digest([w["id"], turn])))
-    budget = 200 if snapshot.get('supply') else 210
+    budget = supply_rules.KEYWORD_BUDGET if snapshot.get('supply') else 210
     core = core or snapshot.get('category_localized_name') or ''
     chosen, used_facts = [], set()
     for word in ordered:
@@ -547,14 +559,32 @@ async def generate_record(db, record_id, api_key=None):
                 TitleRecord.task_id == record.task_id if record.task_id else False,
                 TitleRecord.snapshot["supply_job_id"].as_integer() == snapshot.get("supply_job_id", -1)))).all()
         recent = [{"title": r.title, "keywords": r.selected_keywords} for r in history]
-        target_minimum = 180
-        target_maximum = 220 if snapshot.get('supply') else 230
-        maximum = 220 if snapshot.get('supply') else 255
-        last_good = None
-        best_score = None
-        previous_title = ''
-        feedback = ""
-        while record.attempts < 4:
+        supply = snapshot.get('supply', False)
+        target_minimum = supply_rules.TARGET_MINIMUM if supply else 180
+        target_maximum = supply_rules.TARGET_MAXIMUM if supply else 230
+        maximum = supply_rules.MAXIMUM if supply else 255
+        state = copy.deepcopy(snapshot.get('supply_generation', {})) if supply else {}
+        best = state.get('best')
+        last_good = (best['title'], best['warnings'], best['keywords']) if best else None
+        best_score = tuple(best['score']) if best else None
+        previous_title = state.get('previous_title', '')
+        feedback = state.get('feedback', '')
+
+        def save_supply_state():
+            if not supply:
+                return
+            task_still_active(db, record)
+            db.refresh(record)
+            stored = {**record.snapshot, 'supply_generation': copy.deepcopy(state)}
+            saved = db.execute(update(TitleRecord).where(TitleRecord.id == record.id,
+                TitleRecord.lease_owner == owner, TitleRecord.lease_expires_at > datetime.utcnow())
+                .values(snapshot=stored))
+            if not saved.rowcount:
+                raise ProviderError('标题执行权已变化')
+            db.commit()
+            db.refresh(record)
+
+        while record.attempts < supply_rules.MAX_ATTEMPTS:
             task_still_active(db, record)
             db.refresh(record)
             if record.lease_owner != owner:
@@ -563,11 +593,36 @@ async def generate_record(db, record_id, api_key=None):
             db.scalar(select(TitleMarket).where(TitleMarket.id == market.id).with_for_update())
             counts = {w.id: w.selected_count for w in db.scalars(select(TitleKeyword).where(TitleKeyword.market_id == market.id)
                 .order_by(TitleKeyword.id).with_for_update().execution_options(populate_existing=True))}
-            selected = choose_keywords(snapshot, candidates, counts, record.attempts + record.id,
-                facts=facts['attributes'], core=core)
+            if supply and 'selected' in state:
+                selected = copy.deepcopy(state['selected'])
+            elif supply and record.attempts and record.selected_keywords:
+                # 兼容升级前已消耗部分机会的记录，保留上次选词。
+                selected = copy.deepcopy(record.selected_keywords)
+            else:
+                selected = choose_keywords(snapshot, candidates, counts, record.attempts + record.id,
+                    facts=facts['attributes'], core=core)
+            if supply:
+                protected = set(snapshot['locked_keyword_ids'])
+                if snapshot.get('selected_material_keyword'):
+                    protected.add(snapshot['selected_material_keyword']['id'])
+                if state.pop('reduce_optional', False):
+                    for position in range(len(selected) - 1, -1, -1):
+                        word = selected[position]
+                        if word['id'] not in protected and word['tag'] != '品类':
+                            state.setdefault('removed_keyword_ids', []).append(word['id'])
+                            del selected[position]
+                            break
+                for phrase in [required_core, *[remove_forbidden_phrases(w['phrase'], forbidden_phrases)
+                        for w in selected if w['id'] in protected or w['tag'] == '品类']]:
+                    if len(phrase) > maximum:
+                        raise ProviderError(f'货盘标题配置冲突：单个必要词组为 {len(phrase)} 字符，超过 {maximum} 字符上限')
+                state['selected'] = copy.deepcopy(selected)
+            values = dict(selected_keywords=selected, attempts=record.attempts + 1, state='running')
+            if supply:
+                values['snapshot'] = {**record.snapshot, 'supply_generation': copy.deepcopy(state)}
             consumed = db.execute(update(TitleRecord).where(TitleRecord.id == record.id,
-                TitleRecord.lease_owner == owner, TitleRecord.attempts == record.attempts).values(
-                    selected_keywords=selected, attempts=record.attempts + 1, state='running'))
+                TitleRecord.lease_owner == owner, TitleRecord.lease_expires_at > datetime.utcnow(),
+                TitleRecord.attempts == record.attempts).values(**values))
             if not consumed.rowcount:
                 raise ProviderError('标题执行权已变化')
             for word in selected:
@@ -575,6 +630,7 @@ async def generate_record(db, record_id, api_key=None):
                            .values(selected_count=TitleKeyword.selected_count + 1))
             db.commit()
             db.refresh(record)
+            raw_length = cleaned_length = None
             try:
                 answer = await ask_json(api_key,
                     f"Write one natural product title in {locale['model_language']}. "
@@ -589,7 +645,7 @@ async def generate_record(db, record_id, api_key=None):
                     'Do not contradict confirmed facts. '
                     'Never include any phrase in forbidden, even if it also appears in selected phrases or confirmed facts. '
                     'No invented material, function, audience, brand, marketing, season or occasion. '
-                    'Prefer 180-220 characters including spaces and punctuation, within target_minimum and target_maximum. '
+                    f'Prefer {target_minimum}-{target_maximum} characters including spaces and punctuation, within target_minimum and target_maximum. '
                     'Put the core category near the beginning, then naturally organize confirmed material, silhouette, '
                     'sleeve length, pattern, details, audience and occasion when available. '
                     'If previous_title is outside the target range, expand it using unused_confirmed_attributes or '
@@ -611,11 +667,14 @@ async def generate_record(db, record_id, api_key=None):
                      "avoid": [r["title"] for r in recent[-12:]], "feedback": feedback}, max_tokens=700)
                 raw_title = answer.get('title')
                 if isinstance(raw_title, str):
+                    raw_length = len(raw_title)
                     raw_title = raw_title.strip()
-                    previous_title = raw_title
                     title = remove_forbidden_phrases(raw_title, forbidden_phrases)
+                    previous_title = title
+                    cleaned_length = len(title)
                 else:
                     title = raw_title
+                    previous_title = ''
                 removed_forbidden = title != raw_title
                 title = validate_localized_title(title, maximum, site=market.site, language=market.language)
                 previous_title = title
@@ -645,8 +704,7 @@ async def generate_record(db, record_id, api_key=None):
                 if best_score is None or score < best_score:
                     last_good = (title, warnings, used_keywords)
                     best_score = score
-                if removed_forbidden or (not distance and not high):
-                    break
+                should_finish = removed_forbidden or (not distance and not high)
                 feedback_parts = []
                 if distance:
                     feedback_parts.append(f'Previous title has {len(title)} characters; target '
@@ -655,14 +713,32 @@ async def generate_record(db, record_id, api_key=None):
                 if high:
                     feedback_parts.append('High similarity. Rotate optional verified attributes and synonyms; retain category.')
                 feedback = ' '.join(feedback_parts)
+                if supply:
+                    state.update(overlong_streak=0, previous_title=previous_title, feedback=feedback,
+                        raw_length=raw_length, cleaned_length=cleaned_length,
+                        best={'title': last_good[0], 'warnings': last_good[1],
+                              'keywords': last_good[2], 'score': list(best_score)})
+                    save_supply_state()
+                if should_finish:
+                    break
             except ProviderError as exc:
                 feedback = str(exc)
-                if snapshot.get('supply'):
-                    logger.warning("货盘标题成文失败 | job=%s record=%s attempt=%s site=%s error=%s",
-                        snapshot.get('supply_job_id'), record.id, record.attempts, market.site, feedback)
+                if supply:
+                    reason = exc.reason if isinstance(exc, TitleLengthError) else 'other'
+                    streak = state.get('overlong_streak', 0) + 1 if reason == 'overlong' else 0
+                    if isinstance(exc, TitleLengthError):
+                        feedback = supply_rules.correction_feedback(reason, exc.length)
+                    state.update(overlong_streak=streak, reduce_optional=streak >= 2,
+                        previous_title=previous_title, feedback=feedback,
+                        raw_length=raw_length, cleaned_length=cleaned_length, last_error=str(exc))
+                    save_supply_state()
+                    logger.warning("货盘标题成文失败 | job=%s record=%s attempt=%s site=%s "
+                        "raw_length=%s cleaned_length=%s selected=%s removed=%s error=%s",
+                        snapshot.get('supply_job_id'), record.id, record.attempts, market.site,
+                        raw_length, cleaned_length, len(selected), len(state.get('removed_keyword_ids', [])), str(exc))
         task_still_active(db, record)
         if not last_good:
-            raise ProviderError(feedback or "已达到每条标题最多 4 次成文调用，请人工处理")
+            raise ProviderError(state.get('last_error') or feedback or "已达到每条标题最多 4 次成文调用，请人工处理")
         title, warnings, selected = last_good
         db.scalar(select(TitleMarket).where(TitleMarket.id == market.id).with_for_update())
         # 并发请求可能在模型调用期间完成；提交前再检查一次，避免漏报。

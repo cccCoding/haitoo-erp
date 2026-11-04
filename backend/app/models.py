@@ -5,6 +5,7 @@ from uuid import uuid4
 from sqlalchemy import Boolean, Date, DateTime, Enum, Float, Index, Integer, JSON, LargeBinary, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import DATETIME as MYSQL_DATETIME, MEDIUMBLOB
 from sqlalchemy.orm import Mapped, mapped_column
+from .supply_title_rules import MAXIMUM as SUPPLY_TITLE_MAXIMUM
 from .database import Base
 from .title_models import (TitleMarket, TitleTemplateProfile, TitleKeyword, TitleEvidence,
                           TitleTask, TitleRecord, TitleAttributeCache, TitleImportWord, TitleDictionaryEntry)
@@ -351,7 +352,7 @@ class ProductTemplate(Base):
     color_count: Mapped[int] = mapped_column(Integer, default=1)
     sku_count: Mapped[int] = mapped_column(Integer, default=1)
     supply_public: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
-    supply_fallback_title: Mapped[str | None] = mapped_column(String(220), nullable=True)
+    supply_fallback_title: Mapped[str | None] = mapped_column(String(SUPPLY_TITLE_MAXIMUM), nullable=True)
 
 
 class UserTemplateWhiteImage(Base):

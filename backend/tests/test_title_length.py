@@ -1,14 +1,15 @@
 """词库标题软长度目标、选词预算及多次成文的结果保留。"""
+import asyncio
 import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.ai_providers import ProviderError
 from app.database import Base
-from app.title_models import TitleMarket, TitleRecord
+from app.title_models import TitleKeyword, TitleMarket, TitleRecord
 from app.title_service import choose_keywords, create_record, generate_record, match_keywords
 
 
@@ -53,6 +54,13 @@ class TitleKeywordBudgetTests(unittest.TestCase):
                 result = choose_keywords(self.snapshot(supply=supply), words, {1: 0, 2: 1, 3: 2})
                 self.assertEqual([w['id'] for w in result], expected)
 
+    def test_supply_initial_optional_budget_is_170_including_core_and_spaces(self):
+        snapshot = self.snapshot(supply=True)
+        self.assertEqual([word['id'] for word in choose_keywords(snapshot, [keyword(1, 'a' * 165)], {})], [1])
+        self.assertEqual(choose_keywords(snapshot, [keyword(1, 'a' * 166)], {}), [])
+        snapshot['locked_keyword_ids'] = [1]
+        self.assertEqual([word['id'] for word in choose_keywords(snapshot, [keyword(1, 'a' * 166)], {})], [1])
+
     def test_required_words_and_selected_material_survive_soft_budget(self):
         words = [keyword(1, 'a' * 150), keyword(2, 'b' * 150), keyword(3, 'kapas', tag='材质'),
                  keyword(4, 'linen', tag='材质'), keyword(5, 'poket')]
@@ -86,7 +94,8 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.engine.dispose)
         self.addCleanup(self.db.close)
 
-    async def generate(self, answers, *, supply=False, site='MY', history=None, forbidden=()):
+    async def generate(self, answers, *, supply=False, site='MY', history=None, forbidden=(), words=(),
+                       locked=(), material=None, response_callback=None):
         core = 'Daster' if site == 'ID' else 'Gaun'
         self.company_sequence += 1
         market = TitleMarket(company_id=self.company_sequence, platform='TikTok', site=site,
@@ -95,8 +104,14 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.db.flush()
         snapshot = {'template_id': 1, 'category': '连衣裙', 'category_localized_name': core,
                     'platform': 'TikTok', 'site': site, 'language': market.language,
-                    'attributes': {}, 'keywords': [], 'locked_keyword_ids': [],
+                    'attributes': {}, 'keywords': list(words), 'locked_keyword_ids': list(locked),
                     'forbidden_keyword_ids': [], 'forbidden_phrases': list(forbidden)}
+        if material:
+            snapshot['selected_material_keyword'] = material
+        for word in words:
+            self.db.add(TitleKeyword(id=word['id'], market_id=market.id, code=str(word['id']),
+                identity_hash=str(word['id']).zfill(64), phrase=word['phrase'], translation=word['translation'],
+                tag=word['tag'], categories=word['categories']))
         record = create_record(self.db, market, 1, snapshot, 'https://img.example/1.png', 'length-test', supply=supply)
         record.facts = {'attributes': [
             {'tag': '品类', 'value': '连衣裙', 'localized_value': core, 'source': 'manual'},
@@ -105,14 +120,16 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
             {'tag': '结构设计', 'value': '长袖', 'localized_value': 'Lengan Panjang', 'source': 'manual'},
             {'tag': '颜色', 'value': '蓝色', 'localized_value': 'Biru', 'source': 'manual'},
         ], 'warnings': []}
+        record.facts['attributes'].extend({'tag': word['tag'], 'value': word['translation'],
+            'localized_value': word['phrase'], 'source': 'manual'} for word in words)
         if history:
             self.db.add(TitleRecord(market_id=market.id, user_id=1, template_id=1, request_key='history',
                 category='连衣裙', image_url=record.image_url, snapshot=snapshot, title=history,
                 selected_keywords=[], adopted_at=datetime.utcnow(), state='adopted'))
         self.db.commit()
         self.record_id = record.id
-        sequence = [item if isinstance(item, Exception) else {'title': item} for item in answers]
-        model = AsyncMock(side_effect=sequence)
+        sequence = [item if isinstance(item, BaseException) else {'title': item} for item in answers]
+        model = AsyncMock(side_effect=response_callback or sequence)
         with patch('app.title_service.ask_json', new=model):
             result = await generate_record(self.db, record.id, 'test-key')
             # 已完成的记录重放不调用模型。
@@ -139,15 +156,15 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any('长度' in warning or '字符' in warning for warning in result['warnings']))
 
     async def test_regular_target_boundaries_and_supply_body_boundary(self):
-        for title, length, supply in ((MY_180, 180, False), (MY_230, 230, False), (MY_220, 220, True)):
+        for title, length, supply in ((MY_180, 180, False), (MY_230, 230, False), (MY_230, 230, True)):
             with self.subTest(length=length, supply=supply):
                 self.assertEqual(len(title), length)
-                result, model = await self.generate([title], supply=supply)
+                result, model = await self.generate([title] * (4 if supply else 1), supply=supply)
                 self.assertEqual(result['title'], title)
-                self.assertEqual(model.await_count, 1)
+                self.assertEqual(model.await_count, 4 if supply else 1)
                 if supply:
-                    self.assertEqual(model.await_args.args[2]['target_maximum'], 220)
-                    self.assertEqual(len(result['title'] + ' - L01'), 226)
+                    self.assertEqual(model.await_args.args[2]['target_maximum'], 200)
+                    self.assertEqual(len(result['title'] + ' - L01'), 236)
 
     async def test_over_target_but_within_hard_limit_is_compressed(self):
         result, model = await self.generate([MY_231, MY_230])
@@ -198,3 +215,97 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['title'], ID_182)
         self.assertEqual((result['site'], result['language']), ('ID', 'id'))
         self.assertIn('Bahasa Indonesia', model.await_args.args[1])
+
+    async def test_supply_overlong_retry_preserves_words_and_explains_exact_length(self):
+        for site, title in (('MY', MY_180), ('ID', ID_182)):
+            with self.subTest(site=site):
+                result, model = await self.generate([title + ' X' * 40, title], supply=True, site=site)
+                first, retry = [call.args[2] for call in model.await_args_list]
+                self.assertEqual(first['selected'], retry['selected'])
+                self.assertEqual(retry['character_count'], len(title) + 80)
+                self.assertIn(str(len(title) + 80 - 230), retry['feedback'])
+                self.assertIn('180-200', retry['feedback'])
+                self.assertEqual(result['attempts'], 2)
+                self.assertEqual(result['title'], title)
+
+    async def test_supply_reduces_optional_words_after_two_overlong_responses(self):
+        words = [keyword(1, 'Gaun', tag='品类'), keyword(2, 'Lengan Panjang', tag='结构设计'),
+                 keyword(3, 'kapas', tag='材质'), keyword(4, 'Corak Bunga', tag='图案')]
+        overlong = MY_180 + ' X' * 40
+        result, model = await self.generate([overlong, overlong, MY_180 + ' Kapas'], supply=True,
+            words=words, locked=[2], material=words[2])
+        selections = [[w['id'] for w in call.args[2]['selected']] for call in model.await_args_list]
+        self.assertEqual(selections[0], selections[1])
+        self.assertEqual(set(selections[2]), {1, 2, 3})
+        self.assertNotIn('Corak Bunga', model.await_args.args[2]['required_phrases'])
+        state = self.db.get(TitleRecord, self.record_id).snapshot['supply_generation']
+        self.assertEqual(state['removed_keyword_ids'], [4])
+        self.assertEqual(result['attempts'], 3)
+        counts = {row.id: row.selected_count for row in self.db.scalars(select(TitleKeyword))}
+        self.assertEqual(counts, {1: 3, 2: 3, 3: 3, 4: 2})
+
+    async def test_supply_keeps_best_title_and_selection_across_interruption(self):
+        with self.assertRaises(asyncio.CancelledError):
+            await self.generate([MY_230, asyncio.CancelledError()], supply=True)
+        record = self.db.get(TitleRecord, self.record_id)
+        self.assertEqual(record.attempts, 2)
+        self.assertEqual(record.snapshot['supply_generation']['best']['title'], MY_230)
+        retry = AsyncMock(side_effect=ProviderError('temporary failure'))
+        with patch('app.title_service.ask_json', new=retry), \
+             patch('app.title_service.choose_keywords', side_effect=AssertionError('禁止重新选词')):
+            result = await generate_record(self.db, record.id, 'test-key')
+        self.assertEqual(result['title'], MY_230)
+        self.assertEqual(result['attempts'], 4)
+        self.assertEqual(retry.await_count, 2)
+
+    async def test_supply_resume_does_not_remove_optional_word_twice(self):
+        words = [keyword(1, 'Corak Bunga', tag='图案'), keyword(2, 'Lengan Panjang', tag='结构设计')]
+        with self.assertRaises(asyncio.CancelledError):
+            await self.generate([MY_231, MY_231, asyncio.CancelledError()], supply=True, words=words)
+        record = self.db.get(TitleRecord, self.record_id)
+        state = record.snapshot['supply_generation']
+        self.assertEqual(record.attempts, 3)
+        self.assertEqual(len(state['removed_keyword_ids']), 1)
+        selection = state['selected']
+        model = AsyncMock(return_value={'title': MY_180})
+        with patch('app.title_service.ask_json', new=model):
+            await generate_record(self.db, record.id, 'test-key')
+        self.assertEqual(model.await_args.args[2]['selected'], selection)
+        self.assertEqual(record.attempts, 4)
+
+    async def test_supply_empty_type_short_and_boundary_titles(self):
+        for value in (None, '', 'Gaun', 123):
+            with self.subTest(value=value):
+                result, model = await self.generate([value, MY_180], supply=True)
+                self.assertEqual(result['attempts'], 2)
+                self.assertIn('180-200', model.await_args.args[2]['feedback'])
+        for length in (24, 25, 179, 180, 200, 201, 230, 231):
+            title = 'Gaun ' + 'a' * (length - 5)
+            with self.subTest(length=length):
+                if length in (24, 231):
+                    with self.assertRaisesRegex(ProviderError, f'实际 {length} 字符'):
+                        await self.generate([title] * 4, supply=True)
+                else:
+                    result, _ = await self.generate([title] * 4, supply=True)
+                    self.assertEqual(len(result['title']), length)
+
+    async def test_supply_rejects_single_impossible_required_phrase_before_model(self):
+        word = keyword(1, 'a' * 231)
+        with self.assertRaisesRegex(ProviderError, '配置冲突'):
+            await self.generate([], supply=True, words=[word], locked=[1])
+        self.assertEqual(self.db.get(TitleRecord, self.record_id).attempts, 0)
+
+    async def test_supply_takeover_prevents_stale_candidate_and_state_writes(self):
+        def takeover(*args, **kwargs):
+            record = self.db.get(TitleRecord, self.record_id)
+            record.lease_owner = 'replacement-worker'
+            self.db.commit()
+            return {'title': MY_180}
+
+        with self.assertRaisesRegex(ProviderError, '执行权'):
+            await self.generate([MY_180], supply=True, response_callback=takeover)
+        record = self.db.get(TitleRecord, self.record_id)
+        self.assertEqual(record.lease_owner, 'replacement-worker')
+        self.assertEqual(record.attempts, 1)
+        self.assertNotIn('best', record.snapshot['supply_generation'])
+        self.assertIsNone(record.title)

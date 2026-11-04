@@ -15,6 +15,7 @@ from app.ai_providers import ProviderError
 from app.credentials import encrypt_secret
 from app.models import Company, ProductTemplate, SupplyJob, SupplyStrategy
 from app.supply_worker import claim_job, request_market_title, run_job, style_sample
+from app.supply_common import validate_title_fallback
 from app.title_api import router as title_router
 from app.title_models import TitleKeyword, TitleRecord, TitleTemplateProfile
 from app.title_service import get_market, profile_snapshot
@@ -282,6 +283,64 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
         # 旧客户端遗留审核值不阻止清空标题；审核字段仅保留接口兼容。
         response = self.request('PUT', '/title-profiles/1', json={**payload, 'fallback_title': None, 'fallback_approved': True})
         self.assertEqual(response.status_code, 200, response.text)
+
+    def test_fallback_api_and_excel_accept_230_but_reject_231(self):
+        for length in (230, 231):
+            english = 'Printed Dress ' + 'a' * (length - len('Printed Dress '))
+            response = self.request('PATCH', '/supply/templates/1', json={'supply_fallback_title': english})
+            self.assertEqual(response.status_code, 200 if length == 230 else 422, response.text)
+            if length == 230:
+                self.assertEqual(response.json()['supply_fallback_title'], english)
+            for site, core in (('MY', 'Gaun'), ('ID', 'Daster')):
+                title = core + ' ' + 'a' * (length - len(core) - 1)
+                payload = {'category': '连衣裙', 'gender': '女', 'age_group': '成人', 'site': site,
+                           'language': 'id' if site == 'ID' else 'ms', 'fallback_title': title}
+                response = self.request('PUT', '/title-profiles/1', json=payload)
+                self.assertEqual(response.status_code, 200 if length == 230 else 422, response.text)
+                if length == 230:
+                    self.assertEqual(response.json()['fallback_title'], title)
+        for site in ('MY', 'ID'):
+            identity = self.submit(self.create_strategy(title_site=site), key=f'fallback-230-{site}')
+            links = self.finish(identity)
+            self.assertTrue(all(len(row['title']) == 236 for row in links))
+            self.assert_exported_titles(links)
+        with self.sessions() as db:
+            self.profile(db).fallback_title = None
+            db.commit()
+        links = self.finish(self.submit(key='english-fallback-230'))
+        self.assertTrue(all(len(row['title']) == 236 for row in links))
+        self.assert_exported_titles(links)
+
+    def test_fallback_length_is_checked_after_forbidden_cleanup_in_all_languages(self):
+        for language, core, site in (('en', 'Printed Dress', 'MY'), ('ms', 'Gaun', 'MY'), ('id', 'Daster', 'ID')):
+            title = core + ' ' + 'a' * (229 - len(core))
+            profile = {'fallback_language': language, 'language': language, 'site': site,
+                       'fallback_title': title + ' Forbidden', 'forbidden_phrases': ['Forbidden']}
+            self.assertEqual(validate_title_fallback(profile), title)
+            profile['forbidden_phrases'] = []
+            with self.assertRaisesRegex(ProviderError, '25–230'):
+                validate_title_fallback(profile)
+
+    def test_ai_230_character_body_survives_export_for_both_markets(self):
+        with self.sessions() as db:
+            db.get(Company, 1).supply_ai_secret_encrypted = encrypt_secret('test-supply-key')
+            db.commit()
+        for site, core in (('MY', 'Gaun'), ('ID', 'Daster')):
+            title = core + ' ' + 'a' * (229 - len(core))
+
+            async def answer(key, instructions, data, **kwargs):
+                if 'Identify clothing attributes' in instructions:
+                    expressions = {'品类': core, '性别': 'Wanita', '年龄': 'Dewasa', '结构设计': 'Lengan Panjang'}
+                    return {'attributes': [{'tag': tag, 'value': value, 'localized_value': expressions[tag],
+                        'evidence': 'confirmed template', 'source': 'manual'} for tag, value in data['manual'].items()]}
+                self.assertEqual((data['target_minimum'], data['target_maximum'], data['maximum']), (180, 200, 230))
+                return {'title': title}
+
+            identity = self.submit(self.create_strategy(title_site=site), key=f'ai-230-{site}')
+            with patch('app.title_service.ask_json', side_effect=answer):
+                links = self.finish(identity)
+            self.assertTrue(all(row['title_source'] == 'ai' and len(row['title']) == 236 for row in links))
+            self.assert_exported_titles(links)
 
     def test_reclaimed_job_reuses_checkpoint_and_uncheckpointed_title_without_duplicate_records(self):
         identity = self.submit()
