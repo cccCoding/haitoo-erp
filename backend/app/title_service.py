@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import logging
 import re
 import secrets
 import unicodedata
@@ -20,6 +21,8 @@ from .credentials import decrypt_secret
 from .models import Company, ProductTemplate, Role, User, UserAIProviderCredential
 from .title_models import (TitleAttributeCache, TitleEvidence, TitleKeyword, TitleMarket,
                            TitleRecord, TitleTask, TitleTemplateProfile)
+
+logger = logging.getLogger(__name__)
 
 TAGS = ["品类", "性别", "年龄", "人群", "风格", "场景", "季节", "气候", "材质", "面料", "版型", "尺码", "长度",
         "颜色", "图案", "结构设计", "细节元素", "工艺", "功能", "穿着效果", "搭配", "价格定位", "品牌", "流行趋势",
@@ -151,14 +154,20 @@ async def ask_json(api_key, instructions, data, *, image_url=None, max_tokens=35
             raise ProviderError(f"DeepSeek 调用失败：HTTP {response.status_code}")
         choice = response.json()["choices"][0]
         if choice.get("finish_reason") != "stop":
-            raise ValueError()
+            reason = choice.get("finish_reason")
+            reason = reason if reason in {'length', 'content_filter', 'tool_calls', 'insufficient_system_resource'} else 'unknown'
+            raise ProviderError(f"标题模型未正常结束（finish_reason={reason}），请重试")
         result = json.loads(choice["message"]["content"])
         if not isinstance(result, dict):
             raise ValueError()
         return result
     except ProviderError:
         raise
-    except (httpx.HTTPError, ValueError, TypeError, KeyError, IndexError) as exc:
+    except httpx.TimeoutException as exc:
+        raise ProviderError("DeepSeek 请求超时，请重试") from exc
+    except httpx.HTTPError as exc:
+        raise ProviderError("DeepSeek 网络请求失败，请重试") from exc
+    except (ValueError, TypeError, KeyError, IndexError) as exc:
         raise ProviderError("标题模型未返回完整结构化结果，请重试") from exc
 
 
@@ -648,6 +657,9 @@ async def generate_record(db, record_id, api_key=None):
                 feedback = ' '.join(feedback_parts)
             except ProviderError as exc:
                 feedback = str(exc)
+                if snapshot.get('supply'):
+                    logger.warning("货盘标题成文失败 | job=%s record=%s attempt=%s site=%s error=%s",
+                        snapshot.get('supply_job_id'), record.id, record.attempts, market.site, feedback)
         task_still_active(db, record)
         if not last_good:
             raise ProviderError(feedback or "已达到每条标题最多 4 次成文调用，请人工处理")

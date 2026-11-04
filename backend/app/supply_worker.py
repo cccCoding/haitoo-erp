@@ -226,8 +226,12 @@ async def request_market_title(job_id, epoch, index, first_image, session_factor
                      if profile.get('fallback_language') == 'en'
                      else f"{market_labels(profile.get('site', 'MY'))['language_name']}兜底标题")
             record.warnings = [f'已使用{label}；可能与其他链接高度相似']
-            record.error = None
+            # 兜底成功与 AI 失败是两件事，保留原因用于排查，不改变任务完成状态。
+            record.error = str(exc)
+            record.warnings.append(f'AI 标题生成失败：{record.error}')
             db.commit()
+            logger.warning("货盘标题使用兜底 | job=%s link=%s record=%s attempts=%s error=%s",
+                job_id, index + 1, record.id, record.attempts, record.error)
             result = {'title': fallback, 'source': 'fallback', 'warnings': record.warnings}
         return {**result, 'generation_id': record.id}
 

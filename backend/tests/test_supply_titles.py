@@ -117,7 +117,7 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
                     model.assert_not_awaited()  # 未配置公司密钥，直接进入已校验的兜底。
                 self.assertTrue(all(link['title_source'] == 'fallback' for link in links))
                 self.assertTrue(all(link['title'].startswith('Printed Long Sleeve') for link in links))
-                self.assertTrue(all('英文兜底' in link['title_warnings'][0] for link in links))
+                self.assertTrue(all('对应站点兜底标题未设置' in link['title_warnings'][0] for link in links))
                 self.assert_exported_titles(links)
 
     def assert_exported_titles(self, links):
@@ -156,7 +156,45 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
                 with self.sessions() as db:
                     self.assertEqual(db.get(SupplyJob, identity).snapshot, original)
                     records = db.scalars(select(TitleRecord).where(TitleRecord.snapshot['supply_job_id'].as_integer() == identity)).all()
-                    self.assertTrue(all(record.adopted_at and record.source == 'fallback' and not record.error for record in records))
+                    self.assertTrue(all(record.adopted_at and record.source == 'fallback'
+                        and record.error == '尚未配置公司货盘 DeepSeek 密钥' for record in records))
+
+    def test_fallback_keeps_provider_and_validation_failures_after_export(self):
+        for failure, expected in ((ProviderError('DeepSeek 调用失败：HTTP 429'), 'DeepSeek 调用失败：HTTP 429'),
+                                  ({'title': 'Baju Wanita Dewasa Lengan Panjang'}, '标题遗漏核心品类：Gaun')):
+            with self.subTest(failure=expected):
+                with self.sessions() as db:
+                    db.get(Company, 1).supply_ai_secret_encrypted = encrypt_secret('test-supply-key')
+                    db.commit()
+                identity = self.submit(key=expected)
+
+                async def answer(key, instructions, data, **kwargs):
+                    if 'Identify clothing attributes' in instructions:
+                        expressions = {'品类': 'Gaun', '性别': 'Wanita', '年龄': 'Dewasa', '结构设计': 'Lengan Panjang'}
+                        return {'attributes': [{'tag': tag, 'value': value, 'localized_value': expressions[tag],
+                            'evidence': 'confirmed template', 'source': 'manual'} for tag, value in data['manual'].items()]}
+                    if isinstance(failure, Exception):
+                        raise failure
+                    return failure
+
+                with patch('app.title_service.ask_json', side_effect=answer), \
+                     self.assertLogs('app.title_service', level='WARNING') as attempts, \
+                     self.assertLogs('app.supply_worker', level='WARNING') as fallbacks:
+                    links = self.finish(identity)
+                self.assertEqual(len(attempts.records), 40)
+                self.assertEqual(len(fallbacks.records), 10)
+                self.assertTrue(all(expected in row.getMessage() for row in attempts.records + fallbacks.records))
+                self.assertTrue(all(f'job={identity}' in row.getMessage() for row in attempts.records + fallbacks.records))
+                self.assertTrue(all(link['title_source'] == 'fallback' and
+                    any(expected in warning for warning in link['title_warnings']) for link in links))
+                with self.sessions() as db:
+                    for link in links:
+                        record = db.get(TitleRecord, link['generation_id'])
+                        self.assertEqual(record.attempts, 4)
+                        self.assertIn(expected, record.error)
+                        self.assertEqual(record.source, 'fallback')
+                        self.assertIsNotNone(record.adopted_at)
+                self.assert_exported_titles(links)
 
     def test_fallback_removes_forbidden_phrases_and_rejects_invalid_result(self):
         with self.sessions() as db:

@@ -8,6 +8,33 @@ from app.ai_providers import ProviderError, validate_generated_title
 from app.config import Settings
 
 
+class TitleLibraryRequestDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_failures_are_distinguishable_without_exposing_secrets(self):
+        from app.title_service import ask_json
+        cases = [
+            (httpx.Response(429, json={}), 'DeepSeek 调用失败：HTTP 429'),
+            (httpx.ReadTimeout('private-key'), 'DeepSeek 请求超时'),
+            (httpx.ConnectError('private-key'), 'DeepSeek 网络请求失败'),
+            (httpx.Response(200, json={'choices': [{'finish_reason': 'length'}]}), 'finish_reason=length'),
+            (httpx.Response(200, json={'choices': [{'finish_reason': 'private-key'}]}), 'finish_reason=unknown'),
+            (httpx.Response(200, json={'choices': [{'finish_reason': 'stop', 'message': {'content': 'not json'}}]}),
+             '标题模型未返回完整结构化结果'),
+        ]
+        for response, expected in cases:
+            with self.subTest(expected=expected):
+                client = AsyncMock()
+                if isinstance(response, Exception):
+                    client.post.side_effect = response
+                else:
+                    client.post.return_value = response
+                with patch('app.title_service.httpx.AsyncClient') as factory:
+                    factory.return_value.__aenter__.return_value = client
+                    with self.assertRaises(ProviderError) as failure:
+                        await ask_json('private-key', 'Write a title', {})
+                self.assertIn(expected, str(failure.exception))
+                self.assertNotIn('private-key', str(failure.exception))
+
+
 class TitleGenerationTests(unittest.IsolatedAsyncioTestCase):
     async def test_supply_title_uses_same_fixed_model_and_disables_thinking(self):
         from app.supply_worker import request_title
