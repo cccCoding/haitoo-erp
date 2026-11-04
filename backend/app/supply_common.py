@@ -5,6 +5,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy import select, update
@@ -228,11 +229,19 @@ def normalize_title(value):
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
+def job_filename(job):
+    name = job.snapshot.get("strategy", {}).get("name") or "货盘"
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', "_", name).strip(" .") or "货盘"
+    date = job.created_at.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Asia/Hong_Kong"))
+    return f"{name}_{date:%Y-%m-%d}.xlsx"
+
+
 def job_payload(job, user_name=None):
     return {"id": job.id, "strategy_id": job.strategy_id, "user_id": job.user_id,
+        "strategy_name": job.snapshot.get("strategy", {}).get("name"),
         "user_name": user_name or job.snapshot.get("user_name"), "agent_name": job.agent_name,
         "state": job.state, "stage": job.stage, "progress": job.progress or {}, "error": job.error,
         "created_at": timestamp(job.created_at), "completed_at": timestamp(job.completed_at),
         "output_expires_at": timestamp(job.output_expires_at),
-        "filename": f"TikTok货盘_{job.id}.xlsx", "file_expired": bool(job.output_deleted_at or (
+        "filename": job_filename(job), "file_expired": bool(job.output_deleted_at or (
             job.output_expires_at and job.output_expires_at <= now()))}

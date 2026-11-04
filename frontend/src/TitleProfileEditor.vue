@@ -5,6 +5,7 @@ import { SUPPLY_TITLE_MINIMUM, SUPPLY_TITLE_MAXIMUM } from './supply-title-rules
 import SearchableSelect from './SearchableSelect.vue'
 import { titleMarket, titleMarketParams, type TitleSite } from './title-markets'
 import { titleTagLabel } from './title-labels'
+import { resolveConfirmedChoice, type LegacyAttribute } from './title-confirmed-choices'
 
 const props = withDefaults(defineProps<{ token: string; templateId: number; platform?: string; site?: TitleSite; readonly?: boolean; showFallback?: boolean }>(), { showFallback: false, platform: 'TikTok', site: 'MY', readonly: false })
 const emit = defineEmits<{ saved: []; busy: [value: boolean] }>()
@@ -19,6 +20,10 @@ type KeywordOption = MaterialOption & { code: string; tag: string; semantic_tag:
 const materialOptions = ref<MaterialOption[]>([])
 const keywordOptions = ref<KeywordOption[]>([]), attributeKeywordOptions = ref<KeywordOption[]>([])
 const materialIds = ref<number[]>([]), legacyMaterial = ref(''), materialConflict = ref(''), legacyAudience = ref('')
+const confirmedChoices = ref<{ kind: 'craft' | 'brand'; tag: string; ids: number[]; warning: string }[]>([
+  { kind: 'craft', tag: '工艺', ids: [], warning: '' },
+  { kind: 'brand', tag: '品牌', ids: [], warning: '' },
+])
 const normalized = (value: string) => value.normalize('NFKC').trim().toLowerCase()
 const availableMaterials = computed(() => materialOptions.value.filter(item => item.categories.some(category => normalized(category) === normalized(form.value.category))))
 const unavailableMaterialIds = computed(() => materialIds.value.filter(id => !availableMaterials.value.some(item => item.id === id)))
@@ -26,6 +31,9 @@ const forbiddenIds = ref<number[]>([]), forbiddenError = ref('')
 const busy = ref(false), loaded = ref(false), error = ref(''), notice = ref('')
 const selectorDisabled = computed(() => busy.value || props.readonly || !loaded.value)
 const inCategory = (item: MaterialOption) => item.categories.some(category => normalized(category) === normalized(form.value.category))
+const confirmedWords = (tag: string) => attributeKeywordOptions.value.filter(item => item.semantic_tag === tag && inCategory(item) && !forbiddenIds.value.includes(item.id))
+const confirmedOptions = (tag: string) => confirmedWords(tag).map(item => ({ value: item.id, label: keywordLabel(item) }))
+const unavailableConfirmedIds = (item: {tag: string; ids: number[]}) => item.ids.filter(id => !confirmedWords(item.tag).some(word => word.id === id))
 const keywordLabel = (item: MaterialOption) => `${item.translation} · ${item.phrase}`
 const materialChoices = computed(() => availableMaterials.value.map(item => ({ value: item.id, label: keywordLabel(item) })))
 const tagChoices = computed(() => tags.value.map(tag => ({ value: tag, label: titleTagLabel(tag) })))
@@ -50,6 +58,17 @@ function toggleMaterial(value: string | number | null) {
   legacyMaterial.value = ''; materialConflict.value = ''
 }
 function clearMaterials() { materialIds.value = []; legacyMaterial.value = ''; materialConflict.value = '' }
+function toggleConfirmed(item: typeof confirmedChoices.value[number], value: string | number | null) {
+  if (selectorDisabled.value || typeof value !== 'number') return
+  if (item.ids.includes(value)) item.ids = item.ids.filter(id => id !== value)
+  else if (item.ids.length >= 100) { error.value = `最多选择 100 个${item.tag}关键词`; return }
+  else item.ids = [...item.ids, value]
+  item.warning = ''
+}
+function clearConfirmed(item: typeof confirmedChoices.value[number]) {
+  if (selectorDisabled.value) return
+  item.ids = []; item.warning = ''
+}
 function toggleForbidden(value: string | number | null) {
   if (selectorDisabled.value || typeof value !== 'number') return
   forbiddenError.value = ''
@@ -81,15 +100,21 @@ watch(() => [props.templateId, props.platform, props.site, props.token], async (
     if (current !== revision) return
     const definitions: { name: string; semantic_tag: string }[] = data.attribute_tags || []
     const semantic = (tag: string) => definitions.find(item => item.name === tag)?.semantic_tag || (tag === '面料' ? '材质' : tag)
-    tags.value = (data.tags || []).filter((tag: string) => !['品类','性别','年龄','材质','面料'].includes(semantic(tag)))
+    const legacyChoiceTags = new Set<string>(confirmedChoices.value.flatMap(item => (data[`${item.kind}_legacy_attributes`] || []).map((value: LegacyAttribute) => value.tag)))
+    tags.value = (data.tags || []).filter((tag: string) => !['品类','性别','年龄','材质','面料','工艺','品牌'].includes(semantic(tag)))
     form.value = { ...data, gender: data.gender || '', age_group: data.age_group || '' }
     categories.value = data.category_options || (data.categories || []).map((name: string) => ({ name, enabled: true }))
     if (data.category && !categories.value.some(item => item.name === data.category)) categories.value.push({ name: data.category, enabled: false })
     const values = Object.entries(data.attributes || {}).map(([tag, value]) => ({ tag, value: String(value) }))
-    attributes.value = values.filter(item => !['品类','性别','年龄','材质'].includes(semantic(item.tag)))
+    attributes.value = values.filter(item => !['品类','性别','年龄','材质','工艺','品牌'].includes(semantic(item.tag)) && !legacyChoiceTags.has(item.tag))
     materialOptions.value = data.material_options || []
     keywordOptions.value = data.keyword_options || []
     attributeKeywordOptions.value = data.attribute_keyword_options || []
+    forbiddenIds.value = [...new Set<number>(data.forbidden_keyword_ids || [])]
+    for (const item of confirmedChoices.value) {
+      const resolved = resolveConfirmedChoice(data[`${item.kind}_keyword_ids`] || [], data[`${item.kind}_legacy_attributes`] || [], confirmedWords(item.tag))
+      item.ids = resolved.ids; item.warning = resolved.warning
+    }
     for (const item of attributes.value) {
       item.value = attributeWords(item.tag).find(word => [word.phrase, word.translation].some(value => normalized(value) === normalized(item.value)))?.phrase || item.value
     }
@@ -117,6 +142,9 @@ async function save() {
     if (materialConflict.value && !materialIds.value.length) throw new Error('请选择确认后的面料关键词，或明确清除未确认面料')
     if (legacyMaterial.value || unavailableMaterialIds.value.length) throw new Error('请选择当前产品分类下已启用的面料关键词，或清除不可用面料')
     if (materialIds.value.some(id => forbiddenIds.value.includes(id))) throw new Error('所选面料关键词不能同时禁用')
+    for (const item of confirmedChoices.value) {
+      if (item.warning || unavailableConfirmedIds(item).length) throw new Error(`请选择当前产品分类下已启用且未禁用的${item.tag}关键词，或清空${item.tag}选择`)
+    }
     const confirmed: Record<string, string> = {}
     for (const item of attributes.value) {
       if (!item.tag || !item.value.trim()) throw new Error('请选择每项标签及对应关键词')
@@ -129,6 +157,8 @@ async function save() {
     const payload = { platform: props.platform, ...titleMarketParams(props.site), category: form.value.category,
       gender: form.value.gender, age_group: form.value.age_group, attributes: confirmed,
       material_keyword_ids: materialIds.value,
+      craft_keyword_ids: confirmedChoices.value.find(item => item.kind === 'craft')!.ids,
+      brand_keyword_ids: confirmedChoices.value.find(item => item.kind === 'brand')!.ids,
       category_names: [], locked_keyword_ids: [], forbidden_keyword_ids: forbiddenIds.value,
       fallback_title: form.value.fallback_title?.trim() || null }
     busy.value = true
@@ -141,7 +171,7 @@ async function save() {
 
 <template>
   <section class="title-profile-editor">
-    <p>{{market.siteName}} · {{market.languageName}}。产品分类、性别和年龄用于词库匹配；面料及其他标签请选择符合商品事实的已导入关键词。</p>
+    <p>{{market.siteName}} · {{market.languageName}}。产品分类、性别和年龄用于词库匹配；工艺、品牌和面料须人工确认，未填写时 AI 不推断。请选择符合商品事实的已导入关键词。</p>
     <p v-if="legacyAudience" class="profile-warning">旧配置：{{legacyAudience}}。请按下方标准选项重新确认。</p>
     <form @submit.prevent="save">
       <fieldset :disabled="busy || readonly || !loaded">
@@ -160,6 +190,16 @@ async function save() {
         <p v-if="legacyMaterial" class="profile-warning">原面料“{{legacyMaterial}}”未匹配可选关键词，请重新选择或清空面料选择。</p>
         <p v-if="unavailableMaterialIds.length" class="profile-warning">部分已选面料已停用或不适用当前产品分类，请移除后重新选择。</p>
         <div v-if="materialConflict" class="profile-warning">旧面料配置有冲突：{{materialConflict}}。请选择确认后的面料关键词，或清空面料选择。</div>
+        <div v-for="item in confirmedChoices" :key="item.kind" class="profile-select-field">
+          <span>{{item.tag}}（选填，可多选）</span>
+          <SearchableSelect :model-value="null" :multiple="true" :selected-values="item.ids" :options="confirmedOptions(item.tag)" :disabled="selectorDisabled" :aria-label="item.tag" :placeholder="`未确认${item.tag}（留空）`" :search-placeholder="`搜索${item.tag}关键词或中文释义`" :empty-label="`暂无可选${item.tag}`" :no-match-label="`没有匹配的${item.tag}关键词`" @toggle="toggleConfirmed(item, $event)" />
+          <div v-if="item.ids.length" class="profile-keyword-chips" :aria-label="`已选${item.tag}关键词`"><span v-for="id in item.ids" :key="id">{{forbiddenLabel(id)}}{{unavailableConfirmedIds(item).includes(id)?'（当前不可用）':''}}<button v-if="!readonly" type="button" :disabled="selectorDisabled" :aria-label="`移除${item.tag}关键词 ${forbiddenLabel(id)}`" @click="toggleConfirmed(item, id)">×</button></span></div>
+          <small>可选择多个符合商品事实的{{item.tag}}关键词；每条标题随机使用其中一个。未确认请留空。</small>
+          <button v-if="!readonly&&(item.ids.length||item.warning)" type="button" class="ghost" :disabled="selectorDisabled" @click="clearConfirmed(item)">清空{{item.tag}}选择</button>
+          <small v-if="loaded&&!confirmedWords(item.tag).length">暂无可选{{item.tag}}，请先导入适用于本产品分类的{{item.tag}}关键词并启用。</small>
+          <p v-if="item.warning" class="profile-warning">旧{{item.tag}}配置未匹配可用关键词或存在冲突：{{item.warning}}。请重新选择或清空{{item.tag}}选择。</p>
+          <p v-if="unavailableConfirmedIds(item).length" class="profile-warning">部分已选{{item.tag}}已停用、被禁用或不适用当前产品分类，请移除后重新选择。</p>
+        </div>
         <div class="profile-attribute-heading"><strong>其他标签</strong><button v-if="!readonly" type="button" class="secondary" @click="attributes.push({tag:'',value:''})">添加标签</button></div>
         <div v-for="(item, index) in attributes" :key="index" class="profile-attribute-item">
           <div class="title-attribute-row">

@@ -6,7 +6,7 @@ import TitlePagination from './TitlePagination.vue'
 import { titleMarketParams, type TitleSite } from './title-markets'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
 
-type TemplateConfiguration = { id: number; name: string; cover_url: string | null; is_platform: boolean; category: string; category_localized_name: string | null; gender: string | null; age_group: string | null; material: string; attributes: Record<string,string>; configuration_issues: string[]; ready: boolean }
+type TemplateConfiguration = { id: number; name: string; cover_url: string | null; is_platform: boolean; category: string; category_localized_name: string | null; gender: string | null; age_group: string | null; material: string; craft: string; brand: string; attributes: Record<string,string>; configuration_issues: string[]; ready: boolean }
 const props = defineProps<{ token: string; admin: boolean; site: TitleSite; categories: { name: string; enabled: boolean }[] }>()
 const emit = defineEmits<{ changed: [] }>()
 const api = axios.create({baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000'})
@@ -29,6 +29,9 @@ function changePage(value:number){if(loading.value)return;page.value=value;void 
 function changePageSize(value:number){if(loading.value)return;pageSize.value=value;page.value=1;void load()}
 function close(){if(!editingBusy.value)editing.value=null}
 function saved(){editing.value=null;editingBusy.value=false;void load();emit('changed')}
+function attributeSummary(attributes: Record<string, string>) {
+  return Object.entries(attributes).map(([tag, value]) => `${tag}：${value}`).join('；')
+}
 watch(()=>props.token,()=>{page.value=1;void load()})
 onMounted(()=>void load())
 onUnmounted(()=>{revision++})
@@ -36,7 +39,7 @@ onUnmounted(()=>{revision++})
 
 <template>
   <section class="template-config-panel">
-    <p class="template-config-note">为每个模板确认产品分类、使用性别、年龄、面料和商品标签。未确认的属性请留空。词库生成前须完成产品分类、性别和年龄设置。</p>
+    <p class="template-config-note">为每个模板确认产品分类、使用性别、年龄、面料、工艺、品牌和商品标签。未确认的属性请留空。词库生成前须完成产品分类、性别和年龄设置。</p>
     <form class="creative-resource-filters title-library-filters" @submit.prevent="filter">
       <label class="title-library-search">搜索<input v-model="search" placeholder="搜索模板名称" aria-label="搜索模板名称" /></label>
       <label>产品分类<select v-model="category" aria-label="模板产品分类筛选" @change="filter"><option value="">全部产品分类</option><option v-for="item in categories" :key="item.name" :value="item.name">{{item.name}}{{item.enabled?'':'（停用）'}}</option></select></label>
@@ -44,12 +47,13 @@ onUnmounted(()=>{revision++})
       <div class="creative-resource-filter-actions"><button class="secondary" :disabled="loading">搜索</button></div>
     </form>
     <p v-if="error" class="error" role="alert">{{error}}</p>
-    <div class="template-config-scroll creative-resource-table-wrap" :aria-busy="loading"><table class="title-library-table"><thead><tr><th>产品模板</th><th>产品分类</th><th>使用性别</th><th>年龄</th><th>面料</th><th>其他标签</th><th>配置状态</th><th>操作</th></tr></thead><tbody>
+    <div class="template-config-scroll creative-resource-table-wrap" :aria-busy="loading"><table class="title-library-table"><thead><tr><th>产品模板</th><th>产品分类</th><th>使用性别</th><th>年龄</th><th>面料</th><th>工艺</th><th>品牌</th><th>其他标签</th><th>配置状态</th><th>操作</th></tr></thead><tbody>
       <tr v-for="row in rows" :key="row.id">
         <td><div class="template-config-product"><img v-if="row.cover_url" :src="row.cover_url" alt="" loading="lazy" /><span><strong>{{row.name}}</strong><small v-if="row.is_platform">平台模板 · 当前公司配置</small><small v-else>ID {{row.id}}</small></span></div></td>
         <td>{{row.category||'待设置'}}<small v-if="row.category_localized_name">{{row.category_localized_name}}</small></td>
-        <td>{{row.gender||'待设置'}}</td><td>{{row.age_group||'待设置'}}</td><td class="template-config-material">{{row.material||'未确认'}}</td>
-        <td><div class="template-config-tags"><span v-for="(value,tag) in row.attributes" :key="tag">{{tag}}：{{value}}</span><small v-if="!Object.keys(row.attributes).length">—</small></div></td>
+        <td>{{row.gender||'待设置'}}</td><td>{{row.age_group||'待设置'}}</td>
+        <td v-for="field in (['material','craft','brand'] as const)" :key="field" class="template-config-fact"><span class="template-config-fact-value" :title="row[field]||'未确认'">{{row[field]||'未确认'}}</span></td>
+        <td><div class="template-config-tags" :title="attributeSummary(row.attributes)||'—'"><span v-for="(value,tag) in row.attributes" :key="tag">{{tag}}：{{value}}</span><small v-if="!Object.keys(row.attributes).length">—</small></div></td>
         <td><span class="template-config-state" :class="row.ready?'ready':'incomplete'">{{row.ready?'已配置':'待完善'}}</span><small v-if="row.configuration_issues.length" class="template-config-issues">{{row.configuration_issues.join('；')}}</small></td>
         <td><button class="ghost" :aria-label="`${admin?'配置':'查看'}模板 ${row.name}`" @click="editing=row;editingBusy=false">{{admin?'配置':'查看'}}</button></td>
       </tr>
@@ -65,5 +69,5 @@ onUnmounted(()=>{revision++})
 </template>
 
 <style scoped>
-.template-config-panel{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;min-width:0}.template-config-heading,.template-config-pagination,.template-config-dialog-heading{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.template-config-heading,.template-config-dialog-heading{justify-content:space-between}.template-config-heading h3,.template-config-dialog-heading h2{margin:0}.template-config-heading>span,.template-config-note{font-size:13px;color:#756e82}.template-config-note{margin:0;line-height:1.7}.template-config-scroll{overflow:auto;max-height:650px}table{border-collapse:collapse;width:100%;font-size:13px;text-align:left}th,td{padding:12px;border-bottom:1px solid #ede9f2;vertical-align:middle}th{position:sticky;top:0;z-index:1;background:#f6f4fa;white-space:nowrap}td small{display:block;color:#81788d;margin-top:5px;line-height:1.6}.template-config-product{display:flex;gap:10px;align-items:center;min-width:150px}.template-config-product img{width:42px;height:50px;border-radius:6px;object-fit:cover}.template-config-product strong{font-weight:600}.template-config-material{min-width:100px;max-width:200px;overflow-wrap:anywhere}.template-config-tags{display:flex;gap:5px;flex-wrap:wrap;min-width:120px;max-width:260px}.template-config-tags>span{padding:3px 7px;border-radius:5px;background:#f3f0fb;color:#6c598d;line-height:1.5}.template-config-state{display:inline-flex;padding:3px 9px;border-radius:999px;white-space:nowrap}.template-config-state.ready{background:#e7f6ee;color:#206b43}.template-config-state.incomplete{background:#fff4df;color:#8b641e}.template-config-issues{min-width:130px;max-width:240px}.template-config-pagination{font-size:13px}.template-config-dialog{width:min(800px,calc(100vw - 24px));max-height:88vh;overflow:auto;display:grid;gap:20px}.template-config-dialog-heading{flex-wrap:nowrap;align-items:flex-start}.template-config-dialog-heading h2{font-size:21px}.template-config-dialog-heading button{font-size:24px;line-height:1}@media(max-width:700px){.template-config-dialog{padding:20px}.template-config-dialog-heading h2{font-size:19px}}
+.template-config-panel{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;min-width:0}.template-config-heading,.template-config-pagination,.template-config-dialog-heading{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.template-config-heading,.template-config-dialog-heading{justify-content:space-between}.template-config-heading h3,.template-config-dialog-heading h2{margin:0}.template-config-heading>span,.template-config-note{font-size:13px;color:#756e82}.template-config-note{margin:0;line-height:1.7}.template-config-scroll{overflow:auto;max-height:650px}table{border-collapse:collapse;width:100%;font-size:13px;text-align:left}th,td{padding:12px;border-bottom:1px solid #ede9f2;vertical-align:middle}th{position:sticky;top:0;z-index:1;background:#f6f4fa;white-space:nowrap}td small{display:block;color:#81788d;margin-top:5px;line-height:1.6}.template-config-product{display:flex;gap:10px;align-items:center;min-width:150px}.template-config-product img{width:42px;height:50px;border-radius:6px;object-fit:cover}.template-config-product strong{font-weight:600}.template-config-fact{min-width:100px;max-width:180px}.template-config-fact-value{display:-webkit-box;width:140px;max-width:100%;overflow:hidden;overflow-wrap:anywhere;line-height:1.6;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3}.template-config-tags{display:-webkit-box;min-width:120px;max-width:260px;overflow:hidden;line-height:2.2;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3}.template-config-tags>span{margin-right:5px;padding:3px 7px;border-radius:5px;background:#f3f0fb;color:#6c598d;-webkit-box-decoration-break:clone;box-decoration-break:clone}.template-config-state{display:inline-flex;padding:3px 9px;border-radius:999px;white-space:nowrap}.template-config-state.ready{background:#e7f6ee;color:#206b43}.template-config-state.incomplete{background:#fff4df;color:#8b641e}.template-config-issues{min-width:130px;max-width:240px}.template-config-pagination{font-size:13px}.template-config-dialog{width:min(800px,calc(100vw - 24px));max-height:88vh;overflow:auto;display:grid;gap:20px}.template-config-dialog-heading{flex-wrap:nowrap;align-items:flex-start}.template-config-dialog-heading h2{font-size:21px}.template-config-dialog-heading button{font-size:24px;line-height:1}@media(max-width:700px){.template-config-dialog{padding:20px}.template-config-dialog-heading h2{font-size:19px}}
 </style>

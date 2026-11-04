@@ -607,6 +607,32 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         self.assertTrue(platform.json()['ready'])
         self.assertIsNone(self.request('GET', '/title-profiles/200', uid=5).json()['gender'])
 
+    def test_template_list_summarizes_craft_brand_and_keeps_other_attributes_separate(self):
+        self.create_dictionary('tag', name='针法', semantic_tag='工艺')
+        self.create_dictionary('tag', name='商标', semantic_tag='品牌')
+        self.import_words(content=KEYWORDS + 'sulaman,刺绣,连衣裙,针法\nrenda,蕾丝,连衣裙,工艺\n'
+                          'Acme,艾克,连衣裙,商标\nBrandB,品牌乙,连衣裙,品牌\nkapas,纯棉,连衣裙,材质\n')
+        words = {word['phrase']: word for word in self.request('GET', '/title-keywords').json()['items']}
+        self.profile(attributes={'针法': '刺绣', '商标': '艾克', '结构设计': '长袖'})
+        legacy = self.request('GET', '/title-template-configurations').json()['items'][0]
+        self.assertEqual((legacy['craft'], legacy['brand']), ('刺绣', '艾克'))
+        self.assertEqual(legacy['attributes'], {'结构设计': '长袖'})
+        self.profile(craft_keyword_ids=[words['sulaman']['id'], words['renda']['id']],
+                     brand_keyword_ids=[words['Acme']['id'], words['BrandB']['id']],
+                     material_keyword_ids=[words['kapas']['id']])
+        summary = self.request('GET', '/title-template-configurations', uid=2).json()['items'][0]
+        self.assertEqual((summary['material'], summary['craft'], summary['brand']), ('kapas', 'sulaman、renda', 'Acme、BrandB'))
+        self.assertEqual(summary['attributes'], {'结构设计': '长袖'})
+        with self.sessions() as db:
+            profile = db.scalar(select(TitleTemplateProfile).where(TitleTemplateProfile.template_id == 1))
+            profile.craft_keyword_ids = [999999]
+            profile.brand_keyword_ids = []
+            db.commit()
+        missing = self.request('GET', '/title-template-configurations').json()['items'][0]
+        self.assertEqual((missing['craft'], missing['brand']), ('已不可用 #999999', ''))
+        other = self.request('GET', '/title-template-configurations', uid=5).json()['items'][0]
+        self.assertEqual((other['material'], other['craft'], other['brand']), ('', '', ''))
+
     def test_incomplete_template_blocks_library_calls_but_not_prompt_generation(self):
         from app.title_models import TitleTemplateProfile
         self.profile()
@@ -662,6 +688,101 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             response = self.request('PATCH', f"/title-dictionaries/{tag['id']}", json={'enabled': False})
             self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(self.request('GET', '/title-profiles/1').json()['material_options'], [])
+
+    def test_craft_brand_choices_validate_and_old_client_preserves_saved_choices(self):
+        self.create_dictionary('tag', name='商标', semantic_tag='品牌')
+        self.create_dictionary('tag', name='制作方式', semantic_tag='工艺')
+        self.import_words(content=KEYWORDS + 'sulaman,刺绣,连衣裙,制作方式\nrenda,蕾丝,连衣裙,工艺\n'
+                          'Acme,艾克,连衣裙,商标\nOther,其他品牌,上衣,品牌\n')
+        data = self.request('GET', '/title-profiles/1').json()
+        words = {word['phrase']: word for word in data['keyword_options']}
+        self.assertEqual({word['phrase'] for word in data['craft_options']}, {'sulaman', 'renda'})
+        craft = [words[name]['id'] for name in ('sulaman', 'renda')]
+        brand = [words['Acme']['id']]
+        saved = self.profile(attributes={'制作方式': '刺绣', '商标': '艾克'}, craft_keyword_ids=craft * 2, brand_keyword_ids=brand)
+        self.assertEqual(saved['craft_keyword_ids'], craft)
+        self.assertEqual(saved['brand_keyword_ids'], brand)
+        self.assertEqual(saved['attributes'], {})
+        self.assertEqual(self.profile()['craft_keyword_ids'], craft)
+        self.assertEqual(self.profile()['brand_keyword_ids'], brand)
+        base = {'category': '连衣裙', 'gender': '女', 'age_group': '成人', 'attributes': {}}
+        invalid = [({'craft_keyword_ids': brand}, 400), ({'brand_keyword_ids': [words['Other']['id']]}, 400),
+                   ({'brand_keyword_ids': [999999]}, 400), ({'craft_keyword_ids': craft, 'forbidden_keyword_ids': craft[:1]}, 400),
+                   ({'brand_keyword_ids': brand, 'locked_keyword_ids': brand}, 400),
+                   ({'craft_keyword_ids': craft[:1] * 101}, 422)]
+        for extra, expected in invalid:
+            response = self.request('PUT', '/title-profiles/1', json={**base, **extra})
+            self.assertEqual(response.status_code, expected, response.text)
+        with self.sessions() as db:
+            db.get(TitleKeyword, craft[0]).status = 'disabled'
+            db.commit()
+        response = self.request('PUT', '/title-profiles/1', json={**base, 'craft_keyword_ids': craft})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.profile(craft_keyword_ids=[], brand_keyword_ids=[])
+        cleared = self.request('GET', '/title-profiles/1').json()
+        self.assertEqual((cleared['craft_keyword_ids'], cleared['brand_keyword_ids']), ([], []))
+
+    def test_craft_brand_legacy_snapshot_and_keyword_merge_references(self):
+        self.create_dictionary('tag', name='针法', semantic_tag='工艺')
+        self.create_dictionary('tag', name='商标', semantic_tag='品牌')
+        self.import_words(content=KEYWORDS + 'sulaman,刺绣,连衣裙,针法\nrenda,蕾丝,连衣裙,针法\nAcme,艾克,连衣裙,商标\n')
+        self.profile(attributes={'针法': '刺绣', '商标': '艾克'})
+        data = self.request('GET', '/title-profiles/1').json()
+        self.assertEqual(data['craft_legacy_attributes'], [{'tag': '针法', 'value': '刺绣'}])
+        words = {word['phrase']: word for word in data['keyword_options']}
+        with self.sessions() as db:
+            snapshot = profile_snapshot(db, get_market(db, 1), 1)
+            self.assertEqual(snapshot['craft_keyword_ids'], [words['sulaman']['id']])
+            self.assertEqual(snapshot['brand_keyword_ids'], [words['Acme']['id']])
+            profile = db.scalar(select(TitleTemplateProfile))
+            profile.attributes = {'针法': '无法匹配'}
+            db.commit()
+            with self.assertRaisesRegex(HTTPException, '旧工艺配置'):
+                profile_snapshot(db, get_market(db, 1), 1)
+        self.profile(attributes={}, craft_keyword_ids=[words['sulaman']['id']], brand_keyword_ids=[words['Acme']['id']])
+        response = self.request('POST', f"/title-keywords/{words['sulaman']['id']}/merge", json={'target_id': words['renda']['id']})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.request('GET', '/title-profiles/1').json()['craft_keyword_ids'], [words['renda']['id']])
+        with self.sessions() as db:
+            db.get(TitleKeyword, words['renda']['id']).status = 'disabled'
+            db.commit()
+            with self.assertRaisesRegex(HTTPException, '重新选择工艺'):
+                profile_snapshot(db, get_market(db, 1), 1)
+
+    def test_craft_brand_choices_are_isolated_by_market(self):
+        self.import_words(content=KEYWORDS + 'sulaman,刺绣,连衣裙,工艺\nAcme,艾克,连衣裙,品牌\n')
+        words = {word['phrase']: word for word in self.request('GET', '/title-keywords').json()['items']}
+        self.profile(craft_keyword_ids=[words['sulaman']['id']], brand_keyword_ids=[words['Acme']['id']])
+        self.create_dictionary('category', name='连衣裙', localized_name='Daster', site='ID', language='id')
+        response = self.request('PUT', '/title-profiles/1', json={'site': 'ID', 'language': 'id',
+            'category': '连衣裙', 'gender': '女', 'age_group': '成人', 'brand_keyword_ids': [words['Acme']['id']]})
+        self.assertEqual(response.status_code, 400, response.text)
+        empty = self.request('GET', '/title-profiles/1', params={'site': 'ID', 'language': 'id'}).json()
+        self.assertEqual(empty['brand_options'], [])
+        self.assertEqual(empty['craft_keyword_ids'], [])
+
+    def test_craft_brand_change_blocks_request_reuse_and_draft_adoption(self):
+        from tests.test_title_confirmed_choices import ConfirmedChoicesTests
+        self.import_words(content=KEYWORDS + 'sulaman,刺绣,连衣裙,工艺\nAcme,艾克,连衣裙,品牌\n')
+        words = {word['phrase']: word for word in self.request('GET', '/title-keywords').json()['items']}
+        self.profile(attributes={}, craft_keyword_ids=[words['sulaman']['id']], brand_keyword_ids=[words['Acme']['id']])
+        single_payload = {'method': 'library', 'image_url': 'https://img.example/1.png', 'request_key': 'choice-stale'}
+        with patch('app.title_service.ask_json', new=AsyncMock(side_effect=ConfirmedChoicesTests.model)):
+            response = self.request('POST', '/templates/1/generate-draft-title', uid=2, json=single_payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        generated = response.json()
+        batch_payload = {'template_id': 1, 'request_key': 'choice-batch-stale', 'groups': [{'key': 'first', 'source': {'id': 1}}]}
+        batch = self.request('POST', '/title-generation-jobs', uid=2, json=batch_payload)
+        self.assertEqual(batch.status_code, 200, batch.text)
+        self.profile(attributes={}, craft_keyword_ids=[words['sulaman']['id']], brand_keyword_ids=[])
+        draft = self.request('POST', '/drafts/from-material-assets', uid=2, json={'template_id': 1,
+            'material_asset_ids': [1], 'title': generated['title'], 'generation_id': generated['generation_id']})
+        self.assertEqual(draft.status_code, 400, draft.text)
+        self.assertIn('模板商品属性已改变', draft.json()['detail'])
+        self.assertEqual(self.request('POST', '/templates/1/generate-draft-title', uid=2, json=single_payload).status_code, 409)
+        self.assertEqual(self.request('POST', '/title-generation-jobs', uid=2, json=batch_payload).status_code, 409)
+        with self.sessions() as db:
+            self.assertEqual(db.get(TitleRecord, generated['generation_id']).title, generated['title'])
 
     def test_profile_attribute_keyword_choices_and_simplified_forbidden_settings(self):
         from app.title_service import match_keywords

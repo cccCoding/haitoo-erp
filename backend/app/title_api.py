@@ -22,6 +22,7 @@ from .title_permissions import is_title_manager, require_title_manager
 from .title_import import MAX_BYTES, TITLE_COLUMN_NAMES, keyword_column_names, IMPORT_OPTIONAL_COLUMNS, confirm_import, parse_file
 from .title_models import TitleCategoryMerge, TitleDictionaryEntry, TitleEvidence, TitleImportWord, TitleKeyword, TitleMarket, TitleRecord, TitleTask, TitleTemplateProfile
 from .title_service import (TAGS, CATEGORY_FIELDS, DICTIONARY_TAGS, PROFILE_TAGS, GENDERS, AGE_GROUPS,
+                            CONFIRMED_CHOICES, legacy_choice_values,
                             canonical_tag, profile_attributes, profile_issues, create_record, credential, digest, generate_record, get_market,
                             keyword_data, normalize, profile_snapshot, record_payload, validate_localized_title)
 
@@ -78,6 +79,8 @@ class ProfileInput(MarketInput):
     age_group: Literal['成人', '儿童']
     attributes: dict[str, str] = Field(default_factory=dict, max_length=25)
     material_keyword_ids: list[Annotated[int, Field(gt=0)]] = Field(default_factory=list, max_length=100)
+    craft_keyword_ids: list[Annotated[int, Field(gt=0)]] = Field(default_factory=list, max_length=100)
+    brand_keyword_ids: list[Annotated[int, Field(gt=0)]] = Field(default_factory=list, max_length=100)
     category_names: list[str] = Field(default_factory=list, max_length=100)
     locked_keyword_ids: list[int] = Field(default_factory=list, max_length=8)
     forbidden_keyword_ids: list[int] = Field(default_factory=list, max_length=200)
@@ -242,11 +245,18 @@ def profile_payload(profile, market=None, db=None, *, site='MY', language='ms'):
     attribute_keyword_options = [word for word in keyword_options if word['status'] == 'enabled'
         and word['priority'] != 'forbidden' and word['tag_enabled'] and word['semantic_tag'] in PROFILE_TAGS]
     material_options = [word for word in attribute_keyword_options if word['semantic_tag'] == '材质']
+    choices = {}
+    for kind, semantic in CONFIRMED_CHOICES:
+        choices[f'{kind}_keyword_ids'] = (getattr(profile, f'{kind}_keyword_ids') or []) if profile else []
+        choices[f'{kind}_options'] = [word for word in attribute_keyword_options if word['semantic_tag'] == semantic]
+        choices[f'{kind}_legacy_attributes'] = (legacy_choice_values(profile, definitions, semantic)
+            if profile and getattr(profile, f'{kind}_keyword_ids') is None else [])
     issues = profile_issues(profile, category_entry, definitions)
     return {'category': profile.category if profile else '', 'attributes': profile.attributes if profile else {},
         'gender': profile.gender if profile else None, 'age_group': profile.age_group if profile else None,
         'material': attributes.get('材质', '') if '材质' not in conflicts else '', 'material_options': material_options,
         'material_keyword_ids': (profile.material_keyword_ids or []) if profile else [],
+        **choices,
         'keyword_options': keyword_options, 'attribute_keyword_options': attribute_keyword_options,
         'conflicting_attributes': conflicts,
         'configuration_issues': issues, 'ready': not issues,
@@ -467,6 +477,16 @@ def put_profile(template_id: int, payload: ProfileInput, user: User = Depends(ad
     profile = db.scalar(select(TitleTemplateProfile).where(TitleTemplateProfile.market_id == market.id,
                                                          TitleTemplateProfile.template_id == template_id))
     definitions = dictionary_entries(db, market.id)
+    semantics = {row.name: canonical_tag(row.semantic_tag) for row in definitions if row.kind == 'tag'}
+    managed = set()
+    for kind, semantic in CONFIRMED_CHOICES:
+        field = f'{kind}_keyword_ids'
+        if field in payload.model_fields_set or profile and getattr(profile, field) is not None:
+            managed.add(semantic)
+        if field not in payload.model_fields_set and profile:
+            setattr(payload, field, getattr(profile, field) or [])
+    payload.attributes = {tag: value for tag, value in payload.attributes.items()
+                          if semantics.get(tag, canonical_tag(tag)) not in managed}
     _, conflicts = profile_attributes(payload.attributes, definitions)
     if conflicts:
         raise HTTPException(400, '确认属性重复且冲突：' + '、'.join('面料' if tag == '材质' else tag for tag in conflicts))
@@ -479,6 +499,26 @@ def put_profile(template_id: int, payload: ProfileInput, user: User = Depends(ad
         cleaned['材质' if semantic == '材质' else tag] = value
     payload.attributes = cleaned
     payload.category = category_values(db, market, [payload.category], allow_disabled=[profile.category] if profile else [])[0]
+    for kind, semantic in CONFIRMED_CHOICES:
+        field = f'{kind}_keyword_ids'
+        identities = list(dict.fromkeys(getattr(payload, field)))
+        setattr(payload, field, identities)
+        if not identities:
+            continue
+        if set(identities) & set(payload.forbidden_keyword_ids):
+            raise HTTPException(400, f'所选{semantic}关键词不能同时禁用')
+        words = db.scalars(select(TitleKeyword).where(TitleKeyword.market_id == market.id,
+            TitleKeyword.id.in_(identities), TitleKeyword.merged_into_id.is_(None))).all()
+        if len(words) != len(identities):
+            raise HTTPException(400, f'{semantic}包含其他词库、已合并或不存在的关键词')
+        for word in words:
+            definition = tag_entry(db, market, word.tag)
+            if (canonical_tag(definition.semantic_tag) != semantic or word.status != 'enabled'
+                    or word.priority == 'forbidden' or normalize(payload.category) not in map(normalize, word.categories)):
+                raise HTTPException(400, f'请选择当前产品分类下已启用且未禁用的{semantic}关键词')
+        locked = db.scalars(select(TitleKeyword).where(TitleKeyword.id.in_(payload.locked_keyword_ids))).all()
+        if any(canonical_tag(tag_entry(db, market, word.tag).semantic_tag) == semantic for word in locked):
+            raise HTTPException(400, f'{semantic}多选时不能另设{semantic}必用词')
     payload.material_keyword_ids = list(dict.fromkeys(payload.material_keyword_ids))
     if payload.material_keyword_ids:
         if '材质' in cleaned:
@@ -502,6 +542,9 @@ def put_profile(template_id: int, payload: ProfileInput, user: User = Depends(ad
         db.add(profile)
     for key in ('category', 'gender', 'age_group', 'attributes', 'material_keyword_ids', 'category_names', 'locked_keyword_ids', 'forbidden_keyword_ids', 'fallback_approved'):
         setattr(profile, key, getattr(payload, key))
+    for kind, semantic in CONFIRMED_CHOICES:
+        if semantic in managed:
+            setattr(profile, f'{kind}_keyword_ids', getattr(payload, f'{kind}_keyword_ids'))
     profile.fallback_title = fallback
     profile.updated_at = datetime.utcnow()
     market.revision += 1
@@ -519,7 +562,7 @@ def template_configurations(platform: str = 'TikTok', site: str = 'MY', language
     categories = {row.name_key: row for row in definitions if row.kind == 'category'}
     profiles = {row.template_id: row for row in db.scalars(select(TitleTemplateProfile).where(
         TitleTemplateProfile.market_id == market.id))} if market else {}
-    material_phrases = dict(db.execute(select(TitleKeyword.id, TitleKeyword.phrase).where(TitleKeyword.market_id == market.id)).all()) if market else {}
+    keyword_phrases = dict(db.execute(select(TitleKeyword.id, TitleKeyword.phrase).where(TitleKeyword.market_id == market.id)).all()) if market else {}
     query = select(ProductTemplate).where(or_(ProductTemplate.company_id == user.company_id, ProductTemplate.is_platform.is_(True)))
     if q.strip():
         query = query.where(ProductTemplate.name.contains(q.strip(), autoescape=True))
@@ -534,13 +577,19 @@ def template_configurations(platform: str = 'TikTok', site: str = 'MY', language
         if state and ready != (state == 'ready'):
             continue
         attributes, conflicts = profile_attributes(profile.attributes, definitions) if profile else ({}, [])
+        choice_summaries = {}
+        for kind, semantic in CONFIRMED_CHOICES:
+            identities = getattr(profile, f'{kind}_keyword_ids') if profile else None
+            choice_summaries[kind] = ('、'.join(keyword_phrases.get(identity, f'已不可用 #{identity}') for identity in identities)
+                if identities is not None else attributes.get(semantic, '') if semantic not in conflicts else '')
         items.append({'id': template.id, 'name': template.name, 'cover_url': template.cover_url,
             'is_platform': template.is_platform, 'category': profile.category if profile else '',
             'category_localized_name': category_entry.localized_name if category_entry else None,
             'gender': profile.gender if profile else None, 'age_group': profile.age_group if profile else None,
-            'material': '、'.join(material_phrases.get(identity, f'已不可用 #{identity}') for identity in profile.material_keyword_ids)
+            'material': '、'.join(keyword_phrases.get(identity, f'已不可用 #{identity}') for identity in profile.material_keyword_ids)
                 if profile and profile.material_keyword_ids else attributes.get('材质', '') if '材质' not in conflicts else '',
-            'attributes': {tag: value for tag, value in attributes.items() if tag not in (*CATEGORY_FIELDS, '材质')},
+            **choice_summaries,
+            'attributes': {tag: value for tag, value in attributes.items() if tag not in (*CATEGORY_FIELDS, '材质', '工艺', '品牌')},
             'configuration_issues': issues, 'ready': ready})
     page = min(page, max(1, (len(items) + page_size - 1) // page_size))
     return {'items': items[(page - 1) * page_size:page * page_size], 'total': len(items), 'page': page, 'page_size': page_size}
@@ -654,7 +703,7 @@ def delete_keywords(payload: KeywordBatchInput, user: User = Depends(admin), db:
     now = datetime.utcnow()
     for profile in db.scalars(select(TitleTemplateProfile).where(TitleTemplateProfile.market_id == market.id)):
         changed = False
-        for field in ('locked_keyword_ids', 'forbidden_keyword_ids', 'material_keyword_ids'):
+        for field in ('locked_keyword_ids', 'forbidden_keyword_ids', 'material_keyword_ids', 'craft_keyword_ids', 'brand_keyword_ids'):
             current = getattr(profile, field) or []
             remaining = [identity for identity in current if identity not in deleted_ids]
             if current != remaining:
@@ -757,12 +806,16 @@ def merge_keyword(identity: int, payload: MergeInput, user: User = Depends(admin
         target.priority = 'preferred'
     db.execute(update(TitleEvidence).where(TitleEvidence.keyword_id == source.id, TitleEvidence.market_id == market.id).values(keyword_id=target.id))
     for profile in db.scalars(select(TitleTemplateProfile).where(TitleTemplateProfile.market_id == market.id)):
-        for key in ('locked_keyword_ids', 'forbidden_keyword_ids', 'material_keyword_ids'):
-            setattr(profile, key, list(dict.fromkeys(target.id if i == source.id else i for i in (getattr(profile, key) or []))))
+        for key in ('locked_keyword_ids', 'forbidden_keyword_ids', 'material_keyword_ids', 'craft_keyword_ids', 'brand_keyword_ids'):
+            if getattr(profile, key) is not None:
+                setattr(profile, key, list(dict.fromkeys(target.id if i == source.id else i for i in getattr(profile, key))))
         if set(profile.locked_keyword_ids) & set(profile.forbidden_keyword_ids):
             raise HTTPException(400, '合并会使模板必用词与禁用词冲突，请先调整模板配置')
         if set(profile.material_keyword_ids or []) & set(profile.forbidden_keyword_ids):
             raise HTTPException(400, '合并会使模板面料与禁用词冲突，请先调整模板配置')
+        for kind, semantic in CONFIRMED_CHOICES:
+            if set(getattr(profile, f'{kind}_keyword_ids') or []) & set(profile.forbidden_keyword_ids):
+                raise HTTPException(400, f'合并会使模板{semantic}与禁用词冲突，请先调整模板配置')
     for other in db.scalars(select(TitleKeyword).where(TitleKeyword.market_id == market.id,
         TitleKeyword.id.not_in([source.id, target.id]))):
         if source.id in other.conflicts:
@@ -1031,6 +1084,12 @@ def create_job(payload: JobInput, user: User = Depends(reader), db: Session = De
     if previous:
         if previous.request_hash != request_hash or previous.user_id != user.id:
             raise HTTPException(409, '请求键已用于不同任务')
+        saved_profile = previous.snapshot.get('profile', {})
+        if saved_profile.get('confirmed_choices_version'):
+            latest = profile_snapshot(db, market, payload.template_id)
+            if any(set(latest.get(f'{kind}_keyword_ids', [])) != set(saved_profile.get(f'{kind}_keyword_ids', []))
+                   for kind, _ in CONFIRMED_CHOICES):
+                raise HTTPException(409, '工艺或品牌配置已改变，请使用新的标题请求键')
         return task_payload(previous)
     template = get_company_template(db, user, payload.template_id)
     if len({g.key for g in payload.groups}) != len(payload.groups):

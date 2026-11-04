@@ -4,6 +4,7 @@ from pathlib import Path
 import copy
 import unittest
 from unittest.mock import AsyncMock, patch
+from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -114,6 +115,60 @@ class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
         self.configure_supply_titles()
+
+    def test_users_pagination_search_and_company_isolation(self):
+        with self.sessions() as db:
+            db.get(User, 4).name = "客户_50%"
+            db.get(User, 7).name = "普通客户"
+            db.get(User, 7).email = "buyer@example.com"
+            db.get(User, 6).name = "普通客户"
+            db.add(SupplyAgent(id=3, company_id=1, name="空代理"))
+            db.commit()
+        for uid in (1, 3):
+            with self.subTest(uid=uid):
+                first = self.request("GET", "/supply/users?page=1&page_size=1", uid=uid).json()
+                second = self.request("GET", "/supply/users?page=2&page_size=1", uid=uid).json()
+                self.assertEqual((first["total"], first["page"], first["page_size"]), (2, 1, 1))
+                self.assertEqual([row["id"] for row in first["items"] + second["items"]], [7, 4])
+                for search, expected in (("普通客户", [7]), (" BUYER@EXAMPLE.COM ", [7]),
+                                         ("原代理", [7, 4]), ("_50%", [4]), ("其他公司代理", []),
+                                         ("不存在", []), ("   ", [7, 4])):
+                    response = self.request("GET", "/supply/users", uid=uid, params={"search": search})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["total"], len(expected), search)
+                    self.assertEqual([row["id"] for row in response.json()["items"]], expected, search)
+                self.assertEqual([row["id"] for row in self.request("GET", "/supply/agents", uid=uid).json()], [1, 3])
+        self.assertEqual(self.request("GET", "/supply/users?page=3&page_size=1").json()["items"], [])
+        for uid in (2, 4):
+            self.assertEqual(self.request("GET", "/supply/users", uid=uid).status_code, 403)
+            self.assertEqual(self.request("GET", "/supply/agents", uid=uid).status_code, 403)
+        for params in ({"page": 0}, {"page_size": 0}, {"page_size": 1001}):
+            self.assertEqual(self.request("GET", "/supply/users", params=params).status_code, 422)
+
+    def test_job_name_and_download_filename_use_strategy_snapshot_and_hong_kong_date(self):
+        strategy = self.create_strategy(name="夏日/长袍:新款")
+        identity = self.submit(strategy)
+        with self.sessions() as db:
+            job = db.get(SupplyJob, identity)
+            job.created_at = datetime(2026, 11, 3, 16, 30)
+            job.state, job.completed_at = "completed", datetime.utcnow()
+            job.output_key = f"supply-exports/company/1/jobs/{identity}/1/" + "a" * 32 + ".xlsx"
+            job.output_expires_at = datetime.utcnow() + timedelta(days=30)
+            job.output_sha256, job.output_size = "b" * 64, 7
+            db.commit()
+        renamed = self.request("PATCH", f"/supply/strategies/{strategy}", uid=4,
+                               json=self.strategy_input(name="已改名"))
+        self.assertEqual(renamed.status_code, 200, renamed.text)
+        filename = "夏日_长袍_新款_2026-11-04.xlsx"
+        for data in (self.request("GET", "/supply/jobs", uid=4).json()["items"][0],
+                     self.request("GET", f"/supply/jobs/{identity}", uid=4).json()):
+            self.assertEqual(data["strategy_name"], "夏日/长袍:新款")
+            self.assertEqual(data["filename"], filename)
+        self.assertEqual(self.request("DELETE", f"/supply/strategies/{strategy}", uid=4).status_code, 200)
+        with patch("app.supply_files.read_supply_export", return_value=b"PKexcel"):
+            response = self.request("GET", f"/supply/jobs/{identity}/download", uid=4)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(unquote(response.headers["content-disposition"]), f"attachment; filename*=UTF-8''{filename}")
 
     def test_bothplatforms_strategy_defaults_and_snapshot_keep_insurance(self):
         from app.tiktok_export import parse_listing_options
@@ -688,8 +743,8 @@ class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(renamed.json()["created_at"], expected)
         users = self.request("GET", "/supply/users", uid=3)
         self.assertEqual(users.status_code, 200, users.text)
-        self.assertTrue(users.json())
-        for user in users.json():
+        self.assertTrue(users.json()["items"])
+        for user in users.json()["items"]:
             self.assertEqual(user["agent_created_at"], expected)
         created = self.request("POST", "/supply/agents", json={"name": "新代理"})
         self.assertEqual(created.status_code, 200, created.text)

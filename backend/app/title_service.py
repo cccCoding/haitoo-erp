@@ -34,8 +34,10 @@ PROFILE_TAGS = [tag for tag in TAGS[:25] if tag not in (*CATEGORY_FIELDS, '面�
 GENDERS = ('男', '女', '中性')
 AGE_GROUPS = ('成人', '儿童')
 TITLE_WORD_PATTERN = re.compile(r"[^\W_]+(?:[-'][^\W_]+)*", re.UNICODE)
-VISUAL_TAGS = {"品类", "颜色", "图案", "版型", "长度", "结构设计", "细节元素", "工艺"}
-EXCLUDED_TAGS = {"品牌", "营销修饰", "关键词热度", "关键词竞争度", "搜索语言", "目标市场"}
+VISUAL_TAGS = {"品类", "颜色", "图案", "版型", "长度", "结构设计", "细节元素"}
+EXCLUDED_TAGS = {"营销修饰", "关键词热度", "关键词竞争度", "搜索语言", "目标市场"}
+CONFIRMED_CHOICES = (('craft', '工艺'), ('brand', '品牌'))
+
 MALAY_WORDS = set("baju gaun jubah kurung tudung seluar skirt kemeja jersi tunik kebaya kurta singlet blaus selendang sarung wanita lelaki kanak bayi lengan panjang pendek bunga bercorak corak polos labuh leher bulat longgar saiz besar kapas kain untuk dengan dan berwarna harian pakaian menyusu muslimah hitam putih biru merah hijau ungu kuning coklat berzip".split())
 PROTECTED_CLAIMS = {
     '材质': ('kapas', 'cotton', 'poliester', 'polyester', 'linen', 'sutera', 'silk', 'viskosa', 'viscose', 'rayon', 'nilon', 'nylon', 'wool', 'bulu biri-biri'),
@@ -245,6 +247,50 @@ def profile_attributes(attributes, definitions=()):
     return result, sorted(set(conflicts))
 
 
+def selected_confirmed_keywords(snapshot):
+    return [snapshot[f'selected_{kind}_keyword'] for kind in ('material', 'craft', 'brand')
+            if snapshot.get(f'selected_{kind}_keyword')]
+
+
+def validate_choice_claims(title, snapshot):
+    """已知工艺、品牌词必须来自本条已选人工事实。"""
+    if not snapshot.get('confirmed_choices_version'):
+        return
+    selected = {word['tag']: word for word in selected_confirmed_keywords(snapshot)}
+    for word in snapshot.get('keywords', []):
+        if word['tag'] not in {'工艺', '品牌'} or not contains_phrase(title, word['phrase']):
+            continue
+        confirmed = selected.get(word['tag'])
+        if not confirmed or not contains_phrase(confirmed['phrase'], word['phrase']):
+            raise ProviderError(f"标题包含未选定的{word['tag']}词：{word['phrase']}")
+    brand = selected.get('品牌')
+    if brand and contains_phrase(title, brand['phrase']) and brand['phrase'] not in title:
+        raise ProviderError('品牌须保留人工选定的原词及大小写')
+
+
+def legacy_choice_values(profile, definitions, semantic):
+    semantics = {row.name: canonical_tag(row.semantic_tag) for row in definitions if row.kind == 'tag'}
+    return [{'tag': tag, 'value': value} for tag, value in (profile.attributes if profile else {}).items()
+            if semantics.get(tag, canonical_tag(tag)) == semantic]
+
+
+def confirmed_choice_ids(profile, definitions, words, kind, semantic):
+    """未保存新字段的旧配置按语义匹配，无法确定时交由人工重新确认。"""
+    stored = getattr(profile, f'{kind}_keyword_ids')
+    if stored is not None:
+        return list(stored)
+    legacy = legacy_choice_values(profile, definitions, semantic)
+    if not legacy:
+        return []
+    values = {normalize(item['value']) for item in legacy}
+    matches = [word['id'] for word in words if word['tag'] == semantic
+               and any(normalize(value) in values for value in (word['phrase'], word['translation']))
+               and word['priority'] != 'forbidden' and word['id'] not in profile.forbidden_keyword_ids]
+    if len(values) != 1 or not matches:
+        raise HTTPException(400, f'旧{semantic}配置未匹配可用关键词或存在冲突，请到模板配置重新选择或清除')
+    # 同一旧确认值的同义词可共同成为候选，每条标题只选其中一个。
+    return matches
+
 def profile_issues(profile, category_entry=None, definitions=()):
     issues = []
     if not profile or not profile.category.strip():
@@ -295,10 +341,20 @@ def profile_snapshot(db, market, template_id, *, require_fallback=False):
         and word['priority'] != 'forbidden' and word['id'] not in profile.forbidden_keyword_ids]
     if material_ids and not material_keywords:
         raise HTTPException(400, '所选面料关键词已停用、被禁用或不适用，请到模板配置重新选择面料')
+    confirmed_choices = {'confirmed_choices_version': 1}
+    for kind, semantic in CONFIRMED_CHOICES:
+        identities = confirmed_choice_ids(profile, definitions, words, kind, semantic)
+        available = [word for word in words if word['id'] in identities and word['tag'] == semantic
+                     and word['priority'] != 'forbidden' and word['id'] not in profile.forbidden_keyword_ids]
+        if identities and not available:
+            raise HTTPException(400, f'所选{semantic}关键词已停用、被禁用或不适用，请到模板配置重新选择{semantic}')
+        confirmed_choices[f'{kind}_keyword_ids'] = identities
+        confirmed_choices[f'{kind}_keywords'] = available
     return {"template_id": template_id, "title_template": ((template.title_template or "").strip() or None) if template else None, "category": profile.category,
         "category_localized_name": category_entry.localized_name, "gender": profile.gender, "age_group": profile.age_group,
         "attributes": attributes,
         "material_keyword_ids": list(material_ids), "material_keywords": material_keywords,
+        **confirmed_choices,
         "category_names": list(profile.category_names), "locked_keyword_ids": list(profile.locked_keyword_ids),
         "forbidden_keyword_ids": list(profile.forbidden_keyword_ids), "fallback_title": profile.fallback_title,
         "fallback_approved": profile.fallback_approved, "revision": market.revision,
@@ -326,14 +382,22 @@ def match_keywords(snapshot, facts):
     category = normalize(snapshot["category"])
     result = []
     selected_material = snapshot.get('selected_material_keyword')
+    confirmed = {word['tag']: word for word in selected_confirmed_keywords(snapshot)}
     for word in snapshot["keywords"]:
         if selected_material and word['tag'] == '材质' and word['id'] != selected_material['id']:
             continue
         if word["priority"] == "forbidden" or word["id"] in snapshot["forbidden_keyword_ids"] or word["tag"] in EXCLUDED_TAGS:
             continue
+        if snapshot.get('confirmed_choices_version') and word['tag'] in {'工艺', '品牌'}:
+            if word['id'] != confirmed.get(word['tag'], {}).get('id'):
+                continue
+        elif word['tag'] == '品牌':
+            # 升级前的任务仍使用原有品牌排除规则。
+            continue
         if category not in {normalize(c) for c in word["categories"]}:
             continue
         values = [normalize(v) for f in facts['attributes'] if canonical_tag(f['tag']) == canonical_tag(word['tag'])
+                  and (not snapshot.get('confirmed_choices_version') or word['tag'] not in {'工艺', '品牌'} or f.get('source') == 'manual')
                   for v in (f['value'], localized_value(f))]
         options = [word["phrase"], word["translation"], *word["synonyms"]]
         applicable = any(normalize(o) == v for o in options for v in values)
@@ -344,13 +408,14 @@ def match_keywords(snapshot, facts):
         raise ProviderError("必用词未启用、与商品事实不匹配或被禁用，请核对公开货盘的标题配置")
     if selected_material and selected_material['id'] not in {word['id'] for word in result}:
         raise ProviderError('选定的面料关键词不可用或与商品事实不匹配，请重新生成')
+    if any(word['id'] not in {item['id'] for item in result} for word in selected_confirmed_keywords(snapshot)):
+        raise ProviderError('选定的人工确认关键词不可用或与商品事实不匹配，请重新生成')
     return result
 
 
 def choose_keywords(snapshot, candidates, counts, turn=0, *, facts=None, core=None):
     required = set(snapshot['locked_keyword_ids'])
-    if snapshot.get('selected_material_keyword'):
-        required.add(snapshot['selected_material_keyword']['id'])
+    required.update(word['id'] for word in selected_confirmed_keywords(snapshot))
     ordered = sorted(candidates, key=lambda w: (w["id"] not in required,
         w["tag"] != "品类", w["priority"] != "preferred", counts.get(w["id"], 0),
         -w.get('evidence_frequency', 0), w["selected_count"], digest([w["id"], turn])))
@@ -386,18 +451,25 @@ async def identify_facts(db, market_id, snapshot, image_url, api_key):
     selected_material = snapshot.get('selected_material_keyword')
     if selected_material:
         manual['材质'] = selected_material['phrase']
+    modern = bool(snapshot.get('confirmed_choices_version'))
+    if modern:
+        for kind, semantic in CONFIRMED_CHOICES:
+            manual.pop(semantic, None)
+            if snapshot.get(f'selected_{kind}_keyword'):
+                manual[semantic] = snapshot[f'selected_{kind}_keyword']['phrase']
     if snapshot.get('gender'):
         manual['性别'] = snapshot['gender']
     if snapshot.get('age_group'):
         manual['年龄'] = snapshot['age_group']
     category_localized = snapshot.get('category_localized_name')
-    cache_key = digest(["facts-v5" if selected_material else "facts-v4", image_url, manual, category_localized,
+    cache_key = digest(["facts-v6" if modern else "facts-v5" if selected_material else "facts-v4", image_url, manual, category_localized,
         snapshot["platform"], snapshot["site"], snapshot["language"]])
     cache = db.scalar(select(TitleAttributeCache).where(TitleAttributeCache.market_id == market_id,
                                                       TitleAttributeCache.cache_key == cache_key))
     if cache:
         return copy.deepcopy(cache.facts)
     locale = market_labels(snapshot['site'])
+    visual_tags = VISUAL_TAGS if modern else VISUAL_TAGS | {'工艺'}
     instructions = (
         f"Identify clothing attributes and translate each confirmed value into {locale['model_language']} for {snapshot['site']}. "
         'Return {"attributes":[{"tag":"one supplied tag", "value":"original confirmed value", '
@@ -406,9 +478,11 @@ async def identify_facts(db, market_id, snapshot, image_url, api_key):
         'Only visually establish category, color, pattern, silhouette, length, neckline and visible details. '
         'Never infer fiber, function, religion, ethnicity, age, gender or occasion from model appearance. '
         'If an image contradicts a manual fact, return conflicts; do not replace it. No marketing or trend claims.')
+    if modern:
+        instructions += ' Craft, brand and material are manual-only. Never infer them from images or style requests. Preserve confirmed brand spelling verbatim.'
     warnings = []
     try:
-        answer = await ask_json(api_key, instructions, {"manual": manual, "visual_tags": sorted(VISUAL_TAGS)}, image_url=image_url)
+        answer = await ask_json(api_key, instructions, {"manual": manual, "visual_tags": sorted(visual_tags)}, image_url=image_url)
     except ProviderError:
         warnings.append("识图不可用，仅使用模板已确认属性")
         answer = await ask_json(api_key, instructions + ' No image is available: use manual facts only.',
@@ -425,7 +499,7 @@ async def identify_facts(db, market_id, snapshot, image_url, api_key):
         source = fact.get("source")
         if source == "manual" and tag in manual and normalize(value) == normalize(manual[tag]):
             attributes.append({"tag": tag, "value": value, "localized_value": expression, "evidence": fact["evidence"], "source": source})
-        elif source == "image" and image_url and not warnings and tag in VISUAL_TAGS and tag not in manual:
+        elif source == "image" and image_url and not warnings and tag in visual_tags and tag not in manual:
             attributes.append({"tag": tag, "value": value, "localized_value": expression, "evidence": fact["evidence"], "source": source})
     if set(manual) - {f["tag"] for f in attributes if f["source"] == "manual"}:
         raise ProviderError("模型未完整保留模板确认属性，请重试")
@@ -438,6 +512,13 @@ async def identify_facts(db, market_id, snapshot, image_url, api_key):
         attributes = [fact for fact in attributes if canonical_tag(fact['tag']) != '材质']
         attributes.append({'tag': '材质', 'value': selected_material['phrase'], 'localized_value': selected_material['phrase'],
             'evidence': '模板已确认面料关键词中随机选择一项', 'source': 'manual'})
+    if modern:
+        for kind, semantic in CONFIRMED_CHOICES:
+            selected = snapshot.get(f'selected_{kind}_keyword')
+            attributes = [fact for fact in attributes if fact['tag'] != semantic]
+            if selected:
+                attributes.append({'tag': semantic, 'value': selected['phrase'], 'localized_value': selected['phrase'],
+                    'evidence': f'模板已确认{semantic}关键词中随机选择一项', 'source': 'manual'})
     facts = {"attributes": attributes, "warnings": warnings}
     try:
         with db.begin_nested():
@@ -480,17 +561,23 @@ def create_record(db, market, user_id, snapshot, image_url, request_key, *, task
         if existing.image_url != image_url or existing.template_id != snapshot["template_id"] or existing.user_id != user_id:
             raise HTTPException(409, "标题请求键已用于不同商品")
         if (any(existing.snapshot.get(key) != snapshot.get(key) for key in ('category', 'attributes', 'additional_requirements', 'title_template'))
-                or set(existing.snapshot.get('material_keyword_ids', [])) != set(snapshot.get('material_keyword_ids', []))):
+                or any(set(existing.snapshot.get(f'{kind}_keyword_ids', [])) != set(snapshot.get(f'{kind}_keyword_ids', []))
+                       for kind in ('material', 'craft', 'brand'))):
             raise HTTPException(409, '商品事实或标题要求已改变，请使用新的标题请求键')
         return existing
     stored = copy.deepcopy(snapshot)
     if snapshot.get('material_keywords'):
         # 每个商品独立随机，保存所选词以保证重试与恢复仍使用同一面料。
         stored['selected_material_keyword'] = copy.deepcopy(secrets.choice(snapshot['material_keywords']))
+    for kind, _ in CONFIRMED_CHOICES:
+        if snapshot.get(f'{kind}_keywords'):
+            stored[f'selected_{kind}_keyword'] = copy.deepcopy(secrets.choice(snapshot[f'{kind}_keywords']))
     if task_id or snapshot.get('supply_job_id'):
         # 批量和货盘在父任务中只存一份词库快照，避免每个商品复制整库。
         stored.pop('keywords', None)
         stored.pop('material_keywords', None)
+        for kind, _ in CONFIRMED_CHOICES:
+            stored.pop(f'{kind}_keywords', None)
     record = TitleRecord(market_id=market.id, user_id=user_id, template_id=snapshot["template_id"], task_id=task_id,
         request_key=key, category=snapshot["category"], image_url=image_url,
         snapshot={**stored, "supply": supply})
@@ -603,8 +690,7 @@ async def generate_record(db, record_id, api_key=None):
                     facts=facts['attributes'], core=core)
             if supply:
                 protected = set(snapshot['locked_keyword_ids'])
-                if snapshot.get('selected_material_keyword'):
-                    protected.add(snapshot['selected_material_keyword']['id'])
+                protected.update(word['id'] for word in selected_confirmed_keywords(snapshot))
                 if state.pop('reduce_optional', False):
                     for position in range(len(selected) - 1, -1, -1):
                         word = selected[position]
@@ -645,6 +731,7 @@ async def generate_record(db, record_id, api_key=None):
                     'Do not contradict confirmed facts. '
                     'Never include any phrase in forbidden, even if it also appears in selected phrases or confirmed facts. '
                     'No invented material, function, audience, brand, marketing, season or occasion. '
+                    f"{'Craft and brand are manual-only: use only their selected phrases, never infer or add others; preserve brand spelling verbatim. ' if snapshot.get('confirmed_choices_version') else ''}"
                     f'Prefer {target_minimum}-{target_maximum} characters including spaces and punctuation, within target_minimum and target_maximum. '
                     'Put the core category near the beginning, then naturally organize confirmed material, silhouette, '
                     'sleeve length, pattern, details, audience and occasion when available. '
@@ -689,6 +776,7 @@ async def generate_record(db, record_id, api_key=None):
                     raise ProviderError("标题遗漏选定词组：" + "、".join(missing))
                 used_keywords = [word for word in selected if contains_phrase(title, word['phrase'])]
                 validate_confirmed_claims(title, facts['attributes'], used_keywords, market.site, market.language)
+                validate_choice_claims(title, snapshot)
                 warnings = list(facts.get("warnings", [])) + ["按首图描述，请核对其他 SKU"]
                 if not any(w["tag"] == "品类" for w in used_keywords):
                     warnings.append(f"词库覆盖不足，核心品类使用确认事实的{locale['language_name']}表达；未自动入库")
@@ -795,6 +883,9 @@ def adopt_record(db, draft, user, generation_id=None, *, platform='TikTok'):
                                for field in ('gender', 'age_group'))
         if (profile.category != record.snapshot.get('category') or current_attributes != previous_attributes
                 or conflicts or changed_audience
+                or any(getattr(profile, f'{kind}_keyword_ids') is not None
+                       and set(getattr(profile, f'{kind}_keyword_ids')) != set(record.snapshot.get(f'{kind}_keyword_ids', []))
+                       for kind, _ in CONFIRMED_CHOICES)
                 or set(profile.material_keyword_ids or []) != set(record.snapshot.get('material_keyword_ids', []))):
             raise HTTPException(400, '模板商品属性已改变，请重新生成标题')
     image = (draft.image_urls or [None])[0]

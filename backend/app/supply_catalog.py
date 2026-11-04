@@ -22,7 +22,7 @@ from .security import current_user, hash_password
 from .tiktok_export import catalog_listing_options
 from .supply_accounts import add_calendar_months, as_utc_naive, supply_user_is_expired
 from .supply_common import (ACTIVE_STATES, audit, cancel_user_jobs,
-    digest, eligible_materials, is_manager, job_payload,
+    digest, eligible_materials, is_manager, job_filename, job_payload,
     lock_company, now, require_admin, require_manager, sizes, template_snapshot,
     template_version, timestamp, user_can_run, validate_fallback, validate_strategy, validate_template,
     supply_title_snapshot)
@@ -187,7 +187,7 @@ def context(user=Depends(supply_actor), db: Session = Depends(get_db)):
 
 @router.get("/agents")
 def agents(user=Depends(supply_actor), db: Session = Depends(get_db)):
-    require_admin(user)
+    require_manager(user)
     return [{"id": item.id, "name": item.name, "created_at": timestamp(item.created_at)} for item in db.scalars(select(SupplyAgent).where(
         SupplyAgent.company_id == user.company_id).order_by(SupplyAgent.id)).all()]
 
@@ -218,10 +218,19 @@ def edit_agent(identity: int, payload: AgentInput, user=Depends(supply_actor), d
 
 
 @router.get("/users")
-def users(user=Depends(supply_actor), db: Session = Depends(get_db)):
+def users(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=1000),
+    search: str = Query("", max_length=255), user=Depends(supply_actor), db: Session = Depends(get_db)):
     require_manager(user)
-    return [user_payload(db, item) for item in db.scalars(select(User).where(
-        User.company_id == user.company_id, User.role == Role.SUPPLY_USER).order_by(User.id.desc())).all()]
+    query = select(User).where(User.company_id == user.company_id, User.role == Role.SUPPLY_USER)
+    if term := search.strip():
+        agent_ids = select(SupplyAgent.id).where(SupplyAgent.company_id == user.company_id,
+            SupplyAgent.name.icontains(term, autoescape=True))
+        query = query.where(or_(User.name.icontains(term, autoescape=True),
+            User.email.icontains(term, autoescape=True), User.supply_agent_id.in_(agent_ids)))
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    items = db.scalars(query.order_by(User.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [user_payload(db, item) for item in items],
+        "total": total, "page": page, "page_size": page_size}
 
 
 @router.post("/users")
@@ -653,7 +662,7 @@ def download(identity: int, user=Depends(supply_actor), db: Session = Depends(ge
     audit(db, user, "download", "job", identity, {"on_behalf": item.user_id != user.id})
     db.commit()
     return Response(content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(f'TikTok货盘_{identity}.xlsx')}",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(job_filename(item), safe='')}",
                  "Cache-Control": "private, no-store"})
 
 

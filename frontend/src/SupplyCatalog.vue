@@ -53,6 +53,11 @@ const strategies = ref<any[]>([]), jobs = ref<any[]>([]), jobsLoading = ref(fals
 const jobPage = ref(1), jobPageSize = ref(30), jobTotal = ref(0), jobPages = computed(() => Math.max(1, Math.ceil(jobTotal.value / jobPageSize.value)))
 const managers = ref<any[]>([])
 const agents = ref<any[]>([]), users = ref<any[]>([]), statistics = ref<any>(null)
+const userSearch = ref(''), appliedUserSearch = ref(''), usersLoading = ref(false)
+const userPage = ref(1), userPageSize = ref(20), userTotal = ref(0)
+const userPageSizeOptions = [20, 50, 100, 500, 1000]
+const userPages = computed(() => Math.max(1, Math.ceil(userTotal.value / userPageSize.value)))
+const usersScope = createSupplyRequestScope()
 const aiConfig = ref({ api_key: '', configured: false }), showAiConfig = ref(false), agentForm = ref({ id: null as number | null, name: '' })
 const showAgent = ref(false), showUser = ref(false), userEditing = ref<number | null>(null)
 const userForm = ref({ name: '', email: '', password: '', agent_id: null as number | null, months: 12, is_active: true, supply_expires_at: '' })
@@ -72,7 +77,7 @@ const expectedRows = computed(() => Math.max(1, selectedTemplate.value?.sizes?.l
 const myActiveJob = computed(() => jobs.value.some(item => (!item.user_id || item.user_id === props.user.id) && unfinishedSupplyJob(item)))
 const submissionKeys = createSupplySubmissionKeys(() => crypto.randomUUID())
 let pollTimer: ReturnType<typeof setInterval> | undefined
-let managerRequest = 0
+let managerRequest = 0, agentRequest = 0
 let stopped = false, materialRequest = 0, listingRequest = 0, optionsRequest = 0, jobRequest = 0, accessRefreshing = false
 const pollingAbort = new AbortController()
 const list = (data: any): any[] => Array.isArray(data) ? data : data?.items || []
@@ -85,13 +90,14 @@ function fail(e: any, fallback = '请求失败，请重试') {
   return e.message === 'Network Error' ? '网络连接失败，请重试' : e.message || fallback
 }
 function clearManagementCache() {
-  closeUsage(); statisticsScope.invalidate()
-  materialRequest++; listingRequest++; jobRequest++; managerRequest++
+  closeUsage(); statisticsScope.invalidate(); usersScope.invalidate(); usersLoading.value=false
+  materialRequest++; listingRequest++; jobRequest++; managerRequest++; agentRequest++
   showListingPicker.value=false; listingCandidates.value=[]; listingSelectedIds.value=[]; listingTotal.value=0
   managers.value=[]; users.value=[]; agents.value=[]; statistics.value=null; materials.value=[]; jobs.value=[]
   templates.value=[]; templateGroups.value=[]; activeTemplateGroupId.value=null; selectedMaterialIds.value=[]; materialTotal.value=0; jobTotal.value=0
   showUser.value=false; showAgent.value=false; renewUser.value=null; templateEditing.value=null; usageMaterial.value=null; jobDetail.value=null; preview.value=null
   aiConfig.value={api_key:'',configured:false}; showAiConfig.value=false; jobsScope.value='own'; jobPage.value=1
+  userPage.value=1; userTotal.value=0; userSearch.value=''; appliedUserSearch.value=''
   materialListed.value='true'; appliedMaterialFilters.value.listed='true'; materialResultListed.value='true'; tab.value='templates'
 }
 watch(canViewMaterials, allowed => {
@@ -101,10 +107,10 @@ watch(canViewMaterials, allowed => {
   if (tab.value==='materials') tab.value='templates'
 })
 watch(canManage, allowed => {
-  if (!allowed) { closeUsage(); statisticsScope.invalidate(); statistics.value=null }
+  if (!allowed) { closeUsage(); statisticsScope.invalidate(); statistics.value=null; usersScope.invalidate(); usersLoading.value=false; agentRequest++ }
 }, { flush: 'sync' })
 watch(() => [props.token, props.user.id, props.user.company_id], () => {
-  closeUsage(); statisticsScope.invalidate(); statistics.value=null
+  closeUsage(); statisticsScope.invalidate(); statistics.value=null; usersScope.invalidate(); usersLoading.value=false; agentRequest++
 }, { flush: 'sync' })
 async function reconcileAccess() {
   if (stopped || accessRefreshing) return
@@ -215,16 +221,33 @@ async function loadUsersAndManagers() {
   if (failure) throw failure.reason
 }
 async function loadUsers() {
-  if (!canAdmin.value) {
-    users.value = list((await api.get('/supply/users', {headers:headers.value})).data)
-    agents.value = Array.from(new Map(users.value.filter(item=>item.agent_id).map(item=>[item.agent_id,{id:item.agent_id,name:item.agent_name,created_at:item.agent_created_at}])).values())
-    return
-  }
-  const results = await Promise.allSettled([api.get('/supply/agents', { headers: headers.value }), api.get('/supply/users', { headers: headers.value })])
-  if (results[0].status === 'fulfilled') agents.value = list(results[0].value.data)
-  if (results[1].status === 'fulfilled') users.value = list(results[1].value.data)
+  const request = ++agentRequest
+  const results = await Promise.allSettled([
+    api.get('/supply/agents', { headers: headers.value }).then(({ data }) => {
+      if (!stopped && canManage.value && request === agentRequest) agents.value = list(data)
+    }),
+    loadUserPage(),
+  ])
   const failure = results.find(item => item.status === 'rejected') as PromiseRejectedResult | undefined
   if (failure) throw failure.reason
+}
+async function loadUserPage(page = userPage.value) {
+  if (!canManage.value || stopped) return
+  const request = usersScope.start()
+  usersLoading.value = true
+  try {
+    const { data } = await api.get('/supply/users', { headers: headers.value, signal: request.signal,
+      params: { page, page_size: userPageSize.value, search: appliedUserSearch.value || undefined } })
+    if (!request.isCurrent() || stopped || !canManage.value) return
+    const pages = Math.max(1, Math.ceil(data.total / userPageSize.value))
+    if (page > pages) { await loadUserPage(pages); return }
+    users.value = list(data); userTotal.value = data.total; userPage.value = page
+  } catch (e) { if (request.isCurrent() && !stopped) throw e }
+  finally { if (request.isCurrent()) usersLoading.value = false }
+}
+async function searchUsers() {
+  appliedUserSearch.value = userSearch.value.trim()
+  await action('user-search', () => loadUserPage(1))
 }
 async function loadSettings() {
   const { data } = await api.get('/supply/ai-config', { headers: headers.value })
@@ -442,7 +465,7 @@ async function downloadJob(row: any) {
     try {
       const result = await api.get(`/supply/jobs/${row.id}/download`, { headers: headers.value, responseType: 'blob' })
       const url = URL.createObjectURL(result.data), link = document.createElement('a')
-      link.href = url; link.download = row.filename || `TikTok-货盘-${row.id}.xlsx`; link.click()
+      link.href = url; link.download = row.filename; link.click()
       setTimeout(() => URL.revokeObjectURL(url), 1000)
       row.downloaded = true
       const listedJob = jobs.value.find(item => item.id === row.id)
@@ -523,7 +546,7 @@ onMounted(async () => {
   await reload()
   if (!stopped) pollTimer = setInterval(() => { if (props.token && !document.hidden) void loadJobs(true) }, 5000)
 })
-onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPreview); window.removeEventListener('focus', refreshVisibleMaterials); document.removeEventListener('visibilitychange', refreshVisibleMaterials); stopped = true; closeUsage(); statisticsScope.invalidate(); materialRequest++; listingRequest++; optionsRequest++; jobRequest++; pollingAbort.abort(); if (pollTimer) clearInterval(pollTimer) })
+onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPreview); window.removeEventListener('focus', refreshVisibleMaterials); document.removeEventListener('visibilitychange', refreshVisibleMaterials); stopped = true; closeUsage(); statisticsScope.invalidate(); usersScope.invalidate(); materialRequest++; listingRequest++; optionsRequest++; jobRequest++; pollingAbort.abort(); if (pollTimer) clearInterval(pollTimer) })
 </script>
 
 <template>
@@ -599,7 +622,7 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
       </section>
       <section v-else-if="tab==='jobs'">
         <div class="supply-section-heading"><p>后台处理期间可以离开页面；完成后下载 Excel，文件保留 7 天。</p><div class="supply-actions supply-job-controls"><select v-if="canManage" v-model="jobsScope" aria-label="任务范围" @change="jobPage=1;loadJobs()"><option value="own">我的任务</option><option value="company">公司任务</option></select><button class="secondary" :disabled="jobsLoading" @click="loadJobs()">刷新记录</button></div></div>
-        <div class="supply-table-wrap"><table><thead><tr><th>任务</th><th v-if="canManage">用户 / 代理</th><th>状态</th><th>进度</th><th>时间</th><th>是否已下载</th><th>文件 / 操作</th></tr></thead><tbody><tr v-for="row in jobs" :key="row.id"><td>#{{row.id}}<small>{{row.strategy_name || ''}}</small></td><td v-if="canManage">{{row.user_name || '—'}}<small>{{row.agent_name || '内部使用'}}</small></td><td><span :class="['supply-tag',row.state]">{{supplyJobLabels[row.state] || row.state}}</span><small v-if="row.error" class="error">{{row.error}}</small></td><td>{{supplyStageLabels[row.stage] || row.stage || '等待处理'}}<small>{{progressLabel(row)}}</small></td><td>{{supplyTime(row.created_at)}}<small v-if="row.completed_at">完成：{{supplyTime(row.completed_at)}}</small></td><td>{{row.downloaded ? '已下载' : '未下载'}}</td><td><div class="supply-actions"><button v-if="canDownload(row)" class="primary" :disabled="!!busy" @click="downloadJob(row)">{{busy===`download-${row.id}`?'下载中…':'下载 Excel'}}</button><span v-else>{{supplyFileStatus(row)}}</span><button :disabled="!!busy" @click="viewJob(row)">详情</button><button v-if="unfinishedSupplyJob(row)" class="danger" :disabled="!!busy" @click="cancelJob(row)">取消</button></div><small v-if="row.output_expires_at">到期：{{supplyTime(row.output_expires_at)}}</small></td></tr></tbody></table></div><p v-if="!jobs.length" class="empty">暂无生成记录。</p><footer class="supply-pagination"><span>共 {{jobTotal}} 条</span><label>每页<select v-model.number="jobPageSize" :disabled="jobsLoading" @change="jobPage=1;loadJobs()"><option :value="30">30</option><option :value="50">50</option><option :value="100">100</option></select>条</label><button :disabled="jobsLoading || jobPage===1" @click="jobPage--;loadJobs()">上一页</button><span>{{jobPage}} / {{jobPages}}</span><button :disabled="jobsLoading || jobPage>=jobPages" @click="jobPage++;loadJobs()">下一页</button></footer>
+        <div class="supply-table-wrap"><table><thead><tr><th>任务</th><th>策略</th><th v-if="canManage">用户 / 代理</th><th>状态</th><th>进度</th><th>时间</th><th>是否已下载</th><th>文件 / 操作</th></tr></thead><tbody><tr v-for="row in jobs" :key="row.id"><td>#{{row.id}}</td><td class="supply-strategy-name">{{row.strategy_name || '—'}}</td><td v-if="canManage">{{row.user_name || '—'}}<small>{{row.agent_name || '内部使用'}}</small></td><td><span :class="['supply-tag',row.state]">{{supplyJobLabels[row.state] || row.state}}</span><small v-if="row.error" class="error">{{row.error}}</small></td><td>{{supplyStageLabels[row.stage] || row.stage || '等待处理'}}<small>{{progressLabel(row)}}</small></td><td>{{supplyTime(row.created_at)}}<small v-if="row.completed_at">完成：{{supplyTime(row.completed_at)}}</small></td><td>{{row.downloaded ? '已下载' : '未下载'}}</td><td><div class="supply-actions"><button v-if="canDownload(row)" class="primary" :disabled="!!busy" @click="downloadJob(row)">{{busy===`download-${row.id}`?'下载中…':'下载 Excel'}}</button><span v-else>{{supplyFileStatus(row)}}</span><button :disabled="!!busy" @click="viewJob(row)">详情</button><button v-if="unfinishedSupplyJob(row)" class="danger" :disabled="!!busy" @click="cancelJob(row)">取消</button></div><small v-if="row.output_expires_at">到期：{{supplyTime(row.output_expires_at)}}</small></td></tr></tbody></table></div><p v-if="!jobs.length" class="empty">暂无生成记录。</p><footer class="supply-pagination"><span>共 {{jobTotal}} 条</span><label>每页<select v-model.number="jobPageSize" :disabled="jobsLoading" @change="jobPage=1;loadJobs()"><option :value="30">30</option><option :value="50">50</option><option :value="100">100</option></select>条</label><button :disabled="jobsLoading || jobPage===1" @click="jobPage--;loadJobs()">上一页</button><span>{{jobPage}} / {{jobPages}}</span><button :disabled="jobsLoading || jobPage>=jobPages" @click="jobPage++;loadJobs()">下一页</button></footer>
       </section>
       <section v-else-if="tab==='users' && canManage">
         <div class="supply-section-heading"><h3>货盘管理</h3></div>
@@ -617,7 +640,10 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
           </table>
         </div><p v-if="!agents.length" class="empty">暂无代理。</p>
         <div class="supply-section-heading"><h3>货盘用户</h3><button v-if="canAdmin" class="secondary" :disabled="!!busy || !agents.length" @click="editUser()">创建货盘用户</button></div><p class="supply-help">账号由公司管理员创建，并绑定代理。{{canAdmin?'可在编辑中直接修改到期时间；修改时间或续期不会解除停用，恢复不会延长有效期。':'货盘管理员可查看用户信息，账号管理由公司管理员处理。'}}</p>
-        <div class="supply-table-wrap"><table><thead><tr><th>用户</th><th>邮箱</th><th>代理</th><th>状态</th><th>使用到期</th><th v-if="canAdmin">操作</th></tr></thead><tbody><tr v-for="row in users" :key="row.id"><td>{{row.name}}</td><td class="supply-email">{{row.email}}</td><td>{{row.agent_name || agents.find(agent=>agent.id===row.agent_id)?.name || '—'}}</td><td>{{accountStatus(row)}}</td><td>{{supplyTime(row.supply_expires_at)}}</td><td v-if="canAdmin"><div class="supply-actions"><button :disabled="!!busy" @click="editUser(row)">编辑</button><button :disabled="!!busy" @click="renewUser=row;renewMonths=12;dialogError=''">续期</button><button :class="{danger:row.is_active}" :disabled="!!busy" @click="toggleUser(row)">{{row.is_active?'停用':'恢复'}}</button></div></td></tr></tbody></table></div><p v-if="!users.length" class="empty">暂无货盘用户。</p>
+        <form class="supply-filters supply-user-filters" @submit.prevent="searchUsers"><label>搜索<input v-model="userSearch" type="search" placeholder="姓名、邮箱或代理名称" :disabled="usersLoading || !!busy"/></label><button class="primary" :disabled="usersLoading || !!busy">查询</button></form>
+        <p v-if="usersLoading" class="supply-help" role="status">正在加载货盘用户…</p>
+        <div class="supply-table-wrap" :aria-busy="usersLoading"><table><thead><tr><th>用户</th><th>邮箱</th><th>代理</th><th>状态</th><th>使用到期</th><th v-if="canAdmin">操作</th></tr></thead><tbody><tr v-for="row in users" :key="row.id"><td>{{row.name}}</td><td class="supply-email">{{row.email}}</td><td>{{row.agent_name || agents.find(agent=>agent.id===row.agent_id)?.name || '—'}}</td><td>{{accountStatus(row)}}</td><td>{{supplyTime(row.supply_expires_at)}}</td><td v-if="canAdmin"><div class="supply-actions"><button :disabled="!!busy" @click="editUser(row)">编辑</button><button :disabled="!!busy" @click="renewUser=row;renewMonths=12;dialogError=''">续期</button><button :class="{danger:row.is_active}" :disabled="!!busy" @click="toggleUser(row)">{{row.is_active?'停用':'恢复'}}</button></div></td></tr></tbody></table></div><p v-if="!users.length && !usersLoading" class="empty">{{appliedUserSearch ? '没有符合搜索条件的货盘用户。' : '暂无货盘用户。'}}</p>
+        <footer class="supply-pagination" aria-label="货盘用户分页"><span>共 {{userTotal}} 条</span><label>每页 <select v-model.number="userPageSize" :disabled="usersLoading || !!busy" @change="action('load-users',()=>loadUserPage(1))"><option v-for="size in userPageSizeOptions" :key="size" :value="size">{{size}}</option></select> 条</label><button :disabled="usersLoading || !!busy || userPage===1" @click="action('load-users',()=>loadUserPage(userPage-1))">上一页</button><span>第 {{userPage}} / {{userPages}} 页</span><button :disabled="usersLoading || !!busy || userPage>=userPages" @click="action('load-users',()=>loadUserPage(userPage+1))">下一页</button></footer>
       </section>
       <section v-else-if="tab==='statistics' && canManage">
         <div class="supply-section-heading"><p>按成功完成任务中的最终素材统计，下载单独记录。</p><button class="secondary" :disabled="!!busy" @click="action('load-statistics',loadStatistics)">刷新统计</button></div>
@@ -710,6 +736,8 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
 </template>
 
 <style scoped>
+.supply-strategy-name{max-width:240px;overflow-wrap:anywhere}
+.supply-filters.supply-user-filters>label{flex:0 1 320px;width:320px;min-width:0;max-width:100%}
 .supply-tag.listed{background:#eaf9ef;color:#167144}
 .supply-table-wrap.supply-material-list{margin:0;border-color:#ebe9f3;border-radius:15px}
 .supply-material-list table{min-width:560px;table-layout:auto}
