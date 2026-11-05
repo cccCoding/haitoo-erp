@@ -243,17 +243,18 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['character_count'], len(SHORT))
         self.assertEqual(result['attempts'], 4)
 
-    async def test_cleaned_material_title_finishes_without_retrying_the_same_extra_claim(self):
-        result, _ = await self.generate([SHORT, SHORT + ' Kapas', SHORT + ' Kalis Air', ProviderError('failed')])
-        self.assertEqual(result['title'], SHORT)
-        self.assertEqual(result['attempts'], 2)
+    async def test_unconfirmed_material_does_not_short_circuit_length_attempts(self):
+        result, model = await self.generate([SHORT, SHORT + ' Kapas', SHORT + ' Kalis Air', ProviderError('failed')])
+        self.assertEqual(result['title'], SHORT + ' Kalis Air')
+        self.assertEqual(result['attempts'], 4)
+        self.assertEqual(model.await_count, 4)
 
-    async def test_supply_uses_cleaned_body_for_limits_count_and_link_suffix(self):
-        result, model = await self.generate([MY_220 + ' Kapas'], supply=True, forbidden=['Kapas'])
-        self.assertEqual(result['title'], MY_220)
-        self.assertEqual(result['character_count'], 220)
-        self.assertEqual(len(result['title'] + ' - L01'), 226)
-        self.assertEqual(model.await_count, 1)
+    async def test_supply_preserves_body_and_ignores_legacy_forbidden_words(self):
+        body = MY_220 + ' Kapas'
+        result, model = await self.generate([body] * 4, supply=True, forbidden=['Kapas'])
+        self.assertEqual(result['title'], body)
+        self.assertEqual(result['character_count'], len(body))
+        self.assertEqual(model.await_count, 4)
 
     async def test_indonesian_titles_use_same_soft_length_policy(self):
         short = 'Daster Wanita Lengan Panjang Motif Bunga'
@@ -387,9 +388,9 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs('app.title_service', level='INFO') as logs:
             result, model = await self.generate([MY_231 + ' Kapas', SHORT], supply=True)
         retry = model.await_args.args[2]
-        self.assertEqual(retry['character_count'], 231)
+        self.assertEqual(retry['character_count'], len(MY_231 + ' Kapas'))
         state = self.db.get(TitleRecord, self.record_id).snapshot['supply_generation']
-        self.assertEqual(state['compression_history'][0]['previous_length'], 231)
+        self.assertEqual(state['compression_history'][0]['previous_length'], len(MY_231 + ' Kapas'))
         self.assertEqual(result['attempts'], 2)
         self.assertTrue(any('货盘标题成文完成' in line and 'attempts=2' in line and 'compression_level=1' in line
                             for line in logs.output))

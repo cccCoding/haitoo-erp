@@ -264,34 +264,20 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
                         self.assertEqual(attempts[-1]['raw_title'], None if isinstance(failure, Exception) else failure['title'])
                 self.assert_exported_titles(links)
 
-    def test_fallback_removes_forbidden_phrases_and_rejects_invalid_result(self):
+    def test_fallback_ignores_legacy_forbidden_configuration(self):
+        title = 'Gaun Wanita Dewasa Lengan Panjang Longgar'
         with self.sessions() as db:
             market = get_market(db, 1)
-            word = TitleKeyword(market_id=market.id, code='FORBIDDEN', identity_hash='a' * 64,
-                phrase='Longgar', translation='宽松', tag='版型', categories=['连衣裙'], priority='forbidden')
-            db.add(word)
-            profile = self.profile(db)
-            profile.fallback_title, profile.fallback_approved = 'Gaun Wanita Dewasa Lengan Panjang Longgar', True
+            db.add(TitleKeyword(market_id=market.id, code='FORBIDDEN', identity_hash='a' * 64,
+                phrase=title, translation='旧禁用标题', tag='版型', categories=['连衣裙'], priority='forbidden'))
+            self.profile(db).fallback_title = title
             db.commit()
         identity = self.submit()
         with self.sessions() as db:
-            self.assertEqual(db.get(SupplyJob, identity).snapshot['title_profile']['fallback_title'], 'Gaun Wanita Dewasa Lengan Panjang')
+            profile = db.get(SupplyJob, identity).snapshot['title_profile']
+            self.assertEqual(profile['fallback_title'], title)
+            self.assertNotIn('forbidden_phrases', profile)
         self.cancel(identity)
-        with self.sessions() as db:
-            word = db.scalar(select(TitleKeyword))
-            word.phrase = 'Gaun Wanita Dewasa Lengan Panjang'
-            db.commit()
-        response = self.request('POST', '/supply/jobs', uid=4,
-            json={'strategy_id': self.create_strategy(), 'idempotency_key': 'invalid-localized-fallback'})
-        self.assertEqual(response.status_code, 400, response.text)
-        self.assertIn('禁用词后无效', response.json()['detail'])
-        with self.sessions() as db:
-            self.profile(db).fallback_title = None
-            db.scalar(select(TitleKeyword)).phrase = 'Printed Long Sleeve Nursing Maxi Dress'
-            db.commit()
-        response = self.request('POST', '/supply/jobs', uid=4,
-            json={'strategy_id': self.create_strategy(), 'idempotency_key': 'invalid-english-fallback'})
-        self.assertEqual(response.status_code, 400, response.text)
 
     def test_both_markets_generate_from_library_and_count_adoption_after_export(self):
         for site, core in (('MY', 'Gaun'), ('ID', 'Daster')):
@@ -379,13 +365,13 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
         self.assertTrue(all(len(row['title']) == 236 for row in links))
         self.assert_exported_titles(links)
 
-    def test_fallback_length_is_checked_after_forbidden_cleanup_in_all_languages(self):
+    def test_fallback_length_is_checked_without_deleting_content_in_all_languages(self):
         for language, core, site in (('en', 'Printed Dress', 'MY'), ('ms', 'Gaun', 'MY'), ('id', 'Daster', 'ID')):
             title = core + ' ' + 'a' * (229 - len(core))
             profile = {'fallback_language': language, 'language': language, 'site': site,
-                       'fallback_title': title + ' Forbidden', 'forbidden_phrases': ['Forbidden']}
+                       'fallback_title': title, 'forbidden_phrases': [core]}
             self.assertEqual(validate_title_fallback(profile), title)
-            profile['forbidden_phrases'] = []
+            profile['fallback_title'] += ' Forbidden'
             with self.assertRaisesRegex(ProviderError, '25–230'):
                 validate_title_fallback(profile)
 

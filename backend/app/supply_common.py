@@ -123,8 +123,8 @@ def validate_template(template, *, validate_title=True):
 
 def validate_title_fallback(profile):
     """新货盘快照明确兜底语言；历史词库快照沿用其站点语言。"""
-    from .title_service import remove_forbidden_phrases, validate_localized_title
-    value = remove_forbidden_phrases(profile['fallback_title'], profile.get('forbidden_phrases', []))
+    from .title_service import validate_localized_title
+    value = profile['fallback_title'].strip()
     if not MINIMUM <= len(value) <= MAXIMUM:
         raise ProviderError(f'货盘兜底标题长度须为 {MINIMUM}–{MAXIMUM} 个字符，实际 {len(value)} 字符')
     if profile.get('fallback_language') == 'en':
@@ -154,7 +154,7 @@ def supply_title_snapshot(db, company_id, template, site):
     try:
         profile['fallback_title'] = validate_title_fallback(profile)
     except ProviderError as exc:
-        raise HTTPException(400, f'货盘兜底标题应用禁用词后无效，请检查标题配置：{exc}') from exc
+        raise HTTPException(400, f'货盘兜底标题无效，请检查标题配置：{exc}') from exc
     return market.id, profile
 
 

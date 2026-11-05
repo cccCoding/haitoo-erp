@@ -27,11 +27,10 @@ const confirmedChoices = ref<{ kind: 'craft' | 'brand'; tag: string; ids: number
 const normalized = (value: string) => value.normalize('NFKC').trim().toLowerCase()
 const availableMaterials = computed(() => materialOptions.value.filter(item => item.categories.some(category => normalized(category) === normalized(form.value.category))))
 const unavailableMaterialIds = computed(() => materialIds.value.filter(id => !availableMaterials.value.some(item => item.id === id)))
-const forbiddenIds = ref<number[]>([]), forbiddenError = ref('')
 const busy = ref(false), loaded = ref(false), error = ref(''), notice = ref('')
 const selectorDisabled = computed(() => busy.value || props.readonly || !loaded.value)
 const inCategory = (item: MaterialOption) => item.categories.some(category => normalized(category) === normalized(form.value.category))
-const confirmedWords = (tag: string) => attributeKeywordOptions.value.filter(item => item.semantic_tag === tag && inCategory(item) && !forbiddenIds.value.includes(item.id))
+const confirmedWords = (tag: string) => attributeKeywordOptions.value.filter(item => item.semantic_tag === tag && inCategory(item))
 const confirmedOptions = (tag: string) => confirmedWords(tag).map(item => ({ value: item.id, label: keywordLabel(item) }))
 const unavailableConfirmedIds = (item: {tag: string; ids: number[]}) => item.ids.filter(id => !confirmedWords(item.tag).some(word => word.id === id))
 const keywordLabel = (item: MaterialOption) => `${item.translation} · ${item.phrase}`
@@ -40,9 +39,7 @@ const tagChoices = computed(() => tags.value.map(tag => ({ value: tag, label: ti
 const attributeWords = (tag: string) => attributeKeywordOptions.value.filter(item => item.tag === tag && inCategory(item))
 const attributeChoices = (tag: string) => attributeWords(tag).map(item => ({ value: item.phrase, label: keywordLabel(item) }))
 const matchedAttribute = (item: {tag: string; value: string}) => attributeWords(item.tag).some(word => word.phrase === item.value)
-const forbiddenChoices = computed(() => keywordOptions.value.filter(item => inCategory(item) || forbiddenIds.value.includes(item.id))
-  .map(item => ({ value: item.id, label: `${keywordLabel(item)} · ${titleTagLabel(item.tag)} · ${item.code}` })))
-function forbiddenLabel(id: number) {
+function keywordLabelById(id: number) {
   const item = keywordOptions.value.find(item => item.id === id)
   return item ? keywordLabel(item) : `关键词 #${id}（已不可用）`
 }
@@ -69,32 +66,11 @@ function clearConfirmed(item: typeof confirmedChoices.value[number]) {
   if (selectorDisabled.value) return
   item.ids = []; item.warning = ''
 }
-function toggleForbidden(value: string | number | null) {
-  if (selectorDisabled.value || typeof value !== 'number') return
-  forbiddenError.value = ''
-  if (forbiddenIds.value.includes(value)) forbiddenIds.value = forbiddenIds.value.filter(id => id !== value)
-  else if (forbiddenIds.value.length >= 100) forbiddenError.value = '最多选择 100 个禁用关键词'
-  else forbiddenIds.value = [...forbiddenIds.value, value]
-}
-function selectForbiddenMatches(values: (string | number | null)[]) {
-  if (selectorDisabled.value) return
-  const ids = [...new Set([...forbiddenIds.value, ...values.filter((value): value is number => typeof value === 'number')])]
-  if (ids.length > 100) { forbiddenError.value = `全选后共 ${ids.length} 个禁用关键词，超过 100 个上限，请缩小搜索范围或移除部分已选词`; return }
-  forbiddenIds.value = ids
-  forbiddenError.value = ''
-}
-function clearForbiddenMatches(values: (string | number | null)[]) {
-  if (selectorDisabled.value) return
-  const ids = new Set(values)
-  forbiddenIds.value = forbiddenIds.value.filter(id => !ids.has(id))
-  forbiddenError.value = ''
-}
 let revision = 0
 watch(busy, value => emit('busy', value))
 watch(() => [props.templateId, props.platform, props.site, props.token], async () => {
   const current = ++revision
   error.value = ''; notice.value = ''; busy.value = true; loaded.value = false
-  forbiddenError.value = ''
   try {
     const { data } = await api.get(`/title-profiles/${props.templateId}`, { ...config.value, params: { platform: props.platform, ...titleMarketParams(props.site) } })
     if (current !== revision) return
@@ -110,7 +86,6 @@ watch(() => [props.templateId, props.platform, props.site, props.token], async (
     materialOptions.value = data.material_options || []
     keywordOptions.value = data.keyword_options || []
     attributeKeywordOptions.value = data.attribute_keyword_options || []
-    forbiddenIds.value = [...new Set<number>(data.forbidden_keyword_ids || [])]
     for (const item of confirmedChoices.value) {
       const resolved = resolveConfirmedChoice(data[`${item.kind}_keyword_ids`] || [], data[`${item.kind}_legacy_attributes`] || [], confirmedWords(item.tag))
       item.ids = resolved.ids; item.warning = resolved.warning
@@ -128,7 +103,6 @@ watch(() => [props.templateId, props.platform, props.site, props.token], async (
     }
     materialConflict.value = (data.conflicting_attributes || []).includes('材质') ? values.filter(item => semantic(item.tag) === '材质').map(item => `${item.tag==='材质'?'面料':item.tag}：${item.value}`).join('；') : ''
     legacyAudience.value = values.filter(item => ['性别','年龄'].includes(item.tag)).map(item => `${item.tag==='材质'?'面料':item.tag}：${item.value}`).join('；')
-    forbiddenIds.value = [...new Set<number>(data.forbidden_keyword_ids || [])]
     loaded.value = true
   } catch (e: any) { if (current === revision) error.value = e.response?.data?.detail || '读取模板配置失败' }
   finally { if (current === revision) busy.value = false }
@@ -139,12 +113,10 @@ async function save() {
   error.value = ''; notice.value = ''
   try {
     if (!form.value.category || !form.value.gender || !form.value.age_group) throw new Error('请选择产品分类、使用性别和年龄')
-    if (forbiddenIds.value.length > 100) throw new Error('最多选择 100 个禁用关键词，请移除部分已选词后保存')
     if (materialConflict.value && !materialIds.value.length) throw new Error('请选择确认后的面料关键词，或明确清除未确认面料')
     if (legacyMaterial.value || unavailableMaterialIds.value.length) throw new Error('请选择当前产品分类下已启用的面料关键词，或清除不可用面料')
-    if (materialIds.value.some(id => forbiddenIds.value.includes(id))) throw new Error('所选面料关键词不能同时禁用')
     for (const item of confirmedChoices.value) {
-      if (item.warning || unavailableConfirmedIds(item).length) throw new Error(`请选择当前产品分类下已启用且未禁用的${item.tag}关键词，或清空${item.tag}选择`)
+      if (item.warning || unavailableConfirmedIds(item).length) throw new Error(`请选择当前产品分类下已启用的${item.tag}关键词，或清空${item.tag}选择`)
     }
     const confirmed: Record<string, string> = {}
     for (const item of attributes.value) {
@@ -160,7 +132,7 @@ async function save() {
       material_keyword_ids: materialIds.value,
       craft_keyword_ids: confirmedChoices.value.find(item => item.kind === 'craft')!.ids,
       brand_keyword_ids: confirmedChoices.value.find(item => item.kind === 'brand')!.ids,
-      category_names: [], locked_keyword_ids: [], forbidden_keyword_ids: forbiddenIds.value,
+      category_names: [], locked_keyword_ids: [],
       recognition_prompt: form.value.recognition_prompt?.trim() || null,
       fallback_title: form.value.fallback_title?.trim() || null }
     busy.value = true
@@ -195,12 +167,12 @@ async function save() {
         <div v-for="item in confirmedChoices" :key="item.kind" class="profile-select-field">
           <span>{{item.tag}}（选填，可多选）</span>
           <SearchableSelect :model-value="null" :multiple="true" :selected-values="item.ids" :options="confirmedOptions(item.tag)" :disabled="selectorDisabled" :aria-label="item.tag" :placeholder="`未确认${item.tag}（留空）`" :search-placeholder="`搜索${item.tag}关键词或中文释义`" :empty-label="`暂无可选${item.tag}`" :no-match-label="`没有匹配的${item.tag}关键词`" @toggle="toggleConfirmed(item, $event)" />
-          <div v-if="item.ids.length" class="profile-keyword-chips" :aria-label="`已选${item.tag}关键词`"><span v-for="id in item.ids" :key="id">{{forbiddenLabel(id)}}{{unavailableConfirmedIds(item).includes(id)?'（当前不可用）':''}}<button v-if="!readonly" type="button" :disabled="selectorDisabled" :aria-label="`移除${item.tag}关键词 ${forbiddenLabel(id)}`" @click="toggleConfirmed(item, id)">×</button></span></div>
+          <div v-if="item.ids.length" class="profile-keyword-chips" :aria-label="`已选${item.tag}关键词`"><span v-for="id in item.ids" :key="id">{{keywordLabelById(id)}}{{unavailableConfirmedIds(item).includes(id)?'（当前不可用）':''}}<button v-if="!readonly" type="button" :disabled="selectorDisabled" :aria-label="`移除${item.tag}关键词 ${keywordLabelById(id)}`" @click="toggleConfirmed(item, id)">×</button></span></div>
           <small>可选择多个符合商品事实的{{item.tag}}关键词；每条标题随机使用其中一个。未确认请留空。</small>
           <button v-if="!readonly&&(item.ids.length||item.warning)" type="button" class="ghost" :disabled="selectorDisabled" @click="clearConfirmed(item)">清空{{item.tag}}选择</button>
           <small v-if="loaded&&!confirmedWords(item.tag).length">暂无可选{{item.tag}}，请先导入适用于本产品分类的{{item.tag}}关键词并启用。</small>
           <p v-if="item.warning" class="profile-warning">旧{{item.tag}}配置未匹配可用关键词或存在冲突：{{item.warning}}。请重新选择或清空{{item.tag}}选择。</p>
-          <p v-if="unavailableConfirmedIds(item).length" class="profile-warning">部分已选{{item.tag}}已停用、被禁用或不适用当前产品分类，请移除后重新选择。</p>
+          <p v-if="unavailableConfirmedIds(item).length" class="profile-warning">部分已选{{item.tag}}已停用或不适用当前产品分类，请移除后重新选择。</p>
         </div>
         <div class="profile-attribute-heading"><strong>其他标签</strong><button v-if="!readonly" type="button" class="secondary" @click="attributes.push({tag:'',value:''})">添加标签</button></div>
         <div v-for="(item, index) in attributes" :key="index" class="profile-attribute-item">
@@ -212,11 +184,6 @@ async function save() {
           <small v-if="item.value&&!matchedAttribute(item)" class="profile-warning">原值“{{item.value}}”未匹配可选关键词，请重新选择或删除本标签。</small>
         </div>
         <p v-if="!attributes.length" class="profile-empty">尚未设置其他标签。</p>
-        <div class="profile-select-field"><span>禁用关键词（选填，可多选）</span>
-          <SearchableSelect :model-value="null" :multiple="true" :bulk-selection="true" :selection-error="forbiddenError" :selected-values="forbiddenIds" :options="forbiddenChoices" :disabled="selectorDisabled" aria-label="禁用关键词" placeholder="选择禁用关键词" search-placeholder="搜索禁用关键词、中文释义、标签或编码" empty-label="本分类下暂无关键词" no-match-label="没有匹配的关键词" @toggle="toggleForbidden" @select-matched="selectForbiddenMatches" @clear-matched="clearForbiddenMatches" />
-          <div v-if="forbiddenIds.length" class="profile-keyword-chips" aria-label="已选禁用关键词"><span v-for="id in forbiddenIds" :key="id">{{forbiddenLabel(id)}}<button v-if="!readonly" type="button" :disabled="selectorDisabled" :aria-label="`移除禁用关键词 ${forbiddenLabel(id)}`" @click="toggleForbidden(id)">×</button></span></div>
-          <small>选中的关键词不会出现在本模板的词库标题中，最多选择 100 个。</small>
-        </div>
         <label>补充 AI 提示词（选填）<textarea v-model="form.recognition_prompt" rows="3" maxlength="2000" placeholder="用于辅助 AI 识别首图中的服装细节" /></label>
         <label v-if="showFallback">{{market.languageName}}货盘兜底标题<textarea v-model="form.fallback_title" rows="2" :minlength="SUPPLY_TITLE_MINIMUM" :maxlength="SUPPLY_TITLE_MAXIMUM" /></label>
         <small v-if="showFallback">保存后即可用于货盘生成失败时兜底；未设置时使用公开货盘中配置的兜底标题。</small>

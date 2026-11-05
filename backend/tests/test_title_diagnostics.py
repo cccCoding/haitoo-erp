@@ -82,21 +82,19 @@ class TitleDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('private-test-key', json.dumps(attempts))
         self.assertEqual(model.await_count, 4)
 
-    async def test_cleanup_records_which_stage_deleted_required_phrase(self):
+    async def test_cross_tag_words_and_legacy_forbidden_text_are_preserved(self):
         record_id = self.record(cleanup_conflict=True)
-        raw = '  ' + VALID + ' SIAP JAHIT Viral  '
-        with self.assertRaisesRegex(ProviderError, '标题遗漏选定词组：Siap Jahit'):
-            await self.generate(record_id, [{'title': raw}] * 4)
-        for row in self.attempts(record_id):
-            self.assertEqual(row['raw_title'], raw)
-            self.assertEqual(row['raw_length'], len(raw))
-            self.assertEqual(row['missing_phrases']['raw'], [])
-            self.assertEqual(row['missing_phrases']['after_claim_cleanup'], ['Siap Jahit'])
-            self.assertEqual(row['removed_unselected_claims'], ['SIAP JAHIT'])
-            self.assertEqual(row['removed_forbidden_phrases'], ['Viral'])
-            self.assertIn('Viral', row['claim_cleaned_title'])
-            self.assertEqual(row['cleaned_title'], VALID)
-            self.assertEqual(row['cleaned_length'], len(VALID))
+        raw = VALID[:170] + ' SIAP JAHIT Viral'
+        result, _ = await self.generate(record_id, [{'title': raw}])
+        self.assertEqual(result['title'], raw)
+        row = self.attempts(record_id)[0]
+        self.assertEqual(row['raw_title'], raw)
+        self.assertEqual(row['cleaned_title'], raw)
+        self.assertEqual(row['missing_phrases']['raw'], [])
+        self.assertEqual(row['missing_phrases']['cleaned'], [])
+        self.assertNotIn('removed_unselected_claims', row)
+        self.assertNotIn('removed_forbidden_phrases', row)
+        self.assertEqual(row['policy_version'], 3)
 
     async def test_non_string_response_preserves_type_without_inventing_missing_phrases(self):
         record_id = self.record()

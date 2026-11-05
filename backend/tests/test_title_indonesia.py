@@ -174,7 +174,8 @@ class IndonesiaTitleTests(SupplyFixture, unittest.TestCase):
         self.assertFalse(self.request('GET', '/title-template-configurations').json()['items'][0]['ready'])
         response = self.request('PUT', '/title-profiles/1', json={**ID_MARKET, 'category': '连衣裙',
             'gender': '女', 'age_group': '成人', 'forbidden_keyword_ids': [my_words[0]['id']]})
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['forbidden_keyword_ids'], [])
         self.assertEqual(self.request('POST', f"/title-keywords/{id_words[0]['id']}/merge",
             json={'target_id': my_words[0]['id']}).status_code, 400)
 
@@ -195,30 +196,17 @@ class IndonesiaTitleTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(self.request('GET', '/title-statistics', uid=2, params=ID_MARKET).json()['manual'], 1)
         self.assertEqual(self.request('GET', '/title-statistics', uid=2).json()['manual'], 0)
 
-    def test_generation_rejects_missing_core_and_unconfirmed_claims_but_removes_forbidden_phrases(self):
+    def test_generation_preserves_words_but_still_requires_core_category(self):
         self.configure()
-        category = self.request('GET', '/title-dictionaries', params=ID_MARKET).json()['items']
-        category = next(row for row in category if row['kind'] == 'category')
-        self.assertEqual(self.request('PATCH', f"/title-dictionaries/{category['id']}",
-            json={'localized_name': 'Daster'}).status_code, 200)
-        for index, title in enumerate(['Lengan Panjang Dengan Motif Bunga', ID_TITLE + ' Tahan Air']):
-            with self.subTest(title=title), patch('app.title_service.ask_json', new=self.model(title)):
-                response = self.generate(request_key=f'indonesia-invalid-{index}')
-                self.assertEqual(response.status_code, 502, response.text)
-        with patch('app.title_service.ask_json', new=self.model(ID_TITLE + ' Katun')):
-            cleaned = self.generate(request_key='indonesia-material-cleanup')
-            self.assertEqual(cleaned.status_code, 200, cleaned.text)
-            self.assertEqual(cleaned.json()['title'], ID_TITLE)
-        words = self.request('GET', '/title-keywords', params=ID_MARKET).json()['items']
-        forbidden = next(word['id'] for word in words if word['tag'] == '图案')
-        self.request('PUT', '/title-profiles/1', json={**ID_MARKET, 'category': '连衣裙', 'gender': '女',
-            'age_group': '成人', 'attributes': {'结构设计': '长袖'}, 'forbidden_keyword_ids': [forbidden]})
-        with patch('app.title_service.ask_json', new=self.model(ID_TITLE + ' Gaya Santai Kekinian')) as model:
-            response = self.generate(request_key='indonesia-forbidden')
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(response.json()['title'], 'Daster Lengan Panjang Gaya Santai Kekinian')
-            self.assertEqual(response.json()['attempts'], 1)
-            self.assertEqual(model.await_count, 1)  # 复用识图缓存，一次成文；删除禁用词后直接采用。
+        category = next(row for row in self.request('GET', '/title-dictionaries', params=ID_MARKET).json()['items'] if row['kind'] == 'category')
+        self.request('PATCH', f"/title-dictionaries/{category['id']}", json={'localized_name': 'Daster'})
+        with patch('app.title_service.ask_json', new=self.model('Lengan Panjang Dengan Motif Bunga')):
+            self.assertEqual(self.generate(request_key='missing-core').status_code, 502)
+        for suffix in (' Katun', ' Tahan Air'):
+            with patch('app.title_service.ask_json', new=self.model(ID_TITLE + suffix)):
+                response = self.generate(request_key='unconfirmed-' + suffix)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()['title'], ID_TITLE + suffix)
 
     def test_batch_cancel_retry_and_snapshot_language_remain_indonesian(self):
         self.configure()
@@ -255,7 +243,8 @@ class IndonesiaTitleTests(SupplyFixture, unittest.TestCase):
         with self.sessions() as db:
             caches = db.scalars(select(TitleAttributeCache)).all()
             self.assertTrue(all(db.get(TitleMarket, item.market_id).site == 'ID' for item in caches))
-        for title in ('Printed Floral Dress For Everyday Wear', '印尼语标题' * 8):
+        self.assertEqual(validate_localized_title('Printed Floral Dress For Everyday Wear', **ID_MARKET), 'Printed Floral Dress For Everyday Wear')
+        for title in ('印尼语标题' * 8,):
             with self.assertRaises(ProviderError):
                 validate_localized_title(title, **ID_MARKET)
 

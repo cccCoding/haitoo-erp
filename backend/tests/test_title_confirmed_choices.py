@@ -14,7 +14,7 @@ from app.database import Base
 from app.schema_version import alembic_config
 from app.title_models import TitleAttributeCache, TitleMarket, TitleRecord, TitleTask
 from app.title_service import (choose_keywords, create_record, digest, generate_record,
-                               identify_facts, match_keywords, remove_unselected_claims, validate_choice_claims)
+                               identify_facts, match_keywords, validate_selected_brand)
 from tests.test_title_length import keyword
 
 
@@ -104,10 +104,7 @@ class ConfirmedChoicesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(match_keywords(snapshot, {'attributes': [
             {'tag': '工艺', 'value': 'renda', 'localized_value': 'renda', 'source': 'manual'},
             {'tag': '品牌', 'value': 'Acme', 'localized_value': 'Acme', 'source': 'manual'}]}), [])
-        with self.assertRaisesRegex(ProviderError, '未选定的工艺'):
-            validate_choice_claims('Gaun Wanita Lengan Panjang renda', snapshot)
-        with self.assertRaisesRegex(ProviderError, '未选定的品牌'):
-            validate_choice_claims('Gaun Wanita Lengan Panjang Acme', snapshot)
+        validate_selected_brand('Gaun Wanita Lengan Panjang renda Acme', snapshot)
 
     async def test_indonesian_choices_use_original_brand_and_survive_soft_budget(self):
         snapshot = self.snapshot(site='ID', language='id', category_localized_name='Daster')
@@ -121,7 +118,7 @@ class ConfirmedChoicesTests(unittest.IsolatedAsyncioTestCase):
         chosen = choose_keywords(record.snapshot, candidates, {}, core='a' * 205)
         self.assertEqual({word['tag'] for word in chosen}, {'工艺', '品牌'})
         with self.assertRaisesRegex(ProviderError, '大小写'):
-            validate_choice_claims('Daster Wanita ' + brand['phrase'].lower(), record.snapshot)
+            validate_selected_brand('Daster Wanita ' + brand['phrase'].lower(), record.snapshot)
 
     async def test_request_reuse_rejects_changed_choice_configuration_and_keeps_history(self):
         snapshot = self.snapshot()
@@ -137,7 +134,7 @@ class ConfirmedChoicesTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(caught.exception.status_code, 409)
         self.assertEqual(record.snapshot, original)
 
-    async def test_extra_known_claims_are_deleted_in_single_batch_and_supply_titles(self):
+    async def test_extra_known_claims_are_preserved_in_single_batch_and_supply_titles(self):
         material = keyword(5, 'kapas', tag='材质')
         other_material = keyword(6, 'linen', tag='材质')
         for mode in ('single', 'batch', 'supply'):
@@ -167,28 +164,13 @@ class ConfirmedChoicesTests(unittest.IsolatedAsyncioTestCase):
 
                 with patch('app.title_service.ask_json', new=AsyncMock(side_effect=answer)):
                     result = await generate_record(self.db, record.id, 'key')
-                self.assertEqual(result['attempts'], 1)
+                self.assertEqual(result['attempts'], 4)
                 for phrase in ('kapas', 'sulaman', 'Acme'):
                     self.assertIn(phrase, result['title'])
                 for phrase in ('linen', 'renda', 'BrandB'):
-                    self.assertNotIn(phrase.lower(), result['title'].lower())
-                self.assertIn('已删除未选定的面料、工艺或品牌词', result['warnings'])
+                    self.assertIn(phrase.lower(), result['title'].lower())
+                self.assertNotIn('已删除未选定的面料、工艺或品牌词', result['warnings'])
 
-    def test_claim_cleanup_preserves_selected_subphrases_and_word_boundaries(self):
-        snapshot = self.snapshot()
-        snapshot['selected_craft_keyword'] = keyword(8, 'sulaman renda', tag='工艺')
-        snapshot['selected_brand_keyword'] = keyword(9, 'Acme Studio', tag='品牌')
-        title = 'Gaun sulaman renda Acme Studio Linenwood LINEN BrandB'
-        cleaned = remove_unselected_claims(title, snapshot, [], [])
-        self.assertEqual(cleaned, 'Gaun sulaman renda Acme Studio Linenwood')
-
-    def test_no_manual_choices_clean_known_claims_in_both_languages(self):
-        snapshot = self.snapshot(craft_keywords=[], craft_keyword_ids=[], brand_keywords=[], brand_keyword_ids=[])
-        for site, language, material in (('MY', 'ms', 'Kapas'), ('ID', 'id', 'Katun')):
-            with self.subTest(site=site):
-                title = f'Gaun Lengan Panjang {material} sulaman Acme'
-                self.assertEqual(remove_unselected_claims(title, snapshot, [], [], site=site, language=language),
-                                 'Gaun Lengan Panjang')
 
     async def test_recognition_hints_change_cache_and_do_not_become_facts(self):
         snapshot = self.snapshot(recognition_prompt='重点查看领口')
@@ -209,7 +191,7 @@ class ConfirmedChoicesTests(unittest.IsolatedAsyncioTestCase):
             old = await identify_facts(self.db, self.market.id, legacy, 'https://img.example/shared.png', 'key')
             current = await identify_facts(self.db, self.market.id, self.snapshot(), 'https://img.example/shared.png', 'key')
         self.assertEqual(model.await_count, 2)
-        self.assertIn('工艺', {fact['tag'] for fact in old['attributes']})
+        self.assertNotIn('工艺', {fact['tag'] for fact in old['attributes']})
         self.assertNotIn('工艺', {fact['tag'] for fact in current['attributes']})
 
     async def test_image_failure_does_not_pass_hints_to_manual_fallback(self):
@@ -224,7 +206,7 @@ class ConfirmedChoicesTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('recognition_hints', model.await_args.args[2])
         self.assertTrue(all(fact['source'] == 'manual' for fact in facts['attributes']))
 
-    async def test_legacy_snapshot_keeps_visual_craft_and_brand_exclusion(self):
+    async def test_legacy_snapshot_does_not_allow_visual_craft_or_brand(self):
         snapshot = self.snapshot()
         snapshot.pop('confirmed_choices_version')
         for kind in ('craft', 'brand'):
@@ -232,8 +214,8 @@ class ConfirmedChoicesTests(unittest.IsolatedAsyncioTestCase):
             snapshot.pop(f'{kind}_keywords')
         with patch('app.title_service.ask_json', new=AsyncMock(side_effect=self.model)) as model:
             facts = await identify_facts(self.db, self.market.id, snapshot, 'https://img.example/test.png', 'key')
-        self.assertIn('工艺', model.await_args.args[2]['visual_tags'])
-        self.assertEqual([word['phrase'] for word in match_keywords(snapshot, facts)], ['renda'])
+        self.assertNotIn('工艺', model.await_args.args[2]['visual_tags'])
+        self.assertEqual(match_keywords(snapshot, facts), [])
 
 
 class ConfirmedChoicesMigrationTests(unittest.TestCase):
