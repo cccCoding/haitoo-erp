@@ -137,9 +137,9 @@ async def extract_row(row, kind, api_key=None, *, allowed_tags=None, tag_semanti
     check_market(site=site, language=language)
     locale = market_labels(site)
     allowed_tags = [tag for tag in TAGS if tag not in RETIRED_TAGS] if allowed_tags is None else allowed_tags
-    # 旧任务快照可能仍允许兜底语义；无法归类的词也不再进入提词结果。
+    # 旧任务快照可能仍允许已退出的语义；这些词不再进入提词结果。
     semantics = tag_semantics or {}
-    allowed_tags = [tag for tag in allowed_tags if tag != '待分类' and semantics.get(tag) != '待分类']
+    allowed_tags = [tag for tag in allowed_tags if tag not in RETIRED_TAGS and semantics.get(tag) not in RETIRED_TAGS]
     if kind == 'keywords':
         v = row['values']
         if v['属性分类'] not in allowed_tags:
@@ -187,11 +187,11 @@ def confirm_import(db, task, selections):
     words = [word for word in words if word.id not in confirmed_ids]
     if not words:
         return result.get('confirmed', {'created': 0, 'merged': 0, 'evidence': 0})
-    # 已提词、未入库的历史结果同样丢弃未分类词，避免旧任务重新写入。
+    # 已提词、未入库的历史结果同样丢弃退出使用的标签，避免旧任务重新写入。
     semantics = {**task.snapshot.get('tag_semantics', {}), **{
         entry.name: entry.semantic_tag for entry in dictionary_entries(db, market.id, 'tag')}}
-    words = [word for word in words if word.word['tag'] != '待分类'
-             and semantics.get(word.word['tag']) != '待分类']
+    words = [word for word in words if word.word['tag'] not in RETIRED_TAGS
+             and semantics.get(word.word['tag']) not in RETIRED_TAGS]
     from .title_categories import materialize_categories
     categories_by_key = materialize_categories(db, task, {c for candidate in words for c in candidate.word['categories']})
     rows = {r['row']: r for r in task.snapshot['rows']}

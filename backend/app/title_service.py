@@ -29,7 +29,7 @@ TAGS = ["品类", "性别", "年龄", "人群", "风格", "场景", "季节", "�
         "颜色", "图案", "结构设计", "细节元素", "工艺", "功能", "穿着效果", "搭配", "价格定位", "品牌", "流行趋势",
         "地域文化", "搜索意图", "长尾程度", "营销修饰", "时间节点", "目标市场", "搜索语言", "关键词热度", "关键词竞争度", "待分类"]
 CATEGORY_FIELDS = ('品类', '性别', '年龄')
-RETIRED_TAGS = {'搜索语言', '关键词热度', '关键词竞争度', '待分类'}
+RETIRED_TAGS = {'搜索语言', '关键词热度', '关键词竞争度', '待分类', '长尾程度'}
 AUTOMATIC_TAGS = {'营销修饰', '目标市场'}
 DICTIONARY_TAGS = [tag for tag in TAGS if tag not in (*CATEGORY_FIELDS, '面料', *RETIRED_TAGS)]
 PROFILE_TAGS = [tag for tag in TAGS[:25] if tag not in (*CATEGORY_FIELDS, '面料')]

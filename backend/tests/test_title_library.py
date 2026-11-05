@@ -506,7 +506,9 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
                 semantic_tag='搜索语言'))
             old = TitleKeyword(market_id=market.id, code='OLDLANG', phrase='Bahasa Melayu', translation='马来语',
                 identity_hash=digest('old-language'), tag='搜索语种', categories=['连衣裙'])
-            db.add(old); db.commit(); old_id = old.id
+            long_tail = TitleKeyword(market_id=market.id, code='OLDTAIL', phrase='Elastik', translation='弹性',
+                identity_hash=digest(['elastik', '长尾程度']), tag='长尾程度', categories=['连衣裙'])
+            db.add_all([old, long_tail]); db.commit(); old_id, long_tail_id = old.id, long_tail.id
         data = self.request('GET', '/title-dictionaries').json()
         retired = [row for row in data['items'] if row['semantic_tag'] in RETIRED_TAGS]
         self.assertEqual(len(retired), len(RETIRED_TAGS) + 1)
@@ -514,6 +516,12 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         core = next(word for word in self.request('GET', '/title-keywords').json()['items'] if word['tag'] == '品类')
         self.assertEqual(self.request('PATCH', f"/title-keywords/{core['id']}", json={'tag': '搜索语种'}).status_code, 400)
         self.assertEqual(self.request('PATCH', f'/title-keywords/{old_id}', json={'translation': '历史马来语'}).status_code, 200)
+        self.assertEqual(self.request('PATCH', f"/title-keywords/{core['id']}", json={'tag': '长尾程度'}).status_code, 400)
+        self.assertIn(long_tail_id, [word['id'] for word in self.request('GET', '/title-keywords').json()['items']])
+        self.assertEqual(self.request('PATCH', f'/title-keywords/{long_tail_id}', json={'translation': '弹性设计'}).status_code, 200)
+        reclassified = self.request('PATCH', f'/title-keywords/{long_tail_id}', json={'tag': '结构设计'})
+        self.assertEqual(reclassified.status_code, 200, reclassified.text)
+        self.assertEqual(reclassified.json()['tag'], '结构设计')
         for tag in RETIRED_TAGS:
             self.assertEqual(self.request('POST', '/title-dictionaries/tag',
                 json={'name': f'{tag}别名', 'semantic_tag': tag}).status_code, 400)
@@ -1794,15 +1802,15 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
                     detail = self.request('GET', f"/title-tasks/{task['id']}").json()
                     self.assertEqual([word['tag'] for word in detail['result']['words']], ['品类'])
 
-    def test_pending_legacy_unclassified_results_are_not_imported(self):
+    def test_pending_legacy_retired_results_are_not_imported(self):
         from app.title_models import TitleImportWord
         self.profile()
         task = self.upload(kind='titles', content='商品标题,商品分类\nGaun Popular,连衣裙\n')
         with self.sessions() as db:
             stored = db.get(TitleTask, task['id'])
             stored.state = 'review'
-            stored.snapshot = {**stored.snapshot, 'tag_semantics': {'旧兜底': '待分类'}}
-            for index, tag in enumerate(['待分类', '旧兜底']):
+            stored.snapshot = {**stored.snapshot, 'tag_semantics': {'旧兜底': '待分类', '细分搜索词': '长尾程度'}}
+            for index, tag in enumerate(['待分类', '旧兜底', '长尾程度', '细分搜索词']):
                 db.add(TitleImportWord(task_id=stored.id, row_number=2, identity_hash=digest(index), word={
                     'phrase': 'Popular', 'translation': '热门', 'tag': tag, 'categories': ['连衣裙'],
                     'synonyms': [], 'conflicts': [], 'is_borrowed': False, 'position': 5, 'row': 2}))
@@ -2243,12 +2251,14 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
 
 
 class TitlePureTests(unittest.TestCase):
-    def test_legacy_unclassified_keywords_are_excluded_even_with_matching_facts(self):
+    def test_legacy_retired_keywords_are_excluded_even_with_matching_facts(self):
         from app.title_service import match_keywords
         snapshot = {'category': '连衣裙', 'locked_keyword_ids': [], 'forbidden_keyword_ids': [],
-            'keywords': [{'id': 1, 'tag': '待分类', 'phrase': 'Popular', 'translation': '热门',
-                          'synonyms': [], 'categories': ['连衣裙'], 'priority': 'preferred'}]}
-        facts = {'attributes': [{'tag': '待分类', 'value': '热门', 'localized_value': 'Popular', 'source': 'manual'}]}
+            'keywords': [{'id': index, 'tag': tag, 'phrase': 'Popular', 'translation': '热门',
+                          'synonyms': [], 'categories': ['连衣裙'], 'priority': 'preferred'}
+                         for index, tag in enumerate(['待分类', '长尾程度'])]}
+        facts = {'attributes': [{'tag': tag, 'value': '热门', 'localized_value': 'Popular', 'source': 'manual'}
+                                for tag in ['待分类', '长尾程度']]}
         self.assertEqual(match_keywords(snapshot, facts), [])
 
     def test_extraction_discards_missing_unknown_and_legacy_unclassified_tags(self):
@@ -2261,11 +2271,14 @@ class TitlePureTests(unittest.TestCase):
                     {'phrase': 'Popular', 'translation': '热门'},
                     {'phrase': 'Popular', 'translation': '热门', 'tag': None},
                     {'phrase': 'Popular', 'translation': '热门', 'tag': '未知标签'},
+                    {'phrase': 'Popular', 'translation': '热门', 'tag': '长尾程度'},
+                    {'phrase': 'Popular', 'translation': '热门', 'tag': '细分搜索词'},
                     {'phrase': 'Popular', 'translation': '热门', 'tag': '待分类'},
                     {'phrase': 'Popular', 'translation': '热门', 'tag': '旧兜底'}]}
                 with patch('app.title_import.ask_json', new=AsyncMock(return_value=answer)) as model:
                     result = asyncio.run(extract_row(row, 'titles', 'key', site=site, language=language,
-                        allowed_tags=['品类', '待分类', '旧兜底'], tag_semantics={'品类': '品类', '旧兜底': '待分类'}))
+                        allowed_tags=['品类', '待分类', '旧兜底', '长尾程度', '细分搜索词'],
+                        tag_semantics={'品类': '品类', '旧兜底': '待分类', '细分搜索词': '长尾程度'}))
                 self.assertEqual([word['phrase'] for word in result], [core])
                 self.assertEqual(model.await_args.args[2]['allowed_tags'], ['品类'])
                 self.assertEqual(model.await_args.args[2]['tag_semantics'], {'品类': '品类'})
