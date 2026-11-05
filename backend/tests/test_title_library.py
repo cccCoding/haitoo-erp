@@ -1099,8 +1099,8 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         compatible = self.request('POST','/title-keywords/1/review',json={'status':'enabled','review_token':word()['review_token']})
         self.assertEqual(compatible.status_code,200,compatible.text)
 
-    def test_profile_forbidden_keywords_accepts_200_and_rejects_201(self):
-        job = self.upload(content=KEYWORDS + ''.join(f'butang {index},纽扣{index},连衣裙,结构设计,否\n' for index in range(198)))
+    def test_profile_forbidden_keywords_accepts_100_and_rejects_101(self):
+        job = self.upload(content=KEYWORDS + ''.join(f'butang {index},纽扣{index},连衣裙,结构设计,否\n' for index in range(98)))
         self.request('POST', f"/title-tasks/{job['id']}/start", json={})
         self.run_worker()
         task = self.request('GET', f"/title-tasks/{job['id']}", params={'limit': 1000}).json()
@@ -1108,15 +1108,15 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             'selections': [word['index'] for word in task['result']['words']]})
         self.assertEqual(confirmed.status_code, 200, confirmed.text)
         ids = [word['id'] for word in self.request('GET', '/title-keywords', params={'page_size': 1000}).json()['items']]
-        self.assertEqual(len(ids), 201)
+        self.assertEqual(len(ids), 101)
         payload = {'category': '连衣裙', 'gender': '女', 'age_group': '成人',
-            'attributes': {}, 'forbidden_keyword_ids': ids[:200]}
+            'attributes': {}, 'forbidden_keyword_ids': ids[:100]}
         saved = self.request('PUT', '/title-profiles/1', json=payload)
         self.assertEqual(saved.status_code, 200, saved.text)
-        self.assertEqual(saved.json()['forbidden_keyword_ids'], ids[:200])
+        self.assertEqual(saved.json()['forbidden_keyword_ids'], ids[:100])
         rejected = self.request('PUT', '/title-profiles/1', json={**payload, 'forbidden_keyword_ids': ids})
         self.assertEqual(rejected.status_code, 422, rejected.text)
-        self.assertEqual(self.request('GET', '/title-profiles/1').json()['forbidden_keyword_ids'], ids[:200])
+        self.assertEqual(self.request('GET', '/title-profiles/1').json()['forbidden_keyword_ids'], ids[:100])
 
     def test_batch_delete_cleans_references_and_preserves_history(self):
         task_id = self.import_words()

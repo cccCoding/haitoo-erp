@@ -73,13 +73,13 @@ function toggleForbidden(value: string | number | null) {
   if (selectorDisabled.value || typeof value !== 'number') return
   forbiddenError.value = ''
   if (forbiddenIds.value.includes(value)) forbiddenIds.value = forbiddenIds.value.filter(id => id !== value)
-  else if (forbiddenIds.value.length >= 200) forbiddenError.value = '最多选择 200 个禁用关键词'
+  else if (forbiddenIds.value.length >= 100) forbiddenError.value = '最多选择 100 个禁用关键词'
   else forbiddenIds.value = [...forbiddenIds.value, value]
 }
 function selectForbiddenMatches(values: (string | number | null)[]) {
   if (selectorDisabled.value) return
   const ids = [...new Set([...forbiddenIds.value, ...values.filter((value): value is number => typeof value === 'number')])]
-  if (ids.length > 200) { forbiddenError.value = `全选后共 ${ids.length} 个禁用关键词，超过 200 个上限，请缩小搜索范围或移除部分已选词`; return }
+  if (ids.length > 100) { forbiddenError.value = `全选后共 ${ids.length} 个禁用关键词，超过 100 个上限，请缩小搜索范围或移除部分已选词`; return }
   forbiddenIds.value = ids
   forbiddenError.value = ''
 }
@@ -139,6 +139,7 @@ async function save() {
   error.value = ''; notice.value = ''
   try {
     if (!form.value.category || !form.value.gender || !form.value.age_group) throw new Error('请选择产品分类、使用性别和年龄')
+    if (forbiddenIds.value.length > 100) throw new Error('最多选择 100 个禁用关键词，请移除部分已选词后保存')
     if (materialConflict.value && !materialIds.value.length) throw new Error('请选择确认后的面料关键词，或明确清除未确认面料')
     if (legacyMaterial.value || unavailableMaterialIds.value.length) throw new Error('请选择当前产品分类下已启用的面料关键词，或清除不可用面料')
     if (materialIds.value.some(id => forbiddenIds.value.includes(id))) throw new Error('所选面料关键词不能同时禁用')
@@ -214,7 +215,7 @@ async function save() {
         <div class="profile-select-field"><span>禁用关键词（选填，可多选）</span>
           <SearchableSelect :model-value="null" :multiple="true" :bulk-selection="true" :selection-error="forbiddenError" :selected-values="forbiddenIds" :options="forbiddenChoices" :disabled="selectorDisabled" aria-label="禁用关键词" placeholder="选择禁用关键词" search-placeholder="搜索禁用关键词、中文释义、标签或编码" empty-label="本分类下暂无关键词" no-match-label="没有匹配的关键词" @toggle="toggleForbidden" @select-matched="selectForbiddenMatches" @clear-matched="clearForbiddenMatches" />
           <div v-if="forbiddenIds.length" class="profile-keyword-chips" aria-label="已选禁用关键词"><span v-for="id in forbiddenIds" :key="id">{{forbiddenLabel(id)}}<button v-if="!readonly" type="button" :disabled="selectorDisabled" :aria-label="`移除禁用关键词 ${forbiddenLabel(id)}`" @click="toggleForbidden(id)">×</button></span></div>
-          <small>选中的关键词不会出现在本模板的词库标题中，最多选择 200 个。</small>
+          <small>选中的关键词不会出现在本模板的词库标题中，最多选择 100 个。</small>
         </div>
         <label>补充 AI 提示词（选填）<textarea v-model="form.recognition_prompt" rows="3" maxlength="2000" placeholder="用于辅助 AI 识别首图中的服装细节" /></label>
         <label v-if="showFallback">{{market.languageName}}货盘兜底标题<textarea v-model="form.fallback_title" rows="2" :minlength="SUPPLY_TITLE_MINIMUM" :maxlength="SUPPLY_TITLE_MAXIMUM" /></label>

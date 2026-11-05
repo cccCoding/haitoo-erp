@@ -83,7 +83,7 @@ class ProfileInput(MarketInput):
     brand_keyword_ids: list[Annotated[int, Field(gt=0)]] = Field(default_factory=list, max_length=100)
     category_names: list[str] = Field(default_factory=list, max_length=100)
     locked_keyword_ids: list[int] = Field(default_factory=list, max_length=8)
-    forbidden_keyword_ids: list[int] = Field(default_factory=list, max_length=200)
+    forbidden_keyword_ids: list[int] = Field(default_factory=list, max_length=100)
     recognition_prompt: str | None = Field(default=None, max_length=2000)
     fallback_title: str | None = Field(default=None, max_length=SUPPLY_TITLE_MAXIMUM)
     # 仅兼容旧客户端；站点兜底标题设置后即可使用，不再需要审核。
