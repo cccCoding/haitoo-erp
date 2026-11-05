@@ -2,6 +2,7 @@
 import copy
 import secrets
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Literal
 from urllib.parse import quote
 
@@ -604,14 +605,24 @@ def downloaded_job_ids(db, company_id, identities):
 def jobs(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
     scope: Literal["own", "company"] = "own",
     user=Depends(supply_actor), db: Session = Depends(get_db)):
-    query = select(SupplyJob).where(SupplyJob.company_id == user.company_id)
+    query = select(SupplyJob.id).where(SupplyJob.company_id == user.company_id)
     if scope == "company":
         require_manager(user)
     else:
         query = query.where(SupplyJob.user_id == user.id)
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
-    items = db.scalars(query.order_by(SupplyJob.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
-    downloaded = downloaded_job_ids(db, user.company_id, [item.id for item in items])
+    # 先只对 ID 分页，避免大快照和文件字段参与排序；LIMIT 阻止 MySQL 合并派生表。
+    page_ids = query.order_by(SupplyJob.id.desc()).offset((page - 1) * page_size).limit(page_size).subquery()
+    rows = db.execute(select(SupplyJob.id, SupplyJob.strategy_id, SupplyJob.user_id, SupplyJob.agent_name,
+        SupplyJob.state, SupplyJob.stage, SupplyJob.progress, SupplyJob.error, SupplyJob.created_at,
+        SupplyJob.completed_at, SupplyJob.output_expires_at, SupplyJob.output_deleted_at,
+        SupplyJob.snapshot["strategy"]["name"].as_string().label("strategy_name"),
+        SupplyJob.snapshot["user_name"].as_string().label("user_name"))
+        .join(page_ids, page_ids.c.id == SupplyJob.id).order_by(SupplyJob.id.desc())).mappings().all()
+    downloaded = downloaded_job_ids(db, user.company_id, [row["id"] for row in rows])
+    # 复用详情和下载的摘要/文件名规则，只构造它们实际需要的两个快照字段。
+    items = [SimpleNamespace(**row, snapshot={"strategy": {"name": row["strategy_name"]},
+        "user_name": row["user_name"]}) for row in rows]
     return {"items": [{**job_payload(item), "downloaded": item.id in downloaded} for item in items],
         "total": total, "page": page, "page_size": page_size}
 

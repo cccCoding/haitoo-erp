@@ -647,7 +647,10 @@ class SupplyJobMaterial(Base):
 
 class SupplyAudit(Base):
     __tablename__ = "supply_audits"
-    __table_args__ = (Index("ix_supply_audits_company_created", "company_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_supply_audits_company_created", "company_id", "created_at"),
+        Index("ix_supply_audits_download", "company_id", "action", "target_type", "target_id"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     user_id: Mapped[int] = mapped_column(index=True)

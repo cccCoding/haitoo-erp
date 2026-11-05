@@ -132,6 +132,26 @@ class SupplySchemaTests(unittest.TestCase):
             db.commit()
             self.assertEqual(db.query(SupplyJobMaterial).count(), 2)
 
+    def test_download_index_migration_preserves_audits_and_matches_model(self):
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, "20261105_67")
+            connection.execute(text("""INSERT INTO supply_audits
+                (company_id, user_id, action, target_type, target_id, details, created_at)
+                VALUES (1, 1, 'download', 'job', 42, '{}', CURRENT_TIMESTAMP)"""))
+            command.upgrade(config, "20261105_68")
+            index = next(item for item in inspect(connection).get_indexes("supply_audits")
+                         if item["name"] == "ix_supply_audits_download")
+            self.assertEqual(index["column_names"], ["company_id", "action", "target_type", "target_id"])
+            self.assertEqual(connection.scalar(text("SELECT target_id FROM supply_audits")), 42)
+            command.downgrade(config, "20261105_67")
+            self.assertNotIn("ix_supply_audits_download",
+                             {item["name"] for item in inspect(connection).get_indexes("supply_audits")})
+            self.assertEqual(connection.scalar(text("SELECT target_id FROM supply_audits")), 42)
+        Base.metadata.create_all(self.engine)
+        self.assertIn("ix_supply_audits_download",
+                      {index.name for index in Base.metadata.tables["supply_audits"].indexes})
+
 
 if __name__ == "__main__":
     unittest.main()
