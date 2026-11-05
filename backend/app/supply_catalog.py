@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .supply_title_rules import MAXIMUM as SUPPLY_TITLE_MAXIMUM
+from .title_warnings import visible_title_warnings
 from .ai_providers import DEEPSEEK_TITLE_MODEL
 from .credentials import decrypt_secret, encrypt_secret
 from .database import get_db
@@ -618,8 +619,12 @@ def jobs(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
 @router.get("/jobs/{identity}")
 def job_detail(identity: int, user=Depends(supply_actor), db: Session = Depends(get_db)):
     item = accessible_job(db, user, identity)
+    drafts = copy.deepcopy(item.checkpoint.get('links', []))
+    for draft in drafts:
+        if 'title_warnings' in draft:
+            draft['title_warnings'] = visible_title_warnings(draft['title_warnings'])
     return {**job_payload(item), "downloaded": item.id in downloaded_job_ids(db, user.company_id, [item.id]),
-        "drafts": item.checkpoint.get("links", []), "strategy": item.snapshot.get("strategy")}
+        "drafts": drafts, "strategy": item.snapshot.get("strategy")}
 
 
 @router.post("/jobs/{identity}/cancel")

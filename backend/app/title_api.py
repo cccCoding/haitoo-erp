@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session, undefer
 
 from .title_markets import TitleMarketSelection, check_market
+from .title_warnings import visible_title_warnings
 from .supply_title_rules import MAXIMUM as SUPPLY_TITLE_MAXIMUM
 from .ai_providers import ProviderError
 from .database import get_db
@@ -935,6 +936,11 @@ def tasks(platform: str = 'TikTok', site: str = 'MY', language: str = 'ms', kind
 
 def task_payload(task, offset=0, limit=100, db=None, category='', tag='', imported=None):
     result = copy.deepcopy(task.result)
+    if task.kind == 'batch':
+        items = result.get('items') or {}
+        for item in items.values() if isinstance(items, dict) else items:
+            if isinstance(item, dict) and 'warnings' in item:
+                item['warnings'] = visible_title_warnings(item['warnings'])
     resolution = category_summary(db, task) if task.kind == 'import' and db is not None else None
     confirmed_ids = set(result.get('selections', []))
     if task.kind == 'import':
@@ -1145,12 +1151,12 @@ async def generate_single(db, user, template, image_url, payload):
 def statistics(platform: str = 'TikTok', site: str = 'MY', language: str = 'ms', user: User = Depends(reader), db: Session = Depends(get_db)):
     market = market_for(db, user, platform, site, language)
     if not market:
-        return {'generated': 0, 'adopted': 0, 'manual': 0, 'high_similarity': 0, 'attempts': 0}
+        return {'generated': 0, 'adopted': 0, 'manual': 0, 'attempts': 0}
     query = select(TitleRecord).where(TitleRecord.market_id == market.id)
     if not is_title_manager(user):
         query = query.where(TitleRecord.user_id == user.id)
     rows = db.scalars(query).all()
     return {'generated': sum(bool(r.title) and r.source == 'ai' for r in rows),
         'adopted': sum(bool(r.adopted_at) and r.source == 'ai' for r in rows),
-        'manual': sum(r.source == 'manual' for r in rows), 'high_similarity': sum(any('高度相似' in w for w in r.warnings) for r in rows),
+        'manual': sum(r.source == 'manual' for r in rows),
         'attempts': sum(r.attempts for r in rows), 'coverage_insufficient': sum(any('覆盖不足' in w for w in r.warnings) for r in rows)}

@@ -280,7 +280,7 @@ onUnmounted(()=>{disposed=true;revision++;detailRequest++;if(timer)clearTimeout(
       </table></div>
       <p v-if="!words.length" class="empty">暂无关键词，请先导入并确认入库。</p><TitlePagination label="关键词" :page="page" :page-size="pageSize" :total="total" :disabled="busy||taskListLoading" @page="changeWordPage" @page-size="changeWordPageSize" />
     </section>
-    <section v-if="tab==='stats'" class="title-panel"><div class="title-stat-grid"><div v-for="(label,key) in {generated:'生成标题',adopted:'采纳标题',manual:'人工调整',high_similarity:'高相似标题',coverage_insufficient:'覆盖不足',attempts:'成文调用次数'}" :key="key"><strong>{{stats[key]||0}}</strong><span>{{label}}</span></div></div><p class="title-note">调用次数在请求前记录，可能包括失败请求，不等同于供应商账单。自然流效果需结合真实搜索曝光、点击和转化评估。</p></section>
+    <section v-if="tab==='stats'" class="title-panel"><div class="title-stat-grid"><div v-for="(label,key) in {generated:'生成标题',adopted:'采纳标题',manual:'人工调整',coverage_insufficient:'覆盖不足',attempts:'成文调用次数'}" :key="key"><strong>{{stats[key]||0}}</strong><span>{{label}}</span></div></div><p class="title-note">调用次数在请求前记录，可能包括失败请求，不等同于供应商账单。自然流效果需结合真实搜索曝光、点击和转化评估。</p></section>
     <section v-if="tab==='imports'||tab==='stats'" class="title-panel">
       <h3>{{tab==='imports'?'导入记录':'后台标题任务'}}</h3>
       <div class="title-task-table-wrap creative-resource-table-wrap" :aria-busy="taskListLoading">

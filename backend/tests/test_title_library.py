@@ -19,7 +19,7 @@ from app.schema_version import alembic_config
 from app.title_import import extract_row, parse_file
 from app.title_models import TitleEvidence, TitleKeyword, TitleMarket, TitleRecord, TitleTask, TitleTemplateProfile
 from app.title_service import (adopt_record, create_record, digest, generate_record, get_market,
-    normalized_title, profile_snapshot, similarity, validate_malay_title)
+    normalized_title, profile_snapshot, validate_malay_title)
 from app.title_worker import claim_task, run_task
 from tests.test_supply_catalog import SupplyFixture
 
@@ -1696,6 +1696,61 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(self.request('GET', '/title-statistics').json()['adopted'], 1)
 
+    def test_replayed_title_hides_legacy_similarity_warnings_without_updating_history(self):
+        self.enable(); self.profile()
+        payload = {'method': 'library', 'image_url': 'https://img.example/1.png', 'request_key': 'legacy-warning-replay'}
+        with patch('app.title_service.ask_json', new=self.model()):
+            generated = self.request('POST', '/templates/1/generate-draft-title', uid=2, json=payload).json()
+        original = ['按首图描述，请核对其他 SKU',
+            '与本批或近 90 天已采用标题高度相似，真实属性有限时允许保留',
+            '与并发生成的同批标题高度相似，请核对']
+        with self.sessions() as db:
+            record = db.get(TitleRecord, generated['generation_id'])
+            record.warnings = original
+            db.commit()
+        with patch('app.title_service.ask_json', new=AsyncMock(side_effect=AssertionError('不应重新调用模型'))):
+            replay = self.request('POST', '/templates/1/generate-draft-title', uid=2, json=payload)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()['warnings'], [original[0]])
+        self.assertEqual(replay.json()['title'], generated['title'])
+        self.assertEqual(replay.json()['attempts'], generated['attempts'])
+        with self.sessions() as db:
+            record = db.get(TitleRecord, generated['generation_id'])
+            self.assertEqual(record.warnings, original)
+            self.assertIsNone(record.adopted_at)
+        stats = self.request('GET', '/title-statistics').json()
+        self.assertNotIn('high_similarity', stats)
+        self.assertEqual(stats['attempts'], generated['attempts'])
+
+    def test_batch_history_filters_only_similarity_warnings_in_response_copies(self):
+        self.enable()
+        entries = [{'key': 'one', 'title': TITLE, 'warnings': [
+            '与并发生成的同批标题高度相似，请核对', '词库覆盖不足，请核对']},
+            {'key': 'failed', 'error': '原失败原因'}]
+        for index, items in enumerate(({item['key']: item for item in entries}, entries)):
+            with self.subTest(format=type(items).__name__):
+                original = {'items': copy.deepcopy(items)}
+                expected = copy.deepcopy(original)
+                first = expected['items']['one'] if isinstance(items, dict) else expected['items'][0]
+                first['warnings'] = ['词库覆盖不足，请核对']
+                with self.sessions() as db:
+                    task = TitleTask(market_id=get_market(db, 1).id, user_id=2, kind='batch', state='completed',
+                        snapshot={}, result=copy.deepcopy(original), request_key=f'legacy-task-warnings-{index}',
+                        request_hash=f'legacy-task-warnings-{index}')
+                    db.add(task); db.flush(); identity = task.id; db.commit()
+                response = self.request('GET', f'/title-tasks/{identity}', uid=2)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()['result'], expected)
+                listed = self.request('GET', '/title-tasks', uid=2, params={'kind': 'batch'}).json()['items']
+                self.assertEqual(listed[0]['result'], expected)
+                with self.sessions() as db:
+                    self.assertEqual(db.get(TitleTask, identity).result, original)
+
+    def test_empty_statistics_no_longer_include_similarity(self):
+        result = self.request('GET', '/title-statistics').json()
+        self.assertNotIn('high_similarity', result)
+        self.assertEqual(result, {'generated': 0, 'adopted': 0, 'manual': 0, 'attempts': 0})
+
     def test_library_ignores_legacy_template_and_per_request_requirements(self):
         self.enable(); self.profile(); self.import_words()
         self.request('PUT', '/templates/1', json={'title_template': 'Place category first'})
@@ -2078,10 +2133,9 @@ class TitlePureTests(unittest.TestCase):
         self.assertEqual(model.await_args.args[2]['tag_semantics'], {'袖型': '结构设计'})
         self.assertEqual((words[0]['tag'], words[0]['position'], words[0]['phrase']), ('袖型', 5, 'Lengan Panjang'))
 
-    def test_similarity_ignores_sequence_case_punctuation_and_order(self):
+    def test_normalized_title_preserves_adoption_comparison_rules(self):
         self.assertEqual(normalized_title('Gaun, Bunga - L01'), normalized_title('GAUN BUNGA - L02'))
-        self.assertTrue(similarity(TITLE, 'Corak Bunga Gaun Lengan Panjang - L02'))
-        self.assertFalse(similarity(TITLE, 'Seluar Lelaki Potongan Longgar'))
+        self.assertNotEqual(normalized_title(TITLE), normalized_title('Corak Bunga Gaun Lengan Panjang'))
         for bad in ('Floral Long Sleeve Everyday Dress', '中文马来语商品标题' * 4, TITLE+'\nnew line'):
             with self.assertRaises(ProviderError):
                 validate_malay_title(bad)

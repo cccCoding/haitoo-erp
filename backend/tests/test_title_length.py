@@ -1,5 +1,6 @@
 """词库标题软长度目标、选词预算及多次成文的结果保留。"""
 import asyncio
+import copy
 import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
@@ -9,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.ai_providers import ProviderError
 from app.database import Base
-from app.title_models import TitleKeyword, TitleMarket, TitleRecord
+from app.title_models import TitleKeyword, TitleMarket, TitleRecord, TitleTask
 from app.title_service import choose_keywords, create_record, generate_record, match_keywords
 
 
@@ -178,24 +179,49 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['attempts'], 4)
         self.assertEqual(self.db.get(TitleRecord, self.record_id).title, MY_231)
 
-    async def test_in_range_similar_title_is_kept_over_shorter_unique_title(self):
-        result, _ = await self.generate([MY_180, SHORT, ProviderError('failed'), SHORT], history=MY_180)
+    async def test_identical_adopted_title_finishes_immediately_without_history_prompt(self):
+        result, model = await self.generate([MY_180], history=MY_180)
         self.assertEqual(result['title'], MY_180)
-        self.assertTrue(any('高度相似' in warning for warning in result['warnings']))
-
-    async def test_lower_similarity_wins_when_both_candidates_are_in_range(self):
-        # 仅隔离相似度判定，成文及其余事实校验仍走实际流水线。
-        with patch('app.title_service.similarity', side_effect=[True, False, False]):
-            result, model = await self.generate([MY_180, MY_230], history=MY_180)
-        self.assertEqual(result['title'], MY_230)
-        self.assertEqual(model.await_count, 2)
+        self.assertEqual(result['attempts'], 1)
+        self.assertEqual(model.await_count, 1)
+        self.assertNotIn('avoid', model.await_args.args[2])
+        self.assertNotIn('similarity', str(model.await_args).lower())
         self.assertFalse(any('高度相似' in warning for warning in result['warnings']))
 
-    async def test_equal_score_keeps_first_candidate_and_its_metadata(self):
-        with patch('app.title_service.similarity', return_value=True):
-            result, _ = await self.generate([MY_180, MY_230, MY_230, MY_230], history=MY_180)
+    async def test_identical_supply_title_finishes_immediately(self):
+        result, model = await self.generate([MY_180], supply=True, history=MY_180)
         self.assertEqual(result['title'], MY_180)
-        self.assertEqual(result['character_count'], 180)
+        self.assertEqual(result['attempts'], 1)
+        self.assertEqual(model.await_count, 1)
+        self.assertNotIn('avoid', model.await_args.args[2])
+
+    async def test_identical_title_in_same_batch_does_not_trigger_another_call(self):
+        await self.generate([MY_180])
+        record = self.db.get(TitleRecord, self.record_id)
+        task = TitleTask(market_id=record.market_id, user_id=1, kind='batch', state='running',
+            snapshot={}, request_key='same-batch', request_hash='same-batch')
+        self.db.add(task); self.db.flush()
+        record.task_id, record.title, record.attempts = task.id, None, 0
+        record.state = 'queued'
+        self.db.add(TitleRecord(market_id=record.market_id, user_id=1, template_id=1,
+            task_id=task.id, request_key='same-batch-history', category=record.category,
+            image_url=record.image_url, snapshot={}, title=MY_180, state='generated'))
+        self.db.commit()
+        model = AsyncMock(return_value={'title': MY_180})
+        with patch('app.title_service.ask_json', new=model):
+            result = await generate_record(self.db, record.id, 'test-key')
+        self.assertEqual(result['title'], MY_180)
+        self.assertEqual(result['attempts'], 1)
+        self.assertEqual(model.await_count, 1)
+        self.assertFalse(any('高度相似' in warning for warning in result['warnings']))
+
+    async def test_equal_length_scores_keep_first_candidate_and_its_metadata(self):
+        reordered = 'Gaun Lengan Panjang Wanita Corak Bunga'
+        self.assertEqual(len(reordered), len(SHORT))
+        result, _ = await self.generate([SHORT, reordered, ProviderError('failed'), reordered])
+        self.assertEqual(result['title'], SHORT)
+        self.assertEqual(result['character_count'], len(SHORT))
+        self.assertEqual(result['attempts'], 4)
 
     async def test_cleaned_material_title_finishes_without_retrying_the_same_extra_claim(self):
         result, _ = await self.generate([SHORT, SHORT + ' Kapas', SHORT + ' Kalis Air', ProviderError('failed')])
@@ -258,12 +284,69 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['attempts'], 4)
         self.assertEqual(retry.await_count, 2)
 
+    async def test_supply_resumes_legacy_three_part_score_and_removes_only_similarity_feedback(self):
+        with self.assertRaises(asyncio.CancelledError):
+            await self.generate([MY_230, asyncio.CancelledError()], supply=True)
+        record = self.db.get(TitleRecord, self.record_id)
+        state = copy.deepcopy(record.snapshot['supply_generation'])
+        state['best']['score'] = [True, 30, True]
+        state['best']['warnings'] = ['保留原提示', '与本批或近 90 天已采用标题高度相似，真实属性有限时允许保留']
+        state['feedback'] = ('Compress to 180-200 characters. '
+            'High similarity. Rotate optional verified attributes and synonyms; retain category.')
+        record.snapshot = {**record.snapshot, 'supply_generation': state}
+        self.db.commit()
+        selected = state['selected']
+        model = AsyncMock(return_value={'title': MY_180})
+        with patch('app.title_service.ask_json', new=model), \
+             patch('app.title_service.choose_keywords', side_effect=AssertionError('禁止重新选词')):
+            result = await generate_record(self.db, record.id, 'test-key')
+        self.assertEqual(result['title'], MY_180)
+        self.assertEqual(result['attempts'], 3)
+        self.assertEqual(model.await_count, 1)
+        self.assertEqual(model.await_args.args[2]['selected'], selected)
+        self.assertEqual(model.await_args.args[2]['feedback'], 'Compress to 180-200 characters.')
+        self.assertNotIn('avoid', model.await_args.args[2])
+        stored = self.db.get(TitleRecord, record.id, populate_existing=True).snapshot['supply_generation']
+        self.assertEqual(stored['best']['score'], [False, 0])
+
+    async def test_supply_legacy_in_range_best_requires_no_more_calls_and_keeps_attempt_count(self):
+        with self.assertRaises(asyncio.CancelledError):
+            await self.generate([MY_230, asyncio.CancelledError()], supply=True)
+        record = self.db.get(TitleRecord, self.record_id)
+        state = copy.deepcopy(record.snapshot['supply_generation'])
+        state['best'].update(title=MY_180, score=[False, 0, True],
+            warnings=['保留原提示', '与并发生成的同批标题高度相似，请核对'])
+        record.snapshot = {**record.snapshot, 'supply_generation': state}
+        self.db.commit()
+        model = AsyncMock(side_effect=AssertionError('不得因旧相似度标记继续成文'))
+        with patch('app.title_service.ask_json', new=model):
+            result = await generate_record(self.db, record.id, 'test-key')
+        model.assert_not_awaited()
+        self.assertEqual(result['title'], MY_180)
+        self.assertEqual(result['attempts'], 2)
+        self.assertEqual(result['warnings'], ['保留原提示'])
+
+    async def test_supply_legacy_equal_length_score_preserves_first_candidate_metadata(self):
+        with self.assertRaises(asyncio.CancelledError):
+            await self.generate([MY_230, asyncio.CancelledError()], supply=True)
+        record = self.db.get(TitleRecord, self.record_id)
+        state = copy.deepcopy(record.snapshot['supply_generation'])
+        state['best'].update(score=[True, 30, True], warnings=['首个候选的提示'])
+        record.snapshot = {**record.snapshot, 'supply_generation': state}
+        self.db.commit()
+        model = AsyncMock(side_effect=[{'title': MY_230}, ProviderError('最后一次请求失败')])
+        with patch('app.title_service.ask_json', new=model):
+            result = await generate_record(self.db, record.id, 'test-key')
+        self.assertEqual(result['title'], MY_230)
+        self.assertEqual(result['attempts'], 4)
+        self.assertEqual(result['warnings'], ['首个候选的提示'])
+
     async def test_supply_resume_does_not_remove_optional_word_twice(self):
         words = [keyword(1, 'Corak Bunga', tag='图案'), keyword(2, 'Lengan Panjang', tag='结构设计')]
         with self.assertRaises(asyncio.CancelledError):
             await self.generate([MY_231, MY_231, asyncio.CancelledError()], supply=True, words=words)
         record = self.db.get(TitleRecord, self.record_id)
-        state = record.snapshot['supply_generation']
+        state = copy.deepcopy(record.snapshot['supply_generation'])
         self.assertEqual(record.attempts, 3)
         self.assertEqual(len(state['removed_keyword_ids']), 1)
         selection = state['selected']

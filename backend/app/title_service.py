@@ -7,7 +7,6 @@ import re
 import secrets
 import unicodedata
 from datetime import datetime, timedelta
-from difflib import SequenceMatcher
 
 import httpx
 from fastapi import HTTPException
@@ -16,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .ai_providers import DEEPSEEK_TITLE_MODEL, ProviderError, _public_url
 from .title_markets import check_market, market_labels, localized_value
+from .title_warnings import visible_title_warnings
 from .config import get_settings
 from .credentials import decrypt_secret
 from .models import Company, Role, User, UserAIProviderCredential
@@ -383,18 +383,6 @@ def profile_snapshot(db, market, template_id, *, require_fallback=False):
                 if normalize(profile.category) in map(normalize, row.categories) or row.id in profile.forbidden_keyword_ids]}
 
 
-def similarity(title, previous, selected=None, old_selected=None):
-    left, right = normalized_title(title), normalized_title(previous)
-    a, b = set(left.split()), set(right.split())
-    def semantic(words):
-        return {min(map(normalize, [item['phrase'], *item.get('synonyms', [])])) for item in words or []}
-    # 词序变化仍被集合相似度捕获；同义关系用于补充语义比较。
-    sa, sb = semantic(selected), semantic(old_selected)
-    jaccard = max(len(a & b) / max(1, len(a | b)), len(sa & sb) / max(1, len(sa | sb)) if sa and sb else 0)
-    settings = get_settings()
-    return left == right or jaccard >= settings.title_jaccard_threshold or SequenceMatcher(None, left, right).ratio() >= settings.title_text_threshold
-
-
 def match_keywords(snapshot, facts):
     category = normalize(snapshot["category"])
     result = []
@@ -554,7 +542,7 @@ async def identify_facts(db, market_id, snapshot, image_url, api_key):
 
 def record_payload(record):
     return {"title": record.title, "character_count": len(record.title or ""), "generation_id": record.id,
-        "keywords": record.selected_keywords, "facts": record.facts, "warnings": record.warnings,
+        "keywords": record.selected_keywords, "facts": record.facts, "warnings": visible_title_warnings(record.warnings),
         "state": record.state, "source": record.source, "attempts": record.attempts,
         "platform": record.snapshot.get("platform"), "site": record.snapshot.get("site"),
         "language": record.snapshot.get("language"), "revision": record.snapshot.get("revision")}
@@ -662,18 +650,19 @@ async def generate_record(db, record_id, api_key=None):
         forbidden_phrases = snapshot['forbidden_phrases']
         required_core = remove_forbidden_phrases(core, forbidden_phrases)
         candidates = match_keywords(snapshot, facts)
-        history = db.scalars(select(TitleRecord).where(TitleRecord.market_id == market.id,
-            TitleRecord.category == record.category, TitleRecord.id != record.id, TitleRecord.title.is_not(None),
-            or_(TitleRecord.adopted_at >= datetime.utcnow() - timedelta(days=90),
-                TitleRecord.task_id == record.task_id if record.task_id else False,
-                TitleRecord.snapshot["supply_job_id"].as_integer() == snapshot.get("supply_job_id", -1)))).all()
-        recent = [{"title": r.title, "keywords": r.selected_keywords} for r in history]
         supply = snapshot.get('supply', False)
         target_minimum = supply_rules.TARGET_MINIMUM if supply else 180
         target_maximum = supply_rules.TARGET_MAXIMUM if supply else 230
         maximum = supply_rules.MAXIMUM if supply else 255
         state = copy.deepcopy(snapshot.get('supply_generation', {})) if supply else {}
         best = state.get('best')
+        if best:
+            # 旧货盘评分的第三项为相似度标记，恢复时仅保留长度评分。
+            best['score'] = best['score'][:2]
+            best['warnings'] = visible_title_warnings(best['warnings'])
+        if 'feedback' in state:
+            state['feedback'] = state['feedback'].replace(
+                'High similarity. Rotate optional verified attributes and synonyms; retain category.', '').strip()
         last_good = (best['title'], best['warnings'], best['keywords']) if best else None
         best_score = tuple(best['score']) if best else None
         previous_title = state.get('previous_title', '')
@@ -693,7 +682,8 @@ async def generate_record(db, record_id, api_key=None):
             db.commit()
             db.refresh(record)
 
-        while record.attempts < supply_rules.MAX_ATTEMPTS:
+        # 恢复时已有达标候选就直接采用，不再因旧相似度标记继续成文。
+        while record.attempts < supply_rules.MAX_ATTEMPTS and (best_score is None or best_score[0]):
             task_still_active(db, record)
             db.refresh(record)
             if record.lease_owner != owner:
@@ -771,7 +761,7 @@ async def generate_record(db, record_id, api_key=None):
                      "previous_title": previous_title, "character_count": len(previous_title),
                      "unused_confirmed_attributes": [fact for fact in facts['attributes']
                          if not contains_phrase(previous_title, localized_value(fact))],
-                     "avoid": [r["title"] for r in recent[-12:]], "feedback": feedback}, max_tokens=700)
+                     "feedback": feedback}, max_tokens=700)
                 raw_title = answer.get('title')
                 removed_forbidden = removed_unselected = False
                 if isinstance(raw_title, str):
@@ -810,22 +800,17 @@ async def generate_record(db, record_id, api_key=None):
                                not any(normalize(localized_value(f)) == normalize(w["phrase"]) for w in used_keywords)]
                 if non_library:
                     warnings.append("非词库词：" + "、".join(non_library))
-                high = any(similarity(title, old["title"], used_keywords, old["keywords"]) for old in recent)
-                if high:
-                    warnings.append("与本批或近 90 天已采用标题高度相似，真实属性有限时允许保留")
                 distance = max(target_minimum - len(title), len(title) - target_maximum, 0)
-                score = (distance > 0, distance, high)
+                score = (distance > 0, distance)
                 if best_score is None or score < best_score:
                     last_good = (title, warnings, used_keywords)
                     best_score = score
-                should_finish = removed_forbidden or removed_unselected or (not distance and not high)
+                should_finish = removed_forbidden or removed_unselected or not distance
                 feedback_parts = []
                 if distance:
                     feedback_parts.append(f'Previous title has {len(title)} characters; target '
                         f'{target_minimum}-{target_maximum}. Expand with unused confirmed attributes if short, '
                         'or compress if long. Preserve required phrases without repetition or invented content.')
-                if high:
-                    feedback_parts.append('High similarity. Rotate optional verified attributes and synonyms; retain category.')
                 feedback = ' '.join(feedback_parts)
                 if supply:
                     state.update(overlong_streak=0, previous_title=previous_title, feedback=feedback,
@@ -854,15 +839,6 @@ async def generate_record(db, record_id, api_key=None):
         if not last_good:
             raise ProviderError(state.get('last_error') or feedback or "已达到每条标题最多 4 次成文调用，请人工处理")
         title, warnings, selected = last_good
-        db.scalar(select(TitleMarket).where(TitleMarket.id == market.id).with_for_update())
-        # 并发请求可能在模型调用期间完成；提交前再检查一次，避免漏报。
-        concurrent = db.scalars(select(TitleRecord).where(TitleRecord.market_id == market.id,
-            TitleRecord.category == record.category, TitleRecord.id != record.id, TitleRecord.title.is_not(None),
-            or_(TitleRecord.adopted_at >= datetime.utcnow() - timedelta(days=90),
-                TitleRecord.task_id == record.task_id if record.task_id else False,
-                TitleRecord.snapshot['supply_job_id'].as_integer() == snapshot.get('supply_job_id', -1))).with_for_update())
-        if any(similarity(title, old.title, selected, old.selected_keywords) for old in concurrent) and not any('高度相似' in w for w in warnings):
-            warnings.append('与并发生成的同批标题高度相似，请核对')
         changed = db.execute(update(TitleRecord).where(TitleRecord.id == record.id, TitleRecord.lease_owner == owner).values(
             title=title, warnings=warnings, selected_keywords=selected, state="generated", error=None))
         if not changed.rowcount:

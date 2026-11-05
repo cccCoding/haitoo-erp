@@ -54,6 +54,21 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
         response = self.request('POST', f'/supply/jobs/{identity}/cancel', uid=4)
         self.assertEqual(response.status_code, 200, response.text)
 
+    def test_historical_detail_hides_similarity_but_keeps_fallback_and_failure_reason(self):
+        identity = self.submit(self.create_strategy())
+        warnings = ['已使用马来语兜底标题；可能与其他链接高度相似',
+            'AI 标题生成失败：模型超时', '与并发生成的同批标题高度相似，请核对', '保留其他提示']
+        checkpoint = {'links': [{'title': 'Gaun Wanita Lengan Panjang', 'title_warnings': warnings}]}
+        with self.sessions() as db:
+            db.get(SupplyJob, identity).checkpoint = copy.deepcopy(checkpoint)
+            db.commit()
+        response = self.request('GET', f'/supply/jobs/{identity}', uid=4)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['drafts'][0]['title_warnings'],
+            ['已使用马来语兜底标题', 'AI 标题生成失败：模型超时', '保留其他提示'])
+        with self.sessions() as db:
+            self.assertEqual(db.get(SupplyJob, identity).checkpoint, checkpoint)
+
     def test_market_selection_validation_legacy_default_and_omitted_patch_preserves_id(self):
         for site in ('SG', '', 'id'):
             response = self.request('POST', '/supply/strategies', uid=4, json=self.strategy_input(title_site=site))
