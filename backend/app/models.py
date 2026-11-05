@@ -633,11 +633,14 @@ class SupplyJobMaterial(Base):
     __table_args__ = (
         UniqueConstraint("job_id", "material_id", "version_hash", "link_index", name="uq_supply_job_material_version_link"),
         Index("ix_supply_job_materials_usage", "company_id", "material_id", "successful"),
+        Index("ix_supply_job_materials_sku_usage", "company_id", "sku", "successful", "job_id", "link_index"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(index=True)
     job_id: Mapped[int] = mapped_column(index=True)
     material_id: Mapped[int] = mapped_column(index=True)
+    # 永久保存当时使用的 SKU，素材删除或重新导入不重置账号额度。
+    sku: Mapped[str | None] = mapped_column(String(24), nullable=True)
     version_hash: Mapped[str] = mapped_column(String(64))
     source: Mapped[str] = mapped_column(String(30), default="snapshot", server_default="snapshot")
     # -1 为候选关联，0 起为实际商品组；避免 MySQL 的 NULL 唯一键漏洞。

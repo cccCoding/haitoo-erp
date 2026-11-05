@@ -4,7 +4,6 @@ import copy
 import hashlib
 from datetime import datetime, timedelta
 from io import BytesIO
-import random
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -14,8 +13,9 @@ from sqlalchemy import select
 from app.ai_providers import ProviderError
 from app.credentials import encrypt_secret
 from app.models import Company, ProductTemplate, SupplyJob, SupplyStrategy
-from app.supply_worker import claim_job, request_market_title, run_job, style_sample
+from app.supply_worker import claim_job, request_market_title, run_job
 from app.supply_common import validate_title_fallback
+from app.supply_quota import QUOTA_VERSION
 from app.title_api import router as title_router
 from app.title_models import TitleKeyword, TitleRecord, TitleTemplateProfile
 from app.title_service import get_market, profile_snapshot
@@ -25,6 +25,7 @@ from tests.test_supply_catalog import SupplyFixture
 class SupplyTitleTests(SupplyFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
+        self.add_more_materials(end=60)
         self.app.include_router(title_router)
         self.configure_supply_titles('MY')
         self.configure_supply_titles('ID')
@@ -400,10 +401,7 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
         identity = self.submit()
         claimed = claim_job(self.sessions)
         with self.sessions() as db:
-            snap = db.get(SupplyJob, identity).snapshot
-            rng = random.Random(snap['seed'])
-            links = [{'index': index, 'materials': style_sample(snap['candidates'], 5, rng),
-                      'title': None, 'replaced': False} for index in range(10)]
+            links = copy.deepcopy(db.get(SupplyJob, identity).checkpoint['links'])
         generated = []
         for index in (0, 1):
             generated.append(asyncio.run(request_market_title(identity, claimed[1], index,
@@ -414,7 +412,7 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
                         generation_id=result['generation_id'], title_warnings=result['warnings'])
         with self.sessions() as db:
             job = db.get(SupplyJob, identity)
-            job.checkpoint = {'links': links}
+            job.checkpoint = {'links': links, 'quota_version': QUOTA_VERSION}
             job.lease_expires_at = datetime.utcnow() - timedelta(seconds=1)
             self.assertTrue(all(record.adopted_at is None for record in db.scalars(select(TitleRecord))))
             db.commit()
@@ -427,6 +425,27 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
             records = db.scalars(select(TitleRecord)).all()
             self.assertEqual(len(records), 10)
             self.assertTrue(all(record.adopted_at for record in records))
+
+    def test_legacy_reallocation_generates_new_title_records_and_keeps_old_history(self):
+        identity = self.submit()
+        claimed = claim_job(self.sessions)
+        with self.sessions() as db:
+            job = db.get(SupplyJob, identity)
+            group = job.snapshot['candidates'][:5]
+            job.checkpoint = {'links': [{'index': index, 'materials': group, 'title': None}
+                                       for index in range(10)]}
+            db.commit()
+        old = asyncio.run(request_market_title(identity, claimed[1], 0, group[0]['url'], self.sessions))
+        with self.sessions() as db:
+            db.get(SupplyJob, identity).lease_expires_at = datetime.utcnow() - timedelta(seconds=1)
+            db.commit()
+        links = self.finish(identity)
+        self.assertNotIn(old['generation_id'], [link['generation_id'] for link in links])
+        with self.sessions() as db:
+            self.assertIsNone(db.get(TitleRecord, old['generation_id']).adopted_at)
+            records = db.scalars(select(TitleRecord)).all()
+            self.assertEqual(len(records), 11)
+            self.assertEqual(sum(record.adopted_at is not None for record in records), 10)
 
     def test_cancelled_or_reclaimed_execution_never_uses_fallback(self):
         for action in ('cancel', 'reclaim'):

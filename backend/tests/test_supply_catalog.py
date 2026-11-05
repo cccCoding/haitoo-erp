@@ -27,6 +27,18 @@ TEST_PASSWORD_HASH = hash_password("Password123")
 
 
 class SupplyFixture:
+    def add_more_materials(self, end=40):
+        """给筛选或多批次测试补充 SKU，满足整批额度限制。"""
+        with self.sessions() as db:
+            for identity in range(21, end + 1):
+                db.add(MaterialAsset(id=identity, company_id=1, template_id=1, claimed_by=2,
+                    name=f"素材{identity}", sku=f"SOURCE{identity:03d}",
+                    url=f"https://img.example/{identity}.png", supply_listed=True))
+            db.commit()
+        from tests.image_file_helpers import index_urls
+        with self.sessions() as db:
+            index_urls(db, 1, [f"https://img.example/{i}.png" for i in range(21, end + 1)])
+
     def setUp(self):
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
@@ -214,27 +226,28 @@ class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
             self.assertFalse(items[2]["is_infringing"])
 
     def test_infringement_modes_filter_snapshot_and_report_insufficient_materials(self):
+        self.add_more_materials()
         with self.sessions() as db:
-            for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.id <= 10)):
+            for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.id <= 20)):
                 asset.is_infringing = True
             db.commit()
-        for mode, expected in (("exclude", set(range(11, 21))), ("include", set(range(1, 21))), ("only", set(range(1, 11)))):
+        for mode, expected in (("exclude", set(range(21, 41))), ("include", set(range(1, 41))), ("only", set(range(1, 21)))):
             identity = self.submit(self.create_strategy(infringement_filter=mode), key=f"mode-{mode}-request")
             with self.sessions() as db:
                 snap = db.get(SupplyJob, identity).snapshot
                 self.assertEqual(snap["strategy"]["infringement_filter"], mode)
                 self.assertEqual({item["id"] for item in snap["candidates"]}, expected)
-                self.assertTrue(all(item["is_infringing"] == (item["id"] <= 10) for item in snap["candidates"]))
+                self.assertTrue(all(item["is_infringing"] == (item["id"] <= 20) for item in snap["candidates"]))
             self.request("POST", f"/supply/jobs/{identity}/cancel", uid=4)
         with self.sessions() as db:
-            for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.id <= 6)):
+            for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.id <= 16)):
                 asset.is_infringing = False
             db.commit()
         strategy = self.create_strategy(infringement_filter="only")
         response = self.request("POST", "/supply/jobs", uid=4,
             json={"strategy_id": strategy, "idempotency_key": "insufficient-only"})
         self.assertEqual(response.status_code, 400, response.text)
-        self.assertIn("侵权筛选", response.json()["detail"])
+        self.assertIn("当前筛选条件", response.json()["detail"])
         self.assertEqual(self.request("POST", "/supply/strategies", uid=4,
             json=self.strategy_input(infringement_filter="bad")).status_code, 422)
 

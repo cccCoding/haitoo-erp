@@ -18,6 +18,7 @@ from app.models import (Company, MaterialAsset, MaterialStyle, ProductTemplate, 
                         SupplyJobMaterial, TiktokCategoryCatalog, User, UserTemplateWhiteImage)
 from app.supply_common import (digest, eligible_materials, normalize_title,
                               template_snapshot, template_version, unique_title)
+from app.supply_quota import QUOTA_VERSION, allocate_links, sku_use_counts
 if __package__:
     from .test_supply_catalog import SupplyFixture
 else:
@@ -125,7 +126,7 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
             db.commit()
         for insurance in (None, "Mandatory"):
             with self.subTest(insurance=insurance):
-                job_id = self.make_job()
+                job_id = self.make_job(uid=4 if insurance is None else 7)
                 with self.sessions() as db:
                     job = db.get(SupplyJob, job_id)
                     snapshot = copy.deepcopy(job.snapshot)
@@ -143,12 +144,14 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
                 self.assertEqual({row["shipping_insurance"] for row in rows}, {insurance or "Optional"})
 
     def test_each_generated_link_obeys_snapshot_filter_after_flags_change(self):
-        for mode in ("exclude", "include", "only"):
+        self.add_more_materials()
+        for mode, uid in (("exclude", 4), ("include", 7), ("only", 2)):
             with self.sessions() as db:
                 for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.company_id == 1)):
-                    asset.is_infringing = asset.id <= 10
+                    asset.is_infringing = asset.id <= 20
                 db.commit()
-            identity = self.submit(self.create_strategy(infringement_filter=mode), key=f"filter-{mode}-job")
+            identity = self.submit(self.create_strategy(uid=uid, infringement_filter=mode), uid=uid,
+                                   key=f"filter-{mode}-job")
             # 提交后反转标记，执行仍须使用原候选和标记快照。
             with self.sessions() as db:
                 for asset in db.scalars(select(MaterialAsset).where(MaterialAsset.company_id == 1)):
@@ -159,7 +162,7 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
             for link in checkpoint["links"]:
                 self.assertEqual(len(link["materials"]), 5)
                 for item in link["materials"]:
-                    self.assertEqual(item["is_infringing"], item["id"] <= 10)
+                    self.assertEqual(item["is_infringing"], item["id"] <= 20)
                     if mode != "include":
                         self.assertEqual(item["is_infringing"], mode == "only")
 
@@ -344,7 +347,7 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
                              {item['url'] for item in link['materials']})
         self.assertLess(len({item['id'] for link in state['links'] for item in link['materials']}), 50)
 
-    def test_legacy_snapshot_uses_original_selection_even_when_current_assets_have_styles(self):
+    def test_legacy_snapshot_uses_snapshot_styles_and_respects_new_quota(self):
         self.assign_styles()
         with self.sessions() as db:
             candidates = eligible_materials(db, 1, 1, template_version(template_snapshot(db.get(ProductTemplate, 1))))
@@ -354,27 +357,103 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
         identity = self.make_job(candidates=candidates)
         self.run_job(identity)
         state = self.assert_completed(identity)
-        rng = random.Random('fixed-seed')
-        for link in state['links']:
-            self.assertEqual(link['materials'], self.worker.distinct_sample(candidates, 5, rng))
+        expected = allocate_links(candidates, 5, 10, 'fixed-seed', {}, sample=self.worker.distinct_sample)
+        self.assertEqual([link['materials'] for link in state['links']],
+                         [link['materials'] for link in expected])
+        self.assertLessEqual(max(Counter(item['sku'] for link in state['links']
+                                        for item in link['materials']).values()), 3)
 
     def test_existing_link_checkpoint_is_exported_without_resampling(self):
         self.assign_styles()
-        identity = self.make_job()
+        identity = self.submit()
         with self.sessions() as db:
             job = db.get(SupplyJob, identity)
-            candidates = job.snapshot['candidates']
-            # 已保存的历史混合风格链接也不能被新算法重排。
-            group = [candidates[index] for index in (0, 10, 1, 11, 2)]
-            links = [{'index': index, 'materials': copy.deepcopy(group), 'title': None, 'replaced': False}
-                     for index in range(10)]
-            job.checkpoint = {'links': links}
-            db.commit()
+            links = copy.deepcopy(job.checkpoint['links'])
+            self.assertEqual(job.checkpoint['quota_version'], QUOTA_VERSION)
         with patch.object(self.worker, 'style_sample', side_effect=AssertionError('不应重新选图')):
             self.run_job(identity)
         state = self.assert_completed(identity)
-        for link in state['links']:
-            self.assertEqual(link['materials'], group)
+        self.assertEqual([link['materials'] for link in state['links']],
+                         [link['materials'] for link in links])
+
+    def test_legacy_checkpoint_discards_old_titles_and_excel_and_replans(self):
+        identity = self.make_job()
+        with self.sessions() as db:
+            job = db.get(SupplyJob, identity)
+            group = job.snapshot['candidates'][:5]
+            job.checkpoint = {'links': [{'index': index, 'materials': group, 'title': 'Old title',
+                'generation_id': 99999} for index in range(10)], 'title_attempts': {'0': 4}}
+            job.export_blob, job.upload_attempts = b'old invalid workbook', 3
+            db.commit()
+        self.run_job(identity)
+        state = self.assert_completed(identity)
+        self.assertEqual(state['quota_version'], QUOTA_VERSION)
+        self.assertEqual(set(state['title_attempts'].values()), {1})
+        self.assertEqual(self.title.call_count, 10)
+        self.assertLessEqual(max(Counter(item['sku'] for link in state['links']
+                                        for item in link['materials']).values()), 3)
+        with self.sessions() as db:
+            self.assertEqual(db.get(SupplyJob, identity).upload_attempts, 1)
+
+    def test_legacy_job_with_insufficient_quota_fails_without_upload_or_usage(self):
+        with self.sessions() as db:
+            candidates = eligible_materials(db, 1, 1, 'version')[:5]
+        identity = self.make_job(candidates=candidates)
+        self.run_job(identity)
+        with self.sessions() as db:
+            job = db.get(SupplyJob, identity)
+            self.assertEqual(job.state, 'failed')
+            self.assertIn('剩余素材额度不足', job.error)
+            self.assertEqual(db.query(SupplyJobMaterial).filter_by(job_id=identity, successful=True).count(), 0)
+        self.upload.assert_not_called()
+        self.title.assert_not_called()
+
+    def test_completion_rechecks_quota_and_cleans_uncommitted_export(self):
+        identity = self.submit()
+        upload = self.upload.side_effect
+
+        def consume_before_completion(company, job_id, epoch, filename, content):
+            result = upload(company, job_id, epoch, filename, content)
+            with self.sessions() as db:
+                item = db.get(SupplyJob, identity).checkpoint['links'][0]['materials'][0]
+                history = SupplyJob(company_id=1, user_id=4, idempotency_key='external-history',
+                    request_hash='x', template_id=1, category_catalog_id=1, category_blob=b'x', state='completed')
+                db.add(history); db.flush()
+                db.add_all(SupplyJobMaterial(company_id=1, job_id=history.id, material_id=item['id'],
+                    sku=item['sku'], version_hash=item['version_hash'], link_index=i, successful=True)
+                    for i in range(3))
+                db.commit()
+            return result
+
+        self.upload.side_effect = consume_before_completion
+        self.run_job(identity)
+        with self.sessions() as db:
+            job = db.get(SupplyJob, identity)
+            self.assertEqual(job.state, 'failed')
+            self.assertIn('剩余素材额度不足', job.error)
+            self.assertIsNone(job.output_key)
+            self.assertEqual(db.query(SupplyJobMaterial).filter_by(job_id=identity, successful=True).count(), 0)
+        self.delete.assert_called_once()
+
+    def test_success_consumes_three_uses_then_blocks_only_the_same_account(self):
+        with self.sessions() as db:
+            candidates = eligible_materials(db, 1, 1, 'version')[:5]
+        first = self.make_job(candidates=candidates, link_count=3)
+        self.run_job(first)
+        with self.sessions() as db:
+            self.assertEqual(db.get(SupplyJob, first).state, 'completed')
+            self.assertEqual(sku_use_counts(db, 1, 4, [item['sku'] for item in candidates]),
+                             {item['sku']: 3 for item in candidates})
+        blocked = self.make_job(candidates=candidates, link_count=1)
+        self.run_job(blocked)
+        with self.sessions() as db:
+            self.assertEqual(db.get(SupplyJob, blocked).state, 'failed')
+        other = self.make_job(uid=7, candidates=candidates, link_count=1)
+        self.run_job(other)
+        with self.sessions() as db:
+            self.assertEqual(db.get(SupplyJob, other).state, 'completed')
+            self.assertEqual(sku_use_counts(db, 1, 7, [item['sku'] for item in candidates]),
+                             {item['sku']: 1 for item in candidates})
 
     def test_title_failure_has_durable_four_call_budget_then_fallback(self):
         identity = self.make_job()
@@ -422,6 +501,9 @@ class SupplyWorkerTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(self.image.call_count, first_images)
         with self.sessions() as db:
             self.assertEqual(db.get(SupplyJob, identity).upload_attempts, 2)
+            counts = sku_use_counts(db, 1, 4, [item['sku'] for link in state['links'] for item in link['materials']])
+            self.assertEqual(sum(counts.values()), 50)
+            self.assertLessEqual(max(counts.values()), 3)
 
     def test_four_upload_failures_end_task_without_success_statistics(self):
         identity = self.make_job()

@@ -24,6 +24,7 @@ from .supply_common import (ACTIVE_STATES, digest, eligible_materials,
     lock_company, normalize_title, now, sizes, template_snapshot,
     template_version, unique_title, user_can_run)
 from .supply_files import delete_supply_export, list_supply_exports, upload_supply_export
+from .supply_quota import QUOTA_VERSION, allocate_links, sku_use_counts, validate_link_quota
 from .image_files import resolve_export_images
 from .tiktok_export import build_workbook
 
@@ -207,8 +208,12 @@ async def request_market_title(job_id, epoch, index, first_image, session_factor
         market = db.get(TitleMarket, job.snapshot['title_market_id'])
         profile = copy.deepcopy(job.snapshot['title_profile'])
         profile.update(supply_job_id=job_id, supply_epoch=epoch)
+        request_key = ['supply', job_id, index]
+        if (job.checkpoint or {}).get('quota_version'):
+            # 旧任务重新选图后不能复用旧首图的标题记录；同版本重试仍保持幂等。
+            request_key.extend(['sku-quota', job.checkpoint['quota_version']])
         record = create_record(db, market, job.user_id, profile, first_image,
-            ['supply', job_id, index], supply=True)
+            request_key, supply=True)
         # 执行 epoch 是权限检查，不改变已固定的商品、词库或策略。
         record.snapshot = {**record.snapshot, 'supply_epoch': epoch}
         db.commit()
@@ -262,24 +267,23 @@ async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
 
     beat = asyncio.create_task(heartbeat())
     try:
-        data = mutate(job_id, epoch, owner, lambda db, job: {
-            "snapshot": copy.deepcopy(job.snapshot), "checkpoint": copy.deepcopy(job.checkpoint),
-            "company_id": job.company_id, "export_blob": job.export_blob,
-            "secret": db.get(Company, job.company_id).supply_ai_secret_encrypted,
-        }, session_factory)
+        def prepare(db, job):
+            if (job.checkpoint or {}).get("quota_version") != QUOTA_VERSION:
+                # 旧检查点可能在单批次内已经超限；旧标题、Excel 均与旧选图绑定。
+                snapshot = job.snapshot
+                used = sku_use_counts(db, job.company_id, job.user_id,
+                                      [item["sku"] for item in snapshot["candidates"]])
+                links = allocate_links(snapshot["candidates"], snapshot["strategy"]["sku_count"],
+                    snapshot["strategy"]["link_count"], snapshot["seed"], used, sample=style_sample)
+                job.checkpoint = {"links": links, "quota_version": QUOTA_VERSION}
+                job.export_blob, job.upload_attempts = None, 0
+                job.progress = {"links_done": 0, "links_total": snapshot["strategy"]["link_count"]}
+                job.stage = "titles"
+            return {"snapshot": copy.deepcopy(job.snapshot), "company_id": job.company_id,
+                "export_blob": job.export_blob, "secret": db.get(Company, job.company_id).supply_ai_secret_encrypted}
+        data = mutate(job_id, epoch, owner, prepare, session_factory)
         snap, company_id = data["snapshot"], data["company_id"]
         strategy, template = snap["strategy"], snap["template"]
-
-        if not data["checkpoint"].get("links"):
-            candidates = snap["candidates"]
-            rng = random.Random(snap["seed"])
-            links = []
-            for index in range(strategy["link_count"]):
-                group = style_sample(candidates, strategy["sku_count"], rng)
-                if len(group) != strategy["sku_count"]:
-                    raise ValueError("没有足够素材组成完整商品组")
-                links.append({"index": index, "materials": group, "title": None, "replaced": False})
-            save(lambda value, db, job: value.update(links=links), "titles")
 
         if not data["export_blob"]:
             try:
@@ -385,6 +389,9 @@ async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
             return
 
         def complete(db, job):
+            used = sku_use_counts(db, company_id, job.user_id,
+                [item["sku"] for link in job.checkpoint["links"] for item in link["materials"]])
+            validate_link_quota(job.checkpoint["links"], used)
             for link in job.checkpoint["links"]:
                 if link.get('generation_id'):
                     from .title_models import TitleRecord
@@ -396,7 +403,7 @@ async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
                         count_adopted_keywords(db, record, record.title)
                 for item in link["materials"]:
                     db.add(SupplyJobMaterial(company_id=company_id, job_id=job_id,
-                        material_id=item["id"], version_hash=item["version_hash"],
+                        material_id=item["id"], sku=item["sku"], version_hash=item["version_hash"],
                         source="replacement" if item["version_hash"] not in {candidate["version_hash"] for candidate in snap["candidates"]} else "snapshot",
                         link_index=link["index"], successful=True))
             job.output_key, job.output_sha256, job.output_size = uploaded["key"], uploaded["sha256"], uploaded["size"]

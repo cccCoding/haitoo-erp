@@ -4,6 +4,8 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -11,7 +13,7 @@ from sqlalchemy import create_engine, inspect, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Company, Role, SupplyJob, User
+from app.models import Company, Role, SupplyJob, SupplyJobMaterial, SupplyStrategy, User
 from app.supply_common import now
 
 
@@ -65,10 +67,66 @@ class SupplyMysqlTests(unittest.TestCase):
                 password_hash="test", role=Role.SUPPLY_USER, supply_expires_at=now() + timedelta(days=30))
             db.add(user); db.commit()
             self.assertEqual(db.execute(text("SELECT role FROM users WHERE id=:id"), {"id": user.id}).scalar_one(), "SUPPLY_USER")
-            self.assertEqual(db.execute(text("SELECT version_num FROM alembic_version")).scalar_one(), "20261016_38")
+            from app.schema_version import schema_heads
+            with self.engine.connect() as connection:
+                current, expected = schema_heads(connection)
+                self.assertEqual(current, expected)
         columns = {column["name"]: column for column in inspect(self.engine).get_columns("supply_jobs")}
         self.assertNotIn("download_revoked", columns)
         self.assertEqual(str(columns["category_blob"]["type"]), "MEDIUMBLOB")
+        material_columns = {column["name"] for column in inspect(self.engine).get_columns("supply_job_materials")}
+        self.assertIn("sku", material_columns)
+
+    def test_parallel_submissions_serialize_quota_and_next_job_reads_completed_usage(self):
+        from app.supply_catalog import JobInput, submit_job
+        from app.supply_quota import sku_use_counts
+        candidates = [dict(id=i, sku=f'SKU{i}', url=f'https://img/{i}', version_hash=f'v{i}', style_id=None)
+                      for i in range(18)]
+        with self.sessions() as db:
+            strategy = SupplyStrategy(company_id=self.company_id, user_id=self.user_ids[0], name='Quota',
+                parameters={'sku_count': 5, 'link_count': 10})
+            db.add(strategy); db.commit()
+            strategy_id = strategy.id
+        barrier = threading.Barrier(2)
+
+        def submit(index):
+            with self.sessions() as db:
+                actor = db.get(User, self.user_ids[0])
+                barrier.wait(timeout=10)
+                try:
+                    result = submit_job(JobInput(strategy_id=strategy_id, idempotency_key=f'quota-request-{index}'), actor, db)
+                    return 200, result['id']
+                except HTTPException as exc:
+                    db.rollback()
+                    return exc.status_code, None
+
+        catalog = SimpleNamespace(id=1, template_blob=b'snapshot', template_type='tiktok_local')
+        with patch('app.supply_catalog.validate_strategy', return_value=(SimpleNamespace(id=1), catalog, {}, 100)), \
+             patch('app.supply_catalog.supply_title_snapshot', return_value=(1, {})), \
+             patch('app.supply_catalog.eligible_materials', return_value=candidates), \
+             patch('app.supply_catalog.catalog_listing_options', return_value={}):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(submit, range(2)))
+            self.assertEqual(sorted(status for status, _ in results), [200, 409])
+            identity = next(identity for status, identity in results if status == 200)
+            with self.sessions() as db:
+                job = db.get(SupplyJob, identity)
+                for link in job.checkpoint['links']:
+                    for item in link['materials']:
+                        db.add(SupplyJobMaterial(company_id=self.company_id, job_id=identity,
+                            material_id=item['id'], sku=item['sku'], version_hash=item['version_hash'],
+                            link_index=link['index'], successful=True))
+                job.state = 'completed'
+                db.commit()
+                counts = sku_use_counts(db, self.company_id, self.user_ids[0], [item['sku'] for item in candidates])
+                self.assertEqual(sum(counts.values()), 50)
+                self.assertLessEqual(max(counts.values()), 3)
+            with self.sessions() as db:
+                with self.assertRaises(HTTPException) as failure:
+                    submit_job(JobInput(strategy_id=strategy_id, idempotency_key='quota-after-completion'),
+                               db.get(User, self.user_ids[0]), db)
+                self.assertEqual(failure.exception.status_code, 400)
+                self.assertIn('剩余素材额度不足', failure.exception.detail)
 
     def test_statistics_with_large_snapshots_and_small_sort_buffer(self):
         from app.supply_catalog import statistics

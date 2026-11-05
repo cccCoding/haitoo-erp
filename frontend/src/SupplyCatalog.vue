@@ -566,7 +566,7 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
           <table aria-label="货盘素材列表">
             <thead><tr>
               <th v-if="canManage" class="supply-material-selection"><label class="supply-check"><input type="checkbox" :disabled="!materials.length || !!busy" :checked="materials.length>0 && selectedMaterialIds.length===materials.length" :indeterminate="selectedMaterialIds.length>0 && selectedMaterialIds.length<materials.length" aria-label="全选本页货盘素材" @change="selectedMaterialIds=selectedMaterialIds.length===materials.length?[]:materials.map(item=>item.id)"/>全选</label></th>
-              <th>缩略图</th><th>SKU</th><th>模板</th><th>是否侵权</th><th>上架状态</th><th v-if="canManage">使用情况</th><th v-if="canManage">操作</th>
+              <th>缩略图</th><th>SKU</th><th>模板</th><th>是否侵权</th><th>上架状态</th><th>本人使用次数</th><th v-if="canManage">使用情况</th><th v-if="canManage">操作</th>
             </tr></thead>
             <tbody><tr v-for="row in materials" :key="row.id" :class="{selected:selectedMaterialIds.includes(row.id)}">
               <td v-if="canManage" class="supply-material-selection"><input v-model="selectedMaterialIds" :disabled="!!busy" type="checkbox" :value="row.id" :aria-label="`选择素材 ${row.sku || row.id}`"/></td>
@@ -575,6 +575,7 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
               <td>{{row.template_name || templateLabel(row.template_id)}}</td>
               <td><InfringementBadge :is-infringing="!!row.is_infringing"/></td>
               <td><span class="supply-tag" :class="{listed:row.supply_listed}">{{row.supply_listed?'已上架':'已下架'}}</span></td>
+              <td>本人已用 {{row.my_sku_use_count}}/{{row.sku_use_limit}}<small>{{row.my_sku_remaining > 0 ? `还可使用 ${row.my_sku_remaining} 次` : '已达使用上限'}}</small></td>
               <td v-if="canManage"><button type="button" class="supply-usage-button" @click="showUsage(row)">{{row.user_count || 0}} 人使用 · {{row.use_count || 0}} 次链接使用</button></td>
               <td v-if="canManage"><div class="supply-actions"><button type="button" class="secondary" :disabled="!!busy" @click="toggleListing(row)">{{row.supply_listed?'下架':'重新上架'}}</button></div></td>
             </tr></tbody>
@@ -619,7 +620,7 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
         </div>
       </section>
       <section v-else-if="tab==='strategies'">
-        <div class="supply-section-heading"><p>每个链接 5–9 个素材 SKU，每次生成 10–50 个商品组。</p><button class="primary" :disabled="!!busy" @click="editStrategy()">新增策略</button></div>
+        <div class="supply-section-heading"><p>每个链接 5–9 个素材 SKU，每次生成 10–50 个商品组。同一账号每个 SKU 累计最多用于 3 个成功商品链接，含历史记录；重复下载 Excel 不计次。</p><button class="primary" :disabled="!!busy" @click="editStrategy()">新增策略</button></div>
         <div class="supply-table-wrap"><table><thead><tr><th>策略</th><th>产品模板</th><th>站点</th><th>类目库/店铺类型</th><th>类目</th><th>售价</th><th>生成数量</th><th>侵权筛选</th><th>操作</th></tr></thead><tbody><tr v-for="row in strategies" :key="row.id"><td>{{row.name}}</td><td>{{templateLabel(row.template_id)}}</td><td>{{titleMarket(row.title_site || 'MY').siteName}}</td><td>{{strategyCatalogLabel(row.category_catalog_id)}}</td><td>{{row.category_name}}</td><td>{{row.price}}</td><td>{{row.sku_count}} SKU × {{row.link_count}} 链接</td><td>{{infringementLabels[row.infringement_filter || 'include']}}</td><td><div class="supply-actions"><button class="primary" :disabled="!!busy || myActiveJob" @click="submitStrategy(row)">{{busy===`submit-${row.id}`?'提交中…':'生成表格'}}</button><button :disabled="!!busy" @click="editStrategy(row)">编辑</button><button class="danger" :disabled="!!busy" @click="deleteStrategy(row)">删除</button></div></td></tr></tbody></table></div><p v-if="myActiveJob" class="supply-help">你有一个未完成任务，完成或取消后可再次提交。</p><p v-if="!strategies.length" class="empty">尚未配置策略，创建策略后即可生成表格。</p>
       </section>
       <section v-else-if="tab==='jobs'">

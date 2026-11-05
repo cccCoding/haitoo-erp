@@ -23,6 +23,7 @@ from .models import (Company, MaterialAsset, OperatorGroup, ProductTemplate, Rol
 from .security import current_user, hash_password
 from .tiktok_export import catalog_listing_options
 from .supply_accounts import add_calendar_months, as_utc_naive, supply_user_is_expired
+from .supply_quota import QUOTA_VERSION, SKU_USE_LIMIT, allocate_links, sku_use_counts
 from .supply_common import (ACTIVE_STATES, audit, cancel_user_jobs,
     digest, eligible_materials, is_manager, job_filename, job_payload,
     lock_company, now, require_admin, require_manager, sizes, template_snapshot,
@@ -403,10 +404,14 @@ def materials(template_id: int | None = None,
         ProductTemplate.company_id == user.company_id, ProductTemplate.id.in_([asset.template_id for asset in assets]))).all()}
     counts = material_statistics(db, user.company_id, [asset.id for asset in assets],
         None if is_manager(user) else user.id)
+    own_counts = sku_use_counts(db, user.company_id, user.id, [asset.sku for asset in assets])
     return {"items": [{"id": asset.id, "name": asset.name, "sku": asset.sku, "url": asset.url,
         "template_id": asset.template_id, "template_name": names.get(asset.template_id),
         "is_infringing": asset.is_infringing,
         "supply_listed": asset.supply_listed,
+        "my_sku_use_count": own_counts.get(asset.sku, 0),
+        "my_sku_remaining": max(0, SKU_USE_LIMIT - own_counts.get(asset.sku, 0)),
+        "sku_use_limit": SKU_USE_LIMIT,
         **counts.get(asset.id, {"use_count": 0, "user_count": 0, "job_count": 0})} for asset in assets],
         "total": total, "page": page, "page_size": page_size}
 
@@ -556,11 +561,14 @@ def submit_job(payload: JobInput, user=Depends(supply_actor), db: Session = Depe
     title_market_id, title_profile = supply_title_snapshot(db, user.company_id, template, parameters['title_site'])
     version = template_version(snapshot)
     candidates = eligible_materials(db, user.company_id, template.id, version, parameters["infringement_filter"])
-    # URL 或源 SKU 重复的素材不能用于同一链接，提交时即验证可形成完整组。
-    from .supply_worker import distinct_sample
-    import random
-    if len(distinct_sample(candidates, parameters["sku_count"], random.Random(0))) < parameters["sku_count"]:
-        raise HTTPException(400, "当前侵权筛选条件下，可用素材不足以组成指定 SKU 数量")
+    from .supply_worker import style_sample
+    seed = secrets.token_hex(16)
+    used = sku_use_counts(db, user.company_id, user.id, [item["sku"] for item in candidates])
+    try:
+        links = allocate_links(candidates, parameters["sku_count"], parameters["link_count"], seed, used,
+                               sample=style_sample)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     agent = db.get(SupplyAgent, actor.supply_agent_id) if actor.role == Role.SUPPLY_USER else None
     if actor.role == Role.SUPPLY_USER and (not agent or agent.company_id != actor.company_id):
         raise HTTPException(400, "货盘账号缺少有效代理，请联系公司管理员")
@@ -571,13 +579,15 @@ def submit_job(payload: JobInput, user=Depends(supply_actor), db: Session = Depe
         snapshot={"strategy": parameters, "template": snapshot, "template_version": version,
             "title_engine": "v2", "title_profile": title_profile, "title_market_id": title_market_id,
             "catalog_options": copy.deepcopy(catalog_listing_options(catalog)), "catalog_type": catalog.template_type,
-            "candidates": candidates, "seed": secrets.token_hex(16), "user_name": actor.name,
+            "candidates": candidates, "seed": seed, "user_name": actor.name,
             "internal_usage": actor.role != Role.SUPPLY_USER, "expected_rows": rows},
-        category_blob=bytes(catalog.template_blob), checkpoint={}, progress={"links_done": 0, "links_total": parameters["link_count"]})
+        category_blob=bytes(catalog.template_blob), checkpoint={"links": links, "quota_version": QUOTA_VERSION},
+        progress={"links_done": 0, "links_total": parameters["link_count"]})
     db.add(job)
     db.flush()
     db.add_all(SupplyJobMaterial(company_id=user.company_id, job_id=job.id, material_id=item["id"],
-        version_hash=item["version_hash"], source="snapshot", link_index=-1, successful=False) for item in candidates)
+        sku=item["sku"], version_hash=item["version_hash"], source="snapshot", link_index=-1,
+        successful=False) for item in candidates)
     audit(db, user, "submit_job", "job", job.id, {"strategy_id": strategy.id})
     db.commit()
     return job_payload(job)
