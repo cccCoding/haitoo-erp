@@ -29,7 +29,7 @@ from .title_service import (TAGS, CATEGORY_FIELDS, DICTIONARY_TAGS, PROFILE_TAGS
 
 from .title_dictionary import (entries as dictionary_entries, entry_payload as dictionary_payload,
     usage_counts as dictionary_usage, name_key as dictionary_key, touch_market as touch_dictionary_market,
-    category_values, tag_entry, localized_category_name)
+    category_values, tag_entry, localized_category_name, selectable_tag)
 from .title_categories import (category_index, category_summary, display_categories, merge_categories,
     merge_preview, save_resolution, sync_names, validate_choices, category_conflicts)
 
@@ -760,6 +760,8 @@ def edit_keyword(identity: int, payload: KeywordInput, user: User = Depends(admi
     if any(v is None for v in data.values()):
         raise HTTPException(400, '编辑字段不能为 null')
     definition = tag_entry(db, market, data.get('tag', row.tag), allow_disabled=row.tag)
+    if definition.name != row.tag and not selectable_tag(definition):
+        raise HTTPException(400, '该标签已退出日常使用，请选择其他标签')
     if 'tag' in data:
         data['tag'] = definition.name
     for field in ('phrase', 'translation'):
@@ -883,7 +885,7 @@ async def preview_import(file: UploadFile = File(...), kind: Literal['titles', '
     period = period or datetime.now(ZoneInfo('Asia/Hong_Kong')).date().isoformat()
     content = await file.read(MAX_BYTES + 1)
     market = market_for(db, user, platform, site, language, create=True, lock=True)
-    tag_definitions = [row for row in dictionary_entries(db, market.id, 'tag') if row.enabled]
+    tag_definitions = [row for row in dictionary_entries(db, market.id, 'tag') if row.enabled and selectable_tag(row)]
     allowed_tags = [*CATEGORY_FIELDS, *(row.name for row in tag_definitions)]
     rows = parse_file(content, file.filename or '', kind, allowed_tags=allowed_tags, site=site, language=language)
     from .title_import import split_values

@@ -34,7 +34,7 @@ function changePageSize(value:number){pageSize.value=value;page.value=1}
 watch([search,state],()=>{page.value=1})
 watch(()=>rows.value.length,()=>{page.value=Math.min(page.value,Math.max(1,Math.ceil(rows.value.length/pageSize.value)))})
 const fixedIdentity = computed(()=>!!editing.value && !!(editing.value.built_in || editing.value.reference_count))
-function edit(row?: Entry) {error.value='';aliasText.value=(row?.aliases||[]).join('\n');editing.value=row?{...row,localized_name:row.localized_name||''}:{name:'',description:'',localized_name:'',semantic_tag:'待分类',enabled:true}}
+function edit(row?: Entry) {error.value='';aliasText.value=(row?.aliases||[]).join('\n');editing.value=row?{...row,localized_name:row.localized_name||''}:{name:'',description:'',localized_name:'',semantic_tag:'',enabled:true}}
 function openMerge(){
   error.value=''
   if(selectedCategories.value.length<2){error.value='请至少勾选两个需要合并的分类';return}
@@ -65,7 +65,10 @@ async function save() {
     if(props.kind==='category'){
       payload.localized_name=form.localized_name.trim()
       payload.aliases=parseCategoryAliases(aliasText.value)
-    }else payload.semantic_tag=form.semantic_tag
+    }else {
+      if(!props.semanticTags.includes(form.semantic_tag))throw new Error('请选择语义分类')
+      payload.semantic_tag=form.semantic_tag
+    }
     const config={headers:{Authorization:`Bearer ${props.token}`}}
     if(form.id)await api.patch(`/title-dictionaries/${form.id}`,payload,config)
     else await api.post(`/title-dictionaries/${props.kind}`,{...payload,...titleMarketParams(props.site)},config)
@@ -130,7 +133,7 @@ async function remove(row:Entry){
         </div>
       </section>
     </div>
-    <div v-if="editing" class="modal-backdrop" @click.self="!busy&&(editing=null)"><section v-dialog-focus="{close:()=>{if(!busy)editing=null},busy}" class="modal-card dictionary-dialog" role="dialog" aria-modal="true" aria-labelledby="dictionary-editor-heading"><h2 id="dictionary-editor-heading">{{editing.id?'编辑':'新增'}}{{label}}</h2><form @submit.prevent="save"><label>{{label}}名称<input v-model="formName" required :maxlength="kind==='tag'?40:255" :readonly="fixedIdentity" /></label><label v-if="kind==='category'">{{market.siteName}}名称（{{market.languageName}}）<input v-model="editing.localized_name" maxlength="255" placeholder="例如：上衣填写 Baju" /><small>用于{{market.siteName}}站点的分类展示和词库标题品类表达；运营名称及已有引用保持不变。</small></label><label v-if="kind==='tag'">语义分类<select v-model="editing.semantic_tag" required :disabled="fixedIdentity"><option v-for="tag in semanticTags" :key="tag" :value="tag">{{titleTagLabel(tag)}}</option></select><small>用于匹配商品确认属性；品牌、营销等语义不会进入自动选词池。</small></label><label v-if="kind==='category'">分类别名<textarea v-model="aliasText" rows="4" placeholder="每行一个，例如：连身裙" /><small>用于导入识别与搜索，不会自动成为标题用词。合并保留的原分类名称不可移除。</small></label><label>说明<textarea v-model="editing.description" rows="3" maxlength="500" /></label><label class="dictionary-checkbox"><input v-model="editing.enabled" type="checkbox" />启用</label><p v-if="fixedIdentity" class="dictionary-note">{{kind==='category'?'该分类已被引用，名称已锁定；站点名称和说明仍可编辑。':'该条目为内置或已被引用，名称和语义分类已锁定。'}}</p><p v-if="error" class="error" role="alert">{{error}}</p><div class="dictionary-dialog-actions"><button type="button" :disabled="busy" @click="editing=null">取消</button><button class="primary" :disabled="busy">{{busy?'保存中…':'保存'}}</button></div></form></section></div>
+    <div v-if="editing" class="modal-backdrop" @click.self="!busy&&(editing=null)"><section v-dialog-focus="{close:()=>{if(!busy)editing=null},busy}" class="modal-card dictionary-dialog" role="dialog" aria-modal="true" aria-labelledby="dictionary-editor-heading"><h2 id="dictionary-editor-heading">{{editing.id?'编辑':'新增'}}{{label}}</h2><form @submit.prevent="save"><label>{{label}}名称<input v-model="formName" required :maxlength="kind==='tag'?40:255" :readonly="fixedIdentity" /></label><label v-if="kind==='category'">{{market.siteName}}名称（{{market.languageName}}）<input v-model="editing.localized_name" maxlength="255" placeholder="例如：上衣填写 Baju" /><small>用于{{market.siteName}}站点的分类展示和词库标题品类表达；运营名称及已有引用保持不变。</small></label><label v-if="kind==='tag'">语义分类<select v-model="editing.semantic_tag" required :disabled="fixedIdentity"><option disabled value="">请选择语义分类</option><option v-for="tag in semanticTags" :key="tag" :value="tag">{{titleTagLabel(tag)}}</option></select><small>商品属性按确认事实匹配；营销修饰、目标市场按当前站点和适用品类自动参与选词，品牌须在模板中人工确认。</small></label><label v-if="kind==='category'">分类别名<textarea v-model="aliasText" rows="4" placeholder="每行一个，例如：连身裙" /><small>用于导入识别与搜索，不会自动成为标题用词。合并保留的原分类名称不可移除。</small></label><label>说明<textarea v-model="editing.description" rows="3" maxlength="500" /></label><label class="dictionary-checkbox"><input v-model="editing.enabled" type="checkbox" />启用</label><p v-if="fixedIdentity" class="dictionary-note">{{kind==='category'?'该分类已被引用，名称已锁定；站点名称和说明仍可编辑。':'该条目为内置或已被引用，名称和语义分类已锁定。'}}</p><p v-if="error" class="error" role="alert">{{error}}</p><div class="dictionary-dialog-actions"><button type="button" :disabled="busy" @click="editing=null">取消</button><button class="primary" :disabled="busy">{{busy?'保存中…':'保存'}}</button></div></form></section></div>
   </section>
 </template>
 

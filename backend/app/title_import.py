@@ -11,8 +11,8 @@ from sqlalchemy import select
 
 from .title_markets import check_market, market_labels
 from .title_models import TitleEvidence, TitleKeyword, TitleMarket, TitleImportWord
-from .title_service import TAGS, ask_json, digest, normalize
-from .title_dictionary import name_key, tag_entry
+from .title_service import TAGS, RETIRED_TAGS, ask_json, digest, normalize
+from .title_dictionary import entries as dictionary_entries, name_key, tag_entry
 
 MAX_BYTES = 20 * 1024 * 1024
 MAX_ROWS = 10000
@@ -32,7 +32,7 @@ def parse_file(content, filename, kind, *, allowed_tags=None, site='MY', languag
     check_market(site=site, language=language)
     phrase_key = '词语' if site == 'ID' else '马来语词语'
     phrase_label = market_labels(site)['language_name'] + '词语'
-    allowed_tags = TAGS if allowed_tags is None else allowed_tags
+    allowed_tags = [tag for tag in TAGS if tag not in RETIRED_TAGS] if allowed_tags is None else allowed_tags
     if not content or len(content) > MAX_BYTES:
         raise HTTPException(400, "文件为空或超过 20MB")
     try:
@@ -113,12 +113,12 @@ def split_values(value):
 
 
 def validate_word(word, row, kind, allowed_tags=None):
-    allowed_tags = TAGS if allowed_tags is None else allowed_tags
+    allowed_tags = [tag for tag in TAGS if tag not in RETIRED_TAGS] if allowed_tags is None else allowed_tags
     if not isinstance(word, dict):
         raise ValueError('提词结果须为对象')
     phrase = word.get('phrase', '')
     translation = word.get('translation', '')
-    tag = word.get('tag', '待分类')
+    tag = word.get('tag')
     if not isinstance(phrase, str) or not phrase.strip() or len(phrase) > 160 or re.search(r'[\u3400-\u9fff]', phrase):
         raise ValueError('词语无效')
     if not isinstance(translation, str) or not translation.strip() or len(translation) > 255 or tag not in allowed_tags:
@@ -136,9 +136,14 @@ def validate_word(word, row, kind, allowed_tags=None):
 async def extract_row(row, kind, api_key=None, *, allowed_tags=None, tag_semantics=None, site='MY', language='ms'):
     check_market(site=site, language=language)
     locale = market_labels(site)
-    allowed_tags = TAGS if allowed_tags is None else allowed_tags
+    allowed_tags = [tag for tag in TAGS if tag not in RETIRED_TAGS] if allowed_tags is None else allowed_tags
+    # 旧任务快照可能仍允许兜底语义；无法归类的词也不再进入提词结果。
+    semantics = tag_semantics or {}
+    allowed_tags = [tag for tag in allowed_tags if tag != '待分类' and semantics.get(tag) != '待分类']
     if kind == 'keywords':
         v = row['values']
+        if v['属性分类'] not in allowed_tags:
+            return []
         word = validate_word({'phrase': v.get('词语', v.get('马来语词语')), 'translation': v['中文释义'], 'tag': v['属性分类'],
                              'is_borrowed': v.get('是否借词') in ('是', 'Y', 'true')}, row, kind, allowed_tags)
         word['synonyms'] = split_values(v.get('同义表达'))
@@ -148,19 +153,26 @@ async def extract_row(row, kind, api_key=None, *, allowed_tags=None, tag_semanti
         f'Return {{"language":"{language} or other", "keywords":['
         '{"phrase":"EXACT contiguous original substring", "translation":"accurate Chinese meaning", '
         '"tag":"one allowed tag", "is_borrowed":false}]}. Keep complete phrases, reduplication and hyphens. '
+        'Omit any phrase that cannot be assigned to an allowed tag; never invent a tag or use an unclassified fallback. '
+        'Return an empty keywords array if no phrase can be classified. '
         f"Do not translate English into invented {locale['model_language']}. Mark English loan expressions as borrowed. "
         'Distinguish brands, shop names and promotional claims using 品牌 or 营销修饰. '
         f"Set language to {language} only for a {locale['model_language']} title (English loan phrases are allowed). "
         'Set other for English-only or other-language titles. '
         'Never infer attributes, search heat or competition from title. Do not extract grammar words.',
         {'title': row['values']['原标题'], 'category': row['values']['商品品类'], 'allowed_tags': allowed_tags,
-         'tag_semantics': tag_semantics or {tag: tag for tag in allowed_tags}}, max_tokens=3000)
+         'tag_semantics': {tag: semantics.get(tag, tag) for tag in allowed_tags}}, max_tokens=3000)
     words = answer.get('keywords')
     if answer.get('language') != language:
         raise ValueError(f"原标题未识别为{locale['language_name']}，请核对语言；不得把英文标题翻译后当作原文提词")
-    if not isinstance(words, list) or not words or len(words) > 60:
+    if not isinstance(words, list) or len(words) > 60:
         raise ValueError('模型未返回有效提词列表')
-    return [validate_word(w, row, kind, allowed_tags) for w in words]
+    result = []
+    for word in words:
+        if isinstance(word, dict) and word.get('tag') not in allowed_tags:
+            continue
+        result.append(validate_word(word, row, kind, allowed_tags))
+    return result
 
 
 def confirm_import(db, task, selections):
@@ -175,6 +187,11 @@ def confirm_import(db, task, selections):
     words = [word for word in words if word.id not in confirmed_ids]
     if not words:
         return result.get('confirmed', {'created': 0, 'merged': 0, 'evidence': 0})
+    # 已提词、未入库的历史结果同样丢弃未分类词，避免旧任务重新写入。
+    semantics = {**task.snapshot.get('tag_semantics', {}), **{
+        entry.name: entry.semantic_tag for entry in dictionary_entries(db, market.id, 'tag')}}
+    words = [word for word in words if word.word['tag'] != '待分类'
+             and semantics.get(word.word['tag']) != '待分类']
     from .title_categories import materialize_categories
     categories_by_key = materialize_categories(db, task, {c for candidate in words for c in candidate.word['categories']})
     rows = {r['row']: r for r in task.snapshot['rows']}

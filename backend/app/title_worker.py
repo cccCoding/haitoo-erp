@@ -135,7 +135,8 @@ async def run_task(identity, owner, session_factory=SessionLocal, *, item_semaph
                                          'failed': len(result['failed_rows'])}
                     change_task(identity, owner, save_error, session_factory)
             def finish_import(db, task, market):
-                task.state = 'review' if task.result.get('word_total') else 'failed'
+                task.state = ('review' if task.result.get('word_total') else
+                              'failed' if task.result.get('failed_rows') else 'completed')
                 task.error = '部分行提词失败，可重试失败行或审核成功结果' if task.result.get('failed_rows') else None
                 task.lease_owner = None
                 task.lease_expires_at = None

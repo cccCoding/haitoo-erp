@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import undefer
 
 from .title_models import TitleDictionaryEntry, TitleImportWord, TitleKeyword, TitleTask, TitleTemplateProfile
-from .title_service import CATEGORY_FIELDS, DICTIONARY_TAGS, normalize
+from .title_service import CATEGORY_FIELDS, DICTIONARY_TAGS, RETIRED_TAGS, normalize
 
 
 def name_key(value):
@@ -46,6 +46,10 @@ def seed_tags(db, market):
             db.add(TitleDictionaryEntry(market_id=market.id, kind='tag', name=tag, name_key=name_key(tag),
                 semantic_tag=tag, built_in=True))
     db.flush()
+
+
+def selectable_tag(row):
+    return getattr(row, 'semantic_tag', None) not in RETIRED_TAGS
 
 
 def category_values(db, market, values, *, allow_disabled=()):
@@ -139,6 +143,7 @@ def usage_counts(db, market_id, *, lock=False):
 
 def entry_payload(row, counts):
     result = {key: getattr(row, key) for key in ('id', 'kind', 'name', 'description', 'localized_name', 'semantic_tag', 'built_in', 'enabled')}
+    result['selectable'] = selectable_tag(row)
     result['merged_into_id'] = row.merged_into_id
     result['aliases'] = sorted(item.name for item in row.names if item.name_key != row.name_key)
     result['merged_source_count'] = counts[(row.kind, row.name_key, 'merged_source')]

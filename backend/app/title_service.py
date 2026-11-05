@@ -29,13 +29,15 @@ TAGS = ["品类", "性别", "年龄", "人群", "风格", "场景", "季节", "�
         "颜色", "图案", "结构设计", "细节元素", "工艺", "功能", "穿着效果", "搭配", "价格定位", "品牌", "流行趋势",
         "地域文化", "搜索意图", "长尾程度", "营销修饰", "时间节点", "目标市场", "搜索语言", "关键词热度", "关键词竞争度", "待分类"]
 CATEGORY_FIELDS = ('品类', '性别', '年龄')
-DICTIONARY_TAGS = [tag for tag in TAGS if tag not in (*CATEGORY_FIELDS, '面料')]
+RETIRED_TAGS = {'搜索语言', '关键词热度', '关键词竞争度', '待分类'}
+AUTOMATIC_TAGS = {'营销修饰', '目标市场'}
+DICTIONARY_TAGS = [tag for tag in TAGS if tag not in (*CATEGORY_FIELDS, '面料', *RETIRED_TAGS)]
 PROFILE_TAGS = [tag for tag in TAGS[:25] if tag not in (*CATEGORY_FIELDS, '面料')]
 GENDERS = ('男', '女', '中性')
 AGE_GROUPS = ('成人', '儿童')
 TITLE_WORD_PATTERN = re.compile(r"[^\W_]+(?:[-'][^\W_]+)*", re.UNICODE)
 VISUAL_TAGS = {"品类", "颜色", "图案", "版型", "长度", "结构设计", "细节元素"}
-EXCLUDED_TAGS = {"营销修饰", "关键词热度", "关键词竞争度", "搜索语言", "目标市场"}
+EXCLUDED_TAGS = RETIRED_TAGS
 CONFIRMED_CHOICES = (('craft', '工艺'), ('brand', '品牌'))
 
 MALAY_WORDS = set("baju gaun jubah kurung tudung seluar skirt kemeja jersi tunik kebaya kurta singlet blaus selendang sarung wanita lelaki kanak bayi lengan panjang pendek bunga bercorak corak polos labuh leher bulat longgar saiz besar kapas kain untuk dengan dan berwarna harian pakaian menyusu muslimah hitam putih biru merah hijau ungu kuning coklat berzip".split())
@@ -376,7 +378,7 @@ def profile_snapshot(db, market, template_id, *, require_fallback=False):
         "forbidden_keyword_ids": list(profile.forbidden_keyword_ids), "fallback_title": profile.fallback_title,
         "fallback_approved": profile.fallback_approved, "revision": market.revision,
         "platform": market.platform, "site": market.site, "language": market.language,
-        "keywords": words,
+        "keywords": words, "keyword_policy_version": 2,
         "forbidden_phrases": [row.phrase for row in db.scalars(select(TitleKeyword).where(
             TitleKeyword.market_id == market.id, or_(TitleKeyword.priority == "forbidden",
                 TitleKeyword.id.in_(profile.forbidden_keyword_ids or [-1]))).with_for_update())
@@ -388,10 +390,13 @@ def match_keywords(snapshot, facts):
     result = []
     selected_material = snapshot.get('selected_material_keyword')
     confirmed = {word['tag']: word for word in selected_confirmed_keywords(snapshot)}
+    automatic_tags = AUTOMATIC_TAGS if snapshot.get('keyword_policy_version', 1) >= 2 else set()
     for word in snapshot["keywords"]:
         if selected_material and word['tag'] == '材质' and word['id'] != selected_material['id']:
             continue
         if word["priority"] == "forbidden" or word["id"] in snapshot["forbidden_keyword_ids"] or word["tag"] in EXCLUDED_TAGS:
+            continue
+        if word['tag'] in AUTOMATIC_TAGS and word['tag'] not in automatic_tags:
             continue
         if snapshot.get('confirmed_choices_version') and word['tag'] in {'工艺', '品牌'}:
             if word['id'] != confirmed.get(word['tag'], {}).get('id'):
@@ -400,6 +405,10 @@ def match_keywords(snapshot, facts):
             # 升级前的任务仍使用原有品牌排除规则。
             continue
         if category not in {normalize(c) for c in word["categories"]}:
+            continue
+        # 快照已按公司、站点和语言隔离；这两类词按适用品类直接成为候选，不由图片证明。
+        if word['tag'] in automatic_tags:
+            result.append(word)
             continue
         values = [normalize(v) for f in facts['attributes'] if canonical_tag(f['tag']) == canonical_tag(word['tag'])
                   and (not snapshot.get('confirmed_choices_version') or word['tag'] not in {'工艺', '品牌'} or f.get('source') == 'manual')
@@ -422,7 +431,7 @@ def choose_keywords(snapshot, candidates, counts, turn=0, *, facts=None, core=No
     required = set(snapshot['locked_keyword_ids'])
     required.update(word['id'] for word in selected_confirmed_keywords(snapshot))
     ordered = sorted(candidates, key=lambda w: (w["id"] not in required,
-        w["tag"] != "品类", w["priority"] != "preferred", counts.get(w["id"], 0),
+        w["tag"] != "品类", w['tag'] in AUTOMATIC_TAGS, w["priority"] != "preferred", counts.get(w["id"], 0),
         -w.get('evidence_frequency', 0), w["selected_count"], digest([w["id"], turn])))
     budget = supply_rules.KEYWORD_BUDGET if snapshot.get('supply') else 180
     core = core or snapshot.get('category_localized_name') or ''
@@ -730,6 +739,10 @@ async def generate_record(db, record_id, api_key=None):
             db.refresh(record)
             raw_length = cleaned_length = None
             try:
+                expression_rules = (
+                    'Selected 营销修饰 and 目标市场 phrases are approved wording from this market and category library. '
+                    'Include them verbatim as required; do not invent additional marketing or market claims. '
+                    if snapshot.get('keyword_policy_version', 1) >= 2 else '')
                 answer = await ask_json(api_key,
                     f"Write one natural product title in {locale['model_language']}. "
                     'Return {"title":"..."}. core_category is the confirmed product category. '
@@ -742,6 +755,7 @@ async def generate_record(db, record_id, api_key=None):
                     'connectives, synonyms and inflections as needed; wording is not restricted to a word whitelist. '
                     'Do not contradict confirmed facts. '
                     'No invented material, function, audience, brand, marketing, season or occasion. '
+                    + expression_rules +
                     'Material, craft and brand may use only the exact original phrases manually selected for this title; '
                     'if none is selected for a type, do not add any for that type. Preserve brand spelling and case verbatim. '
                     f'Prefer {target_minimum}-{target_maximum} characters including spaces and punctuation, within target_minimum and target_maximum. '

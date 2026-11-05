@@ -488,6 +488,105 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             from app.title_service import match_keywords
             matched = match_keywords(profile_snapshot(db, get_market(db, 1, create=True), 1), FACTS)
         self.assertTrue(any(word['id'] == core['id'] for word in matched))
+
+    def test_retired_semantics_are_not_offered_but_existing_words_remain_editable(self):
+        from app.title_dictionary import name_key
+        from app.title_models import TitleDictionaryEntry
+        from app.title_service import RETIRED_TAGS
+        self.profile(); self.import_words()
+        data = self.request('GET', '/title-dictionaries').json()
+        self.assertFalse(RETIRED_TAGS & set(data['semantic_tags']))
+        self.assertFalse(RETIRED_TAGS & {row['name'] for row in data['items']})
+        with self.sessions() as db:
+            market = get_market(db, 1)
+            for tag in RETIRED_TAGS:
+                db.add(TitleDictionaryEntry(market_id=market.id, kind='tag', name=tag, name_key=name_key(tag),
+                    semantic_tag=tag, built_in=True))
+            db.add(TitleDictionaryEntry(market_id=market.id, kind='tag', name='搜索语种', name_key=name_key('搜索语种'),
+                semantic_tag='搜索语言'))
+            old = TitleKeyword(market_id=market.id, code='OLDLANG', phrase='Bahasa Melayu', translation='马来语',
+                identity_hash=digest('old-language'), tag='搜索语种', categories=['连衣裙'])
+            db.add(old); db.commit(); old_id = old.id
+        data = self.request('GET', '/title-dictionaries').json()
+        retired = [row for row in data['items'] if row['semantic_tag'] in RETIRED_TAGS]
+        self.assertEqual(len(retired), len(RETIRED_TAGS) + 1)
+        self.assertTrue(all(not row['selectable'] for row in retired))
+        core = next(word for word in self.request('GET', '/title-keywords').json()['items'] if word['tag'] == '品类')
+        self.assertEqual(self.request('PATCH', f"/title-keywords/{core['id']}", json={'tag': '搜索语种'}).status_code, 400)
+        self.assertEqual(self.request('PATCH', f'/title-keywords/{old_id}', json={'translation': '历史马来语'}).status_code, 200)
+        for tag in RETIRED_TAGS:
+            self.assertEqual(self.request('POST', '/title-dictionaries/tag',
+                json={'name': f'{tag}别名', 'semantic_tag': tag}).status_code, 400)
+        rejected = self.request('POST', '/title-imports', files={'file': ('retired.csv',
+            (KEYWORDS + 'Bahasa Melayu,马来语,连衣裙,搜索语种,否\n').encode())}, data={'kind': 'keywords'})
+        self.assertEqual(rejected.status_code, 400)
+        upload = self.upload(kind='titles', content='商品标题,商品分类\nGaun Lengan Panjang,连衣裙\n')
+        with self.sessions() as db:
+            allowed = db.get(TitleTask, upload['id']).snapshot['allowed_tags']
+            self.assertFalse(RETIRED_TAGS & set(allowed))
+            self.assertNotIn('搜索语种', allowed)
+
+    def test_marketing_and_market_words_are_selected_without_image_or_manual_facts(self):
+        from app.title_service import match_keywords
+        self.profile()
+        self.create_dictionary('tag', name='推广表达', semantic_tag='营销修饰')
+        self.create_dictionary('tag', name='销售市场', semantic_tag='目标市场')
+        self.import_words(content=KEYWORDS + 'Pilihan Popular,热门之选,连衣裙,推广表达,否\nMalaysia,马来西亚,连衣裙,销售市场,否\n')
+        with self.sessions() as db:
+            snapshot = profile_snapshot(db, get_market(db, 1), 1)
+            self.assertGreaterEqual(snapshot['keyword_policy_version'], 2)
+            matches = match_keywords(snapshot, FACTS)
+            self.assertEqual({word['tag'] for word in matches} - {fact['tag'] for fact in FACTS['attributes']},
+                {'营销修饰', '目标市场'})
+            legacy = {key: value for key, value in snapshot.items() if key != 'keyword_policy_version'}
+            self.assertFalse({'营销修饰', '目标市场'} & {word['tag'] for word in match_keywords(legacy, FACTS)})
+        title = TITLE + ' Pilihan Popular Malaysia'
+        model = self.model(title)
+        with patch('app.title_service.ask_json', new=model):
+            result = self.request('POST', '/templates/1/generate-draft-title', uid=2, json={
+                'method': 'library', 'image_url': 'https://img.example/1.png', 'request_key': 'automatic-expression'})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()['title'], title)
+        calls = [call for call in model.await_args_list if 'selected' in call.args[2]]
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertIn('approved wording', call.args[1])
+            self.assertTrue({'Pilihan Popular', 'Malaysia'} <= set(call.args[2]['required_phrases']))
+            self.assertFalse({'营销修饰', '目标市场'} & {fact['tag'] for fact in call.args[2]['facts']})
+
+    def test_automatic_expression_candidates_obey_market_category_status_and_bans(self):
+        from app.title_dictionary import name_key
+        from app.title_models import TitleDictionaryEntry
+        from app.title_service import choose_keywords, match_keywords
+        for site, language in [('MY', 'ms'), ('ID', 'id')]:
+            with self.subTest(site=site):
+                response = self.request('PUT', '/title-profiles/1', json={
+                    'site': site, 'language': language, 'category': '连衣裙', 'gender': '女', 'age_group': '成人'})
+                self.assertEqual(response.status_code, 200, response.text)
+                with self.sessions() as db:
+                    market = get_market(db, 1, site=site, language=language)
+                    db.add(TitleDictionaryEntry(market_id=market.id, kind='tag', name='停用推广',
+                        name_key=name_key('停用推广'), semantic_tag='营销修饰', enabled=False))
+                    words = []
+                    for index, (tag, extra) in enumerate([
+                        ('营销修饰', {}), ('目标市场', {}), ('营销修饰', {'priority': 'forbidden'}),
+                        ('营销修饰', {}), ('营销修饰', {'status': 'disabled'}),
+                        ('目标市场', {'categories': ['上衣']}), ('营销修饰', {'merged_into_id': 1}),
+                        ('停用推广', {}), ('搜索语言', {})]):
+                        word = TitleKeyword(market_id=market.id, code=f'AUTO{index}', phrase=f'Pilihan {index}',
+                            translation=f'表达{index}', identity_hash=digest([site, index]), tag=tag,
+                            **{'categories': ['连衣裙'], **extra})
+                        db.add(word); words.append(word)
+                    db.flush()
+                    profile = db.scalar(select(TitleTemplateProfile).where(TitleTemplateProfile.market_id == market.id))
+                    profile.forbidden_keyword_ids = [words[3].id]
+                    db.flush()
+                    snapshot = profile_snapshot(db, market, 1)
+                    matched = match_keywords(snapshot, {'attributes': []})
+                    self.assertEqual({word['id'] for word in matched}, {words[0].id, words[1].id})
+                    selected = choose_keywords(snapshot, matched, {})
+                    self.assertEqual({word['id'] for word in selected}, {words[0].id, words[1].id})
+                    db.commit()
         self.assertNotIn('品类', [row['name'] for row in self.dictionary_items('tag')])
 
     def test_site_category_name_is_editable_without_changing_identity_or_references(self):
@@ -1671,6 +1770,53 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         self.assertEqual([w['position'] for w in words], [0, 10])
         self.assertEqual(words[0]['phrase'], 'Baju-baju')
 
+    def test_import_discards_unclassified_words_without_failing_valid_rows(self):
+        for empty in (False, True):
+            with self.subTest(empty=empty):
+                task = self.upload(kind='titles', filename=f'classified-{empty}.csv',
+                    content=f'商品标题,商品分类\nGaun Popular {empty},连衣裙\n')
+                response = self.request('POST', f"/title-tasks/{task['id']}/start", json={})
+                self.assertEqual(response.status_code, 200, response.text)
+                answer = {'language': 'ms', 'keywords': [
+                    {'phrase': 'Popular', 'translation': '热门', 'tag': '待分类'},
+                    {'phrase': 'Popular', 'translation': '热门'}]}
+                if not empty:
+                    answer['keywords'].append({'phrase': 'Gaun', 'translation': '连衣裙', 'tag': '品类'})
+                with patch('app.title_import.ask_json', new=AsyncMock(return_value=answer)):
+                    self.run_worker()
+                with self.sessions() as db:
+                    stored = db.get(TitleTask, task['id'])
+                    self.assertEqual(stored.state, 'completed' if empty else 'review')
+                    self.assertEqual(stored.progress['completed'], 1)
+                    self.assertEqual(stored.result.get('failed_rows', {}), {})
+                    self.assertEqual(stored.result['word_total'], 0 if empty else 1)
+                if not empty:
+                    detail = self.request('GET', f"/title-tasks/{task['id']}").json()
+                    self.assertEqual([word['tag'] for word in detail['result']['words']], ['品类'])
+
+    def test_pending_legacy_unclassified_results_are_not_imported(self):
+        from app.title_models import TitleImportWord
+        self.profile()
+        task = self.upload(kind='titles', content='商品标题,商品分类\nGaun Popular,连衣裙\n')
+        with self.sessions() as db:
+            stored = db.get(TitleTask, task['id'])
+            stored.state = 'review'
+            stored.snapshot = {**stored.snapshot, 'tag_semantics': {'旧兜底': '待分类'}}
+            for index, tag in enumerate(['待分类', '旧兜底']):
+                db.add(TitleImportWord(task_id=stored.id, row_number=2, identity_hash=digest(index), word={
+                    'phrase': 'Popular', 'translation': '热门', 'tag': tag, 'categories': ['连衣裙'],
+                    'synonyms': [], 'conflicts': [], 'is_borrowed': False, 'position': 5, 'row': 2}))
+            db.flush()
+            identities = list(db.scalars(select(TitleImportWord.id).where(TitleImportWord.task_id == stored.id)))
+            stored.result = {'word_total': len(identities)}
+            db.commit()
+        response = self.request('POST', f"/title-imports/{task['id']}/confirm", json={'selections': identities})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {'created': 0, 'merged': 0, 'evidence': 0})
+        with self.sessions() as db:
+            self.assertEqual(db.scalar(select(func.count()).select_from(TitleKeyword)), 0)
+            self.assertEqual(db.scalar(select(func.count()).select_from(TitleEvidence)), 0)
+
     def test_single_generation_cache_and_actual_adoption(self):
         self.enable(); self.profile(); self.import_words()
         model = self.model()
@@ -2097,6 +2243,35 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
 
 
 class TitlePureTests(unittest.TestCase):
+    def test_legacy_unclassified_keywords_are_excluded_even_with_matching_facts(self):
+        from app.title_service import match_keywords
+        snapshot = {'category': '连衣裙', 'locked_keyword_ids': [], 'forbidden_keyword_ids': [],
+            'keywords': [{'id': 1, 'tag': '待分类', 'phrase': 'Popular', 'translation': '热门',
+                          'synonyms': [], 'categories': ['连衣裙'], 'priority': 'preferred'}]}
+        facts = {'attributes': [{'tag': '待分类', 'value': '热门', 'localized_value': 'Popular', 'source': 'manual'}]}
+        self.assertEqual(match_keywords(snapshot, facts), [])
+
+    def test_extraction_discards_missing_unknown_and_legacy_unclassified_tags(self):
+        for site, language, title in [('MY', 'ms', 'Gaun Popular'), ('ID', 'id', 'Daster Popular')]:
+            with self.subTest(site=site):
+                row = {'row': 2, 'values': {'原标题': title, '商品品类': '连衣裙'}, 'metrics': {}}
+                core = title.split()[0]
+                answer = {'language': language, 'keywords': [
+                    {'phrase': core, 'translation': '连衣裙', 'tag': '品类'},
+                    {'phrase': 'Popular', 'translation': '热门'},
+                    {'phrase': 'Popular', 'translation': '热门', 'tag': None},
+                    {'phrase': 'Popular', 'translation': '热门', 'tag': '未知标签'},
+                    {'phrase': 'Popular', 'translation': '热门', 'tag': '待分类'},
+                    {'phrase': 'Popular', 'translation': '热门', 'tag': '旧兜底'}]}
+                with patch('app.title_import.ask_json', new=AsyncMock(return_value=answer)) as model:
+                    result = asyncio.run(extract_row(row, 'titles', 'key', site=site, language=language,
+                        allowed_tags=['品类', '待分类', '旧兜底'], tag_semantics={'品类': '品类', '旧兜底': '待分类'}))
+                self.assertEqual([word['phrase'] for word in result], [core])
+                self.assertEqual(model.await_args.args[2]['allowed_tags'], ['品类'])
+                self.assertEqual(model.await_args.args[2]['tag_semantics'], {'品类': '品类'})
+                with patch('app.title_import.ask_json', new=AsyncMock(return_value={'language': language, 'keywords': []})):
+                    self.assertEqual(asyncio.run(extract_row(row, 'titles', 'key', site=site, language=language)), [])
+
     def test_material_choices_migration_keeps_legacy_profile_and_task_snapshots(self):
         from sqlalchemy import MetaData, Table
         engine = create_engine('sqlite://')
@@ -2143,7 +2318,7 @@ class TitlePureTests(unittest.TestCase):
 
     def test_dictionary_migration_backfills_existing_names_without_changing_words_or_tasks(self):
         from app.title_models import TitleDictionaryEntry, TitleTemplateProfile
-        from app.title_service import DICTIONARY_TAGS
+        from app.title_service import DICTIONARY_TAGS, RETIRED_TAGS
         from sqlalchemy.schema import CreateTable
         from sqlalchemy.dialects import mysql
         engine = create_engine('sqlite://')
@@ -2160,7 +2335,8 @@ class TitlePureTests(unittest.TestCase):
                 request_key='b'*64, request_hash='c'*64, snapshot=snapshot))
             command.upgrade(config, 'head')
             rows = connection.execute(select(TitleDictionaryEntry.__table__)).mappings().all()
-            self.assertEqual(len([r for r in rows if r['kind']=='tag']), len(DICTIONARY_TAGS))
+            # 历史迁移保留旧字典，日常可选项由当前策略过滤，不删除历史引用。
+            self.assertEqual(len([r for r in rows if r['kind']=='tag']), len(DICTIONARY_TAGS) + len(RETIRED_TAGS))
             self.assertTrue(all(r['gender'] is None for r in rows if r['kind']=='category'))
             self.assertEqual({r['name'] for r in rows if r['kind']=='category'}, {'连衣裙', 'Ｔｏｐｓ'})
             self.assertTrue(all(r['built_in'] and r['enabled'] for r in rows if r['kind']=='tag'))
