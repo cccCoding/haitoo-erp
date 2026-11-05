@@ -10,8 +10,10 @@ from sqlalchemy.orm import sessionmaker
 
 from app.ai_providers import ProviderError
 from app.database import Base
+from app import supply_title_rules as supply_rules
 from app.title_models import TitleKeyword, TitleMarket, TitleRecord, TitleTask
-from app.title_service import choose_keywords, create_record, generate_record, match_keywords
+from app.title_service import (choose_keywords, create_record, generate_record, match_keywords,
+                               prepare_supply_compression)
 
 
 MY_180 = ('Gaun Wanita Dewasa Lengan Panjang Corak Bunga Potongan Longgar Labuh Leher Bulat '
@@ -85,6 +87,19 @@ class TitleKeywordBudgetTests(unittest.TestCase):
         words[1]['priority'] = 'preferred'
         self.assertEqual(choose_keywords(self.snapshot(), words, {})[0]['id'], 2)
 
+    def test_supply_protected_content_over_170_has_no_optional_additions(self):
+        words = [keyword(1, 'a' * 166), keyword(2, 'Gaun'), keyword(3, 'Biru')]
+        chosen = choose_keywords(self.snapshot(supply=True, locked_keyword_ids=[1]), words, {})
+        self.assertEqual([word['id'] for word in chosen], [1])
+
+    def test_compression_scales_to_actual_overflow_and_preserves_necessary_content(self):
+        self.assertEqual(supply_rules.content_characters(['Gaun', 'GAUN', '  Kapas ']), 10)
+        for length, expected in ((236, 136), (264, 122), (362, 89)):
+            self.assertEqual(supply_rules.compression_budget(1, 170, 40, length), expected)
+        self.assertEqual(supply_rules.compression_budget(1, 170, 150, 362), 150)
+        self.assertEqual(supply_rules.compression_budget(2, 136, 40, 264), 92)
+        self.assertEqual(supply_rules.compression_budget(3, 92, 40, 264), 40)
+
 
 class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -96,7 +111,7 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.db.close)
 
     async def generate(self, answers, *, supply=False, site='MY', history=None, forbidden=(), words=(),
-                       locked=(), material=None, response_callback=None):
+                       locked=(), material=None, craft=None, brand=None, response_callback=None):
         core = 'Daster' if site == 'ID' else 'Gaun'
         self.company_sequence += 1
         market = TitleMarket(company_id=self.company_sequence, platform='TikTok', site=site,
@@ -109,6 +124,11 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
                     'forbidden_keyword_ids': [], 'forbidden_phrases': list(forbidden)}
         if material:
             snapshot['selected_material_keyword'] = material
+        if craft or brand:
+            snapshot['confirmed_choices_version'] = 1
+            for kind, word in (('craft', craft), ('brand', brand)):
+                if word:
+                    snapshot[f'selected_{kind}_keyword'] = word
         for word in words:
             self.db.add(TitleKeyword(id=word['id'], market_id=market.id, code=str(word['id']),
                 identity_hash=str(word['id']).zfill(64), phrase=word['phrase'], translation=word['translation'],
@@ -254,21 +274,138 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result['attempts'], 2)
                 self.assertEqual(result['title'], title)
 
-    async def test_supply_reduces_optional_words_after_two_overlong_responses(self):
+    async def test_supply_reduces_optional_words_after_first_overlong_response(self):
         words = [keyword(1, 'Gaun', tag='品类'), keyword(2, 'Lengan Panjang', tag='结构设计'),
                  keyword(3, 'kapas', tag='材质'), keyword(4, 'Corak Bunga', tag='图案')]
         overlong = MY_180 + ' X' * 40
         result, model = await self.generate([overlong, overlong, MY_180 + ' Kapas'], supply=True,
             words=words, locked=[2], material=words[2])
         selections = [[w['id'] for w in call.args[2]['selected']] for call in model.await_args_list]
-        self.assertEqual(selections[0], selections[1])
+        self.assertEqual(set(selections[1]), {1, 2, 3})
         self.assertEqual(set(selections[2]), {1, 2, 3})
         self.assertNotIn('Corak Bunga', model.await_args.args[2]['required_phrases'])
         state = self.db.get(TitleRecord, self.record_id).snapshot['supply_generation']
         self.assertEqual(state['removed_keyword_ids'], [4])
         self.assertEqual(result['attempts'], 3)
         counts = {row.id: row.selected_count for row in self.db.scalars(select(TitleKeyword))}
-        self.assertEqual(counts, {1: 3, 2: 3, 3: 3, 4: 2})
+        self.assertEqual(counts, {1: 3, 2: 3, 3: 3, 4: 1})
+
+    async def test_supply_removes_multiple_optional_words_and_finishes_second_call(self):
+        phrases = ['Lengan Panjang', 'Corak Bunga', 'Potongan Longgar', 'Labuh', 'Leher Bulat',
+                   'Poket Sisi', 'Butang Hadapan', 'Pinggang Berikat', 'Pakaian Harian', 'Warna Biru Cerah',
+                   'Dengan Lipatan Di Depan Rapi']
+        words = [keyword(i, phrase) for i, phrase in enumerate(phrases, 1)]
+        responses = []
+        def answer(_key, _instructions, data, **_kwargs):
+            title = MY_180 + ' X' * 91 if not responses else ' '.join(data['required_phrases'])
+            responses.append(title)
+            return {'title': title}
+
+        result, model = await self.generate([], supply=True, words=words, response_callback=answer)
+        self.assertEqual(result['attempts'], 2)
+        self.assertEqual(result['title'], responses[1])
+        first, retry = [call.args[2] for call in model.await_args_list]
+        self.assertEqual(first['required_phrase_characters'], 170)
+        self.assertEqual(retry['keyword_budget'], 89)
+        self.assertLessEqual(retry['required_phrase_characters'], 89)
+        self.assertGreater(len(retry['omitted_optional_phrases']), 1)
+        self.assertIn('Compression mode', model.await_args.args[1])
+        self.assertNotIn('expand it using unused_confirmed_attributes', model.await_args.args[1])
+        self.assertNotIn('unused_confirmed_attributes', retry)
+        self.assertIn('Facts are evidence for truth checking only', model.await_args.args[1])
+        self.assertTrue(all(any(fact['localized_value'] == phrase for fact in retry['facts'])
+                            for phrase in retry['omitted_optional_phrases']))
+        state = self.db.get(TitleRecord, self.record_id).snapshot['supply_generation']
+        self.assertEqual(len(state['compression_history']), 1)
+        removed_ids = set(state['removed_keyword_ids'])
+        counts = {row.id: row.selected_count for row in self.db.scalars(select(TitleKeyword))}
+        self.assertTrue(all(counts[identity] == 1 for identity in removed_ids))
+        self.assertTrue(all(counts[word['id']] == 2 for word in retry['selected']))
+
+    async def test_supply_compression_accepts_full_valid_range_for_both_markets(self):
+        for site, core in (('MY', 'Gaun'), ('ID', 'Daster')):
+            for length in (25, 179, 200, 230):
+                with self.subTest(site=site, length=length):
+                    title = core + ' ' + 'a' * (length - len(core) - 1)
+                    result, model = await self.generate([core + ' ' + 'a' * 270, title], supply=True, site=site)
+                    self.assertEqual(result['title'], title)
+                    self.assertEqual(result['attempts'], 2)
+                    self.assertEqual(model.await_count, 2)
+
+    async def test_supply_second_overlong_response_reduces_budget_again_and_finishes_third_call(self):
+        words = [keyword(i, phrase) for i, phrase in enumerate([
+            'Lengan Panjang', 'Corak Bunga', 'Potongan Longgar', 'Labuh', 'Leher Bulat', 'Poket Sisi',
+            'Butang Hadapan', 'Pinggang Berikat', 'Pakaian Harian', 'Warna Biru Cerah',
+            'Dengan Lipatan Di Depan Rapi'], 1)]
+        responses = [MY_180 + ' X' * 28, MY_180 + ' X' * 42]
+        def answer(_key, _instructions, data, **_kwargs):
+            return {'title': responses.pop(0) if responses else ' '.join(data['required_phrases'])}
+
+        result, model = await self.generate([], supply=True, words=words, response_callback=answer)
+        first, second, third = [call.args[2] for call in model.await_args_list]
+        self.assertEqual(first['required_phrase_characters'], 170)
+        self.assertEqual(second['keyword_budget'], 136)
+        self.assertEqual(third['keyword_budget'], second['required_phrase_characters'] * 180 // 264)
+        self.assertLess(third['required_phrase_characters'], second['required_phrase_characters'])
+        self.assertEqual(result['attempts'], 3)
+        self.assertLessEqual(result['character_count'], 230)
+        state = self.db.get(TitleRecord, self.record_id).snapshot['supply_generation']
+        history = state['compression_history']
+        self.assertEqual([item['response_attempt'] for item in history], [1, 2])
+        self.assertTrue(set(history[0]['removed_keyword_ids']).isdisjoint(history[1]['removed_keyword_ids']))
+
+    async def test_supply_compression_rejects_24_and_231_then_finishes_third_call(self):
+        for length in (24, 231):
+            with self.subTest(length=length):
+                result, model = await self.generate([MY_231, 'Gaun ' + 'a' * (length - 5), SHORT], supply=True)
+                self.assertEqual(result['attempts'], 3)
+                self.assertEqual(result['title'], SHORT)
+                stages = [call.args[2]['compression_level'] for call in model.await_args_list]
+                self.assertEqual(stages, [0, 1, 1 if length == 24 else 2])
+
+    async def test_supply_compression_protects_core_manual_choices_and_legacy_locked_words(self):
+        words = [keyword(1, 'Gaun', tag='品类'), keyword(2, 'Lengan Panjang'), keyword(3, 'kapas', tag='材质'),
+                 keyword(4, 'sulaman', tag='工艺'), keyword(5, 'Acme', tag='品牌'), keyword(6, 'Corak Bunga')]
+        title = 'Gaun Lengan Panjang kapas sulaman Acme'
+        result, model = await self.generate([title + ' X' * 150] * 3 + [title], supply=True, words=words,
+            locked=[2], material=words[2], craft=words[3], brand=words[4])
+        self.assertEqual(result['attempts'], 4)
+        self.assertEqual(result['title'], title)
+        self.assertEqual({word['id'] for word in model.await_args.args[2]['selected']}, {1, 2, 3, 4, 5})
+        self.assertEqual(model.await_args.args[2]['compression_level'], 3)
+
+    async def test_supply_non_length_failures_do_not_advance_compression(self):
+        result, model = await self.generate([MY_231, ProviderError('模型超时'), 'Baju ' + 'a' * 30, SHORT], supply=True)
+        self.assertEqual(result['attempts'], 4)
+        payloads = [call.args[2] for call in model.await_args_list]
+        self.assertEqual([data['compression_level'] for data in payloads], [0, 1, 1, 1])
+        self.assertEqual(len({data['keyword_budget'] for data in payloads[1:]}), 1)
+        state = self.db.get(TitleRecord, self.record_id).snapshot['supply_generation']
+        self.assertEqual(len(state['compression_history']), 1)
+
+    async def test_supply_compression_uses_cleaned_length_and_logs_success(self):
+        with self.assertLogs('app.title_service', level='INFO') as logs:
+            result, model = await self.generate([MY_231 + ' Kapas', SHORT], supply=True)
+        retry = model.await_args.args[2]
+        self.assertEqual(retry['character_count'], 231)
+        state = self.db.get(TitleRecord, self.record_id).snapshot['supply_generation']
+        self.assertEqual(state['compression_history'][0]['previous_length'], 231)
+        self.assertEqual(result['attempts'], 2)
+        self.assertTrue(any('货盘标题成文完成' in line and 'attempts=2' in line and 'compression_level=1' in line
+                            for line in logs.output))
+
+    async def test_supply_preserves_overlapping_necessary_phrases_beyond_soft_budget(self):
+        shared = 'Corak Bunga ' * 9
+        phrases = [(shared + 'Wanita').strip(), ('Gaun ' + shared).strip()]
+        words = [keyword(i, phrase) for i, phrase in enumerate(phrases, 1)]
+        title = 'Gaun ' + shared + 'Wanita'
+        self.assertGreater(supply_rules.content_characters(['Gaun', *phrases]), 230)
+        self.assertLess(len(title), 230)
+        result, model = await self.generate([title + ' X' * 100, title], supply=True, words=words, locked=[1, 2])
+        self.assertEqual(result['title'], title)
+        retry = model.await_args.args[2]
+        self.assertEqual({word['id'] for word in retry['selected']}, {1, 2})
+        self.assertGreater(retry['keyword_budget'], 170)
 
     async def test_supply_keeps_best_title_and_selection_across_interruption(self):
         with self.assertRaises(asyncio.CancelledError):
@@ -344,17 +481,71 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
     async def test_supply_resume_does_not_remove_optional_word_twice(self):
         words = [keyword(1, 'Corak Bunga', tag='图案'), keyword(2, 'Lengan Panjang', tag='结构设计')]
         with self.assertRaises(asyncio.CancelledError):
-            await self.generate([MY_231, MY_231, asyncio.CancelledError()], supply=True, words=words)
+            await self.generate([MY_231, asyncio.CancelledError()], supply=True, words=words)
         record = self.db.get(TitleRecord, self.record_id)
         state = copy.deepcopy(record.snapshot['supply_generation'])
-        self.assertEqual(record.attempts, 3)
+        self.assertEqual(record.attempts, 2)
         self.assertEqual(len(state['removed_keyword_ids']), 1)
         selection = state['selected']
         model = AsyncMock(return_value={'title': MY_180})
         with patch('app.title_service.ask_json', new=model):
             await generate_record(self.db, record.id, 'test-key')
         self.assertEqual(model.await_args.args[2]['selected'], selection)
-        self.assertEqual(record.attempts, 4)
+        self.assertEqual(record.attempts, 3)
+        self.assertEqual(record.snapshot['supply_generation']['compression_history'], state['compression_history'])
+
+    async def test_supply_resume_applies_pending_compression_once(self):
+        def interrupt_pending(state, *args):
+            if state.get('compression_source_attempt'):
+                raise asyncio.CancelledError()
+            return prepare_supply_compression(state, *args)
+
+        words = [keyword(1, 'Corak Bunga'), keyword(2, 'Lengan Panjang')]
+        with patch('app.title_service.prepare_supply_compression', side_effect=interrupt_pending):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.generate([MY_231], supply=True, words=words)
+        record = self.db.get(TitleRecord, self.record_id)
+        self.assertEqual(record.attempts, 1)
+        self.assertNotIn('compression_applied_attempt', record.snapshot['supply_generation'])
+        model = AsyncMock(return_value={'title': SHORT})
+        with patch('app.title_service.ask_json', new=model):
+            result = await generate_record(self.db, record.id, 'test-key')
+        self.assertEqual(result['attempts'], 2)
+        state = record.snapshot['supply_generation']
+        self.assertEqual(state['compression_applied_attempt'], 1)
+        self.assertEqual(len(state['compression_history']), 1)
+
+    async def test_supply_legacy_reduction_flag_does_not_remove_more_words_on_resume(self):
+        words = [keyword(1, 'Corak Bunga'), keyword(2, 'Lengan Panjang')]
+        with self.assertRaises(asyncio.CancelledError):
+            await self.generate([asyncio.CancelledError()], supply=True, words=words)
+        record = self.db.get(TitleRecord, self.record_id)
+        state = copy.deepcopy(record.snapshot['supply_generation'])
+        state.update(reduce_optional=True, overlong_streak=2, cleaned_length=264)
+        record.snapshot = {**record.snapshot, 'supply_generation': state}
+        self.db.commit()
+        model = AsyncMock(return_value={'title': MY_180})
+        with patch('app.title_service.ask_json', new=model):
+            result = await generate_record(self.db, record.id, 'test-key')
+        self.assertEqual(result['attempts'], 2)
+        self.assertEqual(model.await_args.args[2]['selected'], state['selected'])
+        self.assertEqual(model.await_args.args[2]['compression_level'], 0)
+        self.assertNotIn('reduce_optional', record.snapshot['supply_generation'])
+
+    async def test_supply_compression_restore_adopts_saved_valid_candidate_without_call(self):
+        with self.assertRaises(asyncio.CancelledError):
+            await self.generate([MY_230, asyncio.CancelledError()], supply=True)
+        record = self.db.get(TitleRecord, self.record_id)
+        state = copy.deepcopy(record.snapshot['supply_generation'])
+        state.update(compression_level=1, compression_source_attempt=2, compression_source_length=264)
+        record.snapshot = {**record.snapshot, 'supply_generation': state}
+        self.db.commit()
+        model = AsyncMock(side_effect=AssertionError('已有合格候选不得继续成文'))
+        with patch('app.title_service.ask_json', new=model):
+            result = await generate_record(self.db, record.id, 'test-key')
+        model.assert_not_awaited()
+        self.assertEqual(result['title'], MY_230)
+        self.assertEqual(result['attempts'], 2)
 
     async def test_supply_empty_type_short_and_boundary_titles(self):
         for value in (None, '', 'Gaun', 123):

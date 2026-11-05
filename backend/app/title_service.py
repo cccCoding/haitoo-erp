@@ -435,9 +435,13 @@ def choose_keywords(snapshot, candidates, counts, turn=0, *, facts=None, core=No
         -w.get('evidence_frequency', 0), w["selected_count"], digest([w["id"], turn])))
     budget = supply_rules.KEYWORD_BUDGET if snapshot.get('supply') else 180
     core = core or snapshot.get('category_localized_name') or ''
+    protected_over_budget = snapshot.get('supply') and supply_rules.content_characters(
+        [core, *[word['phrase'] for word in ordered if word['id'] in required]]) > budget
     chosen, used_facts = [], set()
     for word in ordered:
         locked = word["id"] in required
+        if protected_over_budget and not locked:
+            continue
         options = set(map(normalize, [word['phrase'], word['translation'], *word['synonyms']]))
         # 同标签可保留不同事实，但同一确认事实的不同表达不重复入选。
         fact_keys = {index for index, fact in enumerate(facts or [])
@@ -453,11 +457,51 @@ def choose_keywords(snapshot, candidates, counts, turn=0, *, facts=None, core=No
         # 为核心品类预留位置；必用词及选定面料不受软预算限制。
         phrases = list(dict.fromkeys(normalize(phrase) for phrase in
             [core, *[other['phrase'] for other in chosen], word['phrase']] if phrase))
-        if not locked and len(' '.join(phrases)) > budget:
+        content_length = (supply_rules.content_characters([core, *[other['phrase'] for other in chosen], word['phrase']])
+                          if snapshot.get('supply') else len(' '.join(phrases)))
+        if not locked and content_length > budget:
             continue
         chosen.append(word)
         used_facts.update(fact_keys)
     return chosen
+
+
+def supply_content_phrases(core, selected, forbidden):
+    phrases = {}
+    for phrase in [core, *[remove_forbidden_phrases(word['phrase'], forbidden) for word in selected]]:
+        if phrase:
+            phrases.setdefault(normalize(phrase), phrase)
+    return list(phrases.values())
+
+
+def prepare_supply_compression(state, selected, core, protected, forbidden):
+    """在下一次调用的事务中一次性应用新超长响应，恢复时不重复缩减。"""
+    protected_words = [word for word in selected if word['id'] in protected or word['tag'] == '品类']
+    protected_length = supply_rules.content_characters(supply_content_phrases(core, protected_words, forbidden))
+    state['protected_characters'] = protected_length
+    state.setdefault('keyword_budget', max(supply_rules.KEYWORD_BUDGET, protected_length))
+    source_attempt = state.get('compression_source_attempt', 0)
+    removed = []
+    if source_attempt > state.get('compression_applied_attempt', 0):
+        content = supply_rules.content_characters(supply_content_phrases(core, selected, forbidden))
+        budget = supply_rules.compression_budget(state['compression_level'], content,
+            protected_length, state['compression_source_length'])
+        for position in range(len(selected) - 1, -1, -1):
+            if (state['compression_level'] <= len(supply_rules.COMPRESSION_STEPS)
+                    and supply_rules.content_characters(supply_content_phrases(core, selected, forbidden)) <= budget):
+                break
+            word = selected[position]
+            if word['id'] not in protected and word['tag'] != '品类':
+                removed.append(word['id'])
+                del selected[position]
+        state.update(keyword_budget=budget, compression_applied_attempt=source_attempt)
+        state.setdefault('removed_keyword_ids', []).extend(removed)
+        state.setdefault('compression_history', []).append({
+            'response_attempt': source_attempt, 'previous_length': state['compression_source_length'],
+            'level': state['compression_level'], 'keyword_budget': budget, 'removed_keyword_ids': removed})
+    state['content_characters'] = supply_rules.content_characters(supply_content_phrases(core, selected, forbidden))
+    state['selected'] = copy.deepcopy(selected)
+    return removed
 
 
 async def identify_facts(db, market_id, snapshot, image_url, api_key):
@@ -664,6 +708,10 @@ async def generate_record(db, record_id, api_key=None):
         target_maximum = supply_rules.TARGET_MAXIMUM if supply else 230
         maximum = supply_rules.MAXIMUM if supply else 255
         state = copy.deepcopy(snapshot.get('supply_generation', {})) if supply else {}
+        if supply:
+            # 旧标记不能代表新收到的超长响应，升级恢复不追删关键词。
+            state.pop('reduce_optional', None)
+            state.pop('overlong_streak', None)
         best = state.get('best')
         if best:
             # 旧货盘评分的第三项为相似度标记，恢复时仅保留长度评分。
@@ -692,7 +740,8 @@ async def generate_record(db, record_id, api_key=None):
             db.refresh(record)
 
         # 恢复时已有达标候选就直接采用，不再因旧相似度标记继续成文。
-        while record.attempts < supply_rules.MAX_ATTEMPTS and (best_score is None or best_score[0]):
+        while (record.attempts < supply_rules.MAX_ATTEMPTS and (best_score is None or best_score[0])
+               and not (supply and state.get('compression_level', 0) and last_good)):
             task_still_active(db, record)
             db.refresh(record)
             if record.lease_owner != owner:
@@ -712,18 +761,11 @@ async def generate_record(db, record_id, api_key=None):
             if supply:
                 protected = set(snapshot['locked_keyword_ids'])
                 protected.update(word['id'] for word in selected_confirmed_keywords(snapshot))
-                if state.pop('reduce_optional', False):
-                    for position in range(len(selected) - 1, -1, -1):
-                        word = selected[position]
-                        if word['id'] not in protected and word['tag'] != '品类':
-                            state.setdefault('removed_keyword_ids', []).append(word['id'])
-                            del selected[position]
-                            break
+                removed_this_round = prepare_supply_compression(state, selected, required_core, protected, forbidden_phrases)
                 for phrase in [required_core, *[remove_forbidden_phrases(w['phrase'], forbidden_phrases)
                         for w in selected if w['id'] in protected or w['tag'] == '品类']]:
                     if len(phrase) > maximum:
                         raise ProviderError(f'货盘标题配置冲突：单个必要词组为 {len(phrase)} 字符，超过 {maximum} 字符上限')
-                state['selected'] = copy.deepcopy(selected)
             values = dict(selected_keywords=selected, attempts=record.attempts + 1, state='running')
             if supply:
                 values['snapshot'] = {**record.snapshot, 'supply_generation': copy.deepcopy(state)}
@@ -738,11 +780,40 @@ async def generate_record(db, record_id, api_key=None):
             db.commit()
             db.refresh(record)
             raw_length = cleaned_length = None
+            compression_level = state.get('compression_level', 0) if supply else 0
             try:
                 expression_rules = (
                     'Selected 营销修饰 and 目标市场 phrases are approved wording from this market and category library. '
                     'Include them verbatim as required; do not invent additional marketing or market claims. '
                     if snapshot.get('keyword_policy_version', 1) >= 2 else '')
+                length_instructions = (
+                    'Compression mode: rewrite around retained required_phrases with minimal necessary connectives. '
+                    'Put the core category near the beginning. '
+                    f'Prefer {target_minimum}-{target_maximum} characters, but accept any complete factual title '
+                    f'within {supply_rules.MINIMUM}-{maximum} characters. Never pad or expand to reach the preferred range. '
+                    'Facts are evidence for truth checking only, not additional content to include. '
+                    'Do not restore omitted_optional_phrases from facts or previous_title unless already contained '
+                    'in a retained required phrase. Follow keyword_budget and additional_character_budget. '
+                    if compression_level else
+                    f'Prefer {target_minimum}-{target_maximum} characters including spaces and punctuation, within target_minimum and target_maximum. '
+                    'Put the core category near the beginning, then naturally organize confirmed material, silhouette, '
+                    'sleeve length, pattern, details, audience and occasion when available. '
+                    'If previous_title is outside the target range, expand it using unused_confirmed_attributes or '
+                    'compress it while retaining every required phrase. ')
+                required_phrases = (supply_content_phrases(required_core, selected, forbidden_phrases) if supply else
+                    list(dict.fromkeys(phrase for phrase in
+                        [required_core, *[remove_forbidden_phrases(w['phrase'], forbidden_phrases) for w in selected]] if phrase)))
+                compression_data = {}
+                if supply:
+                    compression_data = {
+                        'compression_level': compression_level, 'keyword_budget': state['keyword_budget'],
+                        'required_phrase_characters': state['content_characters'],
+                        'additional_character_budget': max(target_maximum - state['content_characters'], 0),
+                        'omitted_optional_phrases': [remove_forbidden_phrases(word['phrase'], forbidden_phrases)
+                            for word in snapshot['keywords'] if word['id'] in state.get('removed_keyword_ids', [])]}
+                if not compression_level:
+                    compression_data['unused_confirmed_attributes'] = [fact for fact in facts['attributes']
+                        if not contains_phrase(previous_title, localized_value(fact))]
                 answer = await ask_json(api_key,
                     f"Write one natural product title in {locale['model_language']}. "
                     'Return {"title":"..."}. core_category is the confirmed product category. '
@@ -753,29 +824,23 @@ async def generate_record(db, record_id, api_key=None):
                     'Before returning, verify every required phrase is present and the title meets the length limit. '
                     f"Use confirmed facts and selected phrases for content, with natural {locale['model_language']} wording, "
                     'connectives, synonyms and inflections as needed; wording is not restricted to a word whitelist. '
+                    + ('Facts are available evidence, not a checklist; do not include all facts by default. ' if supply else '') +
                     'Do not contradict confirmed facts. '
                     'No invented material, function, audience, brand, marketing, season or occasion. '
                     + expression_rules +
                     'Material, craft and brand may use only the exact original phrases manually selected for this title; '
                     'if none is selected for a type, do not add any for that type. Preserve brand spelling and case verbatim. '
-                    f'Prefer {target_minimum}-{target_maximum} characters including spaces and punctuation, within target_minimum and target_maximum. '
-                    'Put the core category near the beginning, then naturally organize confirmed material, silhouette, '
-                    'sleeve length, pattern, details, audience and occasion when available. '
-                    'If previous_title is outside the target range, expand it using unused_confirmed_attributes or '
-                    'compress it while retaining every required phrase. Never repeat phrases or pad with grammar words '
+                    + length_instructions + 'Never repeat phrases or pad with grammar words '
                     'just to reach a character count. If confirmed content is insufficient, return the best factual title. '
                     'Never exceed maximum or truncate a word. Vary natural ordering and optional real attributes. '
                     'No Chinese or English-only title.',
                     {"facts": facts["attributes"], "core_category": required_core, "selected": selected,
                      "manually_selected": selected_confirmed_keywords(snapshot),
-                     "required_phrases": list(dict.fromkeys(phrase for phrase in
-                         [required_core, *[remove_forbidden_phrases(w['phrase'], forbidden_phrases) for w in selected]] if phrase)),
+                     "required_phrases": required_phrases,
                      "maximum": maximum,
                      "target_minimum": target_minimum, "target_maximum": target_maximum,
                      "previous_title": previous_title, "character_count": len(previous_title),
-                     "unused_confirmed_attributes": [fact for fact in facts['attributes']
-                         if not contains_phrase(previous_title, localized_value(fact))],
-                     "feedback": feedback}, max_tokens=700)
+                     "feedback": feedback, **compression_data}, max_tokens=700)
                 raw_title = answer.get('title')
                 removed_forbidden = removed_unselected = False
                 if isinstance(raw_title, str):
@@ -819,15 +884,15 @@ async def generate_record(db, record_id, api_key=None):
                 if best_score is None or score < best_score:
                     last_good = (title, warnings, used_keywords)
                     best_score = score
-                should_finish = removed_forbidden or removed_unselected or not distance
+                should_finish = removed_forbidden or removed_unselected or not distance or bool(compression_level)
                 feedback_parts = []
-                if distance:
+                if distance and not compression_level:
                     feedback_parts.append(f'Previous title has {len(title)} characters; target '
                         f'{target_minimum}-{target_maximum}. Expand with unused confirmed attributes if short, '
                         'or compress if long. Preserve required phrases without repetition or invented content.')
                 feedback = ' '.join(feedback_parts)
                 if supply:
-                    state.update(overlong_streak=0, previous_title=previous_title, feedback=feedback,
+                    state.update(previous_title=previous_title, feedback=feedback,
                         raw_length=raw_length, cleaned_length=cleaned_length,
                         best={'title': last_good[0], 'warnings': last_good[1],
                               'keywords': last_good[2], 'score': list(best_score)})
@@ -838,17 +903,21 @@ async def generate_record(db, record_id, api_key=None):
                 feedback = str(exc)
                 if supply:
                     reason = exc.reason if isinstance(exc, TitleLengthError) else 'other'
-                    streak = state.get('overlong_streak', 0) + 1 if reason == 'overlong' else 0
+                    if reason == 'overlong':
+                        state.update(compression_level=state.get('compression_level', 0) + 1,
+                            compression_source_attempt=record.attempts, compression_source_length=exc.length)
                     if isinstance(exc, TitleLengthError):
-                        feedback = supply_rules.correction_feedback(reason, exc.length)
-                    state.update(overlong_streak=streak, reduce_optional=streak >= 2,
-                        previous_title=previous_title, feedback=feedback,
+                        feedback = (supply_rules.compression_feedback(reason, exc.length) if state.get('compression_level')
+                                    else supply_rules.correction_feedback(reason, exc.length))
+                    state.update(previous_title=previous_title, feedback=feedback,
                         raw_length=raw_length, cleaned_length=cleaned_length, last_error=str(exc))
                     save_supply_state()
                     logger.warning("货盘标题成文失败 | job=%s record=%s attempt=%s site=%s "
-                        "raw_length=%s cleaned_length=%s selected=%s removed=%s error=%s",
+                        "raw_length=%s cleaned_length=%s selected=%s removed=%s compression_level=%s "
+                        "keyword_budget=%s protected_characters=%s removed_this_round=%s error=%s",
                         snapshot.get('supply_job_id'), record.id, record.attempts, market.site,
-                        raw_length, cleaned_length, len(selected), len(state.get('removed_keyword_ids', [])), str(exc))
+                        raw_length, cleaned_length, len(selected), len(state.get('removed_keyword_ids', [])),
+                        compression_level, state['keyword_budget'], state['protected_characters'], len(removed_this_round), str(exc))
         task_still_active(db, record)
         if not last_good:
             raise ProviderError(state.get('last_error') or feedback or "已达到每条标题最多 4 次成文调用，请人工处理")
@@ -859,6 +928,12 @@ async def generate_record(db, record_id, api_key=None):
             raise ProviderError("标题执行权已变化")
         db.commit()
         db.refresh(record)
+        if supply:
+            logger.info('货盘标题成文完成 | job=%s record=%s attempts=%s site=%s cleaned_length=%s '
+                'compression_level=%s keyword_budget=%s protected_characters=%s removed=%s',
+                snapshot.get('supply_job_id'), record.id, record.attempts, market.site, len(title),
+                state.get('compression_level', 0), state.get('keyword_budget'), state.get('protected_characters'),
+                len(state.get('removed_keyword_ids', [])))
         return record_payload(record)
     except Exception as exc:
         db.rollback()
