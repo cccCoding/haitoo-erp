@@ -3,6 +3,12 @@ import { test } from 'node:test'
 import { createSupplyRequestScope, createSupplySubmissionKeys, emptySupplyStrategy, supplyExpiryInput, supplyExpiryPayload, supplyFileStatus, supplyStrategyPayload, supplyTime, unfinishedSupplyJob, validateSupplyStrategy } from '../src/supply-catalog.ts'
 const valid = () => ({ ...emptySupplyStrategy(), name: '日常女装', category_catalog_id: 1, category_name: 'Dresses', template_id: 1, price: '39.90' })
 
+test('货盘策略不再保存或发送附加标题要求，包括编辑旧策略', () => {
+  assert.equal('title_requirements' in emptySupplyStrategy(), false)
+  const payload = supplyStrategyPayload({ ...valid(), title_requirements: '旧标题要求' })
+  assert.equal('title_requirements' in payload, false)
+})
+
 test('Supply title markets default legacy strategies to MY and preserve ID in payloads', () => {
   assert.equal(emptySupplyStrategy().title_site, 'MY')
   const legacy = valid()

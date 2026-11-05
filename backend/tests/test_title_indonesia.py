@@ -201,10 +201,14 @@ class IndonesiaTitleTests(SupplyFixture, unittest.TestCase):
         category = next(row for row in category if row['kind'] == 'category')
         self.assertEqual(self.request('PATCH', f"/title-dictionaries/{category['id']}",
             json={'localized_name': 'Daster'}).status_code, 200)
-        for index, title in enumerate(['Lengan Panjang Dengan Motif Bunga', ID_TITLE + ' Katun', ID_TITLE + ' Tahan Air']):
+        for index, title in enumerate(['Lengan Panjang Dengan Motif Bunga', ID_TITLE + ' Tahan Air']):
             with self.subTest(title=title), patch('app.title_service.ask_json', new=self.model(title)):
                 response = self.generate(request_key=f'indonesia-invalid-{index}')
                 self.assertEqual(response.status_code, 502, response.text)
+        with patch('app.title_service.ask_json', new=self.model(ID_TITLE + ' Katun')):
+            cleaned = self.generate(request_key='indonesia-material-cleanup')
+            self.assertEqual(cleaned.status_code, 200, cleaned.text)
+            self.assertEqual(cleaned.json()['title'], ID_TITLE)
         words = self.request('GET', '/title-keywords', params=ID_MARKET).json()['items']
         forbidden = next(word['id'] for word in words if word['tag'] == '图案')
         self.request('PUT', '/title-profiles/1', json={**ID_MARKET, 'category': '连衣裙', 'gender': '女',

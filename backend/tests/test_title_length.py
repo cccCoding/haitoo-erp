@@ -47,8 +47,8 @@ class TitleKeywordBudgetTests(unittest.TestCase):
                              set(range(1, 11)))
 
     def test_budget_reserves_core_and_skips_long_optional_word_but_keeps_shorter_words(self):
-        # Gaun + 空格 + 196 字符 + 空格 + 8 字符 = 210。
-        words = [keyword(1, 'a' * 196), keyword(2, 'bbbbbbbbb'), keyword(3, 'cccccccc')]
+        # Gaun + 空格 + 166 字符 + 空格 + 8 字符 = 180。
+        words = [keyword(1, 'a' * 166), keyword(2, 'bbbbbbbbb'), keyword(3, 'cccccccc')]
         for supply, expected in ((False, [1, 3]), (True, [2, 3])):
             with self.subTest(supply=supply):
                 result = choose_keywords(self.snapshot(supply=supply), words, {1: 0, 2: 1, 3: 2})
@@ -197,10 +197,10 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['title'], MY_180)
         self.assertEqual(result['character_count'], 180)
 
-    async def test_unconfirmed_material_cannot_replace_an_accepted_short_title(self):
+    async def test_cleaned_material_title_finishes_without_retrying_the_same_extra_claim(self):
         result, _ = await self.generate([SHORT, SHORT + ' Kapas', SHORT + ' Kalis Air', ProviderError('failed')])
         self.assertEqual(result['title'], SHORT)
-        self.assertEqual(result['attempts'], 4)
+        self.assertEqual(result['attempts'], 2)
 
     async def test_supply_uses_cleaned_body_for_limits_count_and_link_suffix(self):
         result, model = await self.generate([MY_220 + ' Kapas'], supply=True, forbidden=['Kapas'])

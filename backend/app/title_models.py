@@ -36,6 +36,7 @@ class TitleTemplateProfile(Base):
     category_names: Mapped[list] = mapped_column(JSON, default=list)
     locked_keyword_ids: Mapped[list] = mapped_column(JSON, default=list)
     forbidden_keyword_ids: Mapped[list] = mapped_column(JSON, default=list)
+    recognition_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     fallback_title: Mapped[str | None] = mapped_column(String(SUPPLY_TITLE_MAXIMUM), nullable=True)
     fallback_approved: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

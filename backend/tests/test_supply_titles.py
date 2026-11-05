@@ -245,8 +245,9 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
                         expressions = {'品类': core, '性别': 'Wanita', '年龄': 'Dewasa', '结构设计': 'Lengan Panjang'}
                         return {'attributes': [{'tag': tag, 'value': value, 'localized_value': expressions[tag],
                             'evidence': 'confirmed template', 'source': 'manual'} for tag, value in data['manual'].items()], 'conflicts': []}
-                    self.assertEqual(data['template_requirements'], 'Category first')
-                    self.assertEqual(data['style'], 'Use confirmed sleeves')
+                    self.assertNotIn('template_requirements', data)
+                    self.assertNotIn('style', data)
+                    self.assertNotIn('forbidden', data)
                     self.assertIn('Lengan Panjang', [word['phrase'] for word in data['selected']])
                     return {'title': f'{core} Wanita Dewasa Lengan Panjang'}
 

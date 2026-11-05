@@ -104,7 +104,8 @@ class StrategyInput(Input):
     attributes: dict[str, str | list[str]] = Field(default_factory=dict)
     sku_count: int = Field(ge=5, le=9)
     link_count: int = Field(ge=10, le=50)
-    title_requirements: str = Field(default="", max_length=2000)
+    # 兼容旧客户端，已停用，不再保存或用于生成。
+    title_requirements: str = Field(default="", max_length=2000, exclude=True)
 
 
 class JobInput(Input):
@@ -479,7 +480,8 @@ def catalog_options(identity: int, user=Depends(supply_actor), db: Session = Dep
 
 
 def strategy_payload(item):
-    return {"infringement_filter": "include", "title_site": "MY", **item.parameters, "id": item.id, "name": item.name, "created_at": timestamp(item.created_at)}
+    parameters = {key: value for key, value in item.parameters.items() if key != 'title_requirements'}
+    return {"infringement_filter": "include", "title_site": "MY", **parameters, "id": item.id, "name": item.name, "created_at": timestamp(item.created_at)}
 
 
 @router.get("/strategies")
@@ -545,6 +547,7 @@ def submit_job(payload: JobInput, user=Depends(supply_actor), db: Session = Depe
     if strategy.user_id != user.id:
         raise HTTPException(404, "策略不存在")
     parameters = copy.deepcopy(strategy.parameters)
+    parameters.pop('title_requirements', None)
     parameters.setdefault("infringement_filter", "include")
     parameters.setdefault("title_site", "MY")
     template, catalog, snapshot, rows = validate_strategy(db, user, parameters)

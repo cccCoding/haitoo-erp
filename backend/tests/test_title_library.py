@@ -1696,7 +1696,7 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(self.request('GET', '/title-statistics').json()['adopted'], 1)
 
-    def test_template_requirements_reach_malay_generation_and_change_request_identity(self):
+    def test_library_ignores_legacy_template_and_per_request_requirements(self):
         self.enable(); self.profile(); self.import_words()
         self.request('PUT', '/templates/1', json={'title_template': 'Place category first'})
         payload = {'method': 'library', 'image_url': 'https://img.example/1.png', 'request_key': 'template-style-001',
@@ -1705,19 +1705,29 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         with patch('app.title_service.ask_json', new=model):
             generated = self.request('POST', '/templates/1/generate-draft-title', uid=2, json=payload)
             self.assertEqual(generated.status_code, 200, generated.text)
-            composition = next(call.args[2] for call in model.await_args_list if 'selected' in call.args[2])
-            self.assertEqual(composition['template_requirements'], 'Place category first')
-            self.assertEqual(composition['style'], 'Emphasize visible flowers')
-            self.assertNotIn('template_requirements', model.await_args_list[0].args[2]['manual'])
+            for call in model.await_args_list:
+                self.assertNotIn('template_requirements', call.args[2])
+                self.assertNotIn('style', call.args[2])
+                self.assertNotIn('Place category first', str(call.args))
+                self.assertNotIn('Emphasize visible flowers', str(call.args))
             self.request('PUT', '/templates/1', json={'title_template': 'Use a natural short title'})
-            stale = self.request('POST', '/templates/1/generate-draft-title', uid=2, json=payload)
-            self.assertEqual(stale.status_code, 409, stale.text)
+            repeat = self.request('POST', '/templates/1/generate-draft-title', uid=2,
+                                  json={**payload, 'additional_requirements': 'Changed unused requirement'})
+            self.assertEqual(repeat.status_code, 200, repeat.text)
+            self.assertEqual(repeat.json()['generation_id'], generated.json()['generation_id'])
             self.assertEqual(model.await_count, 5)
-            fresh = self.request('POST', '/templates/1/generate-draft-title', uid=2,
-                                 json={**payload, 'request_key': 'template-style-002'})
-            self.assertEqual(fresh.status_code, 200, fresh.text)
-            self.assertEqual(model.await_args.args[2]['template_requirements'], 'Use a natural short title')
-            self.assertEqual(model.await_count, 9)  # 表达要求变化不重复识图，每条短标题最多四次成文。
+
+    def test_recognition_prompt_round_trip_snapshot_and_validation(self):
+        self.enable()
+        saved = self.profile(recognition_prompt='  请仔细查看领口和袖口  ')
+        self.assertEqual(saved['recognition_prompt'], '请仔细查看领口和袖口')
+        self.assertEqual(self.request('GET', '/title-profiles/1').json()['recognition_prompt'], saved['recognition_prompt'])
+        with self.sessions() as db:
+            self.assertEqual(profile_snapshot(db, get_market(db, 1), 1)['recognition_prompt'], saved['recognition_prompt'])
+        response = self.request('PUT', '/title-profiles/1', json={'category': '连衣裙', 'gender': '女',
+            'age_group': '成人', 'recognition_prompt': 'a' * 2001})
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIsNone(self.profile(recognition_prompt='  ')['recognition_prompt'])
 
     def test_title_import_review_exposes_original_and_merge_suggestion(self):
         self.import_words()
@@ -1820,20 +1830,21 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('属性已改变', response.json()['detail'])
 
-    def test_attempt_limit_persists_and_facts_reject_invented_material(self):
+    def test_unselected_material_is_cleaned_and_replay_does_not_call_model(self):
         self.enable(); self.profile(); self.import_words()
         model = self.model('Gaun Lengan Panjang Corak Bunga Kapas')
         self.request('PUT', '/templates/1', json={'title_template': 'Include cotton and write in English'})
         payload = {'method': 'library', 'image_url': 'https://img.example/1.png', 'request_key': 'bad-material-001'}
         with patch('app.title_service.ask_json', new=model):
-            self.assertEqual(self.request('POST', '/templates/1/generate-draft-title', uid=2, json=payload).status_code, 502)
-            self.assertEqual(model.await_count, 5)
-            self.assertEqual(self.request('POST', '/templates/1/generate-draft-title', uid=2, json=payload).status_code, 502)
-            self.assertEqual(model.await_count, 5)
+            for _ in range(2):
+                response = self.request('POST', '/templates/1/generate-draft-title', uid=2, json=payload)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()['title'], TITLE)
+            self.assertEqual(model.await_count, 2)
         with self.sessions() as db:
             record = db.scalar(select(TitleRecord))
-            self.assertEqual(record.attempts, 4)
-            self.assertIsNone(record.title)
+            self.assertEqual(record.attempts, 1)
+            self.assertEqual(record.title, TITLE)
 
     def test_visual_material_is_ignored_and_manual_conflicts_block(self):
         self.enable(); self.profile()
@@ -1874,8 +1885,8 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             self.run_worker()
         compositions = [call.args[2] for call in model.await_args_list if 'selected' in call.args[2]]
         self.assertTrue(compositions)
-        self.assertTrue(all(data['template_requirements'] == 'Original category-first style' for data in compositions))
-        self.assertTrue(all(data['forbidden'] == ['kapas'] for data in compositions))
+        self.assertTrue(all('template_requirements' not in data and 'style' not in data for data in compositions))
+        self.assertTrue(all('forbidden' not in data for data in compositions))
         task = self.request('GET', f'/title-tasks/{identity}', uid=2).json()
         self.assertEqual(task['state'], 'completed', task)
         self.assertEqual(task['progress']['completed'], 2)
@@ -1981,7 +1992,8 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
             snap = db.get(SupplyJob, identity).snapshot
             self.assertEqual(snap['title_engine'], 'v2')
             self.assertEqual(snap['strategy']['title_site'], 'MY')
-            self.assertEqual(snap['title_profile']['title_template'], 'Place product category first')
+            self.assertNotIn('title_template', snap['title_profile'])
+            self.assertNotIn('title_requirements', snap['strategy'])
             self.assertEqual(snap['title_profile']['fallback_language'], 'en')
             self.assertEqual(snap['title_profile']['fallback_title'], snap['template']['supply_fallback_title'])
             self.assertEqual(snap['title_market_id'], get_market(db, 1).id)

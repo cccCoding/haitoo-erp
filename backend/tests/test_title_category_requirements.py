@@ -121,11 +121,21 @@ class TitleCategoryRequirementsTests(unittest.IsolatedAsyncioTestCase):
         record = self.db.get(TitleRecord, self.record_id)
         self.assertEqual(record.title, result['title'])
         self.assertIsNone(record.error)
-        self.assertEqual(self.model.await_args.args[2]['forbidden'], ['Gaun', 'Lengan Panjang', 'gaun', 'Kapas', 'ga'])
+        self.assertNotIn('forbidden', self.model.await_args.args[2])
+        self.assertNotIn('forbidden', self.model.await_args.args[1])
 
-    async def test_category_does_not_allow_unconfirmed_claims(self):
-        with self.assertRaisesRegex(ProviderError, '面料或功能词缺少对应的人工确认事实'):
-            await self.generate('Gaun Lengan Panjang Corak Bunga Kapas')
+    async def test_category_cleans_unconfirmed_material(self):
+        result = await self.generate('Gaun Lengan Panjang Corak Bunga Kapas')
+        self.assertEqual(result['title'], 'Gaun Lengan Panjang Corak Bunga')
+        self.assertEqual(result['attempts'], 1)
+
+    async def test_claim_cleanup_rechecks_length(self):
+        with self.assertRaisesRegex(ProviderError, '标题长度须为'):
+            await self.generate('Gaun Kapas Kapas Kapas Kapas Kapas')
+
+    async def test_claim_cleanup_does_not_waive_core_requirements(self):
+        with self.assertRaisesRegex(ProviderError, '标题遗漏核心品类：Kapas'):
+            await self.generate('Kapas Lengan Panjang Corak Bunga Moden', core='Kapas')
 
     async def test_words_outside_facts_selected_keywords_and_grammar_are_accepted(self):
         title = 'Gaun Lengan Panjang Moden Anggun Selesa Beralun Casual Elegant'
@@ -156,7 +166,7 @@ class TitleCategoryRequirementsTests(unittest.IsolatedAsyncioTestCase):
                                      forbidden=['labuh', 'sesuai'])
         self.assertEqual(result['title'], 'Gaun Lengan Panjang Corak Bunga Yang')
         self.assertEqual(result['attempts'], 1)
-        self.assertIn('Never include any phrase in forbidden', self.model.await_args.args[1])
+        self.assertNotIn('forbidden', self.model.await_args.args[1])
 
     async def test_common_expressions_do_not_allow_unconfirmed_material_or_function(self):
         with self.assertRaisesRegex(ProviderError, '面料或功能词缺少对应的人工确认事实'):

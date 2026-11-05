@@ -14,7 +14,7 @@ from app.database import Base
 from app.schema_version import alembic_config
 from app.title_models import TitleAttributeCache, TitleMarket, TitleRecord, TitleTask
 from app.title_service import (choose_keywords, create_record, digest, generate_record,
-                               identify_facts, match_keywords, validate_choice_claims)
+                               identify_facts, match_keywords, remove_unselected_claims, validate_choice_claims)
 from tests.test_title_length import keyword
 
 
@@ -137,6 +137,93 @@ class ConfirmedChoicesTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(caught.exception.status_code, 409)
         self.assertEqual(record.snapshot, original)
 
+    async def test_extra_known_claims_are_deleted_in_single_batch_and_supply_titles(self):
+        material = keyword(5, 'kapas', tag='材质')
+        other_material = keyword(6, 'linen', tag='材质')
+        for mode in ('single', 'batch', 'supply'):
+            with self.subTest(mode=mode):
+                snapshot = self.snapshot(material_keywords=[material], material_keyword_ids=[5])
+                snapshot['keywords'] += [material, other_material]
+                task_id = None
+                if mode == 'batch':
+                    task = TitleTask(market_id=self.market.id, user_id=1, kind='batch', state='running',
+                        request_key=digest('cleanup-batch'), request_hash=digest('cleanup-batch'),
+                        snapshot={'profile': snapshot})
+                    self.db.add(task)
+                    self.db.flush()
+                    task_id = task.id
+                with patch('app.title_service.secrets.choice', side_effect=lambda values: values[0]):
+                    record = create_record(self.db, self.market, 1, snapshot, 'https://img.example/cleanup.png',
+                        ['cleanup', mode], task_id=task_id, supply=mode == 'supply')
+                self.db.commit()
+
+                async def answer(key, instructions, data, **kwargs):
+                    result = await self.model(key, instructions, data, **kwargs)
+                    if 'title' in result:
+                        result['title'] += ' LINEN renda BrandB linen'
+                        self.assertIn('Material, craft and brand may use only the exact original phrases', instructions)
+                        self.assertEqual({word['phrase'] for word in data['manually_selected']}, {'kapas', 'sulaman', 'Acme'})
+                    return result
+
+                with patch('app.title_service.ask_json', new=AsyncMock(side_effect=answer)):
+                    result = await generate_record(self.db, record.id, 'key')
+                self.assertEqual(result['attempts'], 1)
+                for phrase in ('kapas', 'sulaman', 'Acme'):
+                    self.assertIn(phrase, result['title'])
+                for phrase in ('linen', 'renda', 'BrandB'):
+                    self.assertNotIn(phrase.lower(), result['title'].lower())
+                self.assertIn('已删除未选定的面料、工艺或品牌词', result['warnings'])
+
+    def test_claim_cleanup_preserves_selected_subphrases_and_word_boundaries(self):
+        snapshot = self.snapshot()
+        snapshot['selected_craft_keyword'] = keyword(8, 'sulaman renda', tag='工艺')
+        snapshot['selected_brand_keyword'] = keyword(9, 'Acme Studio', tag='品牌')
+        title = 'Gaun sulaman renda Acme Studio Linenwood LINEN BrandB'
+        cleaned = remove_unselected_claims(title, snapshot, [], [])
+        self.assertEqual(cleaned, 'Gaun sulaman renda Acme Studio Linenwood')
+
+    def test_no_manual_choices_clean_known_claims_in_both_languages(self):
+        snapshot = self.snapshot(craft_keywords=[], craft_keyword_ids=[], brand_keywords=[], brand_keyword_ids=[])
+        for site, language, material in (('MY', 'ms', 'Kapas'), ('ID', 'id', 'Katun')):
+            with self.subTest(site=site):
+                title = f'Gaun Lengan Panjang {material} sulaman Acme'
+                self.assertEqual(remove_unselected_claims(title, snapshot, [], [], site=site, language=language),
+                                 'Gaun Lengan Panjang')
+
+    async def test_recognition_hints_change_cache_and_do_not_become_facts(self):
+        snapshot = self.snapshot(recognition_prompt='重点查看领口')
+        with patch('app.title_service.ask_json', new=AsyncMock(side_effect=self.model)) as model:
+            first = await identify_facts(self.db, self.market.id, snapshot, 'https://img.example/hints.png', 'key')
+            self.assertEqual(await identify_facts(self.db, self.market.id, snapshot, 'https://img.example/hints.png', 'key'), first)
+            changed = {**snapshot, 'recognition_prompt': '重点查看袖口'}
+            await identify_facts(self.db, self.market.id, changed, 'https://img.example/hints.png', 'key')
+        self.assertEqual(model.await_count, 2)
+        self.assertEqual([call.args[2]['recognition_hints'] for call in model.await_args_list], ['重点查看领口', '重点查看袖口'])
+        self.assertNotIn('重点查看领口', str(first))
+        self.assertIn('never product evidence', model.await_args.args[1])
+
+    async def test_modern_facts_do_not_reuse_legacy_visual_craft_cache(self):
+        legacy = self.snapshot()
+        legacy.pop('confirmed_choices_version')
+        with patch('app.title_service.ask_json', new=AsyncMock(side_effect=self.model)) as model:
+            old = await identify_facts(self.db, self.market.id, legacy, 'https://img.example/shared.png', 'key')
+            current = await identify_facts(self.db, self.market.id, self.snapshot(), 'https://img.example/shared.png', 'key')
+        self.assertEqual(model.await_count, 2)
+        self.assertIn('工艺', {fact['tag'] for fact in old['attributes']})
+        self.assertNotIn('工艺', {fact['tag'] for fact in current['attributes']})
+
+    async def test_image_failure_does_not_pass_hints_to_manual_fallback(self):
+        async def answer(key, instructions, data, **kwargs):
+            if kwargs.get('image_url'):
+                raise ProviderError('识图失败')
+            return await self.model(key, instructions, data, **kwargs)
+
+        with patch('app.title_service.ask_json', new=AsyncMock(side_effect=answer)) as model:
+            facts = await identify_facts(self.db, self.market.id,
+                self.snapshot(recognition_prompt='重点查看领口'), 'https://img.example/failure.png', 'key')
+        self.assertNotIn('recognition_hints', model.await_args.args[2])
+        self.assertTrue(all(fact['source'] == 'manual' for fact in facts['attributes']))
+
     async def test_legacy_snapshot_keeps_visual_craft_and_brand_exclusion(self):
         snapshot = self.snapshot()
         snapshot.pop('confirmed_choices_version')
@@ -150,6 +237,25 @@ class ConfirmedChoicesTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfirmedChoicesMigrationTests(unittest.TestCase):
+    def test_recognition_prompt_upgrade_and_downgrade_preserve_other_profile_data(self):
+        engine = create_engine('sqlite://')
+        with engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, '20261104_66')
+            profile = Table('title_template_profiles', MetaData(), autoload_with=connection)
+            connection.execute(profile.insert(), {'id': 1, 'market_id': 1, 'template_id': 1,
+                'category': '连衣裙', 'attributes': {}, 'category_names': [], 'locked_keyword_ids': [],
+                'forbidden_keyword_ids': [], 'fallback_approved': False, 'updated_at': datetime.utcnow()})
+            command.upgrade(config, 'head')
+            current = Table('title_template_profiles', MetaData(), autoload_with=connection)
+            self.assertIsNone(connection.scalar(select(current.c.recognition_prompt)))
+            connection.execute(current.update().values(recognition_prompt='仔细查看领口'))
+            self.assertEqual(connection.scalar(select(current.c.recognition_prompt)), '仔细查看领口')
+            command.downgrade(config, '20261104_66')
+            self.assertNotIn('recognition_prompt', {col['name'] for col in inspect(connection).get_columns('title_template_profiles')})
+            self.assertEqual(connection.scalar(select(profile.c.category)), '连衣裙')
+        engine.dispose()
+
     def test_upgrade_preserves_legacy_attributes_and_task_snapshot(self):
         engine = create_engine('sqlite://')
         with engine.begin() as connection:

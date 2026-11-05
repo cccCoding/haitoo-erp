@@ -184,7 +184,7 @@ async def request_title(api_key, template, requirements):
             headers={"Authorization": f"Bearer {api_key}"}, json={"model": DEEPSEEK_TITLE_MODEL,
                 "thinking": {"type": "disabled"},
                 "messages": [{"role": "system", "content": f"Write one factual English TikTok product title. Prefer {TARGET_MINIMUM}-{TARGET_MAXIMUM} characters; hard limit {MINIMUM}-{MAXIMUM} including spaces and punctuation. Return only the title. Do not invent brand, material, pattern, medical claims or benefits."},
-                    {"role": "user", "content": f"Product: {template.get('name', '')}\nFacts: {template.get('product_description', '')}\nTemplate requirements: {template.get('title_template') or ''}\nAdditional requirements: {requirements}"}],
+                    {"role": "user", "content": f"Product: {template.get('name', '')}\nFacts: {template.get('product_description', '')}"}],
                 "temperature": 0.7})
         response.raise_for_status()
         choice = response.json()["choices"][0]
@@ -206,8 +206,7 @@ async def request_market_title(job_id, epoch, index, first_image, session_factor
         job = db.get(SupplyJob, job_id)
         market = db.get(TitleMarket, job.snapshot['title_market_id'])
         profile = copy.deepcopy(job.snapshot['title_profile'])
-        profile.update(supply_job_id=job_id, supply_epoch=epoch,
-            additional_requirements=job.snapshot['strategy'].get('title_requirements', ''))
+        profile.update(supply_job_id=job_id, supply_epoch=epoch)
         record = create_record(db, market, job.user_id, profile, first_image,
             ['supply', job_id, index], supply=True)
         # 执行 epoch 是权限检查，不改变已固定的商品、词库或策略。
@@ -315,7 +314,7 @@ async def run_job(job_id, epoch, owner, session_factory=SessionLocal):
                                 value.setdefault("title_attempts", {})[str(index)] = count + 1
                             save(consume, "titles")
                             try:
-                                result = await request_title(api_key, template, strategy.get("title_requirements", ""))
+                                result = await request_title(api_key, template, "")
                             except Exception:
                                 if count < 3:
                                     await asyncio.sleep(RETRY_DELAYS[count])

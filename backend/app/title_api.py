@@ -84,6 +84,7 @@ class ProfileInput(MarketInput):
     category_names: list[str] = Field(default_factory=list, max_length=100)
     locked_keyword_ids: list[int] = Field(default_factory=list, max_length=8)
     forbidden_keyword_ids: list[int] = Field(default_factory=list, max_length=200)
+    recognition_prompt: str | None = Field(default=None, max_length=2000)
     fallback_title: str | None = Field(default=None, max_length=SUPPLY_TITLE_MAXIMUM)
     # 仅兼容旧客户端；站点兜底标题设置后即可使用，不再需要审核。
     fallback_approved: bool = False
@@ -186,7 +187,8 @@ class Source(Input):
 class JobGroup(Input):
     key: str = Field(min_length=1, max_length=80)
     source: Source
-    additional_requirements: str = Field(default='', max_length=1000)
+    # 仅接受旧客户端字段，不再影响词库生成或请求标识。
+    additional_requirements: str = Field(default='', max_length=1000, exclude=True)
 
 
 class JobInput(MarketInput):
@@ -263,6 +265,7 @@ def profile_payload(profile, market=None, db=None, *, site='MY', language='ms'):
         'category_names': profile.category_names if profile else [],
         'locked_keyword_ids': profile.locked_keyword_ids if profile else [],
         'forbidden_keyword_ids': profile.forbidden_keyword_ids if profile else [],
+        'recognition_prompt': profile.recognition_prompt if profile else '',
         'fallback_title': profile.fallback_title if profile else '',
         'fallback_approved': profile.fallback_approved if profile else False,
         'categories': [row.name for row in categories if row.enabled],
@@ -546,6 +549,7 @@ def put_profile(template_id: int, payload: ProfileInput, user: User = Depends(ad
         if semantic in managed:
             setattr(profile, f'{kind}_keyword_ids', getattr(payload, f'{kind}_keyword_ids'))
     profile.fallback_title = fallback
+    profile.recognition_prompt = (payload.recognition_prompt or '').strip() or None
     profile.updated_at = datetime.utcnow()
     market.revision += 1
     market.updated_at = datetime.utcnow()
@@ -1120,7 +1124,7 @@ def create_job(payload: JobInput, user: User = Depends(reader), db: Session = De
     db.flush()
     groups = []
     for group, source in zip(payload.groups, records):
-        record = create_record(db, market, user.id, {**snapshot, 'additional_requirements': group.additional_requirements},
+        record = create_record(db, market, user.id, snapshot,
             library_record_image(source), ['batch', task.id, group.key], task_id=task.id)
         groups.append({'key': group.key, 'generation_id': record.id})
     task.snapshot = {**task.snapshot, 'groups': groups}
@@ -1131,7 +1135,6 @@ def create_job(payload: JobInput, user: User = Depends(reader), db: Session = De
 async def generate_single(db, user, template, image_url, payload):
     market = market_for(db, user, payload.platform, payload.site, payload.language, create=True, lock=True)
     snapshot = profile_snapshot(db, market, template.id)
-    snapshot['additional_requirements'] = payload.additional_requirements
     import secrets
     record = create_record(db, market, user.id, snapshot, image_url, ['single', user.id, payload.request_key or secrets.token_hex(16)])
     db.commit()

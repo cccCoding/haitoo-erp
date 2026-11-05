@@ -66,11 +66,11 @@ export interface SupplyStrategyForm {
   infringement_filter: 'exclude' | 'include' | 'only';
   name: string; category_catalog_id: number | null; category_name: string; template_id: number | null;
   price: string | number; stock: number; cod: string; shipping_insurance: ShippingInsurance | null; attributes: Record<string, string>; sku_count: number;
-  link_count: number; title_requirements: string;
+  link_count: number;
 }
 export function emptySupplyStrategy(): SupplyStrategyForm {
   return { title_site: 'MY', infringement_filter: 'exclude', name: '', category_catalog_id: null, category_name: '', template_id: null, price: '', stock: 999,
-    cod: 'Y', shipping_insurance: null, attributes: {}, sku_count: 5, link_count: 10, title_requirements: '' }
+    cod: 'Y', shipping_insurance: null, attributes: {}, sku_count: 5, link_count: 10 }
 }
 export function supplyStrategyPayload(form: SupplyStrategyForm): SupplyStrategyForm {
   return {
@@ -79,7 +79,6 @@ export function supplyStrategyPayload(form: SupplyStrategyForm): SupplyStrategyF
     name: form.name.trim(), category_catalog_id: form.category_catalog_id, category_name: form.category_name,
     template_id: form.template_id, price: String(form.price), stock: form.stock, cod: form.cod, shipping_insurance: form.shipping_insurance ?? null,
     attributes: { ...form.attributes }, sku_count: form.sku_count, link_count: form.link_count,
-    title_requirements: form.title_requirements,
   }
 }
 export function validateSupplyStrategy(form: SupplyStrategyForm, sizeCount: number, attributes: { field: string; label?: string; required?: boolean }[] = []): string {
