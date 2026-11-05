@@ -7,7 +7,7 @@ import SearchableSelect from './SearchableSelect.vue'
 import InfringementBadge from './InfringementBadge.vue'
 import { titleMarket, titleMarkets } from './title-markets'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
-import { createSupplyRequestScope, createSupplySubmissionKeys, emptySupplyStrategy, supplyExpiryInput, supplyExpiryPayload, supplyFileStatus, supplyJobLabels, supplyStageLabels, supplyStrategyPayload, supplyTime, unfinishedSupplyJob, validateSupplyStrategy, type SupplyUsageTask, type SupplyStrategyForm } from './supply-catalog'
+import { createSupplyRequestScope, createSupplySubmissionKeys, emptySupplyStrategy, supplyExpiryInput, supplyExpiryPayload, supplyFileStatus, supplyJobLabels, supplyStageLabels, supplyStrategyPayload, supplyTime, supplyTitleDiagnostics, unfinishedSupplyJob, validateSupplyStrategy, type SupplyUsageTask, type SupplyStrategyForm } from './supply-catalog'
 
 const infringementLabels: Record<string, string> = { exclude: '过滤侵权', include: '不过滤侵权', only: '全部侵权' }
 const props = defineProps<{ token: string; user: any; initialTab?: string }>()
@@ -66,6 +66,8 @@ const renewUser = ref<any>(null), renewMonths = ref(12), templateEditing = ref<a
 const showStrategy = ref(false), strategyEditing = ref<number | null>(null), strategyForm = ref<SupplyStrategyForm>(emptySupplyStrategy())
 const strategyOptions = ref<any>(null), optionsLoading = ref(false), strategyError = ref(''), dialogError = ref('')
 const usageMaterial = ref<any>(null), usage = ref<SupplyUsageTask[]>([]), usageLoading = ref(false), jobDetail = ref<any>(null)
+const jobLinks = computed(() => (jobDetail.value?.links || jobDetail.value?.drafts || []).map((row: any) => ({ ...row, diagnostics: supplyTitleDiagnostics(row) })))
+const jobFallbackCount = computed(() => jobLinks.value.filter((row: any) => row.diagnostics.isFallback).length)
 const usagePage = ref(1), usageTotal = ref(0), usageError = ref(''), usageRetryPage = ref(1), usagePageSize = 20
 const usagePages = computed(() => Math.max(1, Math.ceil(usageTotal.value / usagePageSize)))
 const usageScope = createSupplyRequestScope(), statisticsScope = createSupplyRequestScope()
@@ -730,12 +732,47 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
         <button class="secondary" :disabled="usageLoading || usagePage>=usagePages" @click="loadUsage(usagePage+1)">下一页</button>
       </footer>
     </section></div>
-    <div v-if="jobDetail" class="modal-backdrop" @click.self="jobDetail=null"><section v-dialog-focus="{close:()=>{jobDetail=null},busy:false}" class="modal-card supply-dialog supply-wide-dialog" role="dialog" aria-modal="true" aria-labelledby="supply-job-title"><button class="modal-close" aria-label="关闭" @click="jobDetail=null">×</button><h2 id="supply-job-title">生成任务 #{{jobDetail.id}}</h2><p>{{supplyJobLabels[jobDetail.state] || jobDetail.state}} · {{supplyStageLabels[jobDetail.stage] || jobDetail.stage}} · {{progressLabel(jobDetail)}}</p><p v-if="jobDetail.error" class="error">{{jobDetail.error}}</p><div class="supply-detail-grid"><span>提交时间：{{supplyTime(jobDetail.created_at)}}</span><span>完成时间：{{supplyTime(jobDetail.completed_at)}}</span><span>用户：{{jobDetail.user_name || user.name}}</span><span>代理：{{jobDetail.agent_name || '内部使用'}}</span></div><p v-if="jobDetail.strategy || jobDetail.snapshot?.strategy" class="supply-help">快照：{{(jobDetail.strategy || jobDetail.snapshot.strategy).sku_count}} SKU × {{(jobDetail.strategy || jobDetail.snapshot.strategy).link_count}} 链接 · 售价 {{(jobDetail.strategy || jobDetail.snapshot.strategy).price}} · {{infringementLabels[(jobDetail.strategy || jobDetail.snapshot.strategy).infringement_filter || 'include']}}</p><article v-for="(row,index) in jobDetail.links || jobDetail.drafts || []" :key="row.index || index" class="supply-link-preview"><b>链接 {{index+1}}</b><p>{{row.title}}</p><div class="supply-link-images"><img v-for="(asset,assetIndex) in row.materials || row.assets || []" :key="asset.id || assetIndex" :src="imageUrl(asset.url || asset.image_url)" :alt="asset.sku || '素材'" loading="lazy"/></div></article><div class="modal-actions"><button v-if="canDownload(jobDetail)" class="primary" :disabled="!!busy" @click="downloadJob(jobDetail)">下载 Excel</button><span v-else>{{supplyFileStatus(jobDetail)}}</span></div></section></div>
+    <div v-if="jobDetail" class="modal-backdrop" @click.self="jobDetail=null">
+      <section v-dialog-focus="{close:()=>{jobDetail=null},busy:false}" class="modal-card supply-dialog supply-wide-dialog" role="dialog" aria-modal="true" aria-labelledby="supply-job-title">
+        <button class="modal-close" aria-label="关闭" @click="jobDetail=null">×</button>
+        <h2 id="supply-job-title">生成任务 #{{jobDetail.id}}</h2>
+        <p>{{supplyJobLabels[jobDetail.state] || jobDetail.state}} · {{supplyStageLabels[jobDetail.stage] || jobDetail.stage}} · {{progressLabel(jobDetail)}}</p>
+        <p v-if="jobDetail.error" class="error" role="alert">任务错误：{{jobDetail.error}}</p>
+        <div class="supply-detail-grid">
+          <span>提交时间：{{supplyTime(jobDetail.created_at)}}</span><span>完成时间：{{supplyTime(jobDetail.completed_at)}}</span>
+          <span>用户：{{jobDetail.user_name || user.name}}</span><span>代理：{{jobDetail.agent_name || '内部使用'}}</span>
+        </div>
+        <p v-if="jobDetail.strategy || jobDetail.snapshot?.strategy" class="supply-help">快照：{{(jobDetail.strategy || jobDetail.snapshot.strategy).sku_count}} SKU × {{(jobDetail.strategy || jobDetail.snapshot.strategy).link_count}} 链接 · 售价 {{(jobDetail.strategy || jobDetail.snapshot.strategy).price}} · {{infringementLabels[(jobDetail.strategy || jobDetail.snapshot.strategy).infringement_filter || 'include']}}</p>
+        <p v-if="canManage && jobFallbackCount" class="supply-title-summary">{{jobFallbackCount}} 条标题使用了兜底，请查看对应链接的失败原因。</p>
+        <article v-for="(row,index) in jobLinks" :key="row.index ?? index" class="supply-link-preview">
+          <div class="supply-link-heading">
+            <b>链接 {{index+1}}</b>
+            <span v-if="canManage" class="supply-tag" :class="{'supply-title-fallback':row.diagnostics.isFallback}">{{row.diagnostics.sourceLabel}}</span>
+          </div>
+          <p>{{row.title}}</p>
+          <div v-if="canManage && (row.diagnostics.error || row.diagnostics.warnings.length)" class="supply-title-diagnostics" :class="{'has-error':row.diagnostics.error}">
+            <p v-if="row.diagnostics.error" class="supply-title-error">失败原因：{{row.diagnostics.error}}</p>
+            <p v-for="warning in row.diagnostics.warnings" :key="warning" class="supply-title-warning">{{warning}}</p>
+          </div>
+          <div class="supply-link-images"><img v-for="(asset,assetIndex) in row.materials || row.assets || []" :key="asset.id || assetIndex" :src="imageUrl(asset.url || asset.image_url)" :alt="asset.sku || '素材'" loading="lazy"/></div>
+        </article>
+        <div class="modal-actions"><button v-if="canDownload(jobDetail)" class="primary" :disabled="!!busy" @click="downloadJob(jobDetail)">下载 Excel</button><span v-else>{{supplyFileStatus(jobDetail)}}</span></div>
+      </section>
+    </div>
     <div v-if="preview" class="modal-backdrop" @click.self="preview=null"><section v-dialog-focus="{close:()=>{preview=null},busy:false}" class="modal-card supply-dialog supply-image-dialog" role="dialog" aria-modal="true" aria-label="素材图片预览"><button class="modal-close" aria-label="关闭预览" @click="preview=null">×</button><img :src="imageUrl(preview.url)" :alt="preview.name || preview.sku"/><p>{{preview.sku || preview.name}}</p></section></div>
   </section>
 </template>
 
 <style scoped>
+.supply-link-heading{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.supply-title-summary,.supply-tag.supply-title-fallback{background:#fff6df;color:#875c12}
+.supply-title-summary{padding:12px 14px;border-radius:8px}
+.supply-title-diagnostics{margin:0 0 14px;padding:10px 14px;border-radius:8px;background:#f8fafc;overflow-wrap:anywhere}
+.supply-title-diagnostics.has-error{background:#fff7ed;border:1px solid #fed7aa}
+.supply-title-diagnostics p{margin:4px 0;white-space:pre-wrap}
+.supply-title-diagnostics .supply-title-error{color:#9a3412}
+.supply-title-diagnostics .supply-title-warning{color:#64748b}
+
 .supply-strategy-name{max-width:240px;overflow-wrap:anywhere}
 .supply-filters.supply-user-filters>label{flex:0 1 320px;width:320px;min-width:0;max-width:100%}
 .supply-tag.listed{background:#eaf9ef;color:#167144}

@@ -1,7 +1,26 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createSupplyRequestScope, createSupplySubmissionKeys, emptySupplyStrategy, supplyExpiryInput, supplyExpiryPayload, supplyFileStatus, supplyStrategyPayload, supplyTime, unfinishedSupplyJob, validateSupplyStrategy } from '../src/supply-catalog.ts'
+import { createSupplyRequestScope, createSupplySubmissionKeys, emptySupplyStrategy, supplyExpiryInput, supplyExpiryPayload, supplyFileStatus, supplyStrategyPayload, supplyTime, supplyTitleDiagnostics, unfinishedSupplyJob, validateSupplyStrategy } from '../src/supply-catalog.ts'
 const valid = () => ({ ...emptySupplyStrategy(), name: '日常女装', category_catalog_id: 1, category_name: 'Dresses', template_id: 1, price: '39.90' })
+
+test('已完成任务的标题兜底仍展示具体失败原因，保留其他提示', () => {
+  const result = supplyTitleDiagnostics({ title: 'Gaun Wanita', title_source: 'fallback', title_warnings: [
+    '已使用马来语兜底标题', 'AI 标题生成失败：标题遗漏选定词组：Corak Bunga',
+    'AI 标题生成失败：标题遗漏选定词组：Corak Bunga', '按首图描述，请核对其他 SKU'] })
+  assert.equal(result.isFallback, true)
+  assert.equal(result.sourceLabel, '兜底标题')
+  assert.equal(result.error, '标题遗漏选定词组：Corak Bunga')
+  assert.deepEqual(result.warnings, ['已使用马来语兜底标题', '按首图描述，请核对其他 SKU'])
+})
+
+test('历史兜底可从提示识别，缺少原因时明确说明，不把未知来源当作 AI 成功', () => {
+  const legacy = supplyTitleDiagnostics({ title: 'Gaun', title_warnings: ['已使用马来语兜底标题'] })
+  assert.equal(legacy.isFallback, true)
+  assert.equal(legacy.error, '历史记录未保存具体失败原因')
+  assert.equal(supplyTitleDiagnostics({ title: 'Gaun' }).sourceLabel, '标题来源未记录')
+  assert.equal(supplyTitleDiagnostics({}).sourceLabel, '等待生成')
+  assert.equal(supplyTitleDiagnostics({ title_source: 'ai' }).error, '')
+})
 
 test('货盘策略不再保存或发送附加标题要求，包括编辑旧策略', () => {
   assert.equal('title_requirements' in emptySupplyStrategy(), false)

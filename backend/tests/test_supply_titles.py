@@ -62,10 +62,18 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
         with self.sessions() as db:
             db.get(SupplyJob, identity).checkpoint = copy.deepcopy(checkpoint)
             db.commit()
-        response = self.request('GET', f'/supply/jobs/{identity}', uid=4)
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()['drafts'][0]['title_warnings'],
-            ['已使用马来语兜底标题', 'AI 标题生成失败：模型超时', '保留其他提示'])
+        # 公司管理员、货盘管理员可查本公司他人任务，普通用户仅能查自己的任务。
+        for uid in (1, 3, 4):
+            response = self.request('GET', f'/supply/jobs/{identity}', uid=uid)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()['drafts'][0]['title_warnings'],
+                ['已使用马来语兜底标题', 'AI 标题生成失败：模型超时', '保留其他提示'])
+        for uid in (5, 7):
+            self.assertEqual(self.request('GET', f'/supply/jobs/{identity}', uid=uid).status_code, 404)
+        for uid in (1, 3):
+            company = self.request('GET', '/supply/jobs?scope=company', uid=uid)
+            self.assertEqual(company.status_code, 200, company.text)
+            self.assertIn(identity, [item['id'] for item in company.json()['items']])
         with self.sessions() as db:
             self.assertEqual(db.get(SupplyJob, identity).checkpoint, checkpoint)
 

@@ -31,6 +31,20 @@ export const supplyStageLabels: Record<string, string> = {
 export function unfinishedSupplyJob(job: { state: string }): boolean {
   return ['queued', 'running', 'retry_wait'].includes(job.state)
 }
+export function supplyTitleDiagnostics(link: { title?: string; title_source?: string; title_warnings?: unknown }) {
+  const warnings = [...new Set(Array.isArray(link.title_warnings)
+    ? link.title_warnings.filter((value): value is string => typeof value === 'string' && !!value.trim()) : [])]
+  const failurePrefix = 'AI 标题生成失败：'
+  const reasons = warnings.filter(value => value.startsWith(failurePrefix))
+    .map(value => value.slice(failurePrefix.length).trim()).filter(Boolean)
+  const isFallback = link.title_source === 'fallback' || warnings.some(value => value.startsWith('已使用') && value.includes('兜底标题'))
+  return {
+    isFallback,
+    sourceLabel: isFallback ? '兜底标题' : link.title_source === 'ai' ? 'AI 生成' : link.title ? '标题来源未记录' : '等待生成',
+    error: reasons.join('；') || (isFallback ? '历史记录未保存具体失败原因' : ''),
+    warnings: warnings.filter(value => !value.startsWith(failurePrefix)),
+  }
+}
 export function supplyTime(value: string | number | null | undefined): string {
   if (value === null || value === undefined || value === '') return '—'
   const date = new Date(typeof value === 'string' && !/[zZ]|[+-]\d\d:\d\d$/.test(value) && value.includes('T') ? `${value}Z` : value)
