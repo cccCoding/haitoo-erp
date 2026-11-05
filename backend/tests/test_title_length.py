@@ -582,4 +582,6 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.lease_owner, 'replacement-worker')
         self.assertEqual(record.attempts, 1)
         self.assertNotIn('best', record.snapshot['supply_generation'])
+        self.assertEqual(record.snapshot['title_diagnostics']['attempts'][0]['status'], 'running')
+        self.assertIsNone(record.snapshot['title_diagnostics']['attempts'][0]['raw_title'])
         self.assertIsNone(record.title)

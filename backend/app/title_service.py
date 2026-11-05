@@ -68,7 +68,7 @@ def contains_phrase(text, phrase):
     return bool(phrase and re.search(r"(?<!\w)" + re.escape(normalize(phrase)) + r"(?!\w)", normalize(text)))
 
 
-def remove_forbidden_phrases(title, phrases):
+def remove_forbidden_phrases(title, phrases, *, removed_phrases=None):
     """按既有词组边界删除禁用词，保留其余文字的大小写，不误删词内子串。"""
     patterns = [re.compile(r'(?<!\w)' + re.escape(phrase) + r'(?!\w)')
         for phrase in dict.fromkeys(normalize(value) for value in phrases) if phrase]
@@ -84,7 +84,10 @@ def remove_forbidden_phrases(title, phrases):
         # 在同一份原文上收集全部区间，重叠的禁用词也完整删除。
         for pattern in patterns:
             for match in pattern.finditer(searchable):
-                removed.update(range(positions[match.start()], positions[match.end() - 1] + 1))
+                start, end = positions[match.start()], positions[match.end() - 1] + 1
+                removed.update(range(start, end))
+                if removed_phrases is not None:
+                    removed_phrases.append(text[start:end])
         if not removed:
             break
         title = ''.join(' ' if index in removed else char for index, char in enumerate(text))
@@ -270,7 +273,7 @@ def validate_choice_claims(title, snapshot):
         raise ProviderError('品牌须保留人工选定的原词及大小写')
 
 
-def remove_unselected_claims(title, snapshot, facts, selected, *, site='MY', language='ms'):
+def remove_unselected_claims(title, snapshot, facts, selected, *, site='MY', language='ms', removed_phrases=None):
     """清理已知但本条未确认的面料、工艺、品牌；不扩大到功能声明。"""
     _, claims = title_rules(site, language)
     confirmed = {word['tag']: [word['phrase']] for word in selected_confirmed_keywords(snapshot)}
@@ -285,7 +288,7 @@ def remove_unselected_claims(title, snapshot, facts, selected, *, site='MY', lan
         or snapshot.get('confirmed_choices_version') and word['tag'] in {'工艺', '品牌'}]
     unwanted = [phrase for tag, phrase in known
         if not any(contains_phrase(proof, phrase) for proof in confirmed.get(tag, []))]
-    return remove_forbidden_phrases(title, unwanted)
+    return remove_forbidden_phrases(title, unwanted, removed_phrases=removed_phrases)
 
 
 def legacy_choice_values(profile, definitions, semantic):
@@ -724,20 +727,33 @@ async def generate_record(db, record_id, api_key=None):
         best_score = tuple(best['score']) if best else None
         previous_title = state.get('previous_title', '')
         feedback = state.get('feedback', '')
+        # 只保存标题和必要的选词上下文，不复制密钥、请求头或整份模型请求。
+        diagnostics = copy.deepcopy(snapshot.get('title_diagnostics', {'version': 1, 'attempts': []}))
+        interrupted = [attempt for attempt in diagnostics['attempts'] if attempt['status'] == 'running']
+        for attempt in interrupted:
+            attempt.update(status='interrupted', error='执行中断，未保存本轮结果',
+                interruption_detected_at=datetime.utcnow().isoformat() + 'Z')
 
-        def save_supply_state():
-            if not supply:
-                return
+        def generation_snapshot():
+            stored = {**record.snapshot, 'title_diagnostics': copy.deepcopy(diagnostics)}
+            if supply:
+                stored['supply_generation'] = copy.deepcopy(state)
+            return stored
+
+        def save_generation_state():
             task_still_active(db, record)
             db.refresh(record)
-            stored = {**record.snapshot, 'supply_generation': copy.deepcopy(state)}
             saved = db.execute(update(TitleRecord).where(TitleRecord.id == record.id,
                 TitleRecord.lease_owner == owner, TitleRecord.lease_expires_at > datetime.utcnow())
-                .values(snapshot=stored))
+                .values(snapshot=generation_snapshot()))
             if not saved.rowcount:
                 raise ProviderError('标题执行权已变化')
             db.commit()
             db.refresh(record)
+
+        if interrupted:
+            # 即使最后一次机会已消耗，也持久化中断标记，再决定是否继续成文。
+            save_generation_state()
 
         # 恢复时已有达标候选就直接采用，不再因旧相似度标记继续成文。
         while (record.attempts < supply_rules.MAX_ATTEMPTS and (best_score is None or best_score[0])
@@ -766,9 +782,24 @@ async def generate_record(db, record_id, api_key=None):
                         for w in selected if w['id'] in protected or w['tag'] == '品类']]:
                     if len(phrase) > maximum:
                         raise ProviderError(f'货盘标题配置冲突：单个必要词组为 {len(phrase)} 字符，超过 {maximum} 字符上限')
-            values = dict(selected_keywords=selected, attempts=record.attempts + 1, state='running')
-            if supply:
-                values['snapshot'] = {**record.snapshot, 'supply_generation': copy.deepcopy(state)}
+            required_phrases = (supply_content_phrases(required_core, selected, forbidden_phrases) if supply else
+                list(dict.fromkeys(phrase for phrase in
+                    [required_core, *[remove_forbidden_phrases(w['phrase'], forbidden_phrases) for w in selected]] if phrase)))
+            attempt = {'attempt': record.attempts + 1, 'status': 'running',
+                'started_at': datetime.utcnow().isoformat() + 'Z', 'finished_at': None,
+                'model': DEEPSEEK_TITLE_MODEL, 'core_category': required_core,
+                'selected_keywords': copy.deepcopy(selected), 'required_phrases': required_phrases,
+                'raw_title': None, 'claim_cleaned_title': None, 'cleaned_title': None,
+                'raw_length': None, 'cleaned_length': None,
+                'removed_unselected_claims': [], 'removed_forbidden_phrases': [],
+                'missing_phrases': {}, 'stage': 'provider', 'error': None,
+                'feedback': feedback, 'compression_level': state.get('compression_level', 0),
+                'maximum': maximum, 'target_minimum': target_minimum, 'target_maximum': target_maximum,
+                'keyword_budget': state.get('keyword_budget'),
+                'compression_removed_keyword_ids': list(removed_this_round) if supply else []}
+            diagnostics['attempts'].append(attempt)
+            values = dict(selected_keywords=selected, attempts=record.attempts + 1, state='running',
+                snapshot=generation_snapshot())
             consumed = db.execute(update(TitleRecord).where(TitleRecord.id == record.id,
                 TitleRecord.lease_owner == owner, TitleRecord.lease_expires_at > datetime.utcnow(),
                 TitleRecord.attempts == record.attempts).values(**values))
@@ -800,9 +831,6 @@ async def generate_record(db, record_id, api_key=None):
                     'sleeve length, pattern, details, audience and occasion when available. '
                     'If previous_title is outside the target range, expand it using unused_confirmed_attributes or '
                     'compress it while retaining every required phrase. ')
-                required_phrases = (supply_content_phrases(required_core, selected, forbidden_phrases) if supply else
-                    list(dict.fromkeys(phrase for phrase in
-                        [required_core, *[remove_forbidden_phrases(w['phrase'], forbidden_phrases) for w in selected]] if phrase)))
                 compression_data = {}
                 if supply:
                     compression_data = {
@@ -842,25 +870,38 @@ async def generate_record(db, record_id, api_key=None):
                      "previous_title": previous_title, "character_count": len(previous_title),
                      "feedback": feedback, **compression_data}, max_tokens=700)
                 raw_title = answer.get('title')
+                attempt['raw_title'] = raw_title
+                attempt['stage'] = 'cleanup'
                 removed_forbidden = removed_unselected = False
                 if isinstance(raw_title, str):
                     raw_length = len(raw_title)
                     raw_title = raw_title.strip()
                     claim_cleaned = remove_unselected_claims(raw_title, snapshot, facts['attributes'], selected,
-                        site=market.site, language=market.language)
+                        site=market.site, language=market.language,
+                        removed_phrases=attempt['removed_unselected_claims'])
+                    attempt['claim_cleaned_title'] = claim_cleaned
                     removed_unselected = claim_cleaned != raw_title
-                    title = remove_forbidden_phrases(claim_cleaned, forbidden_phrases)
+                    title = remove_forbidden_phrases(claim_cleaned, forbidden_phrases,
+                        removed_phrases=attempt['removed_forbidden_phrases'])
                     removed_forbidden = title != claim_cleaned
                     previous_title = title
                     cleaned_length = len(title)
                 else:
                     title = raw_title
                     previous_title = ''
+                attempt.update(cleaned_title=title, raw_length=raw_length, cleaned_length=cleaned_length)
+                attempt['missing_phrases'] = {stage: [phrase for phrase in required_phrases
+                    if not contains_phrase(value, phrase)] for stage, value in
+                    (('raw', attempt['raw_title']), ('after_claim_cleanup', attempt['claim_cleaned_title']),
+                     ('cleaned', title)) if isinstance(value, str)}
+                attempt['stage'] = 'localized_title'
                 title = validate_localized_title(title, maximum, site=market.site, language=market.language)
                 previous_title = title
+                attempt['stage'] = 'core_category'
                 if (required_core and not contains_phrase(title, required_core)
                         and not (removed_forbidden and contains_phrase(claim_cleaned, core))):
                     raise ProviderError(f"标题遗漏核心品类：{required_core}；请使用此完整原词重新生成标题")
+                attempt['stage'] = 'selected_phrases'
                 missing = [phrase for word in selected
                     if (phrase := remove_forbidden_phrases(word['phrase'], forbidden_phrases))
                     and not contains_phrase(title, phrase)
@@ -868,7 +909,9 @@ async def generate_record(db, record_id, api_key=None):
                 if missing:
                     raise ProviderError("标题遗漏选定词组：" + "、".join(missing))
                 used_keywords = [word for word in selected if contains_phrase(title, word['phrase'])]
+                attempt['stage'] = 'confirmed_claims'
                 validate_confirmed_claims(title, facts['attributes'], used_keywords, market.site, market.language)
+                attempt['stage'] = 'choice_claims'
                 validate_choice_claims(title, snapshot)
                 warnings = list(facts.get("warnings", [])) + ["按首图描述，请核对其他 SKU"]
                 if removed_unselected:
@@ -891,16 +934,18 @@ async def generate_record(db, record_id, api_key=None):
                         f'{target_minimum}-{target_maximum}. Expand with unused confirmed attributes if short, '
                         'or compress if long. Preserve required phrases without repetition or invented content.')
                 feedback = ' '.join(feedback_parts)
+                attempt.update(status='valid', stage='complete', finished_at=datetime.utcnow().isoformat() + 'Z')
                 if supply:
                     state.update(previous_title=previous_title, feedback=feedback,
                         raw_length=raw_length, cleaned_length=cleaned_length,
                         best={'title': last_good[0], 'warnings': last_good[1],
                               'keywords': last_good[2], 'score': list(best_score)})
-                    save_supply_state()
+                save_generation_state()
                 if should_finish:
                     break
             except ProviderError as exc:
                 feedback = str(exc)
+                attempt.update(status='failed', error=str(exc), finished_at=datetime.utcnow().isoformat() + 'Z')
                 if supply:
                     reason = exc.reason if isinstance(exc, TitleLengthError) else 'other'
                     if reason == 'overlong':
@@ -911,19 +956,25 @@ async def generate_record(db, record_id, api_key=None):
                                     else supply_rules.correction_feedback(reason, exc.length))
                     state.update(previous_title=previous_title, feedback=feedback,
                         raw_length=raw_length, cleaned_length=cleaned_length, last_error=str(exc))
-                    save_supply_state()
+                save_generation_state()
+                if supply:
                     logger.warning("货盘标题成文失败 | job=%s record=%s attempt=%s site=%s "
                         "raw_length=%s cleaned_length=%s selected=%s removed=%s compression_level=%s "
                         "keyword_budget=%s protected_characters=%s removed_this_round=%s error=%s",
                         snapshot.get('supply_job_id'), record.id, record.attempts, market.site,
                         raw_length, cleaned_length, len(selected), len(state.get('removed_keyword_ids', [])),
                         compression_level, state['keyword_budget'], state['protected_characters'], len(removed_this_round), str(exc))
+            except Exception:
+                attempt.update(status='failed', error='标题生成失败', finished_at=datetime.utcnow().isoformat() + 'Z')
+                save_generation_state()
+                raise
         task_still_active(db, record)
         if not last_good:
             raise ProviderError(state.get('last_error') or feedback or "已达到每条标题最多 4 次成文调用，请人工处理")
         title, warnings, selected = last_good
         changed = db.execute(update(TitleRecord).where(TitleRecord.id == record.id, TitleRecord.lease_owner == owner).values(
-            title=title, warnings=warnings, selected_keywords=selected, state="generated", error=None))
+            title=title, warnings=warnings, selected_keywords=selected, state="generated", error=None,
+            snapshot=generation_snapshot()))
         if not changed.rowcount:
             raise ProviderError("标题执行权已变化")
         db.commit()

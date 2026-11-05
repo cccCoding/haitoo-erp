@@ -627,6 +627,27 @@ def job_detail(identity: int, user=Depends(supply_actor), db: Session = Depends(
         "drafts": drafts, "strategy": item.snapshot.get("strategy")}
 
 
+@router.get("/jobs/{identity}/title-diagnostics")
+def job_title_diagnostics(identity: int, user=Depends(supply_actor), db: Session = Depends(get_db)):
+    """按原任务权限读取逐轮诊断；不向任务列表或常规详情复制大段模型输出。"""
+    from .title_models import TitleMarket, TitleRecord
+
+    item = accessible_job(db, user, identity)
+    records = db.scalars(select(TitleRecord).join(TitleMarket, TitleMarket.id == TitleRecord.market_id).where(
+        TitleMarket.company_id == user.company_id,
+        TitleRecord.market_id == item.snapshot.get('title_market_id'),
+        TitleRecord.user_id == item.user_id,
+        TitleRecord.snapshot['supply_job_id'].as_integer() == item.id).order_by(TitleRecord.id)).all()
+    link_indices = {link['generation_id']: index + 1 for index, link in
+        enumerate(item.checkpoint.get('links', [])) if link.get('generation_id')}
+    return {'job_id': item.id, 'records': [
+        {'generation_id': record.id, 'link_index': link_indices.get(record.id),
+         'state': record.state, 'source': record.source, 'title': record.title,
+         'attempts': record.attempts, 'error': record.error, 'facts': record.facts,
+         'diagnostics': record.snapshot.get('title_diagnostics')}
+        for record in records]}
+
+
 @router.post("/jobs/{identity}/cancel")
 def cancel_job(identity: int, user=Depends(supply_actor), db: Session = Depends(get_db)):
     lock_actor(db, user)

@@ -100,6 +100,46 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
             self.assertEqual(snap['strategy']['title_site'], 'MY')
             self.assertEqual(snap['title_profile']['site'], 'MY')
 
+    def test_title_diagnostics_follow_job_permissions_and_isolate_records(self):
+        identity = self.submit(self.create_strategy())
+        with self.sessions() as db:
+            job = db.get(SupplyJob, identity)
+            market_id = job.snapshot['title_market_id']
+            records = []
+            for key, user_id, record_job, record_market in (
+                    ('current', job.user_id, identity, market_id),
+                    ('legacy', job.user_id, identity, market_id),
+                    ('other-job', job.user_id, identity + 1, market_id),
+                    ('other-user', 7, identity, market_id),
+                    ('other-market', job.user_id, identity, get_market(db, 1, site='ID', language='id').id)):
+                snapshot = {'supply_job_id': record_job, 'private_configuration': 'do-not-return'}
+                if key == 'current':
+                    snapshot['title_diagnostics'] = {'version': 1, 'attempts': [{'attempt': 1,
+                        'status': 'failed', 'raw_title': 'Skirt Pinggang Anjal',
+                        'error': '标题遗漏选定词组：Pinggang Elastik'}]}
+                record = TitleRecord(market_id=record_market, user_id=user_id, template_id=1,
+                    request_key=key, category='连衣裙', image_url='https://img.example/1.png',
+                    snapshot=snapshot, state='generated', source='fallback', attempts=1,
+                    title='Gaun Wanita Lengan Panjang', error='标题遗漏选定词组：Pinggang Elastik')
+                db.add(record)
+                db.flush()
+                records.append(record.id)
+            job.checkpoint = {'links': [{'generation_id': records[0]}]}
+            db.commit()
+        for uid in (1, 3, 4):
+            response = self.request('GET', f'/supply/jobs/{identity}/title-diagnostics', uid=uid)
+            self.assertEqual(response.status_code, 200, response.text)
+            rows = response.json()['records']
+            self.assertEqual([row['generation_id'] for row in rows], records[:2])
+            self.assertEqual(rows[0]['link_index'], 1)
+            self.assertEqual(rows[0]['diagnostics']['attempts'][0]['raw_title'], 'Skirt Pinggang Anjal')
+            self.assertEqual(rows[0]['source'], 'fallback')
+            self.assertIsNone(rows[1]['diagnostics'])
+            self.assertIsNone(rows[1]['link_index'])
+            self.assertNotIn('do-not-return', response.text)
+        for uid in (5, 7):
+            self.assertEqual(self.request('GET', f'/supply/jobs/{identity}/title-diagnostics', uid=uid).status_code, 404)
+
     def test_missing_market_profile_and_required_facts_block_submission(self):
         strategy = self.create_strategy(title_site='ID')
         for field in ('gender', 'age_group', 'category'):
@@ -218,6 +258,10 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
                         self.assertIn(expected, record.error)
                         self.assertEqual(record.source, 'fallback')
                         self.assertIsNotNone(record.adopted_at)
+                        attempts = record.snapshot['title_diagnostics']['attempts']
+                        self.assertEqual(len(attempts), 4)
+                        self.assertTrue(all(row['status'] == 'failed' and expected in row['error'] for row in attempts))
+                        self.assertEqual(attempts[-1]['raw_title'], None if isinstance(failure, Exception) else failure['title'])
                 self.assert_exported_titles(links)
 
     def test_fallback_removes_forbidden_phrases_and_rejects_invalid_result(self):
