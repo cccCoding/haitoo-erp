@@ -16,6 +16,7 @@ from tests.test_title_length import MY_180, keyword
 
 VALID = MY_180.replace('Gaun', 'Skirt Wanita').replace('Pinggang Berikat', 'Pinggang Elastik')
 MISSING = VALID.replace('Pinggang Elastik', 'Pinggang Anjal')
+INVALID_FORMAT = MISSING.replace('Wanita', 'Wanita\n', 1)
 
 
 class TitleDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
@@ -62,18 +63,19 @@ class TitleDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_keeps_every_failure_and_success_with_original_input(self):
         record_id = self.record()
         result, model = await self.generate(record_id, [ProviderError('DeepSeek 调用失败：HTTP 429'),
-            {'title': VALID + ' ' + 'a' * 100}, {'title': MISSING}, {'title': VALID}])
+            {'title': VALID + ' ' + 'a' * 100}, {'title': INVALID_FORMAT}, {'title': VALID}])
         self.assertEqual(result['title'], VALID)
         attempts = self.attempts(record_id)
         self.assertEqual([row['attempt'] for row in attempts], [1, 2, 3, 4])
         self.assertEqual([row['status'] for row in attempts], ['failed', 'failed', 'failed', 'valid'])
         self.assertEqual([row['stage'] for row in attempts],
-            ['provider', 'localized_title', 'selected_phrases', 'complete'])
+            ['provider', 'localized_title', 'localized_title', 'complete'])
         self.assertIsNone(attempts[0]['raw_title'])
         self.assertEqual(attempts[0]['missing_phrases'], {})
         self.assertIn('HTTP 429', attempts[0]['error'])
         self.assertGreater(attempts[1]['raw_length'], 230)
-        self.assertEqual(attempts[2]['raw_title'], MISSING)
+        self.assertEqual(attempts[2]['raw_title'], INVALID_FORMAT)
+        self.assertIn('单行纯文本', attempts[2]['error'])
         self.assertEqual(attempts[2]['missing_phrases']['raw'], ['Pinggang Elastik'])
         self.assertEqual(attempts[2]['missing_phrases']['cleaned'], ['Pinggang Elastik'])
         self.assertEqual(attempts[2]['selected_keywords'][0]['label_tag'], '腰头设计')
@@ -94,7 +96,7 @@ class TitleDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row['missing_phrases']['cleaned'], [])
         self.assertNotIn('removed_unselected_claims', row)
         self.assertNotIn('removed_forbidden_phrases', row)
-        self.assertEqual(row['policy_version'], 3)
+        self.assertEqual(row['policy_version'], 4)
 
     async def test_non_string_response_preserves_type_without_inventing_missing_phrases(self):
         record_id = self.record()
@@ -108,14 +110,14 @@ class TitleDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_resume_preserves_history_and_marks_unfinished_attempt(self):
         record_id = self.record()
         with self.assertRaises(asyncio.CancelledError):
-            await self.generate(record_id, [{'title': MISSING}, asyncio.CancelledError()])
+            await self.generate(record_id, [{'title': INVALID_FORMAT}, asyncio.CancelledError()])
         self.assertEqual([row['status'] for row in self.attempts(record_id)], ['failed', 'running'])
         result, _ = await self.generate(record_id, [{'title': VALID}])
         self.assertEqual(result['attempts'], 3)
         attempts = self.attempts(record_id)
         self.assertEqual([row['status'] for row in attempts], ['failed', 'interrupted', 'valid'])
         self.assertEqual([row['attempt'] for row in attempts], [1, 2, 3])
-        self.assertEqual(attempts[0]['raw_title'], MISSING)
+        self.assertEqual(attempts[0]['raw_title'], INVALID_FORMAT)
         self.assertIsNone(attempts[1]['raw_title'])
 
     async def test_single_title_also_keeps_diagnostics_and_replay_does_not_duplicate(self):

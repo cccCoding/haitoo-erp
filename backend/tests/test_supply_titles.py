@@ -58,7 +58,8 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
     def test_historical_detail_hides_similarity_but_keeps_fallback_and_failure_reason(self):
         identity = self.submit(self.create_strategy())
         warnings = ['已使用马来语兜底标题；可能与其他链接高度相似',
-            'AI 标题生成失败：模型超时', '与并发生成的同批标题高度相似，请核对', '保留其他提示']
+            'AI 标题生成失败：模型超时', '与并发生成的同批标题高度相似，请核对',
+            '按首图描述，请核对其他 SKU', '保留其他提示']
         checkpoint = {'links': [{'title': 'Gaun Wanita Lengan Panjang', 'title_warnings': warnings}]}
         with self.sessions() as db:
             db.get(SupplyJob, identity).checkpoint = copy.deepcopy(checkpoint)
@@ -226,7 +227,7 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
 
     def test_fallback_keeps_provider_and_validation_failures_after_export(self):
         for failure, expected in ((ProviderError('DeepSeek 调用失败：HTTP 429'), 'DeepSeek 调用失败：HTTP 429'),
-                                  ({'title': 'Baju Wanita Dewasa Lengan Panjang'}, '标题遗漏核心品类：Gaun')):
+                                  ({'title': 'Baju Wanita\nDewasa Lengan Panjang'}, '标题须为单行纯文本，不能包含 Markdown 或控制字符')):
             with self.subTest(failure=expected):
                 with self.sessions() as db:
                     db.get(Company, 1).supply_ai_secret_encrypted = encrypt_secret('test-supply-key')

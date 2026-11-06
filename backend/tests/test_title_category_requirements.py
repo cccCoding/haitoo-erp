@@ -1,4 +1,4 @@
-"""AI 必须使用完整品类词，遗漏时重新成文，程序不拼接标题。"""
+"""原词仍作为模型写作要求及诊断，不再作为标题通过条件。"""
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -58,26 +58,21 @@ class TitleCategoryRequirementsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(expected_selected, model.await_args.args[2]['required_phrases'])
         return result
 
-    async def test_missing_category_retries_with_exact_phrase_and_keeps_model_word_order(self):
-        rewritten = 'Lengan Panjang Gaun Corak Bunga'
-        result = await self.generate(['Lengan Panjang Corak Bunga', rewritten], selected='Lengan Panjang')
-        self.assertEqual(result['title'], rewritten)
-        self.assertEqual(result['attempts'], 4)
-        self.assertEqual(self.model.await_count, 4)
-        first, retry = self.model.await_args_list[:2]
-        self.assertEqual(first.args[2]['feedback'], '')
-        self.assertIn('核心品类：Gaun', retry.args[2]['feedback'])
+    async def test_missing_category_passes_without_phrase_retry(self):
+        title = 'Lengan Panjang Corak Bunga ' + 'a' * 160
+        result = await self.generate(title, selected='Lengan Panjang')
+        self.assertEqual(result['title'], title)
+        self.assertEqual(result['attempts'], 1)
+        self.assertEqual(self.model.await_count, 1)
         record = self.db.get(TitleRecord, self.record_id, populate_existing=True)
         self.assertEqual(record.title, result['title'])
         self.assertEqual(record.state, 'generated')
 
-    async def test_repeated_missing_category_is_rejected_instead_of_appended(self):
-        with self.assertRaisesRegex(ProviderError, '标题遗漏核心品类：Gaun'):
-            await self.generate('Lengan Panjang Corak Bunga')
-        self.assertEqual(self.model.await_count, 4)
-        record = self.db.get(TitleRecord, self.record_id, populate_existing=True)
-        self.assertIsNone(record.title)
-        self.assertEqual(record.state, 'failed')
+    async def test_missing_category_does_not_modify_model_title(self):
+        title = 'Lengan Panjang Corak Bunga Selesa'
+        result = await self.generate(title)
+        self.assertEqual(result['title'], title)
+        self.assertIsNone(self.db.get(TitleRecord, self.record_id).error)
 
     async def test_existing_category_is_not_duplicated_or_reordered(self):
         title = 'Lengan Panjang GAUN Corak Bunga'
@@ -89,9 +84,10 @@ class TitleCategoryRequirementsTests(unittest.IsolatedAsyncioTestCase):
         result = await self.generate(title, site='ID', core='Daster Wanita')
         self.assertEqual(result['title'], title)
 
-    async def test_category_cannot_be_split_into_noncontiguous_words(self):
-        with self.assertRaisesRegex(ProviderError, '标题遗漏核心品类：Daster Wanita'):
-            await self.generate('Daster Lengan Panjang Wanita Motif Bunga', site='ID', core='Daster Wanita')
+    async def test_category_can_be_split_into_noncontiguous_words(self):
+        title = 'Daster Lengan Panjang Wanita Motif Bunga'
+        result = await self.generate(title, site='ID', core='Daster Wanita')
+        self.assertEqual(result['title'], title)
 
     async def test_titles_cannot_exceed_regular_or_supply_length_limit(self):
         for supply, maximum in ((False, 255), (True, 230)):
@@ -106,10 +102,22 @@ class TitleCategoryRequirementsTests(unittest.IsolatedAsyncioTestCase):
                 self.db.query(TitleMarket).delete()
                 self.db.commit()
 
-    async def test_missing_selected_phrase_has_specific_error(self):
-        with self.assertRaisesRegex(ProviderError, '标题遗漏选定词组：Lengan Panjang'):
-            await self.generate('Gaun Corak Bunga Corak Bunga Corak Bunga', selected='Lengan Panjang')
-        self.assertEqual(self.model.await_count, 4)
+    async def assert_hyphenated_phrase_passes(self, *, supply):
+        title = 'Set kanak-kanak perempuan potongan longgar ' + 'a' * 140
+        result = await self.generate(title, core='Set', selected='Kanak Kanak', supply=supply)
+        self.assertEqual(result['title'], title)
+        self.assertEqual(self.model.await_count, 1)
+        record = self.db.get(TitleRecord, self.record_id)
+        attempt = record.snapshot['title_diagnostics']['attempts'][0]
+        self.assertEqual(attempt['missing_phrases']['raw'], ['Kanak Kanak'])
+        self.assertEqual(attempt['status'], 'valid')
+        self.assertNotIn('按首图描述，请核对其他 SKU', result['warnings'])
+
+    async def test_hyphenated_selected_phrase_passes_in_single_title(self):
+        await self.assert_hyphenated_phrase_passes(supply=False)
+
+    async def test_hyphenated_selected_phrase_passes_in_supply_title(self):
+        await self.assert_hyphenated_phrase_passes(supply=True)
 
 
     async def test_words_outside_facts_selected_keywords_and_grammar_are_accepted(self):

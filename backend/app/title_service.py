@@ -40,7 +40,7 @@ VISUAL_TAGS = {"品类", "颜色", "图案", "版型", "长度", "结构设计",
 EXCLUDED_TAGS = RETIRED_TAGS
 CONFIRMED_CHOICES = (('craft', '工艺'), ('brand', '品牌'))
 
-TITLE_POLICY_VERSION = 3
+TITLE_POLICY_VERSION = 4
 
 
 def digest(value):
@@ -200,13 +200,6 @@ def selected_confirmed_keywords(snapshot):
             if snapshot.get(f'selected_{kind}_keyword')]
 
 
-def validate_selected_brand(title, snapshot):
-    """仅检查人工选定品牌的原词及大小写，不扫描其他词库词条。"""
-    brand = snapshot.get('selected_brand_keyword')
-    if brand and brand['phrase'] not in title:
-        raise ProviderError('品牌须保留人工选定的原词及大小写')
-
-
 def required_keyword_ids(snapshot):
     return set(snapshot.get('locked_keyword_ids', [])) | {word['id'] for word in selected_confirmed_keywords(snapshot)}
 
@@ -234,17 +227,6 @@ def content_phrases(core, selected):
         if phrase:
             phrases.setdefault(normalize(phrase), phrase)
     return list(phrases.values())
-
-
-def validate_required_title(title, core, selected, snapshot):
-    if core and not contains_phrase(title, core):
-        raise ProviderError(f"标题遗漏核心品类：{core}；请使用此完整原词重新生成标题")
-    words = [*selected, *selected_confirmed_keywords(snapshot)]
-    missing = [phrase for phrase in content_phrases('', [word for word in words
-        if not optional_marketing(snapshot, word)]) if not contains_phrase(title, phrase)]
-    if missing:
-        raise ProviderError('标题遗漏选定词组：' + '、'.join(missing))
-    validate_selected_brand(title, snapshot)
 
 
 def legacy_choice_values(profile, definitions, semantic):
@@ -665,11 +647,10 @@ async def generate_record(db, record_id, api_key=None):
             state.pop('overlong_streak', None)
         best = state.get('best')
         if best:
-            # 保存过的候选也必须满足新策略下未经删改的品类和必要词组。
+            # 恢复候选仅校验基础格式；原词匹配只用于诊断及词库统计。
             try:
                 prior_selected = limit_marketing(snapshot, state.get('selected', record.selected_keywords or best['keywords']))
                 validate_localized_title(best['title'], maximum, site=market.site, language=market.language)
-                validate_required_title(best['title'], required_core, prior_selected, snapshot)
             except ProviderError:
                 state.pop('best', None)
                 best = None
@@ -749,10 +730,6 @@ async def generate_record(db, record_id, api_key=None):
                 protected = set(snapshot['locked_keyword_ids'])
                 protected.update(word['id'] for word in selected_confirmed_keywords(snapshot))
                 removed_this_round = prepare_supply_compression(state, selected, required_core, protected)
-                for phrase in [required_core, *[w['phrase']
-                        for w in selected if w['id'] in protected or w['tag'] == '品类']]:
-                    if len(phrase) > maximum:
-                        raise ProviderError(f'货盘标题配置冲突：单个必要词组为 {len(phrase)} 字符，超过 {maximum} 字符上限')
             required_phrases = content_phrases(required_core, [word for word in selected
                 if not optional_marketing(snapshot, word)])
             optional_phrases = content_phrases('', [word for word in selected if optional_marketing(snapshot, word)])
@@ -859,10 +836,8 @@ async def generate_record(db, record_id, api_key=None):
                 attempt['stage'] = 'localized_title'
                 title = validate_localized_title(title, maximum, site=market.site, language=market.language)
                 previous_title = title
-                attempt['stage'] = 'core_category' if required_core and not contains_phrase(title, required_core) else 'selected_phrases'
-                validate_required_title(title, required_core, selected, snapshot)
                 used_keywords = [word for word in selected if contains_phrase(title, word['phrase'])]
-                warnings = list(facts.get("warnings", [])) + ["按首图描述，请核对其他 SKU"]
+                warnings = visible_title_warnings(facts.get("warnings", []))
                 if not any(w["tag"] == "品类" for w in used_keywords):
                     warnings.append(f"词库覆盖不足，核心品类使用确认事实的{locale['language_name']}表达；未自动入库")
                 non_library = [localized_value(f) for f in facts["attributes"] if contains_phrase(title, localized_value(f)) and
@@ -980,19 +955,9 @@ def adopt_record(db, draft, user, generation_id=None, *, platform='TikTok'):
     image = (draft.image_urls or [None])[0]
     if not previous and record.image_url != image:
         raise HTTPException(400, "首图已改变，请重新生成标题")
-    try:
-        validate_selected_brand(draft.title, record.snapshot)
-    except ProviderError as exc:
-        raise HTTPException(400, str(exc)) from exc
     if normalized_title(draft.title) != normalized_title(record.title):
         try:
             validate_localized_title(draft.title, site=market.site, language=market.language)
-            facts = record.facts.get('attributes', [])
-            original_core = next((localized_value(f) for f in facts if f['tag'] == '品类'), None)
-            core = original_core
-            if core and not contains_phrase(draft.title, core):
-                raise ProviderError('人工修改不能删除核心品类')
-            validate_required_title(draft.title, core, selected_confirmed_keywords(record.snapshot), record.snapshot)
         except ProviderError as exc:
             raise HTTPException(400, str(exc)) from exc
         if previous and previous.title == draft.title:

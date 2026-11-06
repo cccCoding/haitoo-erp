@@ -14,7 +14,7 @@ from app.database import Base
 from app.schema_version import alembic_config
 from app.title_models import TitleAttributeCache, TitleMarket, TitleRecord, TitleTask
 from app.title_service import (choose_keywords, create_record, digest, generate_record,
-                               identify_facts, match_keywords, validate_selected_brand)
+                               identify_facts, match_keywords)
 from tests.test_title_length import keyword
 
 
@@ -104,7 +104,6 @@ class ConfirmedChoicesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(match_keywords(snapshot, {'attributes': [
             {'tag': '工艺', 'value': 'renda', 'localized_value': 'renda', 'source': 'manual'},
             {'tag': '品牌', 'value': 'Acme', 'localized_value': 'Acme', 'source': 'manual'}]}), [])
-        validate_selected_brand('Gaun Wanita Lengan Panjang renda Acme', snapshot)
 
     async def test_indonesian_choices_use_original_brand_and_survive_soft_budget(self):
         snapshot = self.snapshot(site='ID', language='id', category_localized_name='Daster')
@@ -117,8 +116,22 @@ class ConfirmedChoicesTests(unittest.IsolatedAsyncioTestCase):
         candidates = match_keywords(record.snapshot, facts)
         chosen = choose_keywords(record.snapshot, candidates, {}, core='a' * 205)
         self.assertEqual({word['tag'] for word in chosen}, {'工艺', '品牌'})
-        with self.assertRaisesRegex(ProviderError, '大小写'):
-            validate_selected_brand('Daster Wanita ' + brand['phrase'].lower(), record.snapshot)
+
+    async def test_generation_does_not_reject_changed_or_omitted_confirmed_phrases(self):
+        snapshot = self.snapshot()
+        record = create_record(self.db, self.market, 1, snapshot, 'https://img.example/test.png', 'rephrased')
+        self.db.commit()
+        title = 'Busana wanita acme dengan hiasan cantik ' + 'a' * 145
+
+        async def answer(key, instructions, data, **kwargs):
+            if 'manual' in data:
+                return await self.model(key, instructions, data, **kwargs)
+            return {'title': title}
+
+        with patch('app.title_service.ask_json', new=AsyncMock(side_effect=answer)):
+            result = await generate_record(self.db, record.id, 'test-key')
+        self.assertEqual(result['title'], title)
+        self.assertEqual(result['attempts'], 1)
 
     async def test_request_reuse_rejects_changed_choice_configuration_and_keeps_history(self):
         snapshot = self.snapshot()

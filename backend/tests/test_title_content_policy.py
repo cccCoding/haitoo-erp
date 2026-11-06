@@ -5,7 +5,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from fastapi import HTTPException
 from app.ai_providers import ProviderError
 from app.models import ProductDraft, Role
 from app.title_models import TitleKeyword, TitleRecord
@@ -74,10 +73,11 @@ class TitleContentPolicyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row['missing_phrases']['cleaned'], [])
             self.assertEqual(row['omitted_marketing_phrases'], row['optional_marketing_phrases'])
 
-    async def test_locked_marketing_still_requires_full_phrase_and_blocks_extra_marketing(self):
+    async def test_locked_marketing_can_be_omitted_and_blocks_extra_marketing(self):
         words = [keyword(1, 'Pilihan Popular', tag='营销修饰'), keyword(2, 'Gaya Istimewa', tag='营销修饰')]
-        with self.assertRaisesRegex(ProviderError, '遗漏选定词组：Pilihan Popular'):
-            await self.generate([MY_180] * 4, supply=True, words=words, locked=[1])
+        result, model = await self.generate([MY_180], supply=True, words=words, locked=[1])
+        self.assertEqual(result['title'], MY_180)
+        self.assertEqual(model.await_count, 1)
         for row in self.db.get(TitleRecord, self.record_id).snapshot['title_diagnostics']['attempts']:
             self.assertEqual([word['id'] for word in row['selected_keywords']], [1])
             self.assertEqual(row['optional_marketing_phrases'], [])
@@ -116,32 +116,45 @@ class TitleContentPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload['core_category'], 'Gaun')
         self.assertEqual(len(payload['optional_marketing_phrases']), 1)
         self.db.refresh(record)
-        self.assertEqual(record.snapshot['keyword_policy_version'], 3)
+        self.assertEqual(record.snapshot['keyword_policy_version'], 4)
         self.assertNotIn('forbidden_phrases', record.snapshot)
         self.assertEqual(record.snapshot['title_diagnostics']['attempts'][0]['status'], 'interrupted')
 
-    async def test_recovered_best_candidate_cannot_bypass_current_core_requirement(self):
+    async def test_recovered_best_candidate_does_not_require_exact_core_phrase(self):
         with self.assertRaises(asyncio.CancelledError):
             await self.generate([], supply=True,
                 response_callback=AsyncMock(side_effect=asyncio.CancelledError()))
         record = self.db.get(TitleRecord, self.record_id)
         state = copy.deepcopy(record.snapshot['supply_generation'])
-        state['best'] = {'title': MY_180.replace('Gaun ', ''), 'warnings': [], 'keywords': [], 'score': [False, 0]}
+        title = MY_180.replace('Gaun', 'Busana')
+        state['best'] = {'title': title, 'warnings': ['按首图描述，请核对其他 SKU'], 'keywords': [], 'score': [False, 0]}
         record.snapshot = {**record.snapshot, 'keyword_policy_version': 2, 'supply_generation': state}
         self.db.commit()
         model = AsyncMock(return_value={'title': MY_180})
         with patch('app.title_service.ask_json', new=model):
             result = await generate_record(self.db, record.id, 'key')
-        self.assertEqual(result['title'], MY_180)
-        self.assertEqual(result['attempts'], 2)
-        self.assertEqual(model.await_count, 1)
+        self.assertEqual(result['title'], title)
+        self.assertEqual(result['attempts'], 1)
+        model.assert_not_awaited()
+        self.assertNotIn('按首图描述，请核对其他 SKU', result['warnings'])
 
-    async def test_manual_case_only_edit_cannot_bypass_selected_brand_spelling(self):
+    async def test_manual_case_only_edit_does_not_require_selected_brand_spelling(self):
         brand = keyword(1, 'Acme', tag='品牌')
         body = MY_180 + ' Acme'
         result, _ = await self.generate([body] * 4, words=[brand], brand=brand)
         draft = ProductDraft(company_id=1, created_by=1, template_id=1,
             title=body.replace('Acme', 'acme'), image_urls=['https://img.example/1.png'])
         user = SimpleNamespace(id=1, company_id=1, role=Role.MEMBER)
-        with self.assertRaisesRegex(HTTPException, '品牌须保留'):
-            adopt_record(self.db, draft, user, result['generation_id'])
+        adopt_record(self.db, draft, user, result['generation_id'])
+
+    async def test_manual_edit_can_rephrase_core_and_omit_selected_brand(self):
+        brand = keyword(1, 'Acme', tag='品牌')
+        body = MY_180 + ' Acme'
+        result, _ = await self.generate([body] * 4, words=[brand], brand=brand)
+        draft = ProductDraft(company_id=1, created_by=1, template_id=1,
+            title=MY_180.replace('Gaun', 'Busana'), image_urls=['https://img.example/1.png'])
+        user = SimpleNamespace(id=1, company_id=1, role=Role.MEMBER)
+        adopt_record(self.db, draft, user, result['generation_id'])
+        self.db.flush()
+        manual = self.db.query(TitleRecord).filter_by(source='manual').one()
+        self.assertEqual(manual.title, draft.title)

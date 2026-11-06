@@ -1867,7 +1867,7 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         with patch('app.title_service.ask_json', new=AsyncMock(side_effect=AssertionError('不应重新调用模型'))):
             replay = self.request('POST', '/templates/1/generate-draft-title', uid=2, json=payload)
         self.assertEqual(replay.status_code, 200, replay.text)
-        self.assertEqual(replay.json()['warnings'], [original[0]])
+        self.assertEqual(replay.json()['warnings'], [])
         self.assertEqual(replay.json()['title'], generated['title'])
         self.assertEqual(replay.json()['attempts'], generated['attempts'])
         with self.sessions() as db:
@@ -2098,7 +2098,7 @@ class TitleLibraryTests(SupplyFixture, unittest.TestCase):
         task = self.request('GET', f'/title-tasks/{identity}', uid=2).json()
         self.assertEqual(task['state'], 'completed', task)
         self.assertEqual(task['progress']['completed'], 2)
-        self.assertTrue(task['result']['items']['two']['warnings'])
+        self.assertEqual(task['result']['items']['two']['warnings'], [])
         self.assertEqual(len(task['result']['items']), 2)
         self.assertTrue(all(item['title'] == TITLE + ' Kapas' and item['attempts'] == 4
                             for item in task['result']['items'].values()))

@@ -376,7 +376,7 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.await_args.args[2]['compression_level'], 3)
 
     async def test_supply_non_length_failures_do_not_advance_compression(self):
-        result, model = await self.generate([MY_231, ProviderError('模型超时'), 'Baju ' + 'a' * 30, SHORT], supply=True)
+        result, model = await self.generate([MY_231, ProviderError('模型超时'), 'Baju\n' + 'a' * 30, SHORT], supply=True)
         self.assertEqual(result['attempts'], 4)
         payloads = [call.args[2] for call in model.await_args_list]
         self.assertEqual([data['compression_level'] for data in payloads], [0, 1, 1, 1])
@@ -564,11 +564,11 @@ class TitleLengthGenerationTests(unittest.IsolatedAsyncioTestCase):
                     result, _ = await self.generate([title] * 4, supply=True)
                     self.assertEqual(len(result['title']), length)
 
-    async def test_supply_rejects_single_impossible_required_phrase_before_model(self):
+    async def test_supply_long_selected_phrase_does_not_block_valid_model_title(self):
         word = keyword(1, 'a' * 231)
-        with self.assertRaisesRegex(ProviderError, '配置冲突'):
-            await self.generate([], supply=True, words=[word], locked=[1])
-        self.assertEqual(self.db.get(TitleRecord, self.record_id).attempts, 0)
+        result, model = await self.generate([MY_180], supply=True, words=[word], locked=[1])
+        self.assertEqual(result['title'], MY_180)
+        self.assertEqual(model.await_count, 1)
 
     async def test_supply_takeover_prevents_stale_candidate_and_state_writes(self):
         def takeover(*args, **kwargs):
