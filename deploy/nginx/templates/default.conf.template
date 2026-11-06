@@ -66,6 +66,14 @@ server {
     http2 on;
     server_name ${API_DOMAIN};
 
+    # 词库等 JSON 响应较大，在 API 入口压缩，减少公网传输耗时。
+    gzip on;
+    gzip_types application/json;
+    gzip_min_length 1024;
+    gzip_comp_level 5;
+    gzip_vary on;
+    gzip_proxied any;
+
     # 允许产品库上传 30MB 文件，并为 multipart 表单头留出余量。
     client_max_body_size 31m;
 
