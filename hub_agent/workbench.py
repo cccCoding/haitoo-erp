@@ -96,7 +96,7 @@ class LocalStatusServer:
 
     async def asset(self, request):
         name = request.match_info["name"]
-        if name not in {"workbench.js", "workbench.css"}:
+        if name not in {"workbench.js", "workbench.css", "template-picker.js"}:
             raise web.HTTPNotFound()
         return web.FileResponse(self.static / name)
 

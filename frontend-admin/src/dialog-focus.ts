@@ -3,7 +3,7 @@ import type { ObjectDirective } from 'vue'
 type DialogOptions = { close: () => void; busy?: boolean }
 type DialogState = { options: DialogOptions; previous: HTMLElement | null; overflow: string; keydown: (event: KeyboardEvent) => void }
 const states = new WeakMap<HTMLElement, DialogState>()
-const focusable = (element: HTMLElement) => Array.from(element.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]')).filter(item => item.getClientRects().length)
+const focusable = (element: HTMLElement) => Array.from(element.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]')).filter(item => item.getClientRects().length && item.getAttribute('aria-hidden') !== 'true')
 
 // 所有后台弹窗共用键盘行为：初始焦点、Tab 循环、Escape、关闭后还原焦点。
 export const dialogFocus: ObjectDirective<HTMLElement, DialogOptions> = {

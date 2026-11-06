@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import axios from 'axios'
+import TemplateSelect from './TemplateSelect.vue'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
 
 type ResourceType = 'prompts' | 'white-images'
@@ -81,7 +82,7 @@ defineExpose({ refresh })
     </nav>
     <form class="creative-filters" @submit.prevent="search">
       <label>员工<select v-model="creatorId"><option value="">全部员工</option><option v-for="item in members" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
-      <label>产品模板<select v-model="templateId"><option value="">全部模板</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
+      <label>产品模板<TemplateSelect v-model="templateId" :templates="templates" all-label="全部模板" string-value/></label>
       <label class="creative-keyword">关键词<input v-model="query" type="search" maxlength="1000" :placeholder="resourceType==='prompts'?'搜索名称或创作要求':'搜索白底图名称'"/></label>
       <div class="creative-filter-actions"><button class="primary" type="submit" :disabled="loading || !companyId">{{loading?'加载中…':'搜索'}}</button><button class="secondary" type="button" :disabled="loading || !companyId" @click="reset">重置</button></div>
     </form>

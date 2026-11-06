@@ -143,6 +143,12 @@ class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self): await self.client.close()
 
+    async def test_template_picker_asset_is_served_without_opening_other_files(self):
+        response = await self.client.get("/assets/template-picker.js")
+        self.assertEqual(response.status, 200)
+        self.assertIn("createTemplatePicker", await response.text())
+        self.assertEqual((await self.client.get("/assets/workbench.py")).status, 404)
+
     async def test_csrf_origin_host_and_session(self):
         for headers in ({}, {"Origin": "https://evil.example", "X-CSRF-Token": self.workbench.csrf}, {"Origin": self.workbench.origin, "X-CSRF-Token": "wrong"}):
             response = await self.client.post("/api/pause", json={"paused": True}, headers=headers)

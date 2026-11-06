@@ -7,6 +7,7 @@ const labels={queued:'排队中',running:'执行中',awaiting_attention:'待人�
 const stages={queued:'等待领取',claimed:'已领取',reading_account:'读取环境绑定账号',starting_environment:'启动环境',opening_account:'打开 HubStudio 绑定账号',checking_login:'检查 TikTok 登录',logged_in:'登录成功',checking_language:'检查页面语言',switching_language:'切换简体中文',verifying_language:'核对切换后的语言',language_ready:'语言已就绪',language_failed:'语言检查失败',closing_account_menu:'关闭账号菜单',account_menu_closed:'账号菜单已关闭',upload_parsing:'等待表格解析',waiting_login:'等待 TikTok 登录',uploading:'上传表格',importing:'导入商品',imported:'导入成功',submitting:'正在提交',submitted:'已提交',manually_aborted:'人工中止',duplicate_file:'文件已存在，已中止',import_data_error:'添加商品失败（数据错误）',manual_attention:'等待人工处理',connection_lost:'连接中断',upgrade_review:'升级后待核对',manually_confirmed:'人工确认已提交',cancelled:'已取消',expired:'文件已过期'};
 const stage=value=>stages[value]||value;
 const $=id=>document.getElementById(id);
+const policyTemplatePicker=createTemplatePicker($('policy-template'));
 function node(tag,text){const el=document.createElement(tag);if(text!==undefined)el.textContent=String(text??'—');return el;}
 function time(value){return value?new Date(value).toLocaleString('zh-CN'):'—';}
 async function api(path,method='GET',body){const headers={};if(method!=='GET'){headers['Content-Type']='application/json';headers['X-CSRF-Token']=csrf;}const r=await fetch('/api/'+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)});const text=await r.text();let data;try{data=JSON.parse(text);}catch{throw Error(text||'请求失败');}if(!r.ok)throw Error(data.detail||'请求失败');return data;}
@@ -177,6 +178,7 @@ function openPolicy(templateId=null){
   for(const t of policyData.templates){const option=node('option',t.name);option.value=t.id;select.append(option);}
   if(templateId!==null)select.value=String(templateId);
   select.disabled=!!existing;
+  policyTemplatePicker.sync();
   $('policy-mode').value=existing?.mode||'round_robin';
   policyCodes=[...new Set(existing?.container_codes||[])];
   policyUnavailableCodes=policyCodes.filter(code=>!environmentItems.some(e=>e.container_code===code));

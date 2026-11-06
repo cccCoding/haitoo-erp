@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import axios from 'axios'
+import TemplateSelect from './TemplateSelect.vue'
 import MaterialTransferDialog from './MaterialTransferDialog.vue'
 import { transferItem, type MaterialTransferItem } from './material-transfer'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
@@ -150,7 +151,7 @@ onMounted(async () => {
     <form v-if="tab==='collect' && enabled" class="collection-filters" @submit.prevent="search">
       <label>来源公司<select v-model="companyId" :disabled="saving" @change="changeSource"><option :value="null">请选择公司</option><option v-for="c in companies" :key="c.id" :value="c.id">{{c.name}}</option></select></label>
       <label>来源库<select v-model="library" :disabled="saving" @change="changeSource"><option value="material">素材库</option><option value="product">产品库</option></select></label>
-      <label>来源模板<select v-model="templateId"><option value="">全部模板</option><option v-if="library==='product'" value="unmatched">未匹配</option><option v-for="t in sourceTemplates" :key="t.id" :value="String(t.id)">{{t.name}}</option></select></label>
+      <label>来源模板<TemplateSelect v-model="templateId" :templates="sourceTemplates" all-label="全部模板" string-value :unmatched="library==='product'"/></label>
       <template v-if="library==='material'">
         <label>素材类型<select v-model="sourceType"><option value="">全部类型</option><option v-for="(label,key) in sourceLabels" :key="key" :value="key">{{label}}</option></select></label>
         <label>使用状态<select v-model="usage"><option value="all">全部状态</option><option value="unused">未使用</option><option value="used">已使用</option></select></label>
@@ -161,7 +162,7 @@ onMounted(async () => {
       <button class="primary" :disabled="!companyId || loading || saving">{{loading?'加载中…':'搜索'}}</button><button class="secondary" type="button" :disabled="!companyId || loading || saving" @click="resetFilters">重置筛选</button>
     </form>
     <form v-if="tab==='history'" class="collection-filters collection-history-filters" @submit.prevent="search">
-      <label>目标模板<select v-model="historyTemplateId"><option :value="null">全部模板</option><option v-for="t in usableTemplates" :key="t.id" :value="t.id">{{t.name}}</option></select></label>
+      <label>目标模板<TemplateSelect v-model="historyTemplateId" :templates="usableTemplates" all-label="全部模板"/></label>
       <button class="primary" :disabled="loading">{{loading?'加载中…':'搜索'}}</button><button class="secondary" type="button" :disabled="loading" @click="historyTemplateId=null">重置筛选</button>
     </form>
     <p v-if="snapshot">{{snapshot}} 榜单 · 统计截至 {{through}}</p>
@@ -183,7 +184,7 @@ onMounted(async () => {
     <footer v-if="total" class="collection-pagination"><span>共 {{total}} 条</span><label>每页 <select v-model.number="pageSize" :disabled="loading" @change="changePageSize"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 条</label><button :disabled="loading || page<=1" @click="changePage(page-1)">上一页</button><span>{{page}} / {{pages}}</span><button :disabled="loading || page>=pages" @click="changePage(page+1)">下一页</button></footer>
     <div v-if="confirming" v-dialog-focus="{close:closeConfirm,busy:saving}" class="modal-backdrop" @click.self="closeConfirm"><form class="modal-card collection-modal" role="dialog" aria-modal="true" aria-labelledby="collect-title" @submit.prevent="submit">
       <h2 id="collect-title">采集到素材库</h2><p>已选 {{count}} 张；统一绑定目标模板并生成新 SKU。相同图片默认跳过，图片统一保存或复用。</p>
-      <label>目标产品模板<select v-model="targetTemplate" required :disabled="saving" @change="formError=''"><option :value="null" disabled>请选择模板</option><option v-for="t in usableTemplates" :key="t.id" :value="t.id">{{t.name}}</option></select></label>
+      <label>目标产品模板<TemplateSelect v-model="targetTemplate" required :disabled="saving" @change="formError=''" :templates="usableTemplates"/></label>
       <p v-if="preflight" class="error">{{preflight}} <button v-if="!props.user?.user_code" class="secondary" type="button" @click="closeConfirm();emit('account')">账号设置</button></p>
       <label v-if="hasExisting" class="collection-recollect"><input v-model="recollect" type="checkbox" :disabled="saving" />我确认再次采集已采集的图片，生成新的素材和 SKU</label>
       <p v-if="formError" class="error" role="alert">{{formError}}</p><div class="modal-actions"><button class="secondary" type="button" :disabled="saving" @click="closeConfirm">取消</button><button class="primary" :disabled="saving || !!preflight || (hasExisting && !recollect)">{{saving?'采集中…':'确认采集'}}</button></div>

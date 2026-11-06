@@ -1,0 +1,255 @@
+<script setup lang="ts">
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+
+type OptionValue = string | number | null
+
+const props = withDefaults(defineProps<{
+  modelValue: OptionValue
+  options: any[]
+  valueKey?: string
+  labelKey?: string
+  placeholder?: string
+  searchPlaceholder?: string
+  disabled?: boolean
+  ariaLabel?: string
+  maxVisible?: number
+  emptyLabel?: string
+  noMatchLabel?: string
+  multiple?: boolean
+  selectedValues?: OptionValue[]
+  bulkSelection?: boolean
+  selectionError?: string
+  required?: boolean
+}>(), {
+  valueKey: 'value',
+  labelKey: 'label',
+  placeholder: '请选择',
+  searchPlaceholder: '输入关键词搜索',
+  disabled: false,
+  maxVisible: 200,
+  emptyLabel: '暂无可选类目',
+  noMatchLabel: '没有匹配的类目',
+  multiple: false,
+  selectedValues: () => [],
+  bulkSelection: false,
+  required: false,
+})
+
+const emit = defineEmits<{ 'update:modelValue': [OptionValue]; change: [OptionValue]; toggle: [OptionValue]; 'select-matched': [OptionValue[]]; 'clear-matched': [OptionValue[]] }>()
+
+const root = ref<HTMLElement | null>(null)
+const trigger = ref<HTMLButtonElement | null>(null)
+const listbox = ref<HTMLElement | null>(null)
+const searchInput = ref<HTMLInputElement | null>(null)
+const open = ref(false)
+const keyword = ref('')
+const activeIndex = ref(0)
+
+const normalizedOptions = computed(() => (props.options || []).map(option => ({
+  value: (option?.[props.valueKey] ?? null) as OptionValue,
+  label: String(option?.[props.labelKey] ?? ''),
+})))
+
+const selectedLabel = computed(() => props.multiple
+  ? (props.selectedValues.length ? `已选择 ${props.selectedValues.length} 项` : '')
+  : normalizedOptions.value.find(option => option.value === props.modelValue)?.label || '')
+const isSelected = (value: OptionValue) => props.multiple ? props.selectedValues.includes(value) : value === props.modelValue
+
+const keywordTerms = computed(() => keyword.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean))
+
+const matchedOptions = computed(() => {
+  if (!keywordTerms.value.length) return normalizedOptions.value
+  return normalizedOptions.value.filter(option => {
+    const haystack = option.label.toLocaleLowerCase()
+    return keywordTerms.value.every(term => haystack.includes(term))
+  })
+})
+
+const visibleOptions = computed(() => matchedOptions.value.slice(0, props.maxVisible))
+const hiddenCount = computed(() => matchedOptions.value.length - visibleOptions.value.length)
+const matchedValues = computed(() => matchedOptions.value.map(option => option.value))
+const matchedSelectedCount = computed(() => matchedValues.value.filter(value => props.selectedValues.includes(value)).length)
+
+watch(() => props.options, () => {
+  if (!props.multiple) keyword.value = ''
+  activeIndex.value = 0
+})
+watch(() => props.disabled, value => { if (value) closePanel() })
+
+watch(matchedOptions, () => {
+  if (activeIndex.value >= visibleOptions.value.length) activeIndex.value = Math.max(0, visibleOptions.value.length - 1)
+})
+
+function highlightSegments(label: string) {
+  const terms = keywordTerms.value
+  if (!terms.length) return [{ text: label, match: false }]
+  const haystack = label.toLocaleLowerCase()
+  const flags = new Array<boolean>(label.length).fill(false)
+  for (const term of terms) {
+    let from = 0
+    while (term) {
+      const index = haystack.indexOf(term, from)
+      if (index < 0) break
+      for (let cursor = index; cursor < index + term.length; cursor += 1) flags[cursor] = true
+      from = index + term.length
+    }
+  }
+  const segments: { text: string; match: boolean }[] = []
+  for (let index = 0; index < label.length; index += 1) {
+    const last = segments[segments.length - 1]
+    if (last && last.match === flags[index]) last.text += label[index]
+    else segments.push({ text: label[index], match: flags[index] })
+  }
+  return segments
+}
+
+function indexOfSelected() {
+  const index = matchedOptions.value.findIndex(option => option.value === props.modelValue)
+  return index < 0 ? 0 : Math.min(index, props.maxVisible - 1)
+}
+
+async function openPanel() {
+  if (props.disabled) return
+  keyword.value = ''
+  activeIndex.value = indexOfSelected()
+  open.value = true
+  await nextTick()
+  searchInput.value?.focus()
+  scrollActiveIntoView()
+}
+
+function closePanel() {
+  open.value = false
+  keyword.value = ''
+}
+
+function togglePanel() {
+  if (open.value) closePanel()
+  else void openPanel()
+}
+
+function selectOption(value: OptionValue) {
+  if (props.disabled) return
+  if (props.multiple) {
+    emit('toggle', value)
+    return
+  }
+  emit('update:modelValue', value)
+  emit('change', value)
+  closePanel()
+  trigger.value?.focus()
+}
+
+function scrollActiveIntoView() {
+  void nextTick(() => {
+    const element = listbox.value?.children[activeIndex.value] as HTMLElement | undefined
+    element?.scrollIntoView({ block: 'nearest' })
+  })
+}
+
+function moveActive(step: number) {
+  if (!visibleOptions.value.length) return
+  const total = visibleOptions.value.length
+  activeIndex.value = (activeIndex.value + step + total) % total
+  scrollActiveIntoView()
+}
+
+function onSearchKeydown(event: KeyboardEvent) {
+  if (event.key === 'ArrowDown') { event.preventDefault(); moveActive(1); return }
+  if (event.key === 'ArrowUp') { event.preventDefault(); moveActive(-1); return }
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    const option = visibleOptions.value[activeIndex.value]
+    if (option) selectOption(option.value)
+    return
+  }
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closePanel(); trigger.value?.focus() }
+  if (event.key === 'Tab') { trigger.value?.focus(); closePanel() }
+}
+
+function onTriggerKeydown(event: KeyboardEvent) {
+  if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault()
+    void openPanel()
+  }
+}
+
+function onDocumentPointerDown(event: MouseEvent) {
+  if (!open.value) return
+  if (!root.value?.contains(event.target as Node)) closePanel()
+}
+
+onMounted(() => document.addEventListener('mousedown', onDocumentPointerDown))
+onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointerDown))
+</script>
+
+<template>
+  <div ref="root" class="search-select" :class="{ 'is-open': open, 'is-disabled': disabled }">
+    <input v-if="required" class="search-select-validity" tabindex="-1" aria-hidden="true"
+      :value="modelValue == null ? '' : String(modelValue)" :disabled="disabled" required
+      @invalid.prevent="openPanel"/>
+    <button
+      ref="trigger"
+      type="button"
+      class="search-select-trigger"
+      :aria-label="ariaLabel"
+      :aria-expanded="open"
+      aria-haspopup="listbox"
+      :disabled="disabled"
+      @click="togglePanel"
+      @keydown="onTriggerKeydown"
+    >
+      <span class="search-select-value" :class="{ 'is-placeholder': !selectedLabel }">{{ selectedLabel || placeholder }}</span>
+      <span class="search-select-caret" aria-hidden="true">▾</span>
+    </button>
+    <div v-if="open" class="search-select-panel">
+      <div class="search-select-search">
+        <input
+          ref="searchInput"
+          v-model="keyword"
+          type="text"
+          :placeholder="searchPlaceholder"
+          :aria-label="searchPlaceholder"
+          @keydown="onSearchKeydown"
+        />
+      </div>
+      <div v-if="multiple && bulkSelection" class="search-select-bulk-actions">
+        <span aria-live="polite">已选 {{matchedSelectedCount}} / {{matchedOptions.length}} 项</span>
+        <button type="button" :disabled="disabled || matchedSelectedCount === matchedOptions.length" @click="emit('select-matched', matchedValues)">{{keyword.trim() ? '全选搜索结果' : '全选可选项'}}</button>
+        <button type="button" :disabled="disabled || !matchedSelectedCount" @click="emit('clear-matched', matchedValues)">取消结果选择</button>
+      </div>
+      <p v-if="selectionError" class="search-select-selection-error" role="alert">{{selectionError}}</p>
+      <ul ref="listbox" class="search-select-list" role="listbox" :aria-multiselectable="multiple || undefined">
+        <li
+          v-for="(option, index) in visibleOptions"
+          :key="String(option.value)"
+          class="search-select-option"
+          :class="{ 'is-active': index === activeIndex, 'is-selected': isSelected(option.value) }"
+          role="option"
+          :aria-selected="isSelected(option.value)"
+          @mouseenter="activeIndex = index"
+          @mousedown.prevent
+          @click.prevent="selectOption(option.value)"
+        >
+          <span v-if="multiple" class="search-select-check" aria-hidden="true">{{isSelected(option.value)?'☑':'☐'}} </span>
+          <span
+            v-for="(segment, segmentIndex) in highlightSegments(option.label)"
+            :key="segmentIndex"
+            :class="{ 'search-select-hit': segment.match }"
+          >{{ segment.text }}</span>
+        </li>
+        <li v-if="!visibleOptions.length" class="search-select-empty">{{ keyword.trim() ? noMatchLabel : emptyLabel }}</li>
+      </ul>
+      <div class="search-select-footer">
+        <span>匹配 {{ matchedOptions.length }} / 共 {{ normalizedOptions.length }} 项</span>
+        <span v-if="hiddenCount > 0">仅显示前 {{ visibleOptions.length }} 项，请继续输入关键词</span>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.search-select-validity{position:absolute!important;inset:0 auto auto 0;width:1px!important;height:1px!important;min-height:0!important;padding:0!important;border:0!important;opacity:0;pointer-events:none}
+.search-select-bulk-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin:8px 0;color:#81788d;font-size:12px}.search-select-bulk-actions>span{margin-right:auto}.search-select-bulk-actions>button{padding:5px 7px;border:0;border-radius:6px;background:#f2effb;color:#6047a4;font:inherit;cursor:pointer}.search-select-bulk-actions>button:disabled{opacity:.5;cursor:default}
+.search-select-selection-error{margin:8px 0;color:#b63850;font-size:12px;line-height:1.6}
+</style>

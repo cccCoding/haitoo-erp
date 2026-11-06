@@ -19,6 +19,7 @@ const props = withDefaults(defineProps<{
   selectedValues?: OptionValue[]
   bulkSelection?: boolean
   selectionError?: string
+  required?: boolean
 }>(), {
   valueKey: 'value',
   labelKey: 'label',
@@ -31,11 +32,13 @@ const props = withDefaults(defineProps<{
   multiple: false,
   selectedValues: () => [],
   bulkSelection: false,
+  required: false,
 })
 
 const emit = defineEmits<{ 'update:modelValue': [OptionValue]; change: [OptionValue]; toggle: [OptionValue]; 'select-matched': [OptionValue[]]; 'clear-matched': [OptionValue[]] }>()
 
 const root = ref<HTMLElement | null>(null)
+const trigger = ref<HTMLButtonElement | null>(null)
 const listbox = ref<HTMLElement | null>(null)
 const searchInput = ref<HTMLInputElement | null>(null)
 const open = ref(false)
@@ -134,6 +137,7 @@ function selectOption(value: OptionValue) {
   emit('update:modelValue', value)
   emit('change', value)
   closePanel()
+  trigger.value?.focus()
 }
 
 function scrollActiveIntoView() {
@@ -159,7 +163,8 @@ function onSearchKeydown(event: KeyboardEvent) {
     if (option) selectOption(option.value)
     return
   }
-  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closePanel() }
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closePanel(); trigger.value?.focus() }
+  if (event.key === 'Tab') { trigger.value?.focus(); closePanel() }
 }
 
 function onTriggerKeydown(event: KeyboardEvent) {
@@ -180,7 +185,11 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
 
 <template>
   <div ref="root" class="search-select" :class="{ 'is-open': open, 'is-disabled': disabled }">
+    <input v-if="required" class="search-select-validity" tabindex="-1" aria-hidden="true"
+      :value="modelValue == null ? '' : String(modelValue)" :disabled="disabled" required
+      @invalid.prevent="openPanel"/>
     <button
+      ref="trigger"
       type="button"
       class="search-select-trigger"
       :aria-label="ariaLabel"
@@ -240,6 +249,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
 </template>
 
 <style scoped>
+.search-select-validity{position:absolute!important;inset:0 auto auto 0;width:1px!important;height:1px!important;min-height:0!important;padding:0!important;border:0!important;opacity:0;pointer-events:none}
 .search-select-bulk-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin:8px 0;color:#81788d;font-size:12px}.search-select-bulk-actions>span{margin-right:auto}.search-select-bulk-actions>button{padding:5px 7px;border:0;border-radius:6px;background:#f2effb;color:#6047a4;font:inherit;cursor:pointer}.search-select-bulk-actions>button:disabled{opacity:.5;cursor:default}
 .search-select-selection-error{margin:8px 0;color:#b63850;font-size:12px;line-height:1.6}
 </style>

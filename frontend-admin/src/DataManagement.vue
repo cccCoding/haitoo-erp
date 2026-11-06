@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import axios from 'axios'
+import TemplateSelect from './TemplateSelect.vue'
 import TemplateLibrary from './TemplateLibrary.vue'
 import CreativeResources from './CreativeResources.vue'
 import { summarizeShopSales } from './shop-sales'
@@ -138,12 +139,12 @@ defineExpose({ refresh })
         <template v-if="isMaterial">
           <label v-if="tab==='materials' || category==='new_images'">使用状态<select v-model="usageStatus"><option value="all">全部状态</option><option value="unused">未使用</option><option value="used">已使用</option></select></label>
           <label v-if="tab==='materials'">类型<select v-model="sourceType"><option value="">全部类型</option><option value="ai_created">AI创作</option><option value="local_upload">本地上传</option><option value="imported">导入</option><option value="cross_company">采集</option></select></label>
-          <label v-if="tab==='materials'">产品模板<select v-model="templateId"><option value="">全部模板</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
+          <label v-if="tab==='materials'">产品模板<TemplateSelect v-model="templateId" :templates="templates" all-label="全部模板" string-value/></label>
           <label>创作人<select v-model="creatorId"><option value="">全部创作人</option><option v-for="item in members" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label>
         </template>
         <template v-else-if="tab==='products' && !isShops">
           <div class="data-shop-filter"><span>店铺名称</span><details ref="shopFilter"><summary>{{sourceIds.length ? `已选 ${sourceIds.length} 家店铺` : '全部店铺'}}</summary><div class="data-shop-options"><input v-model="shopSearch" type="search" placeholder="搜索平台、站点或店铺" aria-label="搜索店铺"/><button type="button" class="secondary" @click="sourceIds=[]">清空选择</button><label v-for="shop in shopOptions" :key="shop.id"><input v-model="sourceIds" type="checkbox" :value="shop.id"/>{{shop.label}}</label><p v-if="!shopOptions.length">没有匹配的店铺</p></div></details></div>
-          <template v-if="!isRanking"><label>模板<select v-model="templateId"><option value="">全部模板</option><option value="unmatched">未匹配</option><option v-for="item in templates" :key="item.id" :value="String(item.id)">{{item.name}}</option></select></label><label>SKU<input v-model="sku" type="search" placeholder="输入 SKU 前缀"/></label></template>
+          <template v-if="!isRanking"><label>模板<TemplateSelect v-model="templateId" :templates="templates" all-label="全部模板" string-value unmatched/></label><label>SKU<input v-model="sku" type="search" placeholder="输入 SKU 前缀"/></label></template>
         </template>
         <div class="data-filter-actions"><button class="primary" type="submit" :disabled="loading || !companyId">{{loading ? '加载中…' : '搜索'}}</button><button class="secondary" type="button" :disabled="loading || !companyId" @click="resetSearch">重置</button></div>
       </form>
@@ -190,6 +191,8 @@ defineExpose({ refresh })
 .data-filters > label, .data-shop-filter { display:grid; gap:7px; min-width:140px; color:#475569; font-size:12px; font-weight:500; }
 .data-filters select, .data-filters input[type=search], summary { min-height:var(--admin-control-height); max-width:260px; padding:9px 12px; border:1px solid #cbd5e1; border-radius:8px; background:white; color:var(--admin-text); font:inherit; font-size:13px; }
 .data-filters select { width:100%; }
+.data-filters :deep(.template-select),.creative-filters :deep(.template-select){width:210px;max-width:100%;margin:0}
+@media(max-width:640px){.data-filters :deep(.template-select),.creative-filters :deep(.template-select){width:100%}}
 .data-company-filter > label { width:260px; }
 .data-filter-actions { display:flex; gap:8px; }
 .data-shop-filter details { position:relative; }
