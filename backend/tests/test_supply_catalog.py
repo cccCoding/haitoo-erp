@@ -467,12 +467,33 @@ class SupplyCatalogTests(SupplyFixture, unittest.TestCase):
                 self.assertEqual(self.request("POST", f"/supply/materials/{identity}/recheck", uid=uid).status_code, 404)
         templates = self.request("GET", "/supply/templates", uid=4)
         self.assertEqual(templates.status_code, 200, templates.text)
-        self.assertEqual(templates.json()[0]["available_count"], 20)
+        self.assertNotIn("available_count", templates.json()[0])
         self.assertEqual(templates.json()[0]["cover_url"], "https://img.example/template1.png")
         self.assertEqual(templates.json()[0]["description"], "模板1的款式描述")
         identity = self.submit()
         self.assertEqual(self.request("GET", f"/supply/jobs/{identity}", uid=4).status_code, 200)
         self.image_mock.assert_not_called()
+
+    def test_template_listing_does_not_read_materials_or_image_files(self):
+        statements = []
+
+        def record_query(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement.lower())
+
+        event.listen(self.engine, "before_cursor_execute", record_query)
+        try:
+            for uid in (1, 2, 3, 4):
+                with self.subTest(uid=uid):
+                    statements.clear()
+                    response = self.request("GET", "/supply/templates", uid=uid)
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual([row["id"] for row in response.json()], [1])
+                    self.assertEqual(response.json()[0]["sizes"], ["S", "M"])
+                    self.assertNotIn("available_count", response.json()[0])
+                    self.assertFalse(any("material_assets" in sql or "image_files" in sql
+                                         for sql in statements), statements)
+        finally:
+            event.remove(self.engine, "before_cursor_execute", record_query)
 
     def test_template_groups_include_empty_and_unpublished_categories_without_other_companies(self):
         with self.sessions() as db:

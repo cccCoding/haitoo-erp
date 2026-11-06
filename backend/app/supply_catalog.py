@@ -349,13 +349,12 @@ def templates(user=Depends(supply_actor), db: Session = Depends(get_db)):
     items = []
     for item in db.scalars(query.order_by(ProductTemplate.id)).all():
         snapshot = template_snapshot(item)
-        available = eligible_materials(db, user.company_id, item.id, template_version(snapshot))
         items.append({"id": item.id, "name": item.name, "cover_url": item.cover_url,
             "group_id": item.group_id if item.group_id in groups else None, "group_name": groups.get(item.group_id),
             "description": item.description, "supply_public": item.supply_public,
             "title_engine": "v2",
             "supply_fallback_title": item.supply_fallback_title if is_manager(user) else None,
-            "sizes": sizes(snapshot), "available_count": len(available)})
+            "sizes": sizes(snapshot)})
     return items
 
 
