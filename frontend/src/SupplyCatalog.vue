@@ -77,11 +77,19 @@ const selectedTemplate = computed(() => templates.value.find(item => item.id ===
 const categoryAttributes = computed<any[]>(() => strategyOptions.value?.attributes_by_category?.[strategyForm.value.category_name] || [])
 const expectedRows = computed(() => Math.max(1, selectedTemplate.value?.sizes?.length || 1) * Number(strategyForm.value.sku_count || 0) * Number(strategyForm.value.link_count || 0))
 const myActiveJob = computed(() => jobs.value.some(item => (!item.user_id || item.user_id === props.user.id) && unfinishedSupplyJob(item)))
+const jobPollInterval = computed(() => jobs.value.some(unfinishedSupplyJob) ? 5000 : 30000)
 const submissionKeys = createSupplySubmissionKeys(() => crypto.randomUUID())
 let pollTimer: ReturnType<typeof setInterval> | undefined
 let managerRequest = 0, agentRequest = 0
 let stopped = false, materialRequest = 0, listingRequest = 0, optionsRequest = 0, jobRequest = 0, accessRefreshing = false
 const pollingAbort = new AbortController()
+function startJobPolling() {
+  if (pollTimer !== undefined) clearInterval(pollTimer)
+  pollTimer = setInterval(() => { if (props.token && !document.hidden) void loadJobs(true) }, jobPollInterval.value)
+}
+watch(jobPollInterval, () => {
+  if (!stopped && pollTimer !== undefined) startJobPolling()
+})
 const list = (data: any): any[] => Array.isArray(data) ? data : data?.items || []
 function fail(e: any, fallback = '请求失败，请重试') {
   if (e.response?.status === 401) emit('unauthorized')
@@ -546,7 +554,7 @@ onMounted(async () => {
   window.addEventListener('focus', refreshVisibleMaterials)
   document.addEventListener('visibilitychange', refreshVisibleMaterials)
   await reload()
-  if (!stopped) pollTimer = setInterval(() => { if (props.token && !document.hidden) void loadJobs(true) }, 5000)
+  if (!stopped) startJobPolling()
 })
 onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPreview); window.removeEventListener('focus', refreshVisibleMaterials); document.removeEventListener('visibilitychange', refreshVisibleMaterials); stopped = true; closeUsage(); statisticsScope.invalidate(); usersScope.invalidate(); materialRequest++; listingRequest++; optionsRequest++; jobRequest++; pollingAbort.abort(); if (pollTimer) clearInterval(pollTimer) })
 </script>
