@@ -61,6 +61,14 @@ class MetadataOnlyR2:
 
 
 class DirectStorageTests(TestCase):
+    def test_candidate_size_limit(self):
+        info = {"ContentLength": 5 * 1024 * 1024, "ContentType": "image/png",
+                "LastModified": datetime.now(timezone.utc), "ETag": '"source"'}
+        self.assertEqual(storage.metadata(info, "image.png")[0], 5 * 1024 * 1024)
+        info["ContentLength"] += 1
+        with self.assertRaisesRegex(storage.InvalidCandidate, "超过 5 MiB"):
+            storage.metadata(info, "image.png")
+
     def setUp(self):
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)

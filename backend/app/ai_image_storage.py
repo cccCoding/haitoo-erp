@@ -11,7 +11,7 @@ from .config import get_settings
 from .storage import IMAGE_SUFFIXES, StorageError, _r2_client, _required
 
 logger = logging.getLogger(__name__)
-MAX_BYTES = 3 * 1024 * 1024
+MAX_BYTES = 5 * 1024 * 1024
 
 
 class InvalidCandidate(StorageError):
@@ -118,7 +118,7 @@ def head(client, bucket, key, *, target_bucket=None, target_key=None):
 def metadata(info, key):
     size = info.get("ContentLength")
     if not isinstance(size, int) or not 0 < size <= MAX_BYTES:
-        raise InvalidCandidate("图片为空或超过 3 MiB")
+        raise InvalidCandidate("图片为空或超过 5 MiB")
     mime = str(info.get("ContentType") or "").split(";", 1)[0].strip().lower()
     if mime in {"", "application/octet-stream", "binary/octet-stream"}:
         mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(key.rsplit(".", 1)[-1].lower())
