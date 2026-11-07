@@ -133,6 +133,34 @@ class ConfirmedChoicesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['title'], title)
         self.assertEqual(result['attempts'], 1)
 
+    async def test_missing_and_invalid_manual_attributes_continue_generation_and_keep_diagnostics(self):
+        snapshot = self.snapshot(attributes={'结构设计': '长袖'})
+        record = create_record(self.db, self.market, 1, snapshot, 'https://img.example/missing.png', 'missing')
+        self.db.commit()
+        title = 'Gaun wanita dengan hiasan cantik ' + 'a' * 155
+
+        async def answer(key, instructions, data, **kwargs):
+            if 'manual' in data:
+                return {'attributes': [{'tag': '性别', 'value': '男', 'localized_value': 'Lelaki',
+                    'source': 'manual', 'evidence': 'manual'}]}
+            return {'title': title}
+
+        with patch('app.title_service.ask_json', new=AsyncMock(side_effect=answer)):
+            result = await generate_record(self.db, record.id, 'test-key')
+        self.assertEqual(result['title'], title)
+        self.assertEqual(result['source'], 'ai')
+        self.assertEqual(result['attempts'], 1)
+        self.assertIsNone(record.error)
+        facts = record.facts
+        missing = {fact['tag']: fact for fact in facts['unretained_confirmed_attributes']}
+        self.assertEqual(missing['结构设计']['value'], '长袖')
+        self.assertEqual(missing['结构设计']['reason'], '模型未返回该属性')
+        self.assertIn('未通过', missing['性别']['reason'])
+        self.assertEqual(next(f['localized_value'] for f in facts['attributes'] if f['tag'] == '品类'), 'Gaun')
+        self.assertNotIn('性别', {f['tag'] for f in facts['attributes']})
+        self.db.expire_all()
+        self.assertEqual(self.db.get(TitleRecord, record.id).facts, facts)
+
     async def test_request_reuse_rejects_changed_choice_configuration_and_keeps_history(self):
         snapshot = self.snapshot()
         record = create_record(self.db, self.market, 1, snapshot, 'https://img.example/test.png', 'reuse')

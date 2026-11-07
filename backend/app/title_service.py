@@ -452,7 +452,7 @@ async def identify_facts(db, market_id, snapshot, image_url, api_key):
         manual['年龄'] = snapshot['age_group']
     category_localized = snapshot.get('category_localized_name')
     recognition_prompt = (snapshot.get('recognition_prompt') or '').strip()
-    cache_key = digest(["facts-v8", modern, image_url, manual, category_localized, recognition_prompt,
+    cache_key = digest(["facts-v9", modern, image_url, manual, category_localized, recognition_prompt,
         snapshot["platform"], snapshot["site"], snapshot["language"]])
     cache = db.scalar(select(TitleAttributeCache).where(TitleAttributeCache.market_id == market_id,
                                                       TitleAttributeCache.cache_key == cache_key))
@@ -494,8 +494,19 @@ async def identify_facts(db, market_id, snapshot, image_url, api_key):
             attributes.append({"tag": tag, "value": value, "localized_value": expression, "evidence": fact["evidence"], "source": source})
         elif source == "image" and image_url and not warnings and tag in visual_tags and tag not in manual:
             attributes.append({"tag": tag, "value": value, "localized_value": expression, "evidence": fact["evidence"], "source": source})
-    if set(manual) - {f["tag"] for f in attributes if f["source"] == "manual"}:
-        raise ProviderError("模型未完整保留模板确认属性，请重试")
+    retained = {f['tag'] for f in attributes if f['source'] == 'manual'}
+    unretained = []
+    for tag, value in manual.items():
+        if tag in retained:
+            continue
+        returned = [fact for fact in answer.get('attributes', [])[:40]
+                    if isinstance(fact, dict) and fact.get('tag') == tag]
+        unretained.append({'tag': tag, 'value': value,
+            'reason': '模型未返回该属性' if not returned else '模型返回的原值、来源或必填字段未通过确认属性校验'})
+    # 漏返确认属性只作诊断；品类仍使用模板确认值，保证后续成文有核心品类。
+    if '品类' not in retained and not category_localized:
+        attributes.insert(0, {'tag': '品类', 'value': snapshot['category'],
+            'localized_value': snapshot['category'], 'evidence': '模板已确认品类', 'source': 'manual'})
     if category_localized:
         # 品类的目标语言表达直接采用运营确认的站点名称，不让模型重复翻译。
         attributes = [fact for fact in attributes if fact['tag'] != '品类']
@@ -512,7 +523,7 @@ async def identify_facts(db, market_id, snapshot, image_url, api_key):
             if selected:
                 attributes.append({'tag': semantic, 'value': selected['phrase'], 'localized_value': selected['phrase'],
                     'evidence': f'模板已确认{semantic}关键词中随机选择一项', 'source': 'manual'})
-    facts = {"attributes": attributes, "warnings": warnings}
+    facts = {"attributes": attributes, "warnings": warnings, 'unretained_confirmed_attributes': unretained}
     try:
         with db.begin_nested():
             db.add(TitleAttributeCache(market_id=market_id, cache_key=cache_key, facts=facts))

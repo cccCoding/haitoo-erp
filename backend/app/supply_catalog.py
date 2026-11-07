@@ -641,8 +641,20 @@ def job_detail(identity: int, user=Depends(supply_actor), db: Session = Depends(
     item = accessible_job(db, user, identity)
     drafts = copy.deepcopy(item.checkpoint.get('links', []))
     for draft in drafts:
+        draft.pop('unretained_confirmed_attributes', None)
         if 'title_warnings' in draft:
             draft['title_warnings'] = visible_title_warnings(draft['title_warnings'])
+    if is_manager(user):
+        from .title_models import TitleMarket, TitleRecord
+        ids = [draft['generation_id'] for draft in drafts if draft.get('generation_id')]
+        records = db.execute(select(TitleRecord.id, TitleRecord.facts)
+            .join(TitleMarket, TitleMarket.id == TitleRecord.market_id).where(
+                TitleRecord.id.in_(ids), TitleMarket.company_id == user.company_id,
+                TitleRecord.user_id == item.user_id,
+                TitleRecord.snapshot['supply_job_id'].as_integer() == item.id)).all() if ids else []
+        diagnostics = {identity: facts.get('unretained_confirmed_attributes', []) for identity, facts in records}
+        for draft in drafts:
+            draft['unretained_confirmed_attributes'] = diagnostics.get(draft.get('generation_id'), [])
     return {**job_payload(item), "downloaded": item.id in downloaded_job_ids(db, user.company_id, [item.id]),
         "drafts": drafts, "strategy": item.snapshot.get("strategy")}
 
@@ -663,7 +675,9 @@ def job_title_diagnostics(identity: int, user=Depends(supply_actor), db: Session
     return {'job_id': item.id, 'records': [
         {'generation_id': record.id, 'link_index': link_indices.get(record.id),
          'state': record.state, 'source': record.source, 'title': record.title,
-         'attempts': record.attempts, 'error': record.error, 'facts': record.facts,
+         'attempts': record.attempts, 'error': record.error,
+         'facts': {key: value for key, value in record.facts.items()
+                   if key != 'unretained_confirmed_attributes' or is_manager(user)},
          'diagnostics': record.snapshot.get('title_diagnostics')}
         for record in records]}
 

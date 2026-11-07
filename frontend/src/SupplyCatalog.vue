@@ -764,6 +764,10 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
             <p v-if="row.diagnostics.error" class="supply-title-error">失败原因：{{row.diagnostics.error}}</p>
             <p v-for="warning in row.diagnostics.warnings" :key="warning" class="supply-title-warning">{{warning}}</p>
           </div>
+          <div v-if="canManage && row.unretained_confirmed_attributes?.length" class="supply-title-diagnostics">
+            <p>属性识别未保留以下确认属性，已允许继续生成标题：</p>
+            <p v-for="attribute in row.unretained_confirmed_attributes" :key="attribute.tag" class="supply-title-warning">{{attribute.tag}}：{{attribute.value}}（{{attribute.reason}}）</p>
+          </div>
           <div class="supply-link-images"><img v-for="(asset,assetIndex) in row.materials || row.assets || []" :key="asset.id || assetIndex" :src="imageUrl(asset.url || asset.image_url)" :alt="asset.sku || '素材'" loading="lazy"/></div>
         </article>
         <div class="modal-actions"><button v-if="canDownload(jobDetail)" class="primary" :disabled="!!busy" @click="downloadJob(jobDetail)">下载 Excel</button><span v-else>{{supplyFileStatus(jobDetail)}}</span></div>

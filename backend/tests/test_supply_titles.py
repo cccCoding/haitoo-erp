@@ -79,6 +79,33 @@ class SupplyTitleTests(SupplyFixture, unittest.TestCase):
         with self.sessions() as db:
             self.assertEqual(db.get(SupplyJob, identity).checkpoint, checkpoint)
 
+    def test_unretained_attributes_visible_only_to_managers_in_job_detail(self):
+        identity = self.submit(self.create_strategy())
+        missing = [{'tag': '结构设计', 'value': '长袖', 'reason': '模型未返回该属性'}]
+        with self.sessions() as db:
+            job = db.get(SupplyJob, identity)
+            record = TitleRecord(market_id=job.snapshot['title_market_id'], user_id=job.user_id,
+                template_id=1, request_key='unretained', category='连衣裙', image_url='',
+                snapshot={'supply_job_id': identity}, facts={'attributes': [],
+                    'unretained_confirmed_attributes': missing}, title='Gaun Wanita', state='generated')
+            db.add(record)
+            db.flush()
+            job.checkpoint = {'links': [{'generation_id': record.id, 'title': record.title,
+                'title_source': 'ai', 'unretained_confirmed_attributes': missing}]}
+            db.commit()
+        for uid in (1, 3, 4):
+            response = self.request('GET', f'/supply/jobs/{identity}', uid=uid)
+            self.assertEqual(response.status_code, 200, response.text)
+            draft = response.json()['drafts'][0]
+            facts = self.request('GET', f'/supply/jobs/{identity}/title-diagnostics', uid=uid).json()['records'][0]['facts']
+            if uid in (1, 3):
+                self.assertEqual(draft['unretained_confirmed_attributes'], missing)
+                self.assertEqual(facts['unretained_confirmed_attributes'], missing)
+            else:
+                self.assertNotIn('unretained_confirmed_attributes', draft)
+                self.assertNotIn('unretained_confirmed_attributes', facts)
+        self.assertEqual(self.request('GET', f'/supply/jobs/{identity}', uid=5).status_code, 404)
+
     def test_market_selection_validation_legacy_default_and_omitted_patch_preserves_id(self):
         for site in ('SG', '', 'id'):
             response = self.request('POST', '/supply/strategies', uid=4, json=self.strategy_input(title_site=site))
