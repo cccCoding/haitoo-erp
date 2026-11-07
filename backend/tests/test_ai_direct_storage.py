@@ -27,6 +27,7 @@ from app.models import (AIImageCandidate, AIImagePreparation, Company, ImageFile
     PodTask, ProductDraft, ProductTemplate, Role, TaskQueueSetting, TaskStatus, User, UserAIProviderCredential)
 from app.schemas import ClaimMaterials, DraftImagesConfirm, DraftImageApply, BatchImageReviewConfirm
 from app.schema_version import alembic_config
+from scripts import recheck_ai_image_size
 
 
 class MetadataOnlyR2:
@@ -68,6 +69,27 @@ class DirectStorageTests(TestCase):
         info["ContentLength"] += 1
         with self.assertRaisesRegex(storage.InvalidCandidate, "超过 5 MiB"):
             storage.metadata(info, "image.png")
+
+    def test_recheck_old_size_error_only_for_awaiting_tasks(self):
+        _, _, ids = self.register(count=2)
+        completed_id, _, completed_ids = self.register()
+        with self.sessions() as db:
+            for candidate_id in ids + completed_ids:
+                row = db.get(AIImageCandidate, candidate_id)
+                row.state, row.error = "invalid", recheck_ai_image_size.OLD_ERROR
+                self.r2.objects[row.bucket, row.object_key]["ContentLength"] = 4 * 1024 * 1024
+            oversized = db.get(AIImageCandidate, ids[1])
+            self.r2.objects[oversized.bucket, oversized.object_key]["ContentLength"] = 5 * 1024 * 1024 + 1
+            db.get(PodTask, completed_id).status = TaskStatus.COMPLETED
+            db.commit()
+        self.assertEqual(recheck_ai_image_size.run(self.sessions)["可恢复"], 1)
+        with self.sessions() as db:
+            self.assertEqual(db.get(AIImageCandidate, ids[0]).state, "invalid")
+        self.assertEqual(recheck_ai_image_size.run(self.sessions, apply=True)["已恢复"], 1)
+        with self.sessions() as db:
+            self.assertEqual(db.get(AIImageCandidate, ids[0]).state, "pending")
+            self.assertEqual(db.get(AIImageCandidate, ids[1]).state, "invalid")
+            self.assertEqual(db.get(AIImageCandidate, completed_ids[0]).state, "invalid")
 
     def setUp(self):
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
