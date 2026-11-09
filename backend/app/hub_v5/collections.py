@@ -132,7 +132,13 @@ def summarize(products):
     imp = sum(p["impressions"] for p in active) if all(p.get("impressions") is not None for p in active) else None
     clicks = sum(p["clicks"] for p in active) if all(p.get("clicks") is not None for p in active) else None
     with_imp = sum(p["impressions"] > 0 for p in active) if imp is not None else None
-    return {"active": len(active), "views_covered": sum(p.get("views") is not None for p in active), "views": sum(p["views"] for p in active) if all(p.get("views") is not None for p in active) else None,
+    # 商品管理页明确返回“--”的商品按无浏览统计。
+    views_complete = all(p.get("views") is not None or p.get("views_reason") == "商品管理页未提供浏览次数（--）" for p in active)
+    with_views = sum((p.get("views") or 0) > 0 for p in active) if views_complete else None
+    with_sales = sum(p["sales_count"] > 0 for p in active) if all(p.get("sales_count") is not None for p in active) else None
+    return {"view_counts_version": 2, "with_views": with_views, "zero_views": len(active) - with_views if with_views is not None else None,
+        "sell_through_rate": with_sales / len(active) if active and with_sales is not None else None,
+        "active": len(active), "views_covered": sum(p.get("views") is not None for p in active), "views": sum(p["views"] for p in active) if all(p.get("views") is not None for p in active) else None,
         "sku_count": sum(p["sku_count"] for p in active) if all(p.get("sku_count") is not None for p in active) else None,
         "with_impressions": with_imp, "zero_impressions": len(active)-with_imp if with_imp is not None else None,
         "impressions": imp, "clicks": clicks, "ctr": clicks / imp if imp and clicks is not None else None,
@@ -142,8 +148,10 @@ def summarize(products):
 def snapshot_view(db, row):
     if not row: return None
     summary = row.quality.get("summary")
-    if summary is None:
-        summary = summarize([p for r in db.scalars(select(MatrixPart).where(MatrixPart.kind == "collection", MatrixPart.parent_id == row.id)) for p in r.payload])
+    if summary is None or summary.get("view_counts_version") != 2:
+        calculated = summarize([p for r in db.scalars(select(MatrixPart).where(MatrixPart.kind == "collection", MatrixPart.parent_id == row.id)) for p in r.payload])
+        summary = {**calculated, **(summary or {})}
+        summary.update({key: calculated[key] for key in ("view_counts_version", "with_views", "zero_views")})
     observed = datetime.fromisoformat(row.header["observed_at"].replace("Z", "+00:00"))
     from .service import instant
     return {"id": row.id, "observed_at": row.header["observed_at"], "committed_at": instant(row.committed_at), "window_start": row.header["window_start"],

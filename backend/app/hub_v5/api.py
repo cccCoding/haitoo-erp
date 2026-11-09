@@ -2,6 +2,7 @@
 import csv
 import io
 import secrets
+from urllib.parse import quote
 from decimal import Decimal
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -624,6 +625,8 @@ def metrics(q:str="",site:str="",group:str="",agent_id:int|None=None,status:str=
     for bucket in groups.values():bucket["ctr"]=bucket["clicks"]/bucket["impressions"] if bucket["impressions"] else None
     return {"total":len(envs),"collected":len(snapshots),"active":sum(v["active"] for v in snapshots) if snapshots else None,
         "views":sum(v["views"] for v in snapshots) if snapshots and all(v.get("views") is not None for v in snapshots) else None,
+        "with_views":sum(v["with_views"] for v in snapshots) if snapshots and all(v.get("with_views") is not None for v in snapshots) else None,
+        "zero_views":sum(v["zero_views"] for v in snapshots) if snapshots and all(v.get("zero_views") is not None for v in snapshots) else None,
         "sku_count":sum(v["sku_count"] for v in snapshots) if snapshots and all(v.get("sku_count") is not None for v in snapshots) else None,
         "with_impressions":sum(v["with_impressions"] for v in snapshots) if snapshots and all(v["with_impressions"] is not None for v in snapshots) else None,
         "zero_impressions":sum(v["zero_impressions"] for v in snapshots) if snapshots and all(v["zero_impressions"] is not None for v in snapshots) else None,
@@ -669,13 +672,21 @@ def shop_export(identity:int,q:str="",actor=Depends(matrix_user),db=Depends(get_
 @router.get("/exports")
 def export(q:str="",site:str="",group:str="",agent_id:int|None=None,status:str="",collection:str="",exact:str="",executable:str="",ungrouped:bool=False,actor=Depends(matrix_user),db=Depends(get_db)):
     output=io.StringIO();writer=csv.writer(output)
-    writer.writerow(["环境","分组","站点","店铺ID","在架","浏览次数","SKU数量","有曝光","零曝光","曝光","点击","CTR","GMV","币种","采集时间","窗口开始","窗口结束","完整性"])
+    writer.writerow(["环境名 / 编号","分组","站点","在售商品","有浏览","零浏览","动销率","曝光","点击","CTR","GMV","7日访客","违规分","采集时间"])
     envs=db.scalars(s.environment_query(db,actor,{"q":q,"site":site,"group":group,"ungrouped":ungrouped,"agent_id":agent_id,"status":status,"collection":collection,"executable":executable,"exact":exact.splitlines() if exact else []}).limit(20001)).all()
     if len(envs)>20000:s.fail("导出超过20000环境",413)
     for env in envs:
         shop=db.get(MatrixShop,env.shop_id) if env.shop_id else None
         snap=c.snapshot_view(db,db.get(MatrixCollection,shop.snapshot_id)) if shop and shop.snapshot_id else {}
-        writer.writerow([csv_value(v) for v in [env.name,env.group_name,env.override_site or env.observed_site,shop.external_id if shop else None,
-            *[snap.get(k) for k in ("active","views","sku_count","with_impressions","zero_impressions","impressions","clicks","ctr","gmv","currency","observed_at","window_start","window_end")],str(snap.get("quality",{}))]])
+        observed = snap.get("observed_at")
+        collected_at = datetime.fromisoformat(observed.replace("Z", "+00:00")).astimezone(ZoneInfo("Asia/Hong_Kong")).strftime("%Y/%m/%d %H:%M:%S") if observed else "未采集"
+        writer.writerow([csv_value(v) for v in [f"{env.name}\n{env.container_code}",env.group_name or "未分组",env.override_site or env.observed_site or "未知",
+            *[snap.get(k) if snap.get(k) is not None else "—" for k in ("active","with_views","zero_views")],
+            f"{snap['sell_through_rate']:.2%}" if snap.get("sell_through_rate") is not None else "—",
+            *[snap.get(k) if snap.get(k) is not None else "—" for k in ("impressions","clicks")],
+            f"{snap['ctr']:.2%}" if snap.get("ctr") is not None else "—",
+            f"{snap['gmv']} {snap['currency']}" if snap.get("gmv") is not None else "—",
+            *[snap.get(k) if snap.get(k) is not None else "—" for k in ("visitors7d","violations_score")],collected_at]])
     s.audit(db,actor,"metrics.export",0,{"count":len(envs)});db.commit()
-    return Response("\ufeff"+output.getvalue(),media_type="text/csv; charset=utf-8",headers={"Content-Disposition":"attachment; filename=tk-matrix.csv"})
+    filename = f"店铺数据-{datetime.now(ZoneInfo('Asia/Hong_Kong')):%Y-%m-%d}.csv"
+    return Response("\ufeff"+output.getvalue(),media_type="text/csv; charset=utf-8",headers={"Content-Disposition":f"attachment; filename*=UTF-8''{quote(filename)}"})

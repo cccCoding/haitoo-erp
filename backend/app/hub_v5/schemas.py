@@ -286,6 +286,7 @@ class Product(Input):
     clicks: int | None = Field(default=None, ge=0)
     active: bool = True
     views: int | None = Field(default=None, ge=0)
+    sales_count: int | None = Field(default=None, ge=0)
     views_reason: str | None = Field(default=None, max_length=255)
     sku_count: int | None = Field(default=None, ge=0, le=5000)
     skus: list[ProductSKU] = Field(default_factory=list, max_length=5000)

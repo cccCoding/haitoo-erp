@@ -1,5 +1,7 @@
 """矩阵HTTP闭环：真实数据库状态、固定快照、幂等及提交边界。"""
 import copy
+import csv
+import io
 import hashlib
 import json
 import unittest
@@ -186,6 +188,77 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         self.assertEqual(committed.status_code,200,committed.text)
         self.assertIsNone(committed.json()['views'])
         self.assertEqual(committed.json()['sku_count'],4)
+
+    def test_product_view_counts_and_sales_rate_preserve_unknowns(self):
+        from app.hub_v5.collections import summarize
+        products = [{'views': 10, 'sales_count': 2}, {'views': 0, 'sales_count': 0},
+                    {'views': 9, 'sales_count': 0, 'active': False}]
+        summary = summarize(products)
+        self.assertEqual((summary['with_views'], summary['zero_views']), (1, 1))
+        self.assertEqual(summary['sell_through_rate'], .5)
+        products[0]['views'] = None
+        products[1].pop('sales_count')
+        summary = summarize(products)
+        self.assertIsNone(summary['with_views']);self.assertIsNone(summary['zero_views'])
+        self.assertIsNone(summary['sell_through_rate'])
+        self.assertEqual(summarize([])['with_views'], 0)
+        self.assertIsNone(summarize([])['sell_through_rate'])
+
+    def test_existing_snapshot_derives_view_counts_without_changing_traffic(self):
+        run,_=self.make_run();item,creds=self.claim(run);shop=self.bind(item,creds)
+        data=self.management_package();data['products'][0]['views']=0
+        _,committed=self.upload(item,creds,data)
+        self.assertEqual(committed.status_code,200,committed.text)
+        with self.sessions() as db:
+            row=db.get(MatrixCollection,committed.json()['id'])
+            summary={k:v for k,v in row.quality['summary'].items() if k not in {'view_counts_version','with_views','zero_views','sell_through_rate'}}
+            row.quality={**row.quality,'summary':summary};db.commit()
+        snapshot=self.request('GET',f'/hub-v5/shops/{shop}/snapshots').json()['snapshot']
+        self.assertEqual((snapshot['with_views'],snapshot['zero_views']),(1,1))
+        self.assertIsNone(snapshot['with_impressions']);self.assertIsNone(snapshot['sell_through_rate'])
+        metrics=self.request('GET','/hub-v5/shops/metrics').json()
+        self.assertEqual((metrics['with_views'],metrics['zero_views']),(1,1))
+        export=self.request('GET','/hub-v5/exports')
+        self.assertIn('有浏览,零浏览,动销率',export.text)
+
+    def test_management_dash_views_count_as_zero_for_new_and_saved_snapshots(self):
+        run,_=self.make_run();item,creds=self.claim(run);shop=self.bind(item,creds)
+        data=self.management_package(count=3)
+        data['products'][1]['views']=0
+        data['products'][2].update(views=None,views_reason='商品管理页未提供浏览次数（--）')
+        _,committed=self.upload(item,creds,data)
+        self.assertEqual(committed.status_code,200,committed.text)
+        self.assertEqual((committed.json()['with_views'],committed.json()['zero_views']),(1,2))
+        with self.sessions() as db:
+            row=db.get(MatrixCollection,committed.json()['id'])
+            summary={k:v for k,v in row.quality['summary'].items() if k!='view_counts_version'}
+            summary.update(with_views=None,zero_views=None)
+            row.quality={**row.quality,'summary':summary};db.commit()
+        snapshot=self.request('GET',f'/hub-v5/shops/{shop}/snapshots').json()['snapshot']
+        self.assertEqual((snapshot['with_views'],snapshot['zero_views']),(1,2))
+        self.assertIsNone(snapshot['with_impressions'])
+        metrics=self.request('GET','/hub-v5/shops/metrics').json()
+        self.assertEqual((metrics['with_views'],metrics['zero_views']),(1,2))
+        environment=self.request('GET','/hub-v5/environments').json()['items'][0]
+        self.assertEqual((environment['snapshot']['with_views'],environment['snapshot']['zero_views']),(1,2))
+        response=self.request('GET','/hub-v5/exports')
+        table=list(csv.reader(io.StringIO(response.text.lstrip('\ufeff'))))
+        self.assertEqual(table[0],['环境名 / 编号','分组','站点','在售商品','有浏览','零浏览','动销率','曝光','点击','CTR','GMV','7日访客','违规分','采集时间'])
+        self.assertEqual(len(table[1]),len(table[0]))
+        self.assertEqual(table[1][0],f"{environment['name']}\n{environment['container_code']}")
+        self.assertEqual(table[1][3:7],['3','1','2','—'])
+        from urllib.parse import unquote
+        from zoneinfo import ZoneInfo
+        filename=f"店铺数据-{datetime.now(ZoneInfo('Asia/Hong_Kong')):%Y-%m-%d}.csv"
+        self.assertIn(filename,unquote(response.headers['content-disposition']))
+        # 筛选结果中尚未采集的环境也应保留，与列表一致。
+        self.sync(1,[{'container_code':'env-1','name':'测试环境','group_name':'分组A','site':'MY'},
+                     {'container_code':'env-2','name':'未采集环境','site':'MY'}],version=int(datetime.now().timestamp())+1)
+        response=self.request('GET','/hub-v5/exports?q=未采集环境')
+        table=list(csv.reader(io.StringIO(response.text.lstrip('\ufeff'))))
+        self.assertEqual(len(table),2)
+        self.assertEqual(table[1][3:13],['—']*10)
+        self.assertEqual(table[1][-1],'未采集')
 
     def test_management_snapshot_rejects_incomplete_skus_and_fake_traffic(self):
         run,_=self.make_run();item,creds=self.claim(run);shop=self.bind(item,creds)
