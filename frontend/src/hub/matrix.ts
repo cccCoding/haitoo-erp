@@ -23,8 +23,23 @@ export function deviceSetup(device:MatrixDeviceStatus,config:{enabled:boolean;li
  if(!collect&&!listing)return result('capabilities','环境可同步，执行能力未开放','可先同步和查看环境；采集或上品需设备开放对应站点能力。',true)
  return result('ready','基础连接已就绪','可在环境列表选择环境并创建方案，实际执行以预览校验为准。',true)
 }
-export function windowBuckets(windows:any[],field:'impressions'|'clicks'|'ctr'){
- return windows.map(w=>`${w.site}${windows.filter(v=>v.site===w.site).length>1?` [${w.window_start?.slice(0,10)}~${w.window_end?.slice(0,10)}]`:''} ${field==='ctr'?percent(w[field]):display(w[field])}`).join(' · ') || '—'
+export function windowBuckets(windows:any[]=[],field:'impressions'|'clicks'|'ctr'){
+ const groups=new Map<string,any[]>()
+ for(const window of windows){
+  const key=`${window.window_start||''}|${window.window_end||''}`
+  const values=groups.get(key)||[]
+  values.push(window)
+  groups.set(key,values)
+ }
+ return [...groups.values()].map(values=>{
+  const covered=values.filter(value=>value.impressions!=null&&value.clicks!=null)
+  const impressions=covered.reduce((sum,value)=>sum+value.impressions,0)
+  const clicks=covered.reduce((sum,value)=>sum+value.clicks,0)
+  const totals={impressions:covered.length?impressions:null,clicks:covered.length?clicks:null,ctr:impressions>0?clicks/impressions:null}
+  const value=totals[field]
+  const prefix=groups.size>1?`[${values[0].window_start?.slice(0,10)}~${values[0].window_end?.slice(0,10)}] `:''
+  return prefix+(field==='ctr'?percent(value):display(value))
+ }).join(' · ')||'—'
 }
 
 // 按连续步骤分组，保留重试、重复步骤和不同店铺之间的时间顺序。
@@ -40,6 +55,7 @@ export function groupRunEvents(events:any[]){
 }
 
 Object.assign(statusLabels,{
+ opening_orders:'打开全部订单',collection_orders:'采集订单总数',
  checking_environment:'检查环境权限',starting_environment:'启动环境',connecting_browser:'连接浏览器',
  identity_confirmed:'店铺身份已确认',collection_window:'设置采集窗口',collecting_products:'采集商品和流量',
  collection_checked:'核对采集结果',validating_collection:'校验采集包',collection_committed:'快照已保存',
@@ -62,3 +78,27 @@ Object.assign(statusLabels,{opening_shop:'打开商品管理页',environment_rea
 Object.assign(statusLabels,{collection_count:'读取在售商品总数'})
 
 Object.assign(statusLabels,{waiting_verification:'等待人工安全验证'})
+
+export function sortMatrixRows<T>(rows:T[],key:string,direction:'asc'|'desc'|null):T[]{
+ if(!key||!direction)return rows
+ function value(row:T):string|number|null{
+  const raw=key.split('.').reduce((current:any,part)=>current?.[part],row)
+  if(raw==null||raw==='')return null
+  if(key==='snapshot.observed_at'){
+   const timestamp=Date.parse(String(raw))
+   return Number.isFinite(timestamp)?timestamp:null
+  }
+  if(key.startsWith('snapshot.')){
+   const number=Number(raw)
+   return Number.isFinite(number)?number:null
+  }
+  return String(raw)
+ }
+ return [...rows].sort((left,right)=>{
+  const a=value(left),b=value(right)
+  if(a===null)return b===null?0:1
+  if(b===null)return -1
+  const comparison=typeof a==='number'&&typeof b==='number'?a-b:String(a).localeCompare(String(b),'zh-CN',{numeric:true})
+  return direction==='asc'?comparison:-comparison
+ })
+}

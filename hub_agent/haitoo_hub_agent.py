@@ -12,7 +12,7 @@ import os
 import re
 import secrets
 import time
-from contextlib import suppress
+from contextlib import suppress, AsyncExitStack
 import platform
 import socket
 import sys
@@ -28,7 +28,7 @@ from hubstudio import HubstudioClient, seller_url
 from connector import ConnectorServer, ERPRequestError
 from runtime_settings import validate_erp_url, debug_scope
 from matrix_runtime import MatrixRuntime
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
+from playwright.async_api import async_playwright, expect, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
 SERVICE_NAME = "haitoo-hub-agent"
 TOKEN_KEY = "agent-token"
@@ -161,6 +161,9 @@ class ERPClient:
 BULK_UPLOAD_URL = "https://seller-my.tiktok.com/product/batch/publish?entry-from=hub&shop_region=MY&step=2"
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 LOGIN_WAIT_SECONDS = 600
+IMPORT_RECEIPT_PATTERN = re.compile(
+    r'^\s*(?:成功导入\s*(\d+(?:,\d{3})*)\s*[款个件](?:商品)?(?:[，,]\s*导入成功)?'
+    r'|(\d+(?:,\d{3})*)\s*[款个件](?:商品)?\s*导入成功)\s*[！!。.]?\s*$')
 
 
 class DuplicateUploadError(RuntimeError):
@@ -215,10 +218,11 @@ async def check_import_data_error(page):
                 continue
 
 
-async def wait_import_result(page, success):
+async def wait_import_result(page, success, check_stop=None):
     """同时等待导入成功或明确的数据错误；结束时清理监控协程。"""
     async def watch_errors():
         while True:
+            if check_stop:await check_stop()
             await check_import_data_error(page)
             await asyncio.sleep(0.5)
 
@@ -246,10 +250,11 @@ async def check_duplicate_upload(page):
             raise DuplicateUploadError("此文件已存在。请上传其他文件或查看上传记录核对已有结果；本次已停止。")
 
 
-async def wait_upload_control(page, control, timeout):
+async def wait_upload_control(page, control, timeout, check_stop=None):
     """上传后持续检测重复文件及数据错误，覆盖文件名、就绪提示与导入按钮等待。"""
     deadline = time.monotonic() + timeout / 1000
     while True:
+        if check_stop:await check_stop()
         await check_import_data_error(page)
         await check_duplicate_upload(page)
         try:
@@ -386,11 +391,22 @@ async def confirm_chinese_after_switch(page, on_progress=None, timeout=30):
 
 
 async def ensure_simplified_chinese(page, on_progress=None):
-    """上传页通过账号菜单切换语言，核对并关闭菜单后才允许上传。"""
+    """确认上传控件显示中文，其他语言通过账号菜单切换。"""
     if not seller_url(page.url):
         raise RuntimeError("当前页面不是 TikTok 卖家网站，无法切换语言；尚未上传")
     step = "打开右上角账号菜单"
     try:
+        if urlsplit(page.url).hostname == 'seller.tiktokshopglobalselling.com':
+            step = "核对跨境上传页中文控件"
+            upload_step = page.get_by_role('button', name=re.compile(r'^\s*第\s*2\s*步\s*[:：]\s*上传电子表格\s*$'))
+            attachment = page.get_by_text(UPLOAD_ATTACHMENT_PATTERN)
+            if await unique_visible(upload_step) is not None and await unique_visible(attachment) is not None:
+                await progress(on_progress, 'language_ready', '已通过“第2步：上传电子表格”和附件上传控件确认页面为简体中文')
+                step = "关闭账号菜单"
+                await close_account_menu(page)
+                await progress(on_progress, 'account_menu_closed', '账号菜单已关闭，语言检查完成，准备上传')
+                return
+        step = "打开右上角账号菜单"
         await progress(on_progress, "checking_language", "正在打开右上角账号菜单，检查上传页语言；尚未上传")
         if not await account_menu_visible(page):
             await toggle_account_menu(page)
@@ -488,13 +504,35 @@ async def attempt_account_login(page, account):
         return failed(f"{step}失败（{type(exc).__name__}）")
 
 
-async def wait_for_upload_page(page, on_login_required=None, account=None, upload_url=BULK_UPLOAD_URL):
+UPLOAD_ATTACHMENT_PATTERN = re.compile(r'^\s*(?:在这里添加表格附件|Add (?:your )?spreadsheet(?: attachment)? here)\s*$', re.I)
+
+
+async def expand_upload_steps(page, check_stop=None):
+    """根据跨境页面的展开状态收起模板步骤、展开表格上传步骤。"""
+    first = page.get_by_role('button', name=re.compile(r'第\s*1\s*步\s*[:：]\s*下载模板|Step\s*1\s*[:：]\s*Download', re.I))
+    second = page.get_by_role('button', name=re.compile(r'第\s*2\s*步\s*[:：]\s*上传电子表格|Step\s*2\s*[:：]\s*Upload', re.I))
+    if not await second.count():return False
+    if await first.count()!=1 or await second.count()!=1:
+        raise RuntimeError('无法唯一识别批量上传页的步骤控件')
+    for control, expanded in ((first, 'false'), (second, 'true')):
+        if check_stop:await check_stop()
+        state = await control.get_attribute('aria-expanded')
+        if state not in ('true', 'false'):
+            raise RuntimeError('无法确认批量上传步骤的展开状态')
+        if state!=expanded:
+            await control.click()
+            await expect(control).to_have_attribute('aria-expanded', expanded, timeout=10000)
+    return True
+
+
+async def wait_for_upload_page(page, on_login_required=None, account=None, upload_url=BULK_UPLOAD_URL, check_stop=None):
     """等待人工登录；在明确出现上传控件前不上传或提交。"""
     login_deadline = None
     return_to_upload = False
     page_deadline = time.monotonic() + 30
     login_attempted = False
     while True:
+        if check_stop:await check_stop()
         if login_deadline is not None and time.monotonic() >= login_deadline:
             raise RuntimeError("等待 TikTok 登录超时（10 分钟），尚未上传或提交；请登录后核对并重试")
         try:
@@ -519,6 +557,9 @@ async def wait_for_upload_page(page, on_login_required=None, account=None, uploa
                 return_to_upload = False
                 page_deadline = time.monotonic() + 30
                 continue
+            await expand_upload_steps(page, check_stop)
+            attachment = await unique_visible(page.get_by_text(UPLOAD_ATTACHMENT_PATTERN))
+            if attachment is not None:return
             await page.locator("input[type=file]").wait_for(state="attached", timeout=1_000)
             return
         except PlaywrightTimeoutError:
@@ -533,51 +574,62 @@ async def wait_for_upload_page(page, on_login_required=None, account=None, uploa
         await asyncio.sleep(1)
 
 
-async def upload_and_import(debug_port: int, xlsx_path: Path, before_import=None, on_login_required=None, on_upload_ready=None, account=None, on_progress=None, expected_count=None, site=None, page=None):
+async def upload_and_import(debug_port: int, xlsx_path: Path, before_import=None, on_login_required=None, on_upload_ready=None, account=None, on_progress=None, expected_count=None, site=None, page=None, upload_url=None, check_stop=None):
     """上传后点击一次导入，明确导入成功才完成；未知结果交由人工核对。"""
     if xlsx_path.suffix.lower() != ".xlsx":
         raise RuntimeError("TikTok 批量上传仅支持 .xlsx 文件，尚未上传")
     if xlsx_path.stat().st_size > MAX_UPLOAD_BYTES:
         raise RuntimeError("TikTok 上传页面文件上限为 20 MB，请减少商品数量重新生成任务；尚未上传")
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
+    async with AsyncExitStack() as stack:
+        if page is None:
+            playwright = await stack.enter_async_context(async_playwright())
+            browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
+            stack.push_async_callback(browser.close)
+            if not browser.contexts:
+                raise RuntimeError("HubStudio 浏览器没有可用上下文")
+            page = await browser.contexts[0].new_page()
         operation = "检查 TikTok 登录"
         import_started = False
         try:
-            if not browser.contexts:
-                raise RuntimeError("HubStudio 浏览器没有可用上下文")
-            context = browser.contexts[0]
-            page = page or await context.new_page()
-            upload_url = BULK_UPLOAD_URL
-            if account and urlsplit(account.login_url).hostname != "seller-my.tiktok.com":
-                origin = urlsplit(account.login_url)
-                upload_url = f"{origin.scheme}://{origin.netloc}/products/bulk-upload"
-            if site == "ID":
-                upload_url = "https://seller-id.tokopedia.com/product/batch/publish?entry-from=hub&shop_region=ID&step=2"
+            if upload_url is None:
+                upload_url = BULK_UPLOAD_URL
+                if account and urlsplit(account.login_url).hostname != "seller-my.tiktok.com":
+                    origin = urlsplit(account.login_url)
+                    upload_url = f"{origin.scheme}://{origin.netloc}/products/bulk-upload"
+                if site == "ID":
+                    upload_url = "https://seller-id.tokopedia.com/product/batch/publish?entry-from=hub&shop_region=ID&step=2"
+            await progress(on_progress, 'opening_upload', '正在打开所选环境的批量上传页')
             await open_bulk_upload(page, upload_url)
-            await wait_for_upload_page(page, on_login_required, account, upload_url)
+            await wait_for_upload_page(page, on_login_required, account, upload_url, check_stop)
             await progress(on_progress, "logged_in", "TikTok 已登录，批量上传页已就绪；尚未上传")
             operation = "通过账号菜单检查上传页语言"
             await ensure_simplified_chinese(page, on_progress)
-            await page.locator("input[type=file]").wait_for(state="attached", timeout=30_000)
+            await wait_for_upload_page(page, on_login_required, account, upload_url, check_stop)
             if on_upload_ready:
                 await on_upload_ready()
             operation = "上传 XLSX"
-            file_input = page.locator("input[type=file]")
-            await file_input.wait_for(state="attached", timeout=30_000)
-            if await file_input.count() != 1 or not await file_input.is_enabled():
-                raise RuntimeError("无法唯一识别可用的 TikTok 批量上传控件")
-            await file_input.set_input_files(str(xlsx_path))
+            attachment = await unique_visible(page.get_by_text(UPLOAD_ATTACHMENT_PATTERN))
+            if attachment is not None:
+                async with page.expect_file_chooser(timeout=10000) as pending:
+                    await attachment.click()
+                chooser = await pending.value
+                await chooser.set_files(str(xlsx_path))
+            else:
+                file_input = page.locator("input[type=file]")
+                await file_input.wait_for(state="attached", timeout=30_000)
+                if await file_input.count() != 1 or not await file_input.is_enabled():
+                    raise RuntimeError("无法唯一识别可用的 TikTok 批量上传控件")
+                await file_input.set_input_files(str(xlsx_path))
             await progress(on_progress, "upload_parsing", "XLSX 已交给页面，正在等待文件上传解析和商品准备就绪")
             operation = "等待表格上传解析和商品准备就绪"
-            await wait_upload_control(page, page.get_by_text(xlsx_path.name, exact=True), 120_000)
+            await wait_upload_control(page, page.get_by_text(xlsx_path.name, exact=True), 120_000, check_stop)
             ready = page.get_by_text(re.compile(r"^\s*[1-9]\d*\s*款商品准备就绪\s*$"))
-            await wait_upload_control(page, ready, 120_000)
+            await wait_upload_control(page, ready, 120_000, check_stop)
             if expected_count is not None:
                 if await ready.count() != 1 or int(re.search(r"\d+", await ready.inner_text()).group()) != expected_count:
                     raise RuntimeError("平台解析商品数量与固定文件不一致，尚未导入")
             import_button = page.get_by_role("button", name=re.compile(r"^(导入|import)$", re.I))
-            await wait_upload_control(page, import_button, 30_000)
+            await wait_upload_control(page, import_button, 30_000, check_stop)
             if await import_button.count() != 1 or not await import_button.is_enabled():
                 raise RuntimeError("导入按钮不唯一或尚不可用，尚未导入；请核对文件解析结果")
             success = page.get_by_text(re.compile("导入成功"))
@@ -591,17 +643,30 @@ async def upload_and_import(debug_port: int, xlsx_path: Path, before_import=None
             operation = "点击导入并等待导入成功"
             import_started = True
             await import_button.click()
-            await wait_import_result(page, success)
+            await wait_import_result(page, success, check_stop)
             errors = page.get_by_role("alert").filter(has_text=re.compile(r"error|failed|invalid|失败|错误", re.I))
             if await errors.count() and await errors.first.is_visible():
                 raise RuntimeError("平台同时返回错误，请人工核对本次导入结果")
             if expected_count is not None:
-                receipt = page.get_by_text(re.compile(r"成功导入\s*\d+\s*[款个]|\d+\s*[款个].*导入成功"))
-                if await receipt.count() != 1:
+                receipt = page.get_by_text(IMPORT_RECEIPT_PATTERN)
+                count = await receipt.count()
+                counts = {}
+                for index in range(count):
+                    control = receipt if count == 1 else receipt.nth(index)
+                    if not await control.is_visible():continue
+                    text = (await control.inner_text()).strip()
+                    match = IMPORT_RECEIPT_PATTERN.fullmatch(text)
+                    if match:
+                        accepted = int((match.group(1) or match.group(2)).replace(',', ''))
+                        counts[accepted] = text
+                if not counts:
                     raise RuntimeError("平台只有笼统成功提示，无法核对全部商品；请人工核对")
-                text = await receipt.inner_text()
-                if int(re.search(r"\d+", text).group()) != expected_count:
-                    raise RuntimeError("平台受理数量不一致，请人工核对部分提交")
+                if len(counts) != 1:
+                    raise RuntimeError(f"平台导入回执数量冲突（{sorted(counts)}），预期 {expected_count} 个商品，请人工核对")
+                accepted, text = next(iter(counts.items()))
+                await progress(on_progress, 'listing_receipt', f'导入回执核对：预期 {expected_count} 个商品，平台确认 {accepted} 个商品')
+                if accepted != expected_count:
+                    raise RuntimeError(f"平台受理数量不一致：预期 {expected_count} 个商品，实际 {accepted} 个商品，请人工核对部分提交")
                 return {"accepted": list(range(expected_count)), "rejected": [], "receipt": text[:500]}
         except PlaywrightTimeoutError as exc:
             result = "导入结果未知，请核对 TikTok 页面" if import_started else "尚未点击导入，请核对 TikTok 页面"
@@ -610,9 +675,6 @@ async def upload_and_import(debug_port: int, xlsx_path: Path, before_import=None
             logger.exception("TikTok 自动上品在%s发生 Playwright 异常（仅本机日志）", operation)
             result = "导入结果未知，请核对 TikTok 页面" if import_started else "尚未点击导入，请核对登录状态和页面"
             raise RuntimeError(f"{operation}失败（{type(exc).__name__}）；{result}，详细原因见本机日志") from exc
-        finally:
-            # CDP 关闭连接，不调用 HubStudio 的关闭环境接口，保留页面供人工核对。
-            await browser.close()
 
 
 class AgentRuntime:

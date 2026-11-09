@@ -3,7 +3,7 @@ import {ref,computed,onMounted,onUnmounted,watch} from 'vue'
 import {useRoute,useRouter} from 'vue-router'
 import axios from 'axios'
 import {dialogFocus as vDialogFocus} from '../dialog-focus'
-import {label,display,percent,windowBuckets,filterParams,deviceSetup,groupRunEvents,environmentSyncTargets} from './matrix'
+import {label,display,percent,windowBuckets,filterParams,deviceSetup,groupRunEvents,environmentSyncTargets,sortMatrixRows} from './matrix'
 import AgentConnectionBanner from './AgentConnectionBanner.vue'
 import MatrixDevices from './MatrixDevices.vue'
 import PlanShopSelect from './PlanShopSelect.vue'
@@ -15,6 +15,11 @@ const auth=()=>({headers:{Authorization:`Bearer ${props.token}`}})
 const tab=computed(()=>route.query.tab==='data'?'data':route.query.tab==='automation'?'automation':'environments')
 function setTab(value:string){void router.replace({query:{...route.query,tab:value}})}
 const devices=ref<any[]>([]),operations=ref<any[]>([]),plans=ref<any[]>([]),strategies=ref<any[]>([]),rows=ref<any[]>([]),runs=ref<any[]>([]),stats=ref<any>({windows:[]})
+const catalogs=ref<any[]>([])
+const listingStrategies=computed(()=>{
+ const crossBorderIds=new Set(catalogs.value.filter(c=>c.template_type==='tiktok_cross_border').map(c=>c.id))
+ return strategies.value.filter(s=>crossBorderIds.has(s.category_catalog_id)&&(s.title_site||'MY')==='MY')
+})
 const activeRun=ref<any>(null),runSummary=ref<Record<string,number>>({})
 const configLoaded=ref(false)
 const accessLoaded=ref(false),access=ref({enabled:false,collect_enabled:false,listing_enabled:false,view_scope:'own',is_admin:false})
@@ -54,8 +59,32 @@ const selectedCount=computed(()=>allFiltered.value?total.value:selected.value.le
 const current=computed(()=>run.value||activeRun.value)
 const visibleEvents=computed(()=>events.value.filter(e=>e.seq>logFloor.value))
 const cards=computed(()=>[
- ['已采集店铺',`${stats.value.collected||0} / ${stats.value.total||0}`],['在售商品',display(stats.value.active)],['有浏览商品',display(stats.value.with_views),productShare(stats.value.with_views),'views'],['无浏览商品',display(stats.value.zero_views),productShare(stats.value.zero_views),'zero-views'],
- ['总曝光',windowBuckets(stats.value.windows,'impressions')],['总点击',windowBuckets(stats.value.windows,'clicks')],['整体 CTR',windowBuckets(stats.value.windows,'ctr')],['有违规店铺',`${stats.value.violations||0} / ${stats.value.violations_covered||0}`]])
+ ['已采集店铺',`${stats.value.collected||0} / ${stats.value.total||0}`],['在售商品',display(stats.value.active)],['有浏览商品',display(stats.value.with_views),productShare(stats.value.with_views),'views'],['零浏览商品',display(stats.value.zero_views),productShare(stats.value.zero_views),'zero-views'],
+ ['总曝光',windowBuckets(stats.value.windows,'impressions')],['总点击',windowBuckets(stats.value.windows,'clicks'),`点击率 ${windowBuckets(stats.value.windows,'ctr')}`],['有违规店铺',`${stats.value.violations||0} / ${stats.value.violations_covered||0}`]])
+const dataSort=ref<{key:string;direction:'asc'|'desc'|null}>({key:'',direction:null})
+const visibleRows=computed(()=>tab.value==='data'?sortMatrixRows(rows.value,dataSort.value.key,dataSort.value.direction):rows.value)
+const identityColumns=[{key:'name',label:'环境名 / 编号'},{key:'group',label:'分组'},{key:'site',label:'站点'}]
+const dataColumns=[
+ {key:'snapshot.active',label:'在售商品'},
+ {key:'snapshot.with_views',label:'有浏览'},
+ {key:'snapshot.zero_views',label:'零浏览'},
+ {key:'snapshot.impressions',label:'曝光'},
+ {key:'snapshot.clicks',label:'点击'},
+ {key:'snapshot.ctr',label:'点击率'},
+ {key:'snapshot.gmv',label:'GMV'},
+ {key:'snapshot.sell_through_rate',label:'动销率'},
+ {key:'snapshot.violations_score',label:'违规分'},
+ {key:'snapshot.observed_at',label:'采集时间'},
+]
+function toggleDataSort(key:string){
+ if(dataSort.value.key!==key){dataSort.value={key,direction:'asc'};return}
+ dataSort.value=dataSort.value.direction==='asc'?{key,direction:'desc'}:{key:'',direction:null}
+}
+function sortAria(key:string):'none'|'ascending'|'descending'{
+ if(dataSort.value.key!==key)return 'none'
+ return dataSort.value.direction==='asc'?'ascending':'descending'
+}
+function sortIcon(key:string){return dataSort.value.key!==key?'':dataSort.value.direction==='asc'?'↑':'↓'}
 function productShare(count:number|null|undefined){
  const active=stats.value.active
  return `占总商品 ${count==null||active==null||active===0?'—':`${(count/active*100).toFixed(1)}%`}`
@@ -85,6 +114,7 @@ async function refresh(){await perform(async()=>{
   api.get('/hub-v5/config',auth()).then(({data})=>{config.value=data;configLoaded.value=true}),
   loadAutomation(),
   api.get('/supply/strategies',auth()).then(({data})=>{strategies.value=data}),
+  api.get('/supply/catalogs',auth()).then(({data})=>{catalogs.value=data}),
   api.get('/hub-v5/shops/metrics',{...auth(),params:filterParams(appliedFilters.value)}).then(({data})=>{stats.value=data}),
   loadRows(),loadRuns(),
  ])
@@ -172,25 +202,46 @@ async function savePlan(){await perform(async()=>{
 })}
 async function togglePlan(p:any){await perform(async()=>{await api.patch(`/hub-v5/plans/${p.id}`,{name:p.name,operation_id:p.operation_id,agent_id:p.agent_id,environment_ids:p.environment_ids,scheduled:!p.scheduled,time:p.time,expected_revision:p.revision},auth());await loadAutomation()})}
 async function deletePlan(){if(dialog.value!=='deletePlan')return;await perform(async()=>{await api.delete(`/hub-v5/plans/${editing.value}`,{...auth(),params:{expected_revision:editor.value.expected_revision}});await loadAutomation();close()})}
-function editOperation(o?:any){operationEditing.value=o?.id||null;operationEditor.value=o?JSON.parse(JSON.stringify({...o,strategies:{MY:null,...o.strategies}})):{name:'',tasks:access.value.collect_enabled?['shop.collect']:['listing.catalog'],strategies:{MY:null}};dialog.value='operation'}
+function editOperation(o?:any){
+ operationEditing.value=o?.id||null
+ operationEditor.value=o?JSON.parse(JSON.stringify({...o,strategies:{MY:null,...o.strategies}})):{name:'',tasks:access.value.collect_enabled?['shop.collect']:['listing.catalog'],strategies:{MY:null}}
+ if(!listingStrategies.value.some(s=>s.id===Number(operationEditor.value.strategies.MY)))operationEditor.value.strategies.MY=null
+ dialog.value='operation'
+}
 async function saveOperation(){await perform(async()=>{const o=operationEditor.value;const payload={name:o.name,tasks:o.tasks,strategies:o.tasks.includes('listing.catalog')&&o.strategies.MY?{MY:Number(o.strategies.MY)}:{},...(operationEditing.value?{expected_revision:o.revision}:{})};await api.request({url:operationEditing.value?`/hub-v5/operations/${operationEditing.value}`:'/hub-v5/operations',method:operationEditing.value?'PATCH':'POST',data:payload,...auth()});await loadAutomation();close()})}
 async function deleteOperation(){if(dialog.value!=='deleteOperation')return;await perform(async()=>{await api.delete(`/hub-v5/operations/${operationEditing.value}`,{...auth(),params:{expected_revision:operationEditor.value.revision}});await loadAutomation();close()})}
-function openManual(){manual.value={tasks:[],strategies:{MY:null}};dialog.value='manual'}
-async function preview(p?:any){await perform(async()=>{
+let manualPreviewRequest=''
+function openManual(){manual.value={tasks:[],strategies:{MY:null}};previewData.value=null;manualPreviewRequest='';executeKey.value='';dialog.value='manual'}
+async function preview(p:any){await perform(async()=>{
  executeKey.value=''
- if(p){const {data}=await api.post(`/hub-v5/plans/${p.id}/preview`,{},auth());previewData.value={...data,batches:[data],environment_count:data.environments.length,manual:false}}
- else {const {data}=await api.post('/hub-v5/manual/preview',{tasks:manual.value.tasks,strategies:manual.value.tasks.includes('listing.catalog')&&manual.value.strategies.MY?{MY:Number(manual.value.strategies.MY)}:{},environment_ids:selected.value,all_filtered:allFiltered.value,filters:appliedFilters.value},auth());previewData.value={...data,manual:true}}
+ const {data}=await api.post(`/hub-v5/plans/${p.id}/preview`,{},auth());previewData.value={...data,batches:[data],environment_count:data.environments.length,manual:false}
  dialog.value='preview'
 })}
+async function submitManual(){await perform(async()=>{
+ const payload={tasks:manual.value.tasks,strategies:manual.value.tasks.includes('listing.catalog')&&manual.value.strategies.MY?{MY:Number(manual.value.strategies.MY)}:{},environment_ids:selected.value,all_filtered:allFiltered.value,filters:appliedFilters.value}
+ const request=JSON.stringify(payload)
+ if(request!==manualPreviewRequest||!previewData.value||previewData.value.errors.length){
+  previewData.value=null;manualPreviewRequest='';executeKey.value=''
+  const {data}=await api.post('/hub-v5/manual/preview',payload,auth())
+  previewData.value={...data,manual:true};manualPreviewRequest=request
+ }
+ if(previewData.value.errors.length)return
+ try{await createRuns()}catch(e:any){
+  // 明确拒绝后重新校验，网络异常时保留原请求和幂等键供安全重试。
+  if(e.response?.status>=400&&e.response?.status<500){previewData.value=null;manualPreviewRequest='';executeKey.value=''}
+  throw e
+ }
+})}
 const executeKey=ref('')
-async function execute(){await perform(async()=>{
+async function execute(){await perform(createRuns)}
+async function createRuns(){
  if(!executeKey.value)executeKey.value=crypto.randomUUID()
  const headers={headers:{...auth().headers,'Idempotency-Key':executeKey.value}}
  let created:any[]=[]
  if(previewData.value.manual){const {data}=await api.post('/hub-v5/manual/runs',{previews:previewBatches.value.map((p:any)=>({preview_token:p.preview_token,expected_revision:p.revision}))},headers);created=data.items}
  else {const p=previewBatches.value[0];const {data}=await api.post(`/hub-v5/plans/${p.plan_id}/runs`,{preview_token:p.preview_token,expected_revision:p.revision},headers);created=[data]}
- ++logRequest;run.value=created[0]||null;runItemId.value=null;events.value=[];logFloor.value=0;close();executeKey.value='';runPage.value=1;await loadRuns();notice.value=`已创建 ${created.length} 次运行，可在运行记录中查看进度`
-})}
+ ++logRequest;run.value=created[0]||null;runItemId.value=null;events.value=[];logFloor.value=0;close();executeKey.value='';runPage.value=1;notice.value=`已创建 ${created.length} 次运行，可在运行记录中查看进度`;await loadRuns()
+}
 async function loadHistory(){
  const request=++historyRequest;historyLoading.value=true
  try{const {data}=await api.get('/hub-v5/runs',{...auth(),params:{page:historyPage.value,...(historyScope.value?{environment_id:historyScope.value.id}:{})}})
@@ -260,9 +311,10 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
   <div v-if="pairingCode" class="mx-notice mx-pairing" role="status"><p>确认连接此电脑，连接器将同步 HubStudio 环境并接收矩阵任务。</p><button class="primary" :disabled="busy" @click="authorizeConnector">授权此电脑连接器</button></div>
   <template v-if="!dialog"><div v-if="feedbackMessage" class="mx-feedback" :class="{'is-error':feedbackSource==='error'}" :role="feedbackSource==='error'?'alert':'status'" aria-live="polite"><span>{{feedbackMessage}}</span><button v-if="feedbackSource==='sync'&&syncHelp" @click="openDevices">前往设备管理</button></div></template>
   <div v-if="configLoaded&&!config.enabled" class="mx-banner">公司矩阵功能尚未启用。<router-link v-if="access.is_admin" to="/settings/tk-matrix?tab=settings">前往矩阵管理设置</router-link><span v-else>请联系公司管理员。</span></div>
+  <div v-if="tab==='data'" class="mx-summary mx-data-summary"><b>经营数据总览</b><button :disabled="busy" @click="download">导出 CSV</button><button :disabled="busy" @click="refresh">刷新数据</button></div>
   <div v-if="tab==='data'" class="mx-cards"><article v-for="[name,value,share,tone] in cards" :key="name" :class="tone"><span>{{name}}</span><strong>{{value}}</strong><small v-if="share">{{share}}</small></article></div>
   <section v-if="tab!=='automation'" class="mx-panel">
-    <div class="mx-summary"><b>{{tab==='data'?'经营数据总览':'环境列表'}}</b><span>共 {{total}} 个环境 · {{runSummary.running||0}} 项运行中 · {{runSummary.awaiting_attention||0}} 项待人工</span><button v-if="tab==='data'" :disabled="busy" @click="download">导出 CSV</button><button :disabled="busy" @click="refresh">刷新数据</button></div>
+    <div v-if="tab==='environments'" class="mx-summary"><b>环境列表</b><span>共 {{total}} 个环境 · {{runSummary.running||0}} 项运行中 · {{runSummary.awaiting_attention||0}} 项待人工</span><button :disabled="busy" @click="refresh">刷新数据</button></div>
     <form class="mx-filters" @submit.prevent="applyFilters">
       <input v-model="filters.q" class="mx-filter-search" aria-label="搜索环境或店铺" placeholder="搜索环境、编号、店铺或账号"/>
       <select :value="filters.ungrouped?'ungrouped':filters.group?`group:${filters.group}`:''" class="mx-filter-group" aria-label="分组" @change="changeGroup"><option value="">全部分组</option><option v-for="group in groupOptions" :key="group" :value="group?`group:${group}`:'ungrouped'">{{group||'未分组'}}</option></select>
@@ -270,12 +322,12 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
       <div class="mx-filter-actions"><button type="submit" class="primary">筛选</button></div>
     </form>
     <div v-if="tab==='environments'" class="mx-toolbar"><button class="mx-sync" :disabled="busy||!!syncPending.length" title="同步当前账号已配置团队的所有在线设备" @click="syncEnvironments"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M20 12a8 8 0 1 1-2.3-5.7L20 9"/></svg>{{syncPending.length?'同步中…':'同步环境'}}</button><button :disabled="loading||busy||!total" title="选择当前筛选条件下的全部环境，包含其他分页" @click="selectCurrent">全选当前</button><button @click="selected=[];allFiltered=false">清空选择</button><button :disabled="!selectedCount||busy||loading" @click="openOverrides">批量设置站点/活跃</button><button class="primary" :disabled="!selectedCount||busy||!config.enabled" @click="openManual">批量执行</button><span class="mx-selected">已选 {{selectedCount}}</span></div>
-    <div class="mx-table-wrap" :aria-busy="loading"><table><thead><tr><th v-if="tab==='environments'">选择</th><th>环境名 / 编号</th><th>分组</th><th>站点</th><template v-if="tab==='environments'"><th>店铺</th><th>绑定账号</th><th title="当前上架的产品数量">产品</th><th title="最近7个完整自然日的订单数量；尚未采集时显示 —">订单</th><th>活跃</th><th>上品 / 执行</th><th>采集</th></template><template v-else><th title="当前在售商品数量">在售商品</th><th title="近28天浏览次数大于0的在售商品数">有浏览</th><th title="近28天浏览次数为0的在售商品数">零浏览</th><th title="有销量商品数 ÷ 在售商品数，尚未采集商品销量时显示 —">动销率</th><th>曝光</th><th>点击</th><th>CTR</th><th>GMV</th><th>7日访客</th><th>违规分</th><th>采集时间</th></template><th>操作</th></tr></thead><tbody>
-      <tr v-for="row in rows" :key="row.id" :class="{selected:allFiltered||selected.includes(row.id)}"><td v-if="tab==='environments'"><input type="checkbox" :aria-label="`选择环境 ${row.container_code}`" :disabled="busy||loading" :checked="allFiltered||selected.includes(row.id)" @change="toggle(row.id)"/></td><td><b>{{row.name}}</b><small>{{row.container_code}}</small></td><td>{{row.group||'未分组'}}</td><td><span class="mx-tag">{{row.site||'未知'}}</span></td>
-      <template v-if="tab==='environments'"><td>{{row.shop?.name||'待识别'}}<small>{{row.shop?.external_id}}</small></td><td>{{row.account_names.join(' / ')||'—'}}</td><td :title="row.snapshot?.observed_at">{{display(row.snapshot?.active)}}</td><td :title="row.snapshot?.orders==null?'尚未采集订单数据':`${row.snapshot.window_start} — ${row.snapshot.window_end}`">{{display(row.snapshot?.orders)}}</td><td><span :class="{'mx-activity-normal':row.activity_status==='normal','mx-activity-closed':row.activity_status==='closed'}">{{row.activity_status==='normal'?'正常':row.activity_status==='closed'?'封店':'未检测'}}</span></td><td><span class="mx-state" :class="row.latest_item?.status">{{label(row.latest_item?.stage)}}</span><small>{{label(row.latest_item?.submission)}}</small></td><td>{{label(row.latest_item?.collection_status)}}<small v-if="row.snapshot?.stale">数据超过24小时</small></td></template>
-      <template v-else><td>{{display(row.snapshot?.active)}}</td><td>{{display(row.snapshot?.with_views)}}</td><td>{{display(row.snapshot?.zero_views)}}</td><td :title="row.snapshot?.sell_through_rate==null?'尚无完整商品销量数据':'有销量商品数 ÷ 在售商品数'">{{percent(row.snapshot?.sell_through_rate)}}</td><td>{{display(row.snapshot?.impressions)}}</td><td>{{display(row.snapshot?.clicks)}}</td><td>{{percent(row.snapshot?.ctr)}}</td><td>{{display(row.snapshot?.gmv)}} {{row.snapshot?.gmv!=null?row.snapshot.currency:''}}</td><td>{{display(row.snapshot?.visitors7d)}}</td><td>{{display(row.snapshot?.violations_score)}}</td><td>{{row.snapshot?.observed_at?new Date(row.snapshot.observed_at).toLocaleString():'未采集'}}<small v-if="row.snapshot?.stale">已过期</small></td></template>
+    <div class="mx-table-wrap" :aria-busy="loading"><table><thead><tr><th v-if="tab==='environments'">选择</th><th v-for="column in identityColumns" :key="column.key" :aria-sort="tab==='data'?sortAria(column.key):undefined"><button v-if="tab==='data'" type="button" class="mx-sort-header" @click="toggleDataSort(column.key)">{{column.label}}<span aria-hidden="true">{{sortIcon(column.key)}}</span></button><template v-else>{{column.label}}</template></th><template v-if="tab==='environments'"><th>店铺</th><th>绑定账号</th><th title="当前上架的产品数量">产品</th><th title="管理订单－全部标签页的订单数量；历史快照显示近7天订单数；尚未采集时显示 —">订单</th><th>活跃</th><th>上品 / 执行</th><th>采集</th></template><template v-else><th v-for="column in dataColumns" :key="column.key" :aria-sort="sortAria(column.key)"><button type="button" class="mx-sort-header" @click="toggleDataSort(column.key)">{{column.label}}<span aria-hidden="true">{{sortIcon(column.key)}}</span></button></th></template><th>操作</th></tr></thead><tbody>
+      <tr v-for="row in visibleRows" :key="row.id" :class="{selected:allFiltered||selected.includes(row.id)}"><td v-if="tab==='environments'"><input type="checkbox" :aria-label="`选择环境 ${row.container_code}`" :disabled="busy||loading" :checked="allFiltered||selected.includes(row.id)" @change="toggle(row.id)"/></td><td><b>{{row.name}}</b><small>{{row.container_code}}</small></td><td>{{row.group||'未分组'}}</td><td><span class="mx-tag">{{row.site||'未知'}}</span></td>
+      <template v-if="tab==='environments'"><td>{{row.shop?.name||'待识别'}}<small>{{row.shop?.external_id}}</small></td><td>{{row.account_names.join(' / ')||'—'}}</td><td :title="row.snapshot?.observed_at">{{display(row.snapshot?.active)}}</td><td :title="row.snapshot?.orders_total!=null?'管理订单－全部标签页显示数量':row.snapshot?.orders==null?'尚未采集订单数据':`近7天订单：${row.snapshot.window_start} — ${row.snapshot.window_end}`">{{display(row.snapshot?.orders_total ?? row.snapshot?.orders)}}</td><td><span :class="{'mx-activity-normal':row.activity_status==='normal','mx-activity-closed':row.activity_status==='closed'}">{{row.activity_status==='normal'?'正常':row.activity_status==='closed'?'封店':'未检测'}}</span></td><td><span class="mx-state" :class="row.latest_item?.status">{{label(row.latest_item?.stage)}}</span><small>{{label(row.latest_item?.submission)}}</small></td><td>{{label(row.latest_item?.collection_status)}}<small v-if="row.snapshot?.stale">数据超过24小时</small></td></template>
+      <template v-else><td>{{display(row.snapshot?.active)}}</td><td>{{display(row.snapshot?.with_views)}}</td><td>{{display(row.snapshot?.zero_views)}}</td><td>{{display(row.snapshot?.impressions)}}</td><td>{{display(row.snapshot?.clicks)}}</td><td>{{percent(row.snapshot?.ctr)}}</td><td :title="row.snapshot?.gmv_scope==='all_products'?'最近30天全部商品GMV':'在售商品已知GMV小计'">{{display(row.snapshot?.gmv)}} {{row.snapshot?.gmv!=null?row.snapshot.currency:''}}</td><td :title="row.snapshot?.sell_through_rate==null?'尚无商品销量数据':'有销量商品数 ÷ 已采集销量的商品数'">{{percent(row.snapshot?.sell_through_rate)}}</td><td>{{display(row.snapshot?.violations_score)}}</td><td>{{row.snapshot?.observed_at?new Date(row.snapshot.observed_at).toLocaleString():'未采集'}}<small v-if="row.snapshot?.stale">已过期</small></td></template>
       <td class="mx-row-actions"><button v-if="tab==='environments'" @click="openHistory(row)">运行记录</button><button v-else :disabled="!row.shop" @click="showShop(row)">商品明细</button></td></tr>
-      <tr v-if="!rows.length"><td :colspan="tab==='environments'?12:15" class="mx-empty">{{loading?'正在加载…':'暂无环境，请启动连接器，并在设备管理中配置连接和同步环境'}}</td></tr></tbody></table></div>
+      <tr v-if="!rows.length"><td :colspan="tab==='environments'?12:14" class="mx-empty">{{loading?'正在加载…':'暂无环境，请启动连接器，并在设备管理中配置连接和同步环境'}}</td></tr></tbody></table></div>
     <footer class="mx-pagination"><span>共 {{total}} 个环境</span><label>每页 <select v-model.number="size" @change="page=1;loadRows()"><option :value="25">25</option><option :value="50">50</option><option :value="100">100</option></select></label><button :disabled="page<=1||loading" @click="page--;loadRows()">上一页</button><span>{{page}} / {{pages}}</span><button :disabled="page>=pages||loading" @click="page++;loadRows()">下一页</button></footer>
   </section>
   <div v-if="tab==='automation'" class="mx-automation">
@@ -312,15 +364,17 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
 <template v-if="dialog==='deletePlan'"><p>确定删除运营计划「{{editor.name}}」？未来不再定时触发，已创建的运行和历史记录保留。</p><div class="mx-actions"><button :disabled="busy" @click="dialog='plan'">取消</button><button class="mx-danger" :disabled="busy" @click="deletePlan">确认删除</button></div></template>
 <form v-if="dialog==='operation'" class="mx-form" @submit.prevent="saveOperation">
 <label>操作方案名称<input v-model="operationEditor.name" required maxlength="120"/></label><fieldset><legend>执行任务</legend><label><input v-model="operationEditor.tasks" type="checkbox" value="listing.catalog" :disabled="!access.listing_enabled&&!operationEditor.tasks.includes('listing.catalog')"/>自动上品</label><label><input v-model="operationEditor.tasks" type="checkbox" value="shop.collect" :disabled="!access.collect_enabled&&!operationEditor.tasks.includes('shop.collect')"/>店铺采集</label></fieldset>
-<template v-if="operationEditor.tasks.includes('listing.catalog')"><label>马来西亚货盘策略（MYR）<select v-model="operationEditor.strategies.MY" required><option :value="null">请选择货盘策略</option><option v-for="s in strategies" :key="s.id" :value="s.id">{{s.name}} · {{s.link_count}} 链接 · {{s.sku_count}} SKU · {{s.price}}</option></select></label><a href="/supply?tab=strategies">管理货盘策略 ↗</a></template>
+<template v-if="operationEditor.tasks.includes('listing.catalog')"><label>马来西亚跨境货盘策略（MYR）<select v-model="operationEditor.strategies.MY" required><option :value="null">请选择货盘策略</option><option v-for="s in listingStrategies" :key="s.id" :value="s.id">{{s.name}} · {{s.link_count}} 链接 · {{s.sku_count}} SKU · {{s.price}}</option></select></label><a href="/supply?tab=strategies">管理货盘策略 ↗</a></template>
 <p v-if="operationEditor.plans?.length">保存后将影响以下计划的未来运行：{{operationEditor.plans.map((p:any)=>p.name).join('、')}}。已创建运行继续使用原参数。</p>
 <div class="mx-actions"><button class="primary" :disabled="busy||!operationEditor.tasks.length">保存操作方案</button><button v-if="operationEditing" type="button" class="mx-danger" :disabled="busy||!!operationEditor.plans?.length" @click="dialog='deleteOperation'">删除操作方案</button></div></form>
 <template v-if="dialog==='deleteOperation'"><p>确定删除操作方案「{{operationEditor.name}}」？</p><div class="mx-actions"><button :disabled="busy" @click="dialog='operation'">取消</button><button class="mx-danger" :disabled="busy" @click="deleteOperation">确认删除</button></div></template>
-<form v-if="dialog==='manual'" class="mx-form mx-manual-form" @submit.prevent="preview()">
+<form v-if="dialog==='manual'" class="mx-form mx-manual-form" @submit.prevent="submitManual">
 <p class="mx-manual-intro">已选择 <b>{{selectedCount}}</b> 个环境，系统自动分配执行设备。</p>
-<fieldset class="mx-manual-tasks"><legend>选择操作</legend><div class="mx-task-options"><label><input v-model="manual.tasks" type="checkbox" value="listing.catalog" :disabled="!access.listing_enabled||!config.listing_enabled"/>1. 自动上品</label><label><input v-model="manual.tasks" type="checkbox" value="shop.collect" :disabled="!access.collect_enabled"/>2. 店铺采集</label></div></fieldset>
-<template v-if="manual.tasks.includes('listing.catalog')"><label>马来西亚货盘策略（MYR）<select v-model="manual.strategies.MY" required><option :value="null">请选择货盘策略</option><option v-for="s in strategies" :key="s.id" :value="s.id">{{s.name}} · {{s.link_count}} 链接 · {{s.price}}</option></select></label></template>
-<div class="mx-manual-footer"><button type="button" :disabled="busy" @click="close">取消</button><button class="primary" :disabled="busy||!manual.tasks.length">预览执行范围</button></div></form>
+<fieldset class="mx-manual-tasks" :disabled="busy"><legend>选择操作</legend><div class="mx-task-options"><label><input v-model="manual.tasks" type="checkbox" value="listing.catalog" :disabled="!access.listing_enabled||!config.listing_enabled"/>1. 自动上品</label><label><input v-model="manual.tasks" type="checkbox" value="shop.collect" :disabled="!access.collect_enabled"/>2. 店铺采集</label></div></fieldset>
+<template v-if="manual.tasks.includes('listing.catalog')"><label>马来西亚跨境货盘策略（MYR）<select v-model="manual.strategies.MY" :disabled="busy" required><option :value="null">请选择货盘策略</option><option v-for="s in listingStrategies" :key="s.id" :value="s.id">{{s.name}} · {{s.link_count}} 链接 · {{s.price}}</option></select></label></template>
+<p>{{manual.tasks.includes('listing.catalog')?'执行后将使用所选货盘策略向 TikTok 提交商品。':'执行后将采集所选环境的店铺数据。'}}</p>
+<ul v-if="previewData?.manual&&previewData.errors.length" class="error"><li v-for="(message,i) in previewData.errors" :key="i">{{message}}</li></ul>
+<div class="mx-manual-footer"><button type="button" :disabled="busy" @click="close">取消</button><button class="primary" :disabled="busy||!manual.tasks.length">{{busy?'提交中…':'创建并执行'}}</button></div></form>
 <template v-if="dialog==='preview'&&previewData"><p>{{previewData.manual?'临时批量执行':'计划立即运行'}} · {{taskNames(previewData.tasks)}} · {{previewData.environment_count}} 个环境 · {{previewBatches.length}} 台设备</p><ul v-if="previewData.errors.length" class="error"><li v-for="(e,i) in previewData.errors" :key="i">{{e}}</li></ul><section v-for="batch in previewBatches" :key="batch.agent_id" class="mx-preview-batch"><h3>{{devices.find(d=>d.id===batch.agent_id)?.name||`设备 #${batch.agent_id}`}} <small>{{batch.environments.length}} 个环境</small></h3><div v-for="(s,site) in batch.strategies" :key="site" class="mx-device-card"><b>{{site}} · {{s.name}}</b><span>每店 {{s.link_count}} 个商品组 · {{s.sku_count}} SKU · 售价 {{s.price}} MYR</span></div><div class="mx-preview-env"><span v-for="e in batch.environments" :key="e.id">{{e.name}} / {{e.site}} / {{e.container_code}}</span></div></section><p>{{previewData.tasks.includes('listing.catalog')?'本次执行将使用已冻结的环境和货盘参数，并向 TikTok 提交商品。':'本次仅采集店铺数据，不提交商品。'}}</p><div class="mx-manual-footer"><button :disabled="busy" @click="previewData.manual?dialog='manual':close()">{{previewData.manual?'返回调整':'取消'}}</button><button class="primary" :disabled="busy||previewData.errors.length>0" @click="execute">{{busy?'提交中…':'确认创建运行'}}</button></div></template>
 <template v-if="dialog==='run'&&run">
 <div class="mx-actions"><button v-if="runFromHistory" @click="backToHistory">← 返回运行记录</button><button :disabled="busy||!visibleEvents.length" @click="copyLogs">复制日志</button></div>
@@ -353,7 +407,7 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
  <div class="mx-pagination"><button :disabled="historyPage<=1||historyLoading" @click="historyPage--;loadHistory()">上一页</button><span>{{historyPage}} / {{Math.max(1,Math.ceil(historyTotal/20))}} · 共 {{historyTotal}} 次运行</span><button :disabled="historyPage*20>=historyTotal||historyLoading" @click="historyPage++;loadHistory()">下一页</button></div>
  <details v-if="!historyScope"><summary>历史固定 XLSX 上品记录</summary><slot name="legacy"/></details>
 </template>
-<template v-if="dialog==='shop'&&detail"><p>快照 #{{detail.snapshot?.id||'—'}} · {{detail.snapshot?.observed_at||'尚未采集'}}</p><p v-if="detail.snapshot?.collection_kind==='product_management'">在售 {{display(detail.snapshot.active)}} 个商品 · 浏览次数 {{display(detail.snapshot.views)}} · SKU {{display(detail.snapshot.sku_count)}} 条 · {{detail.snapshot.views_covered}}/{{detail.snapshot.active}} 个商品提供浏览次数。浏览次数取平台近28天字段，未推断精确起止日期。</p><p v-else>{{detail.snapshot?.window_start}} — {{detail.snapshot?.window_end}} · {{detail.snapshot?.timezone}}</p><div class="mx-notice"><span v-for="(state,section) in detail.snapshot?.sections" :key="section">{{({identity:'执行目标',products:'商品分页与SKU',traffic:'商品流量',metrics:'经营指标',health:'健康状态'} as any)[section]}}：{{state==='completed'?'完成':state==='unsupported'?'暂不支持':'失败'}}　</span><p v-for="(reason,section) in detail.snapshot?.reasons" :key="section">{{reason}}</p></div><form class="mx-actions" @submit.prevent="detailPage=1;loadDetail()"><input v-model="detailQ" placeholder="商品名 / 商品ID" aria-label="搜索商品"/><button>搜索</button><button type="button" :disabled="busy||!detail.snapshot" @click="downloadProducts">导出商品及SKU CSV</button></form><div class="mx-product-details"><table><thead><tr><th>商品ID</th><th>名称</th><th>在售</th><th>浏览次数</th><th>SKU 数量</th><th>SKU 明细</th></tr></thead><tbody><tr v-for="p in detail.products" :key="p.external_id"><td>{{p.external_id}}</td><td class="mx-product-name">{{p.name}}</td><td>{{p.active?'是':'否'}}</td><td :title="p.views_reason||''">{{display(p.views)}}</td><td>{{display(p.sku_count)}}</td><td><details v-if="p.skus?.length" @toggle="expandedProductSkus[p.external_id]=($event.target as HTMLDetailsElement).open"><summary>查看 {{p.skus.length}} 条 SKU</summary><table v-if="expandedProductSkus[p.external_id]" class="mx-sku-details"><thead><tr><th>SKU ID</th><th>规格</th><th>商家SKU</th><th>库存</th><th>原价（MYR）</th><th>促销价（MYR）</th></tr></thead><tbody><tr v-for="(sku,i) in p.skus" :key="i"><td>{{sku.external_id||'—'}}</td><td>{{sku.name||'未单独展示'}}</td><td>{{sku.seller_sku||'—'}}</td><td>{{display(sku.stock)}}</td><td>{{sku.price}}</td><td>{{sku.sale_price||'—'}}</td></tr></tbody></table></details><span v-else>—</span></td></tr></tbody></table></div><div class="mx-pagination"><button :disabled="detailPage<=1" @click="detailPage--;loadDetail()">上一页</button><span>{{detailPage}} · 共{{detailTotal}}项</span><button :disabled="detailPage*50>=detailTotal" @click="detailPage++;loadDetail()">下一页</button></div></template>
+<template v-if="dialog==='shop'&&detail"><p>快照 #{{detail.snapshot?.id||'—'}} · {{detail.snapshot?.observed_at||'尚未采集'}}</p><p v-if="['product_management','product_analysis'].includes(detail.snapshot?.collection_kind)">在售 {{display(detail.snapshot.active)}} 个商品 · 浏览次数 {{display(detail.snapshot.views)}} · SKU {{display(detail.snapshot.sku_count)}} 条 · {{detail.snapshot.views_covered}}/{{detail.snapshot.active}} 个商品提供浏览次数。浏览次数取平台近28天字段，未推断精确起止日期。</p><p v-if="detail.snapshot?.window_start">{{detail.snapshot.window_start}} — {{detail.snapshot.window_end}} · {{detail.snapshot.timezone}}<span v-if="detail.snapshot.collection_kind==='product_analysis'"> · 最近30天（含今天，结束时间为次日零点）</span></p><p v-if="detail.snapshot?.collection_kind==='product_analysis'&&detail.snapshot?.traffic_unknown>0">分析数据覆盖 {{detail.snapshot.traffic_covered}}/{{detail.snapshot.active}} 个在售商品 · 已知曝光 {{display(detail.snapshot.known_impressions)}} · 已知点击 {{display(detail.snapshot.known_clicks)}}。其余商品经ID查询后平台无记录，指标保持未知。</p><div class="mx-notice"><span v-for="(state,section) in detail.snapshot?.sections" :key="section">{{({identity:'执行目标',products:'商品分页与SKU',traffic:'商品流量',metrics:'经营指标',health:'健康状态'} as any)[section]}}：{{state==='completed'?'完成':state==='unsupported'?'暂不支持':'失败'}}　</span><p v-for="(reason,section) in detail.snapshot?.reasons" :key="section">{{reason}}</p></div><form class="mx-actions" @submit.prevent="detailPage=1;loadDetail()"><input v-model="detailQ" placeholder="商品名 / 商品ID" aria-label="搜索商品"/><button>搜索</button><button type="button" :disabled="busy||!detail.snapshot" @click="downloadProducts">导出商品及SKU CSV</button></form><div class="mx-product-details"><table><thead><tr><th>商品ID</th><th>名称</th><th>在售</th><th>浏览次数</th><th>曝光</th><th>点击</th><th>点击率</th><th>GMV</th><th>成交件数</th><th>SKU 数量</th><th>SKU 明细</th></tr></thead><tbody><tr v-for="p in detail.products" :key="p.external_id"><td>{{p.external_id}}</td><td class="mx-product-name">{{p.name}}</td><td>{{p.active?'是':'否'}}</td><td :title="p.views_reason||''">{{display(p.views)}}</td><td :title="p.traffic_reason||''">{{display(p.impressions)}}<small v-if="p.traffic_reason">平台无分析记录</small></td><td :title="p.traffic_reason||''">{{display(p.clicks)}}</td><td>{{percent(p.impressions>0&&p.clicks!=null?p.clicks/p.impressions:null)}}</td><td :title="p.traffic_reason||''">{{display(p.gmv)}} {{p.gmv!=null?detail.snapshot?.currency:''}}</td><td>{{display(p.sales_count)}}</td><td>{{display(p.sku_count)}}</td><td><details v-if="p.skus?.length" @toggle="expandedProductSkus[p.external_id]=($event.target as HTMLDetailsElement).open"><summary>查看 {{p.skus.length}} 条 SKU</summary><table v-if="expandedProductSkus[p.external_id]" class="mx-sku-details"><thead><tr><th>SKU ID</th><th>规格</th><th>商家SKU</th><th>库存</th><th>原价（MYR）</th><th>促销价（MYR）</th></tr></thead><tbody><tr v-for="(sku,i) in p.skus" :key="i"><td>{{sku.external_id||'—'}}</td><td>{{sku.name||'未单独展示'}}</td><td>{{sku.seller_sku||'—'}}</td><td>{{display(sku.stock)}}</td><td>{{sku.price}}</td><td>{{sku.sale_price||'—'}}</td></tr></tbody></table></details><span v-else>—</span></td></tr></tbody></table></div><div class="mx-pagination"><button :disabled="detailPage<=1" @click="detailPage--;loadDetail()">上一页</button><span>{{detailPage}} · 共{{detailTotal}}项</span><button :disabled="detailPage*50>=detailTotal" @click="detailPage++;loadDetail()">下一页</button></div></template>
 <form v-if="dialog==='resolve'" class="mx-form" @submit.prevent="saveResolution"><p>请核对原环境及本次文件的真实平台结果；未知提交不得直接取消或重复导入。</p><label>处理方式<select v-model="resolution.action"><option value="confirm-submitted">确认未知部分已提交</option><option value="confirm-not-submitted">确认未提交并取消，不再执行</option><option value="retry" :disabled="run?.stop_requested||run?.owner_id!==user.id">确认未提交，再重试原文件</option><option value="retransmit" :disabled="run?.stop_requested||run?.owner_id!==user.id">仅重传原采集数据</option><option value="cancel">取消明确未提交项</option></select></label><label>核对依据<textarea v-model="resolution.evidence" required minlength="5" maxlength="1000" rows="4"/></label><button :disabled="busy" class="primary">保存核对结果</button></form>
 <form v-if="dialog==='override'" class="mx-form" @submit.prevent="saveOverrides"><p>对已选 {{selectedCount}} 个环境设置站点或活跃状态，选择“不修改”将保留原值。共享环境需管理员操作。</p><label>站点<select v-model="overrideSite"><option value="keep">不修改</option><option>MY</option><option value="">清除人工覆盖</option></select></label><label>活跃<select v-model="overrideActivity"><option value="keep">不修改</option><option value="normal">正常</option><option value="closed">封店</option><option value="unchecked">未检测</option></select></label><button class="primary" :disabled="busy||(overrideSite==='keep'&&overrideActivity==='keep')">保存</button></form>
 
@@ -361,6 +415,12 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
 </template>
 
 <style scoped>
+.matrix th .mx-sort-header{display:flex;align-items:center;justify-content:flex-start;gap:6px;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;white-space:nowrap;cursor:pointer}
+.mx-sort-header span{font-size:13px;color:inherit}
+.matrix th .mx-sort-header:hover{color:#7050dc}
+.matrix th[aria-sort="ascending"] .mx-sort-header,.matrix th[aria-sort="descending"] .mx-sort-header{color:#7050dc;font-weight:600}
+.mx-sort-header:focus-visible{outline:2px solid #7050dc;outline-offset:5px;border-radius:2px}
+
 .mx-product-details{overflow:auto;max-height:55vh}.mx-product-details .mx-product-name{min-width:160px;max-width:260px;white-space:normal}.mx-sku-details{margin-top:10px}.mx-product-details summary{cursor:pointer;color:#7053c6}
 
 .mx-automation{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start;gap:16px;margin-top:16px}
@@ -497,7 +557,8 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
 .mx-log{min-height:160px;max-height:320px;overflow:auto;padding:14px;background:#1d273b;color:#b7c7d4;font:11px/1.9 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
 .mx-log span{color:#8396b0}.mx-log p{margin:0;font:inherit;color:#8396b0}
 .mx-run-summary{display:flex;align-items:center;flex-wrap:wrap;gap:12px;padding:12px 16px;font-size:12px}
-.mx-cards{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.mx-data-summary{min-height:46px;margin-bottom:12px;padding:0;border:0;border-radius:0;background:transparent}
+.mx-cards{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:10px;margin-bottom:14px}
 .mx-cards article{padding:14px 12px;border:1px solid var(--mx-line);border-radius:8px;background:#fff}
 .mx-cards article.views,.mx-cards article.zero-views{position:relative;overflow:hidden;box-shadow:0 1px 3px #14213d0a}
 .mx-cards small{display:block;margin-top:6px;color:#94a0b7;font-size:12px}

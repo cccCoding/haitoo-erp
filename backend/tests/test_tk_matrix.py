@@ -10,7 +10,8 @@ from uuid import uuid4
 from unittest.mock import patch
 from sqlalchemy import select
 from tests.test_supply_catalog import SupplyFixture
-from app.models import HubAgent,HubRuntimeLock,HubUploadTask,SupplyJob,SupplyJobMaterial,Role,User
+from app.models import HubAgent,HubRuntimeLock,HubUploadTask,SupplyJob,SupplyJobMaterial,Role,User,TiktokCategoryCatalog
+from app.tiktok_export import TEMPLATE_PATH,parse_listing_options
 from app.hub_v5.models import *
 from app.hub_v5.api import router
 from app.hub_v5.releases import router as release_router
@@ -27,6 +28,12 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         self.app.include_router(management_router)
         self.agent_tokens={1:'a'*48,2:'b'*48,3:'c'*48}
         with self.sessions() as db:
+            catalog=db.get(TiktokCategoryCatalog,1)
+            db.add(TiktokCategoryCatalog(id=3,company_id=1,name='本土类目',source_filename=catalog.source_filename,
+                template_type='tiktok_local',template_blob=catalog.template_blob,parsed_options=copy.deepcopy(catalog.parsed_options)))
+            catalog.template_type='tiktok_cross_border'
+            catalog.template_blob=(TEMPLATE_PATH.parent/'tiktok_seller_cross_border_zh.xlsx').read_bytes()
+            catalog.parsed_options=parse_listing_options(catalog.template_blob,'tiktok_cross_border')
             db.add(MatrixCompany(company_id=1,enabled=True,listing_enabled=True))
             for uid in (2,3):db.add(MatrixMemberPermission(user_id=uid,company_id=1,enabled=True,collect_enabled=True,listing_enabled=True,view_scope='own'))
             for identity,uid,company in ((1,1,1),(2,1,1),(3,5,2)):
@@ -51,6 +58,9 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         r=self.ar('PUT',f'/agent/environment-syncs/{identity}/parts/0',agent,json={'entries':entries});self.assertEqual(r.status_code,200,r.text)
         r=self.ar('POST',f'/agent/environment-syncs/{identity}/commit',agent,json={});self.assertEqual(r.status_code,200,r.text)
         with self.sessions() as db:return list(db.scalars(select(MatrixAccess.environment_id).where(MatrixAccess.agent_id==agent,MatrixAccess.available.is_(True))))
+
+    def strategy_input(self, **extra):
+        return super().strategy_input(**{'attributes':{'product_property/100157':'棉','product_property/100198':'花朵'},**extra})
 
     def operation(self, listing=False, uid=1, **kwargs):
         payload={'name':'采集操作','tasks':['listing.catalog','shop.collect'] if listing else ['shop.collect']}
@@ -158,6 +168,129 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
             product.update(impressions=None,clicks=None,views=10+i,views_reason=None,sku_count=2,
                 skus=[{'name':f'Color {i} - {size}','seller_sku':f'S{i}-{size}','stock':999,'price':'109.00','sale_price':'39.99','currency':'MYR'} for size in ('S','M')])
         return data
+
+    def analysis_package(self):
+        from zoneinfo import ZoneInfo
+        data=self.management_package()
+        end=datetime.now(ZoneInfo('Asia/Kuala_Lumpur')).replace(hour=0,minute=0,second=0,microsecond=0)+timedelta(days=1)
+        data['header'].update(collection_kind='product_analysis',window_start=(end-timedelta(days=30)).isoformat(),window_end=end.isoformat())
+        data['header']['sections']['traffic']='completed'
+        for p in data['products']:p.update(impressions=100,clicks=5,sales_count=1)
+        return data
+
+    def test_analysis_snapshot_merges_thirty_day_traffic_and_management_skus(self):
+        run,_=self.make_run();item,creds=self.claim(run);shop=self.bind(item,creds)
+        data=self.analysis_package()
+        _,result=self.upload(item,creds,data)
+        self.assertEqual(result.status_code,200,result.text)
+        snap=result.json()
+        self.assertEqual(snap['collection_kind'],'product_analysis')
+        self.assertEqual(snap['impressions'],200);self.assertEqual(snap['clicks'],10)
+        self.assertEqual(snap['ctr'],.05);self.assertEqual(snap['sell_through_rate'],1)
+        self.assertEqual(snap['sku_count'],4);self.assertEqual(snap['views'],21)
+        self.assertEqual(snap['window_start'],data['header']['window_start'])
+        self.assertEqual(self.request('GET',f'/hub-v5/shops/{shop}/snapshots').json()['products'][0]['sales_count'],1)
+        exported=list(csv.DictReader(io.StringIO(self.request('GET',f'/hub-v5/shops/{shop}/export').text.lstrip('\ufeff'))))
+        self.assertEqual(exported[0]['成交件数'],'1');self.assertEqual(exported[0]['曝光'],'100')
+
+    def test_analysis_snapshot_preserves_verified_unavailable_metrics_and_coverage(self):
+        run,_=self.make_run();item,creds=self.claim(run);shop=self.bind(item,creds)
+        data=self.analysis_package()
+        data['products'][0].update(impressions=None,clicks=None,sales_count=None,traffic_reason='商品分析接口按商品ID查询无记录')
+        _,result=self.upload(item,creds,data)
+        self.assertEqual(result.status_code,200,result.text)
+        snap=result.json()
+        self.assertEqual(snap['impressions'],100);self.assertEqual(snap['clicks'],5)
+        self.assertEqual(snap['ctr'],.05);self.assertEqual(snap['sell_through_rate'],1)
+        self.assertEqual(snap['traffic_covered'],1);self.assertEqual(snap['traffic_unknown'],1)
+        self.assertEqual(snap['known_impressions'],100);self.assertEqual(snap['known_clicks'],5)
+        products=self.request('GET',f'/hub-v5/shops/{shop}/snapshots').json()['products']
+        self.assertIsNone(products[0]['impressions']);self.assertIn('无记录',products[0]['traffic_reason'])
+        exported=list(csv.DictReader(io.StringIO(self.request('GET',f'/hub-v5/shops/{shop}/export').text.lstrip('\ufeff'))))
+        self.assertEqual(exported[0]['曝光'],'');self.assertIn('无记录',exported[0]['分析数据说明'])
+
+    def test_existing_partial_analysis_snapshot_recalculates_summary_and_cards(self):
+        run,_=self.make_run();item,creds=self.claim(run);shop=self.bind(item,creds)
+        data=self.analysis_package()
+        data['products'][0].update(impressions=None,clicks=None,sales_count=None,traffic_reason='商品分析接口按商品ID查询无记录')
+        _,result=self.upload(item,creds,data)
+        self.assertEqual(result.status_code,200,result.text)
+        with self.sessions() as db:
+            row=db.get(MatrixCollection,result.json()['id'])
+            summary={k:v for k,v in row.quality['summary'].items() if k not in {'analysis_summary_version','sales_covered','known_sell_through_rate'}}
+            row.quality={**row.quality,'summary':summary};db.commit()
+        snapshot=self.request('GET',f'/hub-v5/shops/{shop}/snapshots').json()['snapshot']
+        self.assertEqual(snapshot['impressions'],100);self.assertEqual(snapshot['clicks'],5)
+        self.assertEqual(snapshot['ctr'],.05);self.assertEqual(snapshot['sell_through_rate'],1)
+        bucket=self.request('GET','/hub-v5/shops/metrics').json()['windows'][0]
+        self.assertEqual(bucket['impressions'],100);self.assertEqual(bucket['clicks'],5)
+        self.assertEqual(bucket['ctr'],.05);self.assertEqual(bucket['traffic_unknown'],1)
+
+    def test_analysis_card_totals_stay_unknown_when_all_products_have_no_record(self):
+        run,_=self.make_run();item,creds=self.claim(run);self.bind(item,creds)
+        data=self.analysis_package()
+        for product in data['products']:
+            product.update(impressions=None,clicks=None,sales_count=None,traffic_reason='商品分析接口按商品ID查询无记录')
+        _,result=self.upload(item,creds,data)
+        self.assertEqual(result.status_code,200,result.text)
+        bucket=self.request('GET','/hub-v5/shops/metrics').json()['windows'][0]
+        self.assertIsNone(bucket['impressions']);self.assertIsNone(bucket['clicks']);self.assertIsNone(bucket['ctr'])
+        self.assertEqual(bucket['traffic_unknown'],2)
+
+    def test_analysis_gmv_uses_decimal_totals_and_exports_product_amounts(self):
+        run,_=self.make_run();item,creds=self.claim(run);shop=self.bind(item,creds)
+        data=self.analysis_package()
+        data['products'][0]['gmv']='12.34';data['products'][1]['gmv']='0.66'
+        _,result=self.upload(item,creds,data)
+        self.assertEqual(result.status_code,200,result.text)
+        self.assertEqual(result.json()['gmv'],'13.00');self.assertEqual(result.json()['gmv_covered'],2)
+        detail=self.request('GET',f'/hub-v5/shops/{shop}/snapshots').json()
+        self.assertEqual(detail['products'][0]['gmv'],'12.34')
+        exported=list(csv.DictReader(io.StringIO(self.request('GET',f'/hub-v5/shops/{shop}/export').text.lstrip('\ufeff'))))
+        self.assertEqual(exported[0]['GMV'],'12.34');self.assertEqual(exported[0]['GMV币种'],'MYR')
+
+    def test_analysis_shop_gmv_keeps_all_products_total_separate_from_on_sale_subtotal(self):
+        run,_=self.make_run();item,creds=self.claim(run);shop=self.bind(item,creds)
+        data=self.analysis_package();data['products'][0]['gmv']='12.34';data['products'][1]['gmv']='0.66'
+        data['header']['metrics']['gmv']='15.25'
+        _,result=self.upload(item,creds,data)
+        self.assertEqual(result.status_code,200,result.text)
+        self.assertEqual(result.json()['gmv'],'15.25');self.assertEqual(result.json()['gmv_scope'],'all_products')
+        self.assertEqual(result.json()['quality']['summary']['gmv'],'13.00')
+
+    def test_analysis_gmv_preserves_zero_and_legacy_unknown_amounts(self):
+        from app.hub_v5.collections import summarize
+        self.assertEqual(summarize([{'gmv':'0.00'}])['gmv'],'0.00')
+        partial=summarize([{'gmv':'12.34'},{}])
+        self.assertEqual(partial['gmv'],'12.34');self.assertEqual(partial['gmv_covered'],1)
+        self.assertIsNone(summarize([{}])['gmv'])
+
+    def test_existing_analysis_snapshot_derives_gmv_from_saved_product_amounts(self):
+        run,_=self.make_run();item,creds=self.claim(run);shop=self.bind(item,creds)
+        data=self.analysis_package();data['products'][0]['gmv']='1.10';data['products'][1]['gmv']='2.20'
+        _,result=self.upload(item,creds,data)
+        self.assertEqual(result.status_code,200,result.text)
+        with self.sessions() as db:
+            row=db.get(MatrixCollection,result.json()['id'])
+            summary={**row.quality['summary'],'analysis_summary_version':1}
+            summary.pop('gmv',None);summary.pop('gmv_covered',None)
+            row.quality={**row.quality,'summary':summary};db.commit()
+        snapshot=self.request('GET',f'/hub-v5/shops/{shop}/snapshots').json()['snapshot']
+        self.assertEqual(snapshot['gmv'],'3.30');self.assertEqual(snapshot['gmv_covered'],2)
+
+    def test_analysis_snapshot_rejects_wrong_window_missing_traffic_or_skus(self):
+        for mutation in ('window','clicks','skus','sales','reason'):
+            with self.subTest(mutation=mutation):
+                run,_=self.make_run();item,creds=self.claim(run);self.bind(item,creds)
+                data=self.analysis_package()
+                if mutation=='window':data['header']['window_start']=(datetime.fromisoformat(data['header']['window_end'])-timedelta(days=7)).isoformat()
+                elif mutation=='clicks':data['products'][0]['clicks']=None
+                elif mutation=='sales':data['products'][0]['sales_count']=None
+                elif mutation=='reason':data['products'][0]['traffic_reason']='商品分析接口按商品ID查询无记录'
+                else:data['products'][0]['skus']=[]
+                _,result=self.upload(item,creds,data)
+                self.assertEqual(result.status_code,422,result.text)
+                self.ar('POST',f'/agent/items/{item}/report',json={**creds,'status':'failed'})
 
     def test_management_snapshot_saves_views_and_all_skus_without_traffic_window(self):
         run,_=self.make_run();item,creds=self.claim(run);shop=self.bind(item,creds)
@@ -338,6 +471,20 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
             with self.assertRaisesRegex(Exception,'马来西亚货盘策略'):
                 s.validate_operation(db,db.get(User,1),config)
 
+    def test_listing_rejects_local_catalogs_and_other_market_strategies(self):
+        for parameters in ({'category_catalog_id':3},{'title_site':'ID'}):
+            with self.subTest(parameters=parameters):
+                strategy=self.create_strategy(uid=1,**parameters)
+                config={'tasks':['listing.catalog'],'strategies':{'MY':strategy}}
+                operation=self.request('POST','/hub-v5/operations',json={'name':'不支持的策略',**config})
+                preview=self.request('POST','/hub-v5/manual/preview',json={'environment_ids':[self.env],**config})
+                for response in (operation,preview):
+                    self.assertEqual(response.status_code,422,response.text)
+                    self.assertIn('马来西亚跨境',response.text)
+                with self.sessions() as db:
+                    with self.assertRaisesRegex(Exception,'马来西亚跨境'):
+                        s.freeze_strategy(db,db.get(User,1),strategy)
+
     def test_direct_manual_checks_tasks_and_freezes_listing_strategy(self):
         self.assertEqual(self.request('POST','/hub-v5/manual/preview',json={'tasks':[],'environment_ids':[self.env]}).status_code,422)
         self.assertEqual(self.request('POST','/hub-v5/manual/preview',json={'tasks':['listing.catalog'],'environment_ids':[self.env]}).status_code,422)
@@ -350,6 +497,7 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
             run=db.get(MatrixRun,result.json()['items'][0]['id'])
             self.assertEqual(run.frozen['config']['tasks'],['listing.catalog','shop.collect'])
             self.assertEqual(run.frozen['strategies']['MY']['strategy_id'],strategy)
+            self.assertEqual(run.frozen['strategies']['MY']['catalog_type'],'tiktok_cross_border')
         self.assertEqual(self.request('POST','/hub-v5/manual/preview',uid=2,json={'tasks':['shop.collect'],'environment_ids':[self.env]}).status_code,422)
 
     def test_all_filtered_manual_execution_rejects_partial_device_scope(self):
@@ -435,6 +583,40 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         self.assertEqual(self.request('DELETE',f"/hub-v5/plans/{plan['id']}?expected_revision={current['revision']}").status_code,200)
         self.assertEqual(self.request('DELETE',f"/hub-v5/operations/{plan['operation_id']}?expected_revision=1").status_code,200)
         self.assertEqual(self.request('GET',f"/hub-v5/runs/{run['id']}").status_code,200)
+
+    def test_run_pagination_keeps_large_frozen_payloads_out_of_sorting(self):
+        from sqlalchemy import event
+        older,_=self.make_run()
+        newer,_=self.make_run()
+        with self.sessions() as db:
+            for identity,status in ((older['id'],'succeeded'),(newer['id'],'queued')):
+                row=db.get(MatrixRun,identity)
+                row.status=status
+                row.frozen={**row.frozen,'strategies':{'MY':{'catalog':'x'*1000000}}}
+            db.commit()
+        statements=[]
+        def capture(conn,cursor,statement,parameters,context,executemany):
+            statements.append(statement)
+        event.listen(self.engine,'before_cursor_execute',capture)
+        try:
+            first=self.request('GET','/hub-v5/runs?page_size=1')
+            second=self.request('GET','/hub-v5/runs?page=2&page_size=1')
+            empty=self.request('GET','/hub-v5/runs?page=3&page_size=1')
+        finally:
+            event.remove(self.engine,'before_cursor_execute',capture)
+        for response in (first,second,empty):
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(response.json()['total'],2)
+            self.assertEqual(response.json()['summary'],{'succeeded':1,'queued':1})
+            self.assertEqual(response.json()['active']['id'],newer['id'])
+        self.assertEqual([r['id'] for r in first.json()['items']],[newer['id']])
+        self.assertEqual([r['id'] for r in second.json()['items']],[older['id']])
+        self.assertEqual(empty.json()['items'],[])
+        sorted_runs=[sql for sql in statements if 'matrix_runs' in sql and 'ORDER BY' in sql]
+        self.assertTrue(sorted_runs)
+        self.assertTrue(all('matrix_runs.frozen' not in sql for sql in sorted_runs))
+        self.assertEqual(self.request('GET','/hub-v5/runs',uid=2).json()['total'],0)
+        self.assertEqual(self.request('GET','/hub-v5/runs',uid=5).json()['total'],0)
 
     def test_environment_history_filters_items_before_shop_identification(self):
         envs=self.sync(1,[{'container_code':'env-1','name':'测试环境','group_name':'分组A','site':'MY'},
@@ -674,26 +856,30 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
 
     def test_orders_are_separate_from_pending_shipments_and_preserve_unknown(self):
         run,_=self.make_run();item,creds=self.claim(run);self.bind(item,creds)
-        for orders in (None,0,37):
-            with self.subTest(orders=orders):
+        for orders,total in ((None,None),(0,0),(37,1791)):
+            with self.subTest(orders=orders,total=total):
                 package=self.package()
                 package['header']['metrics']={'orders_to_ship':5}
                 if orders is not None:package['header']['metrics']['orders']=orders
+                if total is not None:package['header']['metrics']['orders_total']=total
                 _,result=self.upload(item,creds,package)
                 self.assertEqual(result.status_code,200,result.text)
                 self.assertEqual(result.json().get('orders'),orders)
+                self.assertEqual(result.json().get('orders_total'),total)
                 rows=self.request('GET','/hub-v5/environments').json()['items']
                 self.assertEqual(rows[0]['snapshot'].get('orders'),orders)
+                self.assertEqual(rows[0]['snapshot'].get('orders_total'),total)
                 self.assertEqual(rows[0]['snapshot']['orders_to_ship'],5)
 
     def test_orders_reject_negative_fractional_and_nonfinite_counts(self):
         run,_=self.make_run();item,creds=self.claim(run);self.bind(item,creds)
-        for value in (-1,'1.5','NaN','Infinity','unknown'):
-            with self.subTest(value=value):
-                package=self.package();package['header']['metrics']={'orders':value}
-                response=self.ar('POST',f'/agent/items/{item}/collections',json={**creds,
-                    'content_hash':digest(package),'part_count':1,'header':package['header']})
-                self.assertEqual(response.status_code,422,response.text)
+        for metric in ('orders','orders_total'):
+            for value in (-1,'1.5','NaN','Infinity','unknown'):
+                with self.subTest(metric=metric,value=value):
+                    package=self.package();package['header']['metrics']={metric:value}
+                    response=self.ar('POST',f'/agent/items/{item}/collections',json={**creds,
+                        'content_hash':digest(package),'part_count':1,'header':package['header']})
+                    self.assertEqual(response.status_code,422,response.text)
 
     def test_snapshot_digest_and_conflicting_parts(self):
         run,_=self.make_run();item,creds=self.claim(run);self.bind(item,creds)

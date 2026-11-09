@@ -9,6 +9,7 @@ import time
 import uuid
 from contextlib import suppress
 from pathlib import Path
+from urllib.parse import urlsplit,parse_qs
 import httpx
 from playwright.async_api import async_playwright
 from hubstudio import HubstudioClient
@@ -56,7 +57,7 @@ class MatrixRuntime:
         if self.plugin:
             for task,sites in self.plugin.CAPABILITIES.items():
                 if task=='shop.collect':continue
-                capabilities[task]=sorted(set(sites) & {'MY'})
+                capabilities[task]=sorted((set(capabilities.get(task,[])) | set(sites)) & {'MY'})
         return capabilities
 
     async def heartbeat(self, process_commands=True):
@@ -128,7 +129,7 @@ class MatrixRuntime:
             await self.check_stop()
             await self.client.request('PUT',self.path(f"collections/{row['id']}/parts/{n}"),json={**self.credentials(),'products':products[n*200:(n+1)*200]})
             await self.progress('uploading',f'采集包分片 {n+1}/{count} 已上传')
-        await self.progress('validating_collection','分片上传完成，正在校验商品分页、SKU数量和执行环境' if header.get('collection_kind')=='product_management' else '分片上传完成，正在校验完整性、执行环境和数据窗口')
+        await self.progress('validating_collection','分片上传完成，正在校验商品分页、SKU数量、流量窗口和执行环境' if header.get('collection_kind') in {'product_management','product_analysis'} else '分片上传完成，正在校验完整性、执行环境和数据窗口')
         await self.client.post(self.path(f"collections/{row['id']}/commit"),json=self.credentials())
 
     async def run_next(self):
@@ -178,7 +179,8 @@ class MatrixRuntime:
                     # 按任务、站点固定适配器；插件未覆盖的采集站点使用内置实现。
                     adapter=self.adapter('listing.catalog' if 'listing.catalog' in tasks else 'shop.collect',site)
                     collector=self.adapter('shop.collect',site) if 'shop.collect' in tasks else None
-                    await tiktok.open_environment(page,site,self.check_stop,self.progress)
+                    if 'listing.catalog' not in tasks:
+                        await tiktok.open_environment(page,site,self.check_stop,self.progress)
                     target=await self.client.post(self.path('environment-target'),json=self.credentials())
                     identity=target['identity']
                     await self.progress('environment_ready',f"目标环境已就绪：{claim['environment']['name']}，按环境归档执行结果")
@@ -198,17 +200,27 @@ class MatrixRuntime:
                         await self.client.matrix_download(self.path('file'),self.credentials(),destination,file['size'])
                         if hashlib.sha256(destination.read_bytes()).hexdigest()!=file['sha256']:raise RuntimeError('固定文件摘要不一致')
                         await self.progress('file_verified',f"文件校验通过，预期 {file['expected_count']} 个商品组")
+                        async def upload_ready():
+                            await self.check_stop()
+                            url=urlsplit(page.url)
+                            if not tiktok.allowed(page.url,site) or url.path!='/product/batch/publish' or parse_qs(url.query).get('shop_region')!=[site]:
+                                raise RuntimeError('未进入目标站点的跨境批量上传页，停止上传')
                         async def before_import():
                             nonlocal submitted
                             await self.check_stop()
                             if not tiktok.allowed(page.url,site):
                                 raise RuntimeError('当前页面不属于目标站点入口，尚未导入')
+                            if adapter is tiktok:await upload_ready()
                             atomic(journal_path,{**journal,'submission':'intent_recorded','file_sha256':file['sha256']})
                             await self.progress('submission_pending','目标环境已就绪，正在保存提交意图，准备向平台导入商品')
                             await self.client.post(self.path('submission'),json=self.credentials());submitted=True
                         # 只给插件受控页面和提交回调，不分发服务器令牌。
                         if hasattr(adapter,'upload'):
                             result=await adapter.upload(page,site,str(destination),file['expected_count'],before_import,self.check_stop,self.progress)
+                        elif adapter is tiktok:
+                            result=await self.upload(port,destination,before_import=before_import,on_upload_ready=upload_ready,
+                                on_progress=self.progress,expected_count=file['expected_count'],site=site,page=page,
+                                upload_url=tiktok.profile(site)['upload_url'],check_stop=self.check_stop)
                         else:
                             account=await hub.bound_account(claim['environment']['container_code'])
                             result=await self.upload(port,destination,before_import=before_import,account=account,on_progress=self.progress,
@@ -218,6 +230,8 @@ class MatrixRuntime:
                         listing_confirmed=response['status']=='confirmed'
                         if response.get('partial'):raise RuntimeError('平台部分商品拒绝，请核对明细')
                     if 'shop.collect' in tasks:
+                        if 'listing.catalog' in tasks:
+                            await tiktok.open_environment(page,site,self.check_stop,self.progress)
                         package=await collector.collect(page,site,identity,self.check_stop,self.progress)
                         journal={**journal,'identity':identity,'collection':package};atomic(journal_path,journal)
                         await self.progress('uploading','采集完成，正在校验并提交固定数据包')

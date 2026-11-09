@@ -165,8 +165,16 @@ class UploadTests(unittest.IsolatedAsyncioTestCase):
         page.get_by_text.side_effect = lambda text, **kwargs: chinese if isinstance(text, re.Pattern) and text.pattern == r"^\s*简体中文\s*$" else success_control
         alert = MagicMock(); alert.filter.return_value = errors
         import_button = AsyncMock(); import_button.count.return_value = 1; import_button.is_enabled.return_value = True
+        missing_step = AsyncMock(); missing_step.count.return_value = 0
         page.import_button = import_button
-        page.get_by_role.side_effect = lambda role, **kwargs: alert if role == "alert" else (login if "log" in kwargs["name"].pattern else (import_button if "导入" in kwargs["name"].pattern else submit))
+        def role_control(role, **kwargs):
+            if role == 'alert':return alert
+            pattern = kwargs['name'].pattern
+            if 'Step' in pattern:return missing_step
+            if 'log' in pattern:return login
+            if '导入' in pattern:return import_button
+            return submit
+        page.get_by_role.side_effect = role_control
         context = MagicMock(); context.new_page = AsyncMock(return_value=page)
         browser = MagicMock(); browser.contexts = [context]; browser.close = AsyncMock()
         playwright = MagicMock(); playwright.chromium.connect_over_cdp = AsyncMock(return_value=browser)
@@ -443,6 +451,82 @@ class UploadTests(unittest.IsolatedAsyncioTestCase):
         before_import.assert_awaited_once(); page.import_button.click.assert_awaited_once(); submit.click.assert_not_awaited(); file_input.set_input_files.assert_awaited_once()
         self.assertIsInstance(page.get_by_role.call_args_list[0].kwargs["name"], re.Pattern)
 
+    async def test_matrix_upload_reuses_page_and_cross_border_route(self):
+        from plugins.tiktok import profile
+        _,_,file_input,page=self.controls()
+        page.url=profile('MY')['upload_url']
+        ready=AsyncMock();ready.count.return_value=1;ready.inner_text.return_value='10款商品准备就绪'
+        success=AsyncMock();success.count.return_value=0
+        receipt=AsyncMock();receipt.count.return_value=1;receipt.inner_text.return_value='成功导入10款商品'
+        def text(value,**kwargs):
+            if isinstance(value,re.Pattern):
+                if '准备就绪' in value.pattern:return ready
+                if '成功导入' in value.pattern:return receipt
+            return success
+        page.get_by_text.side_effect=text
+        before=AsyncMock();stop=AsyncMock()
+        with patch.object(self.agent,'async_playwright') as browser:
+            result=await self.agent.upload_and_import(1234,Path(self.temp.name)/'test.xlsx',
+                before_import=before,page=page,site='MY',expected_count=10,
+                upload_url=profile('MY')['upload_url'],check_stop=stop)
+        browser.assert_not_called()
+        page.goto.assert_awaited_once_with(profile('MY')['upload_url'],wait_until='domcontentloaded')
+        file_input.set_input_files.assert_awaited_once()
+        before.assert_awaited_once();page.import_button.click.assert_awaited_once()
+        self.assertEqual(result,{'accepted':list(range(10)),'rejected':[],'receipt':'成功导入10款商品'})
+        self.assertGreater(stop.await_count,0)
+
+    async def test_stopped_matrix_upload_never_selects_file(self):
+        _,_,file_input,page=self.controls()
+        with self.assertRaises(asyncio.CancelledError):
+            await self.agent.upload_and_import(1234,Path(self.temp.name)/'test.xlsx',page=page,
+                check_stop=AsyncMock(side_effect=asyncio.CancelledError))
+        file_input.set_input_files.assert_not_awaited();page.import_button.click.assert_not_awaited()
+
+    @unittest.skipUnless(os.getenv('HAITOO_MATRIX_BROWSER_TESTS')=='1','需启用隔离矩阵浏览器测试')
+    async def test_cross_border_upload_in_isolated_browser(self):
+        from playwright.async_api import async_playwright
+        from plugins.tiktok import profile
+        async with async_playwright() as playwright:
+            browser=await playwright.chromium.launch(channel=os.getenv('HAITOO_BROWSER_CHANNEL') or 'chrome')
+            try:
+                page=await browser.new_page()
+                async def route(request):
+                    await request.fulfill(content_type='text/html',body='''<!doctype html><meta charset="utf-8">
+                        <div>平台限制商家每天最多上传240个商品。</div>
+                        <button id="step1" aria-expanded="true" onclick="this.setAttribute('aria-expanded','false');window.firstClicks=(window.firstClicks||0)+1">第 1 步 : 下载模板</button>
+                        <button id="step2" aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#upload').hidden=false;window.secondClicks=(window.secondClicks||0)+1">第 2 步 : 上传电子表格</button>
+                        <div id="upload" hidden><button id="attachment" onclick="choose()">在这里添加表格附件</button></div>
+                        <span id="file"></span><span id="ready"></span>
+                        <button onclick="document.querySelector('#result').textContent='10 件商品导入成功'">导入</button>
+                        <span id="result"></span><script>
+                        function choose(){
+                            const input=document.createElement('input');input.type='file';input.hidden=true;
+                            input.onchange=()=>{document.querySelector('#file').textContent=input.files[0].name;document.querySelector('#ready').textContent='10款商品准备就绪';};
+                            document.body.append(input);input.click();
+                        }</script>''')
+                await page.route('**/*',route)
+                before=AsyncMock()
+                async def upload_ready():
+                    self.assertEqual(await page.locator('#step1').get_attribute('aria-expanded'),'false')
+                    self.assertEqual(await page.locator('#step2').get_attribute('aria-expanded'),'true')
+                    # 再次准备页面时，已经展开的第二步保持可上传状态。
+                    await self.agent.expand_upload_steps(page)
+                    self.assertEqual(await page.evaluate('[window.firstClicks,window.secondClicks]'),[1,1])
+                    self.assertEqual(await page.locator('input[type=file]').count(),0)
+                report=AsyncMock()
+                result=await self.agent.upload_and_import(1234,Path(self.temp.name)/'test.xlsx',page=page,
+                    before_import=before,on_upload_ready=upload_ready,on_progress=report,
+                    site='MY',expected_count=10,upload_url=profile('MY')['upload_url'])
+                self.assertEqual(page.url,profile('MY')['upload_url'])
+                self.assertEqual(result['accepted'],list(range(10)))
+                self.assertEqual(result['rejected'],[])
+                self.assertEqual(result['receipt'],'10 件商品导入成功')
+                before.assert_awaited_once()
+                self.assertIn('language_ready',[call.args[0] for call in report.await_args_list])
+            finally:
+                await browser.close()
+
     async def test_import_is_reported_before_click_and_never_publishes(self):
         manager, submit, _, page = self.controls()
         async def importing():
@@ -452,6 +536,16 @@ class UploadTests(unittest.IsolatedAsyncioTestCase):
             await self.agent.upload_and_import(1234, Path(self.temp.name) / "test.xlsx", before_import=importing)
         page.import_button.click.assert_awaited_once()
         submit.click.assert_not_awaited()
+
+    def test_import_receipt_pattern_extracts_quantity_and_rejects_parent_text(self):
+        pattern=self.agent.IMPORT_RECEIPT_PATTERN
+        for text,count in (('10 件商品导入成功',10),('成功导入10款商品',10),(' 2款商品导入成功！ ',2),('1,000 个商品导入成功',1000),('0 件商品导入成功',0)):
+            with self.subTest(text=text):
+                match=pattern.fullmatch(text)
+                self.assertIsNotNone(match)
+                self.assertEqual(int((match.group(1) or match.group(2)).replace(',','')),count)
+        for text in ('平台最多上传240个商品。10 件商品导入成功','第1步 10款商品准备就绪 10 件商品导入成功','导入成功','上传10件商品失败'):
+            self.assertIsNone(pattern.search(text))
 
     async def test_success_pattern_matches_import_success_anywhere(self):
         manager, _, _, page = self.controls()

@@ -110,10 +110,10 @@ class MatrixRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp:
             host=SimpleNamespace(config={},state={},client=None,current_claim=None)
             runtime=MatrixRuntime(host,temp,lambda c:None,AsyncMock())
-            self.assertEqual(runtime.capabilities(),{'shop.collect':['MY']})
+            self.assertEqual(runtime.capabilities(),{'shop.collect':['MY'],'listing.catalog':['MY']})
             for sites in ([],['MY'],['OTHER']):
                 host.config['matrix_collection_validation_sites']=sites
-                self.assertEqual(runtime.capabilities(),{'shop.collect':['MY']})
+                self.assertEqual(runtime.capabilities(),{'shop.collect':['MY'],'listing.catalog':['MY']})
 
     async def test_partial_plugin_preserves_builtin_collection_and_routes_by_site(self):
         from types import SimpleNamespace
@@ -128,7 +128,10 @@ class MatrixRuntimeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError,'仅支持'):runtime.adapter('shop.collect','ID')
             self.assertIs(runtime.adapter('listing.catalog','MY'),runtime.plugin)
             with self.assertRaisesRegex(RuntimeError,'仅支持'):runtime.adapter('listing.catalog','ID')
-            self.assertEqual(tiktok.CAPABILITIES,{'shop.collect':['MY']})
+            self.assertEqual(tiktok.CAPABILITIES,{'shop.collect':['MY'],'listing.catalog':['MY']})
+            runtime.plugin=SimpleNamespace(CAPABILITIES={'listing.catalog':[]})
+            self.assertEqual(runtime.capabilities(),{'shop.collect':['MY'],'listing.catalog':['MY']})
+            self.assertIs(runtime.adapter('listing.catalog','MY'),tiktok)
 
     async def test_heartbeat_reports_builtin_capabilities_without_enabling_backend_disabled_company(self):
         from types import SimpleNamespace
@@ -139,7 +142,7 @@ class MatrixRuntimeTests(unittest.IsolatedAsyncioTestCase):
             runtime=MatrixRuntime(host,temp,lambda c:None,AsyncMock())
             with patch('matrix_runtime.load_plugin',return_value=None),patch('matrix_runtime.keys',return_value={}):
                 await runtime.heartbeat()
-            self.assertEqual(client.post.await_args.kwargs['json']['capabilities'],{'shop.collect':['MY']})
+            self.assertEqual(client.post.await_args.kwargs['json']['capabilities'],{'shop.collect':['MY'],'listing.catalog':['MY']})
             self.assertFalse(runtime.enabled)
 
     async def test_retransmission_never_opens_a_browser(self):
@@ -181,6 +184,59 @@ class MatrixRuntimeTests(unittest.IsolatedAsyncioTestCase):
             client.request.assert_awaited_once()
 
 class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_builtin_listing_uses_cross_border_page_and_submission_callback(self):
+        await self.check_builtin_listing(['listing.catalog'])
+
+    async def test_listing_then_collection_opens_product_page_after_import(self):
+        await self.check_builtin_listing(['listing.catalog','shop.collect'])
+
+    async def check_builtin_listing(self,tasks):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from matrix_runtime import MatrixRuntime
+        from plugins import tiktok
+        identity={'site':'MY','environment_id':7,'name':'测试环境'}
+        content=b'fixed workbook'
+        async def post(path,**kwargs):
+            if path.endswith('/environment-target'):return {'identity':identity}
+            if path.endswith('/listing-preparations'):
+                return {'status':'ready','filename':'test.xlsx','size':len(content),
+                    'sha256':hashlib.sha256(content).hexdigest(),'expected_count':10}
+            if path.endswith('/listing-result'):return {'status':'confirmed'}
+            return {}
+        async def download(path,credentials,destination,size):destination.write_bytes(content)
+        client=SimpleNamespace(post=AsyncMock(side_effect=post),matrix_download=AsyncMock(side_effect=download))
+        page=SimpleNamespace(url='about:blank',close=AsyncMock())
+        async def upload(port,destination,**kwargs):
+            open_page.assert_not_awaited()
+            self.assertIs(kwargs['page'],page)
+            self.assertEqual(kwargs['upload_url'],tiktok.profile('MY')['upload_url'])
+            self.assertEqual(kwargs['expected_count'],10)
+            self.assertEqual(destination.read_bytes(),content)
+            page.url=kwargs['upload_url']
+            await kwargs['on_upload_ready']()
+            await kwargs['before_import']()
+            self.assertTrue(any(c.args[0].endswith('/submission') for c in client.post.await_args_list))
+            return {'accepted':list(range(10)),'rejected':[],'receipt':'成功导入10款商品'}
+        with tempfile.TemporaryDirectory() as temp:
+            host=SimpleNamespace(config={},state={},client=client,current_claim=None)
+            runtime=MatrixRuntime(host,temp,lambda c:None,AsyncMock(side_effect=upload))
+            runtime.claim={'item':{'id':1,'result':{},'submission':'not_started'},'claim_token':'a'*32,'fencing':1,
+                'tasks':tasks,'environment':{'id':7,'site':'MY','name':'测试环境','container_code':'env-7'}}
+            runtime.progress=AsyncMock();runtime.check_stop=AsyncMock();runtime.upload_collection=AsyncMock()
+            browser=SimpleNamespace(contexts=[SimpleNamespace(new_page=AsyncMock(return_value=page))])
+            manager=MagicMock();manager.__aenter__=AsyncMock(return_value=SimpleNamespace(chromium=SimpleNamespace(connect_over_cdp=AsyncMock(return_value=browser))));manager.__aexit__=AsyncMock(return_value=False)
+            hub=SimpleNamespace(environments=AsyncMock(return_value=[{'container_code':'env-7'}]),start=AsyncMock(return_value=9222),bound_account=AsyncMock())
+            with patch('matrix_runtime.HubstudioClient',return_value=hub),patch('matrix_runtime.async_playwright',return_value=manager),patch('matrix_runtime.tiktok.open_environment',new_callable=AsyncMock) as open_page,patch('matrix_runtime.tiktok.collect',new_callable=AsyncMock,return_value={'header':{'identity':identity},'products':[]}) as collect:
+                await runtime.execute()
+            if 'shop.collect' in tasks:
+                open_page.assert_awaited_once();collect.assert_awaited_once();runtime.upload_collection.assert_awaited_once()
+            else:
+                open_page.assert_not_awaited();collect.assert_not_awaited()
+            hub.bound_account.assert_not_awaited()
+            runtime.upload.assert_awaited_once();page.close.assert_awaited_once()
+            self.assertEqual(client.post.await_args_list[-1].kwargs['json']['status'],'succeeded')
+
     async def test_collection_does_not_call_platform_identity_methods(self):
         from types import SimpleNamespace
         from unittest.mock import MagicMock

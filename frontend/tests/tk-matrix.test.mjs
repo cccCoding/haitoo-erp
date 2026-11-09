@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {display,percent,windowBuckets,filterParams,deviceSetup} from '../src/hub/matrix.ts'
+import {display,percent,windowBuckets,filterParams,deviceSetup,sortMatrixRows} from '../src/hub/matrix.ts'
 test('an online connector is not ready when HubStudio or its execution capabilities are missing',()=>{
  const now=Date.now(),config={enabled:true,listing_enabled:false}
  const device={is_active:true,online:true,version:'5.1.0',hub_identity:'team',hub_connected:false,sync_at:null,paused:false,capabilities:{}}
@@ -22,7 +22,22 @@ test('empty device filters are omitted from HTTP query parameters',()=>{
  assert.deepEqual(filterParams({agent_id:7,q:'测试环境',exact:'1\n2'}),{agent_id:7,q:'测试环境',exact:'1\n2'})
 })
 test('unknown values remain different from real zero',()=>{assert.equal(display(null),'—');assert.equal(display(0),'0');assert.equal(percent(null),'—');assert.equal(percent(0),'0.00%')})
-test('traffic buckets keep different markets separate',()=>{assert.equal(windowBuckets([{site:'MY',ctr:.1},{site:'ID',ctr:0}],'ctr'),'MY 10.00% · ID 0.00%')})
+test('traffic cards combine markets in the same window without country prefixes',()=>{
+ const windows=[{site:'MY',impressions:100,clicks:10},{site:'ID',impressions:900,clicks:0}]
+ assert.equal(windowBuckets(windows,'impressions'),'1,000')
+ assert.equal(windowBuckets(windows,'clicks'),'10')
+ assert.equal(windowBuckets(windows,'ctr'),'1.00%')
+})
+test('traffic cards preserve unknown totals and explicit zero',()=>{
+ assert.equal(windowBuckets([{site:'MY',impressions:null,clicks:null}],'impressions'),'—')
+ assert.equal(windowBuckets([{site:'MY',impressions:0,clicks:0}],'clicks'),'0')
+ assert.equal(windowBuckets([{site:'MY',impressions:0,clicks:0}],'ctr'),'—')
+ assert.equal(windowBuckets([],'clicks'),'—')
+})
+test('traffic cards keep different date windows separate',()=>{
+ const windows=[{site:'MY',window_start:'2026-10-01',window_end:'2026-11-01',impressions:100,clicks:5},{site:'MY',window_start:'2026-10-02',window_end:'2026-11-02',impressions:200,clicks:20}]
+ assert.equal(windowBuckets(windows,'clicks'),'[2026-10-01~2026-11-01] 5 · [2026-10-02~2026-11-02] 20')
+})
 
 test('device readiness distinguishes member authorization from installed capabilities',()=>{
  const now=Date.now(),config={enabled:true,listing_enabled:true}
@@ -51,4 +66,18 @@ test('one-click environment sync targets only eligible devices owned by the curr
  const devices=[base,{...base,id:2,user_id:8},{...base,id:3,online:false},{...base,id:4,hub_identity:''},{...base,id:5,is_active:false},{...base,id:6,version:'协议4'},{...base,id:7,hub_connected:false},{...base,id:8,paused:true},{...base,id:9,permissions:{enabled:false,collect_enabled:false,listing_enabled:false}}]
  assert.deepEqual(environmentSyncTargets(devices,7,config).map(d=>d.id),[1,7,8])
  assert.deepEqual(environmentSyncTargets(devices,7,{...config,enabled:false}),[])
+})
+
+test('matrix sorting handles numeric amounts, keeps unknowns last and preserves default order',()=>{
+ const rows=[{id:1,snapshot:{gmv:'10.00'}},{id:2,snapshot:null},{id:3,snapshot:{gmv:'2.50'}},{id:4,snapshot:{gmv:'0.00'}}]
+ assert.deepEqual(sortMatrixRows(rows,'snapshot.gmv','asc').map(row=>row.id),[4,3,1,2])
+ assert.deepEqual(sortMatrixRows(rows,'snapshot.gmv','desc').map(row=>row.id),[1,3,4,2])
+ assert.deepEqual(sortMatrixRows(rows,'',null).map(row=>row.id),[1,2,3,4])
+ assert.deepEqual(rows.map(row=>row.id),[1,2,3,4])
+})
+test('matrix sorting supports natural text, timestamps and stable ties',()=>{
+ const rows=[{id:1,name:'女装10',snapshot:{clicks:1,observed_at:'2026-11-09T09:00:00+08:00'}},{id:2,name:'女装2',snapshot:{clicks:1,observed_at:'2026-11-09T02:00:00Z'}}]
+ assert.deepEqual(sortMatrixRows(rows,'name','asc').map(row=>row.id),[2,1])
+ assert.deepEqual(sortMatrixRows(rows,'snapshot.observed_at','asc').map(row=>row.id),[1,2])
+ assert.deepEqual(sortMatrixRows(rows,'snapshot.clicks','desc').map(row=>row.id),[1,2])
 })

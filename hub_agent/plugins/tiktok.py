@@ -1,18 +1,20 @@
 """马来西亚跨境店只读页面适配。入口按站点与店铺类型定义。"""
 import asyncio
 import re
-from playwright.async_api import TimeoutError as BrowserTimeout
-from datetime import datetime
+from playwright.async_api import TimeoutError as BrowserTimeout, expect
+from datetime import datetime, timedelta
+from decimal import Decimal
 from zoneinfo import ZoneInfo
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit, parse_qs, urlencode
 
 # 声明代码实现的能力；公司与成员授权始终由 ERP 后台校验。
 # 环境入口、在售总数、商品分页和SKU明细仍须每次核验。
-CAPABILITIES={'shop.collect':['MY']}
+CAPABILITIES={'shop.collect':['MY'],'listing.catalog':['MY']}
 # 当前只启用这一组合；未来本土店须提供独立适配，不能回退到跨境入口。
 PROFILES={('MY','cross_border'):{
     'url':'https://seller.tiktokshopglobalselling.com/product/manage?shop_region=MY',
-    'host':'seller.tiktokshopglobalselling.com','api_host':'api16-normal-sg.tiktokshopglobalselling.com','timezone':'Asia/Kuala_Lumpur'}}
+    'host':'seller.tiktokshopglobalselling.com','api_host':'api16-normal-sg.tiktokshopglobalselling.com','timezone':'Asia/Kuala_Lumpur',
+    'upload_url':'https://seller.tiktokshopglobalselling.com/product/batch/publish?step=2&shop_region=MY'}}
 
 
 def profile(site,shop_type='cross_border'):
@@ -122,6 +124,201 @@ def parse_sku(sku):
         'stock':stock,'price':money(str(price.get('sale_price',''))),'sale_price':money(str(price['promotion_price'])) if price.get('promotion_price') not in (None,'') else None,'currency':'MYR'}
 
 
+ANALYSIS_PATH='/compass/product-analysis'
+ANALYSIS_COLUMNS={'gmv':'GMV','impressions':'商品曝光次数','clicks':'商品点击量','sales_count':'商品成交件数'}
+
+
+async def analysis_columns(page):
+    """只补选缺少的指标，保留用户已有的其他列。"""
+    headers=page.locator('th, [role="columnheader"]')
+    names=await headers.all_text_contents()
+    if all(any(re.sub(r'\s+','',name)==label for name in names) for label in ANALYSIS_COLUMNS.values()):return
+    edit=page.get_by_role('button',name=re.compile(r'自定义指标|Customize metrics|Edit metrics',re.I))
+    if await edit.count()==1:
+        await edit.click()
+    else:
+        export=page.get_by_text(re.compile(r'^(导出数据|Export data)$')).last
+        # 平台的编辑指标按钮只有图标，位于导出数据控件之前。
+        control=export.locator('xpath=ancestor-or-self::*[self::button or @role="button"][1]')
+        if not await control.count():control=export.locator('..')
+        await control.locator('xpath=preceding-sibling::*[1]').click()
+    title=page.get_by_text('自定义指标',exact=True)
+    await title.wait_for(state='visible',timeout=15000)
+    dialog=title.locator('xpath=ancestor::*[.//button[normalize-space(.)="确定"] or .//*[@role="button" and normalize-space(.)="确定"]][1]')
+    for label in ANALYSIS_COLUMNS.values():
+        checkbox=dialog.get_by_role('checkbox',name=label,exact=True)
+        if await checkbox.count()!=1:
+            checkbox=dialog.get_by_text(label,exact=True).first.locator('xpath=ancestor::label[1]').locator('input[type="checkbox"], [role="checkbox"]')
+        if await checkbox.count()!=1:raise RuntimeError(f'无法唯一识别自定义指标：{label}')
+        if not await checkbox.is_checked():
+            await dialog.get_by_text(label,exact=True).first.click()
+            await expect(checkbox).to_be_checked()
+    await dialog.get_by_role('button',name='确定',exact=True).click()
+    await title.wait_for(state='hidden',timeout=15000)
+    for label in ANALYSIS_COLUMNS.values():
+        await expect(headers.filter(has_text=re.compile(r'^\s*'+re.escape(label)+r'\s*$'))).to_have_count(1)
+
+
+ANALYSIS_API_PATH='/api/v3/insights/seller/ttp/product/list'
+ANALYSIS_PAGE_SIZE=500
+ANALYSIS_NO_RECORD='商品分析接口按商品ID查询无记录'
+ANALYSIS_FIELDS={'impressions':'product_impression_pv','clicks':'product_click_pv','sales_count':'items_sold'}
+
+
+def parse_analysis_item(item):
+    if not isinstance(item,dict) or not isinstance(item.get('meta'),dict):raise RuntimeError('商品分析接口商品结构无法识别')
+    meta=item['meta']
+    pid=meta.get('product_id')
+    if not isinstance(pid,str) or not pid:raise RuntimeError('商品分析接口缺少明确商品ID')
+    stats_v3=item.get('stats_v3')
+    if not isinstance(stats_v3,dict) or not isinstance(stats_v3.get('total'),dict):raise RuntimeError(f'商品 {pid} 的分析指标结构无法识别')
+    stats=stats_v3['total']
+    values={}
+    for key,field in ANALYSIS_FIELDS.items():
+        value=stats.get(field)
+        if value is None:raise RuntimeError(f'商品 {pid} 的分析指标缺失：{field}')
+        values[key]=number(str(value))
+    gmv=stats.get('gmv')
+    if not isinstance(gmv,dict) or gmv.get('currency_code')!='MYR' or not isinstance(gmv.get('amount'),str):
+        raise RuntimeError(f'商品 {pid} 的GMV缺少明确MYR金额')
+    values['gmv']=money(gmv['amount'])
+    return pid,values
+
+
+def analysis_page(data):
+    if not isinstance(data,dict) or not isinstance(data.get('list_control'),dict):
+        raise RuntimeError('商品分析接口结构无法识别')
+    control=data['list_control'].get('next_pagination')
+    if not isinstance(control,dict):raise RuntimeError('商品分析接口缺少分页信息')
+    total=control.get('total')
+    if not isinstance(total,int) or isinstance(total,bool) or not 0<=total<=100000:raise RuntimeError('商品分析接口未提供有效总数')
+    if not isinstance(control.get('has_more'),bool):raise RuntimeError('商品分析接口缺少分页结束标记')
+    items=data.get('items')
+    # 平台的零条响应可能省略items字段，须有明确的总数及结束标记。
+    if items is None and control.get('total')==0 and control.get('has_more') is False:items=[]
+    if not isinstance(items,list):raise RuntimeError('商品分析接口商品列表结构无法识别')
+    return items,control
+
+
+async def collect_analysis(page,site,products,check_stop,progress,wait_verification,request):
+    config=profile(site)
+    today=datetime.now(ZoneInfo(config['timezone'])).replace(hour=0,minute=0,second=0,microsecond=0)
+    start=today-timedelta(days=29);end=today+timedelta(days=1)
+    dates={'start':start.strftime('%Y-%m-%d'),'end':end.strftime('%Y-%m-%d')}
+    query=urlencode({'shop_region':site,'timeRange':f"{dates['start']}|{dates['end']}",'shortcut':'last30days'})
+    await check_stop()
+    await progress('opening_product_analysis','商品及SKU已读完，正在打开数据分析－商品数据分析，选择最近30天')
+    def matches(response):
+        parsed=urlsplit(response.url)
+        return parsed.scheme=='https' and parsed.hostname==config['api_host'] and parsed.path==ANALYSIS_API_PATH and response.request.method=='POST'
+    pending=asyncio.get_running_loop().create_future()
+    def remember(response):
+        if matches(response) and not pending.done():pending.set_result(response)
+    page.on('response',remember)
+    try:
+        await page.goto(f"https://{config['host']}{ANALYSIS_PATH}?{query}",wait_until='domcontentloaded',timeout=60000)
+        await wait_verification()
+        response=await asyncio.wait_for(pending,timeout=30)
+    except (BrowserTimeout,asyncio.TimeoutError) as exc:
+        raise RuntimeError('等待商品分析页正常接口请求超时，请检查登录或安全验证') from exc
+    finally:
+        page.remove_listener('response',remember)
+    if not allowed(page.url,site) or urlsplit(page.url).path!=ANALYSIS_PATH:raise RuntimeError('未进入目标店铺的商品数据分析页')
+    try:
+        await page.wait_for_function(r"""dates=>{
+            const text=document.body.innerText+' '+[...document.querySelectorAll('input')].map(e=>e.value).join(' ');
+            return dates.every(date=>text.includes(date)||text.includes(date.replaceAll('/','-')));
+        }""",arg=[start.strftime('%Y/%m/%d'),today.strftime('%Y/%m/%d')],timeout=30000)
+    except BrowserTimeout as exc:raise RuntimeError('商品分析页未显示最近30天的准确起止日期') from exc
+    params={k:v[-1] for k,v in parse_qs(urlsplit(response.url).query).items() if k in BUSINESS_QUERY}
+    # 接口提供完整指标；页面缺列时仍补选，便于人工核对。
+    await page.locator('th, [role="columnheader"]').first.wait_for(state='visible',timeout=30000)
+    await analysis_columns(page)
+    body={'request':{'time_descriptor':dates,'search':{'channel_type':0},
+        'list_control':{'pagination':{'page':0,'size':ANALYSIS_PAGE_SIZE},'rules':[{'field':'gmv','direction':2}]}}}
+    collected={};page_number=0;total=None;read_count=0
+    while True:
+        body['request']['list_control']['pagination']['page']=page_number
+        data=await request(ANALYSIS_API_PATH,params,body)
+        batch,control=analysis_page(data)
+        count=control.get('total')
+        if total is None:total=count
+        if count!=total:raise RuntimeError('商品分析分页期间总数发生变化，请重新采集')
+        for item in batch:
+            pid,values=parse_analysis_item(item)
+            collected[pid]=values
+        read_count+=len(batch)
+        await progress('collecting_product_analysis',f'最近30天商品分析接口第 {page_number+1} 页读取完成：{len(batch)} 条，已核对 {len(collected)} 个商品')
+        more=control.get('has_more')
+        if not more:
+            if read_count!=total:raise RuntimeError('商品分析接口分页条数与声明总数不一致')
+            break
+        next_page=control.get('next_page')
+        if not batch or not isinstance(next_page,int) or isinstance(next_page,bool) or next_page!=page_number+1 or next_page>=500:
+            raise RuntimeError('商品分析接口分页未前进或超过安全上限')
+        page_number=next_page
+    # 只有完整的去重分析列表才可代表店铺全部商品GMV。
+    shop_gmv=format(sum((Decimal(values['gmv']) for values in collected.values()),Decimal('0')),'f') if len(collected)==total else None
+    # 平台按GMV排序时，同值商品可能跨页重复。按已确认的在售ID精确补查遗漏，不能补零。
+    missing=[p['external_id'] for p in products if p['external_id'] not in collected]
+    for index,pid in enumerate(missing,1):
+        body['request']['search']={'channel_type':0,'search_keyword':pid}
+        body['request']['list_control']['pagination']={'page':0,'size':ANALYSIS_PAGE_SIZE}
+        data=await request(ANALYSIS_API_PATH,params,body)
+        batch,control=analysis_page(data)
+        matching=[parse_analysis_item(item) for item in batch if item.get('meta',{}).get('product_id')==pid]
+        if not batch and control.get('total')==0 and control.get('has_more') is False:
+            collected[pid]={'impressions':None,'clicks':None,'sales_count':None,'gmv':None,'traffic_reason':ANALYSIS_NO_RECORD}
+        elif len(matching)==1:
+            collected[pid]=matching[0][1]
+        else:raise RuntimeError(f'商品分析缺少在售商品 {pid} 的唯一明确数据，请核对平台分析范围')
+        await progress('collecting_product_analysis_missing',f'按在售商品ID补查分析数据：{index}/{len(missing)}')
+    for product in products:product.update(collected[product['external_id']])
+    return start,end,shop_gmv
+
+
+ORDER_COUNT_PATTERN=re.compile(r'^(?:找到\s*)?([0-9]+(?:,[0-9]{3})*)\s*个订单$|^(?:Found\s+)?([0-9]+(?:,[0-9]{3})*)\s+orders?$',re.I)
+
+
+async def collect_order_count(page,site,check_stop,progress,wait_verification):
+    config=profile(site)
+    await check_stop()
+    await progress('opening_orders','商品数据已采集完毕，正在打开管理订单－全部，读取订单总数')
+    query=urlencode({'shop_region':site,'selected_sort':6,'tab':'all'})
+    await page.goto(f"https://{config['host']}/order?{query}",wait_until='domcontentloaded',timeout=60000)
+    await wait_verification()
+    if not allowed(page.url,site) or urlsplit(page.url).path!='/order' or parse_qs(urlsplit(page.url).query).get('tab')!=['all']:
+        raise RuntimeError('未进入管理订单的全部标签页')
+    tab=page.get_by_role('tab',name=re.compile(r'^(?:全部|All)(?:\s*[\d,]+)?$',re.I))
+    if not await tab.count():tab=page.get_by_text(re.compile(r'^(?:全部|All)$',re.I))
+    await tab.wait_for(state='visible',timeout=30000)
+    if await tab.count()!=1:raise RuntimeError('无法唯一识别全部订单标签')
+    if await tab.get_attribute('aria-selected')!='true':await tab.click()
+    if await tab.get_attribute('role')=='tab':await expect(tab).to_have_attribute('aria-selected','true')
+    # 同时兼容筛选栏“找到 N 个订单”和列表上方“N 个订单”，两处有值时必须一致。
+    labels=page.get_by_text(ORDER_COUNT_PATTERN)
+    previous=None
+    for _ in range(60):
+        await check_stop()
+        await wait_verification()
+        if not allowed(page.url,site) or urlsplit(page.url).path!='/order' or parse_qs(urlsplit(page.url).query).get('tab')!=['all']:
+            raise RuntimeError('读取订单数量时离开了管理订单的全部标签页')
+        counts=set()
+        for label in await labels.all():
+            if await label.is_visible():
+                match=ORDER_COUNT_PATTERN.fullmatch((await label.inner_text()).strip())
+                if match:counts.add(number(match.group(1) or match.group(2)))
+        if len(counts)==1:
+            count=counts.pop()
+            if count==previous:
+                await progress('collection_orders',f'管理订单－全部：{count} 个订单')
+                return count
+            previous=count
+        else:previous=None
+        await asyncio.sleep(.5)
+    raise RuntimeError('全部订单页未显示唯一且稳定的明确订单数量，请核对登录、筛选条件或页面加载状态')
+
+
 async def collect(page,site,identity,check_stop,progress):
     config=profile(site)
     if not allowed(page.url,site):raise RuntimeError('当前页面不属于马来西亚跨境店入口，拒绝采集')
@@ -138,7 +335,7 @@ async def collect(page,site,identity,check_stop,progress):
                 return True
             await asyncio.sleep(1)
         raise RuntimeError('等待TikTok安全验证超时，请完成验证后重试')
-    async def request(path,params):
+    async def request(path,params,body=None):
         for attempt in range(2):
             await check_stop();await wait_verification()
             if not allowed(page.url,site):raise RuntimeError('商品管理页入口发生变化，停止读取')
@@ -146,10 +343,10 @@ async def collect(page,site,identity,check_stop,progress):
                 const url=new URL(args.path,args.origin);
                 for(const[k,v]of Object.entries(args.params))url.searchParams.set(k,String(v));
                 const control=new AbortController();const timer=setTimeout(()=>control.abort(),30000);
-                try{const r=await fetch(url.toString(),{method:'GET',credentials:'include',headers:{'content-type':'application/json','x-tt-oec-region':'MY'},signal:control.signal});
+                try{const r=await fetch(url.toString(),{method:args.body===null?'GET':'POST',credentials:'include',headers:{'content-type':'application/json','x-tt-oec-region':'MY'},body:args.body===null?undefined:JSON.stringify(args.body),signal:control.signal});
                     const text=await r.text();let data=null;try{data=JSON.parse(text)}catch{};return {status:r.status,data};
                 }finally{clearTimeout(timer)}
-            }""",{'origin':'https://'+config['api_host'],'path':path,'params':params})
+            }""",{'origin':'https://'+config['api_host'],'path':path,'params':params,'body':body})
             payload=result.get('data')
             if result.get('status')==200 and isinstance(payload,dict) and payload.get('code') in (0,'0'):return payload.get('data')
             if attempt==0 and await wait_verification():continue
@@ -207,14 +404,17 @@ async def collect(page,site,identity,check_stop,progress):
             if len(products)==total:break
             if len(products)>total or page_number>=500:raise RuntimeError('商品接口分页超过声明总数或安全上限')
             page_number+=1;await asyncio.sleep(.2)
+        start,end,shop_gmv=await collect_analysis(page,site,products,check_stop,progress,wait_verification,request)
+        orders_total=await collect_order_count(page,site,check_stop,progress,wait_verification)
         observed=datetime.now(ZoneInfo(config['timezone']))
-        await progress('collection_checked',f'商品管理页采集完成：{total} 个在售商品、{sum(p["sku_count"] for p in products)} 条SKU，全部分页已核对')
-        return {'header':{'identity':identity,'collection_kind':'product_management','product_scope':'on_sale','on_sale_count':total,
-            'observed_at':observed.isoformat(),'window_start':None,'window_end':None,'timezone':config['timezone'],
+        covered=sum(p.get('impressions') is not None for p in products)
+        await progress('collection_checked',f'商品管理及最近30天商品分析采集完成：{total} 个在售商品、{sum(p["sku_count"] for p in products)} 条SKU；{covered} 个商品有分析数据，{total-covered} 个商品经ID查询确认无记录，已标记未知；全部订单 {orders_total} 个')
+        return {'header':{'identity':identity,'collection_kind':'product_analysis','product_scope':'on_sale','on_sale_count':total,
+            'observed_at':observed.isoformat(),'window_start':start.isoformat(),'window_end':end.isoformat(),'timezone':config['timezone'],
             'expected_count':total,'complete':True,'empty_verified':total==0,'total_verified':True,
-            'sections':{'identity':'completed','products':'completed','traffic':'unsupported','metrics':'unsupported','health':'unsupported'},'metrics':{},
-            'reasons':{'traffic':'浏览次数取商品管理页product_performance.last_28days_pv原值，不作为曝光或点击；未推断精确时间窗口',
-                'metrics':'商品分析与经营指标后续补充','health':'健康指标后续补充'}},'products':products}
+            'sections':{'identity':'completed','products':'completed','traffic':'completed','metrics':'completed','health':'unsupported'},'metrics':{'orders_total':orders_total,**({'gmv':shop_gmv} if shop_gmv is not None else {})},
+            'reasons':{'traffic':'GMV、曝光、点击及成交件数来自商品数据分析－按商品－全部，最近30天（含今天）；浏览次数独立取商品管理页近28天字段',
+                'metrics':'全部订单数取管理订单－全部标签页当前显示数量；GMV在分析列表完整去重核对后汇总全部商品金额，完整性不足时展示在售商品已知小计及覆盖数','health':'健康指标后续补充'}},'products':products}
     finally:
         listener=state.get('listener')
         if listener:page.remove_listener('response',listener)

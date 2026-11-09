@@ -9,7 +9,7 @@ from .service import checked_attempt, fail, utcnow, event
 from ..supply_common import digest
 
 # orders 与快照窗口一致，表示最近7个完整自然日的订单数；缺失时保持未知。
-METRICS = {"gmv", "visitors7d", "orders", "orders_to_ship", "violations_score", "shop_status"}
+METRICS = {"gmv", "visitors7d", "orders", "orders_total", "orders_to_ship", "violations_score", "shop_status"}
 
 
 def part(db, kind, parent_id, number, count, values):
@@ -46,7 +46,7 @@ def create(db, agent, item_id, payload):
         try:
             number = Decimal(str(val))
             if not number.is_finite() or number < 0: raise ValueError()
-            if key == "orders" and number != number.to_integral_value(): raise ValueError()
+            if key in {"orders", "orders_total"} and number != number.to_integral_value(): raise ValueError()
         except (ValueError, InvalidOperation): fail("指标值无效", 422)
     if header["metrics"].get("shop_status") not in {None, "normal", "abnormal", "unknown"}: fail("店铺状态无效", 422)
     old = db.scalar(select(MatrixCollection).where(MatrixCollection.item_id == item.id, MatrixCollection.content_hash == payload.content_hash))
@@ -61,6 +61,7 @@ def create(db, agent, item_id, payload):
 
 
 def validate_window(header):
+    analysis = header.get("collection_kind") == "product_analysis"
     try:
         tz = ZoneInfo(header["timezone"])
         observed = datetime.fromisoformat(header["observed_at"].replace("Z", "+00:00"))
@@ -68,9 +69,11 @@ def validate_window(header):
         end = datetime.fromisoformat(header["window_end"].replace("Z", "+00:00"))
         if any(d.tzinfo is None for d in (observed,start,end)): raise ValueError()
         expected_end = observed.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
-        expected_start = expected_end - timedelta(days=7)
+        if analysis: expected_end += timedelta(days=1)
+        expected_start = expected_end - timedelta(days=30 if analysis else 7)
         if start != expected_start or end != expected_end or observed > datetime.now(timezone.utc)+timedelta(minutes=5): raise ValueError()
-    except (ValueError, KeyError): fail("统计窗口必须是采集时所在店铺时区的最近7个完整自然日", 422)
+    except (ValueError, KeyError):
+        fail("统计窗口必须是采集时所在店铺时区的最近30天（含今天）" if analysis else "统计窗口必须是采集时所在店铺时区的最近7个完整自然日", 422)
 
 
 def commit(db, agent, item_id, collection_id, payload):
@@ -82,6 +85,7 @@ def commit(db, agent, item_id, collection_id, payload):
     if digest({"header": row.header, "products": products}) != row.content_hash: fail("采集包摘要不一致", 422)
     h = row.header
     management = h.get("collection_kind") == "product_management"
+    analysis = h.get("collection_kind") == "product_analysis"
     if management:
         if h["window_start"] is not None or h["window_end"] is not None: fail("商品管理页不能声明流量时间窗口", 422)
         observed = datetime.fromisoformat(h["observed_at"].replace("Z", "+00:00"))
@@ -93,15 +97,21 @@ def commit(db, agent, item_id, collection_id, payload):
     if not h["complete"] or any(h["sections"].get(s) != "completed" for s in required):
         issue = "必需采集分区不完整"
     if len(products) != h["expected_count"] or len({p["external_id"] for p in products}) != len(products): issue = "商品总数或分页完整性不一致"
-    if management:
+    if management or analysis:
         if h["on_sale_count"] != len(products) or any(not p.get("active") for p in products): issue = "在售商品数量与完整列表不一致"
-        if h["sections"].get("traffic") != "unsupported" or any(p.get("impressions") is not None or p.get("clicks") is not None for p in products): issue = "商品管理页浏览次数不能冒充曝光或点击"
+        if management and (h["sections"].get("traffic") != "unsupported" or any(p.get("impressions") is not None or p.get("clicks") is not None for p in products)): issue = "商品管理页浏览次数不能冒充曝光或点击"
         for p in products:
             skus = p.get("skus", [])
             if "views" not in p or p["views"] is None and p.get("views_reason") != "商品管理页未提供浏览次数（--）": issue = "商品浏览次数缺失"
             if p.get("sku_count") != len(skus) or not skus: issue = "SKU 明细与页面数量不一致"
             if len({("id",s["external_id"]) if s.get("external_id") else ("spec",s.get("name"),s.get("seller_sku")) for s in skus}) != len(skus): issue = "商品包含重复 SKU 明细"
-    elif any(p.get("impressions") is None or p.get("clicks") is None for p in products if p.get("active", True)):
+    if analysis:
+        for p in products:
+            fields=(p.get('impressions'),p.get('clicks'),p.get('sales_count'))
+            verified_empty=p.get('traffic_reason')=='商品分析接口按商品ID查询无记录' and all(value is None for value in fields)
+            if any(value is None for value in fields) and not verified_empty:issue='商品分析指标缺失且未经ID查询确认无记录'
+            if p.get('traffic_reason') and (not verified_empty or p.get('gmv') is not None):issue='商品分析无记录说明与指标不一致'
+    elif not management and any(p.get("impressions") is None or p.get("clicks") is None for p in products if p.get("active", True)):
         issue = "在架商品核心流量缺失"
     shop = db.get(MatrixShop, row.shop_id)
     old = db.get(MatrixCollection, shop.snapshot_id) if shop.snapshot_id else None
@@ -132,11 +142,19 @@ def summarize(products):
     imp = sum(p["impressions"] for p in active) if all(p.get("impressions") is not None for p in active) else None
     clicks = sum(p["clicks"] for p in active) if all(p.get("clicks") is not None for p in active) else None
     with_imp = sum(p["impressions"] > 0 for p in active) if imp is not None else None
+    covered = [p for p in active if p.get("impressions") is not None and p.get("clicks") is not None]
     # 商品管理页明确返回“--”的商品按无浏览统计。
     views_complete = all(p.get("views") is not None or p.get("views_reason") == "商品管理页未提供浏览次数（--）" for p in active)
     with_views = sum((p.get("views") or 0) > 0 for p in active) if views_complete else None
+    sales_covered = [p for p in active if p.get("sales_count") is not None]
     with_sales = sum(p["sales_count"] > 0 for p in active) if all(p.get("sales_count") is not None for p in active) else None
-    return {"view_counts_version": 2, "with_views": with_views, "zero_views": len(active) - with_views if with_views is not None else None,
+    gmv_covered = [p for p in active if p.get("gmv") is not None]
+    gmv = format(sum((Decimal(p["gmv"]) for p in gmv_covered), Decimal("0")), "f") if gmv_covered else None
+    return {"gmv":gmv,"gmv_covered":len(gmv_covered),"analysis_summary_version":2,"sales_covered":len(sales_covered),
+        "known_sell_through_rate":sum(p["sales_count"]>0 for p in sales_covered)/len(sales_covered) if sales_covered else None,
+        "traffic_covered":len(covered),"traffic_unknown":len(active)-len(covered),
+        "known_impressions":sum(p["impressions"] for p in covered),"known_clicks":sum(p["clicks"] for p in covered),
+        "view_counts_version": 2, "with_views": with_views, "zero_views": len(active) - with_views if with_views is not None else None,
         "sell_through_rate": with_sales / len(active) if active and with_sales is not None else None,
         "active": len(active), "views_covered": sum(p.get("views") is not None for p in active), "views": sum(p["views"] for p in active) if all(p.get("views") is not None for p in active) else None,
         "sku_count": sum(p["sku_count"] for p in active) if all(p.get("sku_count") is not None for p in active) else None,
@@ -148,15 +166,24 @@ def summarize(products):
 def snapshot_view(db, row):
     if not row: return None
     summary = row.quality.get("summary")
-    if summary is None or summary.get("view_counts_version") != 2:
+    analysis = row.header.get("collection_kind") == "product_analysis"
+    if summary is None or summary.get("view_counts_version") != 2 or analysis and summary.get("analysis_summary_version") != 2:
         calculated = summarize([p for r in db.scalars(select(MatrixPart).where(MatrixPart.kind == "collection", MatrixPart.parent_id == row.id)) for p in r.payload])
         summary = {**calculated, **(summary or {})}
         summary.update({key: calculated[key] for key in ("view_counts_version", "with_views", "zero_views")})
+        if analysis:
+            summary.update({key:calculated[key] for key in ("gmv","gmv_covered","analysis_summary_version","sales_covered","known_sell_through_rate","traffic_covered","traffic_unknown","known_impressions","known_clicks")})
+    if analysis:
+        summary={**summary,"sell_through_rate":summary.get("known_sell_through_rate")}
+        if summary.get("traffic_covered",0)>0:
+            impressions,clicks=summary["known_impressions"],summary["known_clicks"]
+            summary.update(impressions=impressions,clicks=clicks,ctr=clicks/impressions if impressions else None)
     observed = datetime.fromisoformat(row.header["observed_at"].replace("Z", "+00:00"))
     from .service import instant
     return {"id": row.id, "observed_at": row.header["observed_at"], "committed_at": instant(row.committed_at), "window_start": row.header["window_start"],
         "window_end": row.header["window_end"], "timezone": row.header["timezone"], "site": row.header["identity"]["site"],
         "collection_kind": row.header.get("collection_kind", "analytics"), "on_sale_count": row.header.get("on_sale_count"),
-        "currency": "MYR" if row.header["identity"]["site"] == "MY" else "IDR", "quality": row.quality, "sections": row.header["sections"],
+        "currency": "MYR" if row.header["identity"]["site"] == "MY" else "IDR",
+        "gmv_scope":"all_products" if row.header["metrics"].get("gmv") is not None else "on_sale", "quality": row.quality, "sections": row.header["sections"],
         "reasons": row.header["reasons"], "stale": datetime.now(timezone.utc)-observed > timedelta(hours=24),
         **summary, **row.header["metrics"]}

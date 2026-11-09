@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from .. import hub
 from ..models import Company, User, Role, HubAgent, HubUploadTask, HubRuntimeLock, SupplyStrategy, TiktokCategoryCatalog
 from ..supply_common import digest, validate_strategy, eligible_materials, template_version
+from ..tiktok_export import catalog_listing_options
 from .models import *
 from . import permissions
 
@@ -191,7 +192,8 @@ def validate_operation(db, actor, config):
     for strategy_id in config["strategies"].values():
         strategy = owned(db, SupplyStrategy, strategy_id, actor, "user_id")
         _, catalog, _, _ = validate_strategy(db, actor, copy.deepcopy(strategy.parameters))
-        if catalog.template_type != "tiktok_local": fail("自动上品仅支持本土类目库", 422)
+        if catalog.template_type != "tiktok_cross_border" or strategy.parameters.get('title_site', 'MY') != 'MY':
+            fail("自动上品仅支持马来西亚跨境类目库的策略", 422)
     if "listing.catalog" in config["tasks"] and not config["strategies"]:
         fail("请选择站点对应的货盘策略", 422)
 
@@ -250,13 +252,13 @@ def freeze_strategy(db, actor, strategy_id):
     strategy = owned(db, SupplyStrategy, strategy_id, actor, "user_id")
     parameters = copy.deepcopy(strategy.parameters)
     template, catalog, snapshot, rows = validate_strategy(db, actor, parameters)
-    if catalog.template_type != "tiktok_local":
-        fail("仅支持本土类目", 422)
+    if catalog.template_type != "tiktok_cross_border" or parameters.get('title_site', 'MY') != 'MY':
+        fail("自动上品仅支持马来西亚跨境类目库的策略", 422)
     version = template_version(snapshot)
     candidates = eligible_materials(db, actor.company_id, template.id, version, parameters.get("infringement_filter", "include"))
     if len(candidates) > 20000: fail("单站点候选素材超过20000条，请缩小公开货盘模板范围", 422)
     return {"strategy_id": strategy.id, "name": strategy.name, "parameters": parameters, "template": snapshot, "template_version": version,
-        "catalog_type": catalog.template_type, "catalog_options": copy.deepcopy(catalog.parsed_options), "category_blob": base64.b64encode(catalog.template_blob).decode(), "candidates": candidates, "expected_rows": rows}
+        "catalog_type": catalog.template_type, "catalog_options": copy.deepcopy(catalog_listing_options(catalog)), "category_blob": base64.b64encode(catalog.template_blob).decode(), "candidates": candidates, "expected_rows": rows}
 
 
 def preview(db, actor, plan_id, payload, operation_id=None, manual_config=None, manual_agent_id=None, commit=True):

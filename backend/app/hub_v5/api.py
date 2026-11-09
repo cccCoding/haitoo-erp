@@ -418,10 +418,15 @@ def runs(page: int = Query(1,ge=1), page_size: int = Query(20,ge=1,le=50), envir
     item_ids = history_items(db, actor, environment_id) if environment_id else None
     if item_ids is not None:
         query = query.where(MatrixRun.id.in_(select(MatrixItem.run_id).where(MatrixItem.id.in_(item_ids))))
-    subquery = query.subquery()
+    subquery = query.with_only_columns(MatrixRun.status).subquery()
     summary = dict(db.execute(select(subquery.c.status, func.count()).group_by(subquery.c.status)).all())
-    active = db.scalar(query.where(MatrixRun.status.in_(["running", "queued", "awaiting_attention"])).order_by(MatrixRun.id).limit(1))
-    return {"items":[s.run_view(db,r,item_ids) for r in db.scalars(query.order_by(MatrixRun.id.desc()).offset((page-1)*page_size).limit(page_size))],
+    # 大型冻结货盘 JSON 不参与 MySQL 排序；只按 ID 分页，再按主键读取整条记录。
+    ids = query.with_only_columns(MatrixRun.id)
+    active_id = db.scalar(ids.where(MatrixRun.status.in_(["running", "queued", "awaiting_attention"])).order_by(MatrixRun.id).limit(1))
+    active = db.get(MatrixRun, active_id) if active_id is not None else None
+    page_ids = list(db.scalars(ids.order_by(MatrixRun.id.desc()).offset((page-1)*page_size).limit(page_size)))
+    records = {row.id: row for row in db.scalars(query.where(MatrixRun.id.in_(page_ids)))} if page_ids else {}
+    return {"items":[s.run_view(db,records[identity],item_ids) for identity in page_ids if identity in records],
         "total":db.scalar(select(func.count()).select_from(subquery)), "summary":summary, "active":s.run_view(db,active,item_ids) if active else None}
 
 
@@ -618,10 +623,12 @@ def metrics(q:str="",site:str="",group:str="",agent_id:int|None=None,status:str=
     for snap in snapshots:
         if snap["window_start"] is None or snap["window_end"] is None: continue
         key=(snap["site"],snap["window_start"],snap["window_end"])
-        bucket=groups.setdefault(key,{"site":key[0],"window_start":key[1],"window_end":key[2],"shops":0,"impressions":0,"clicks":0,"covered":0})
+        bucket=groups.setdefault(key,{"site":key[0],"window_start":key[1],"window_end":key[2],"shops":0,"impressions":None,"clicks":None,"covered":0,"traffic_covered":0,"traffic_unknown":0})
         bucket["shops"]+=1
+        bucket["traffic_covered"]+=snap.get("traffic_covered",0)
+        bucket["traffic_unknown"]+=snap.get("traffic_unknown",0)
         if snap["impressions"] is not None and snap["clicks"] is not None:
-            bucket["impressions"]+=snap["impressions"];bucket["clicks"]+=snap["clicks"];bucket["covered"]+=1
+            bucket["impressions"]=(bucket["impressions"] or 0)+snap["impressions"];bucket["clicks"]=(bucket["clicks"] or 0)+snap["clicks"];bucket["covered"]+=1
     for bucket in groups.values():bucket["ctr"]=bucket["clicks"]/bucket["impressions"] if bucket["impressions"] else None
     return {"total":len(envs),"collected":len(snapshots),"active":sum(v["active"] for v in snapshots) if snapshots else None,
         "views":sum(v["views"] for v in snapshots) if snapshots and all(v.get("views") is not None for v in snapshots) else None,
@@ -655,7 +662,7 @@ def shop_export(identity:int,q:str="",actor=Depends(matrix_user),db=Depends(get_
     snapshot=view['snapshot']
     if not snapshot:s.fail("店铺尚无有效快照",404)
     output=io.StringIO();writer=csv.writer(output)
-    writer.writerow(["商品ID","商品名称","在售","浏览次数","浏览次数说明","SKU数量","SKU ID","SKU规格","商家SKU","SKU库存","SKU原价","SKU促销价","币种","采集时间","曝光","点击","窗口开始","窗口结束"])
+    writer.writerow(["商品ID","商品名称","在售","浏览次数","浏览次数说明","SKU数量","SKU ID","SKU规格","商家SKU","SKU库存","SKU原价","SKU促销价","币种","采集时间","曝光","点击","窗口开始","窗口结束","成交件数","分析数据说明","GMV","GMV币种"])
     count=0
     for part in db.scalars(select(MatrixPart).where(MatrixPart.kind=="collection",MatrixPart.parent_id==snapshot['id']).order_by(MatrixPart.number)):
         for product in part.payload:
@@ -663,7 +670,7 @@ def shop_export(identity:int,q:str="",actor=Depends(matrix_user),db=Depends(get_
             for sku in product.get('skus') or [{}]:
                 writer.writerow([csv_value(v) for v in [product['external_id'],product['name'],product.get('active',True),product.get('views'),product.get('views_reason'),product.get('sku_count'),
                     sku.get('external_id'),sku.get('name'),sku.get('seller_sku'),sku.get('stock'),sku.get('price'),sku.get('sale_price'),sku.get('currency',snapshot['currency']),
-                    snapshot['observed_at'],product.get('impressions'),product.get('clicks'),snapshot['window_start'],snapshot['window_end']]])
+                    snapshot['observed_at'],product.get('impressions'),product.get('clicks'),snapshot['window_start'],snapshot['window_end'],product.get('sales_count'),product.get('traffic_reason'),product.get('gmv'),snapshot['currency']]])
             count+=1
     s.audit(db,actor,"shop.export",identity,{"snapshot_id":snapshot['id'],"count":count});db.commit()
     return Response("\ufeff"+output.getvalue(),media_type="text/csv; charset=utf-8",headers={"Content-Disposition":"attachment; filename=tk-shop-products.csv"})

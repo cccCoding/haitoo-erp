@@ -263,10 +263,16 @@ class ProductManagementHeader(CollectionHeader):
     window_end: AwareDatetime | None = None
 
 
+class ProductAnalysisHeader(CollectionHeader):
+    collection_kind: Literal["product_analysis"]
+    product_scope: Literal["on_sale"]
+    on_sale_count: int = Field(ge=0, le=100000)
+
+
 class CollectionInput(AttemptInput):
     content_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     part_count: int = Field(ge=1, le=500)
-    header: ProductManagementHeader | CollectionHeader
+    header: ProductAnalysisHeader | ProductManagementHeader | CollectionHeader
 
 
 class ProductSKU(Input):
@@ -284,9 +290,11 @@ class Product(Input):
     name: str = Field(default="", max_length=500)
     impressions: int | None = Field(default=None, ge=0)
     clicks: int | None = Field(default=None, ge=0)
+    traffic_reason: Literal["商品分析接口按商品ID查询无记录"] | None = None
     active: bool = True
     views: int | None = Field(default=None, ge=0)
     sales_count: int | None = Field(default=None, ge=0)
+    gmv: str | None = Field(default=None, max_length=40, pattern=r"^\d+(?:\.\d{1,4})?$")
     views_reason: str | None = Field(default=None, max_length=255)
     sku_count: int | None = Field(default=None, ge=0, le=5000)
     skus: list[ProductSKU] = Field(default_factory=list, max_length=5000)
