@@ -18,7 +18,7 @@ from .ai_providers import DEEPSEEK_TITLE_MODEL
 from .credentials import decrypt_secret, encrypt_secret
 from .database import get_db
 from .models import (Company, MaterialAsset, OperatorGroup, ProductTemplate, Role, SupplyAgent, SupplyAudit,
-                     SupplyJob, SupplyJobMaterial, SupplyStrategy,
+                     SupplyJob, SupplyJobMaterial, SupplyStrategy, SupplyTemplateCount, SupplyUserExhaustedCount,
                      TemplateGroup, TiktokCategoryCatalog, User)
 from .security import current_user, hash_password
 from .tiktok_export import catalog_listing_options
@@ -341,20 +341,28 @@ def template_groups(user=Depends(supply_actor), db: Session = Depends(get_db)):
 
 @router.get("/templates")
 def templates(user=Depends(supply_actor), db: Session = Depends(get_db)):
-    query = select(ProductTemplate).where(ProductTemplate.company_id == user.company_id)
+    query = select(ProductTemplate, SupplyTemplateCount.material_count, SupplyTemplateCount.updated_at,
+        SupplyUserExhaustedCount.exhausted_count).outerjoin(SupplyTemplateCount,
+            (SupplyTemplateCount.company_id == ProductTemplate.company_id)
+            & (SupplyTemplateCount.template_id == ProductTemplate.id)).outerjoin(SupplyUserExhaustedCount,
+                (SupplyUserExhaustedCount.company_id == ProductTemplate.company_id)
+                & (SupplyUserExhaustedCount.template_id == ProductTemplate.id)
+                & (SupplyUserExhaustedCount.user_id == user.id)).where(ProductTemplate.company_id == user.company_id)
     if not is_manager(user):
         query = query.where(ProductTemplate.supply_public.is_(True))
     groups = {group.id: group.name for group in db.scalars(select(TemplateGroup).where(
         or_(TemplateGroup.company_id == user.company_id, TemplateGroup.is_platform.is_(True)))).all()}
     items = []
-    for item in db.scalars(query.order_by(ProductTemplate.id)).all():
+    for item, material_count, updated_at, exhausted_count in db.execute(query.order_by(ProductTemplate.id)).all():
         snapshot = template_snapshot(item)
         items.append({"id": item.id, "name": item.name, "cover_url": item.cover_url,
             "group_id": item.group_id if item.group_id in groups else None, "group_name": groups.get(item.group_id),
             "description": item.description, "supply_public": item.supply_public,
             "title_engine": "v2",
             "supply_fallback_title": item.supply_fallback_title if is_manager(user) else None,
-            "sizes": sizes(snapshot)})
+            "sizes": sizes(snapshot), "material_count": material_count,
+            "my_available_count": max(0, material_count - (exhausted_count or 0)) if material_count is not None else None,
+            "counts_updated_at": timestamp(updated_at)})
     return items
 
 

@@ -462,6 +462,7 @@ class MaterialAsset(Base):
         Index("ix_material_assets_company_created_id", "company_id", "created_at", "id"),
         Index("ix_material_assets_company_creator_created_id", "company_id", "claimed_by", "created_at", "id"),
         Index("ix_material_assets_supply_listing", "company_id", "supply_listed", "supply_listed_at"),
+        Index("ix_material_assets_supply_template", "company_id", "supply_listed", "template_id"),
         Index("ix_material_assets_company_template_style", "company_id", "template_id", "style_id"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -483,6 +484,24 @@ class MaterialAsset(Base):
     supply_listed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     claimed_by: Mapped[int] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class SupplyTemplateCount(Base):
+    """同一公司一轮统计发布的模板素材总数。"""
+    __tablename__ = "supply_template_counts"
+    company_id: Mapped[int] = mapped_column(primary_key=True)
+    template_id: Mapped[int] = mapped_column(primary_key=True)
+    material_count: Mapped[int] = mapped_column()
+    updated_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class SupplyUserExhaustedCount(Base):
+    """仅保存账号已用满额度且当前仍上架的素材数量。"""
+    __tablename__ = "supply_user_exhausted_counts"
+    company_id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(primary_key=True)
+    template_id: Mapped[int] = mapped_column(primary_key=True)
+    exhausted_count: Mapped[int] = mapped_column()
 
 
 class SupplyAgent(Base):

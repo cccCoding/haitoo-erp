@@ -81,6 +81,9 @@ const myActiveJob = computed(() => jobs.value.some(item => (!item.user_id || ite
 const jobPollInterval = computed(() => jobs.value.some(unfinishedSupplyJob) ? 5000 : 30000)
 const submissionKeys = createSupplySubmissionKeys(() => crypto.randomUUID())
 let pollTimer: ReturnType<typeof setInterval> | undefined
+let templatePollTimer: ReturnType<typeof setInterval> | undefined
+const templateClock = ref(Date.now())
+const templatesScope = createSupplyRequestScope()
 let managerRequest = 0, agentRequest = 0
 let stopped = false, materialRequest = 0, listingRequest = 0, optionsRequest = 0, jobRequest = 0, accessRefreshing = false
 const pollingAbort = new AbortController()
@@ -101,6 +104,7 @@ function fail(e: any, fallback = '请求失败，请重试') {
   return e.message === 'Network Error' ? '网络连接失败，请重试' : e.message || fallback
 }
 function clearManagementCache() {
+  templatesScope.invalidate()
   closeUsage(); statisticsScope.invalidate(); usersScope.invalidate(); usersLoading.value=false
   materialRequest++; listingRequest++; jobRequest++; managerRequest++; agentRequest++
   showListingPicker.value=false; listingCandidates.value=[]; listingSelectedIds.value=[]; listingTotal.value=0
@@ -121,6 +125,7 @@ watch(canManage, allowed => {
   if (!allowed) { closeUsage(); statisticsScope.invalidate(); statistics.value=null; usersScope.invalidate(); usersLoading.value=false; agentRequest++ }
 }, { flush: 'sync' })
 watch(() => [props.token, props.user.id, props.user.company_id], () => {
+  templatesScope.invalidate()
   closeUsage(); statisticsScope.invalidate(); statistics.value=null; usersScope.invalidate(); usersLoading.value=false; agentRequest++
 }, { flush: 'sync' })
 async function reconcileAccess() {
@@ -165,12 +170,23 @@ function accountStatus(item: any) {
 }
 function canDownload(job: any) { return supplyFileStatus(job) === '可下载' }
 async function loadTemplates() {
+  const request = templatesScope.start()
   const [templateResponse, groupResponse] = await Promise.all([
-    api.get('/supply/templates', { headers: headers.value }),
-    api.get('/supply/template-groups', { headers: headers.value }),
+    api.get('/supply/templates', { headers: headers.value, signal: request.signal }),
+    api.get('/supply/template-groups', { headers: headers.value, signal: request.signal }),
   ])
+  if (stopped || !request.isCurrent()) return
   templates.value = list(templateResponse.data)
   templateGroups.value = list(groupResponse.data)
+  templateClock.value = Date.now()
+}
+async function refreshVisibleTemplates() {
+  templateClock.value = Date.now()
+  if (stopped || !props.token || document.hidden || tab.value !== 'templates' || loading.value || busy.value) return
+  try { await loadTemplates() }
+  catch (e: any) {
+    if (!stopped && !axios.isCancel(e)) error.value = fail(e, '刷新素材数量失败')
+  }
 }
 async function searchTemplates() {
   const filters = { ...templateFilters.value, search: templateFilters.value.search.trim() }
@@ -554,10 +570,15 @@ onMounted(async () => {
   window.addEventListener('resize', clearListingHoverPreview)
   window.addEventListener('focus', refreshVisibleMaterials)
   document.addEventListener('visibilitychange', refreshVisibleMaterials)
+  window.addEventListener('focus', refreshVisibleTemplates)
+  document.addEventListener('visibilitychange', refreshVisibleTemplates)
   await reload()
-  if (!stopped) startJobPolling()
+  if (!stopped) {
+    startJobPolling()
+    templatePollTimer = setInterval(() => { void refreshVisibleTemplates() }, 60000)
+  }
 })
-onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPreview); window.removeEventListener('focus', refreshVisibleMaterials); document.removeEventListener('visibilitychange', refreshVisibleMaterials); stopped = true; closeUsage(); statisticsScope.invalidate(); usersScope.invalidate(); materialRequest++; listingRequest++; optionsRequest++; jobRequest++; pollingAbort.abort(); if (pollTimer) clearInterval(pollTimer) })
+onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPreview); window.removeEventListener('focus', refreshVisibleMaterials); document.removeEventListener('visibilitychange', refreshVisibleMaterials); window.removeEventListener('focus', refreshVisibleTemplates); document.removeEventListener('visibilitychange', refreshVisibleTemplates); stopped = true; templatesScope.invalidate(); if (templatePollTimer) clearInterval(templatePollTimer); closeUsage(); statisticsScope.invalidate(); usersScope.invalidate(); materialRequest++; listingRequest++; optionsRequest++; jobRequest++; pollingAbort.abort(); if (pollTimer) clearInterval(pollTimer) })
 </script>
 
 <template>
@@ -612,6 +633,14 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
                 <div class="supply-template-cover">
                   <img v-if="item.cover_url" :src="imageUrl(item.cover_url)" :alt="item.name" loading="lazy"/>
                   <span v-else>暂无模板图片</span>
+                  <div class="supply-template-counts" :title="`统计更新：${supplyTime(item.counts_updated_at)}。包含侵权素材，我的可用为累计使用未满 3 次的素材条数。`">
+                    <template v-if="item.counts_updated_at != null">
+                      <span>素材总数 <strong>{{item.material_count}}</strong></span>
+                      <span>我的可用 <strong>{{item.my_available_count}}</strong></span>
+                      <small v-if="templateClock - item.counts_updated_at > 600000">待更新</small>
+                    </template>
+                    <span v-else>统计中</span>
+                  </div>
                 </div>
                 <div class="supply-section-heading"><h3 class="supply-template-text" :title="item.name">{{item.name}}</h3><span v-if="user.role!=='supply_user'" class="supply-tag" :class="{published:item.supply_public}">{{item.supply_public?'已公开':'未公开'}}</span></div>
                 <div class="supply-template-field">
@@ -816,7 +845,10 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
 .supply-job-controls select{width:auto;min-width:120px}
 .supply-template-grid{grid-template-columns:repeat(auto-fill,minmax(min(280px,100%),1fr))}
 .supply-card{min-width:0;display:flex;flex-direction:column}
-.supply-template-cover{height:220px;display:flex;align-items:center;justify-content:center;background:#f4f6fa;border-radius:8px;overflow:hidden;margin-bottom:16px;color:#64748b;font-size:13px}
+.supply-template-cover{position:relative;height:220px;display:flex;align-items:center;justify-content:center;background:#f4f6fa;border-radius:8px;overflow:hidden;margin-bottom:16px;color:#64748b;font-size:13px}
+.supply-template-counts{position:absolute;right:8px;top:8px;display:flex;flex-direction:column;gap:3px;padding:7px 9px;border:1px solid #e3e0f5;border-radius:7px;background:rgba(255,255,255,.94);color:#475569;font-size:12px;line-height:1.5;box-shadow:0 2px 6px #00000008}
+.supply-template-counts strong{color:#5940cb;font-variant-numeric:tabular-nums}
+.supply-template-counts small{color:#946200}
 .supply-template-cover img{width:100%;height:100%;object-fit:contain}
 .supply-card .supply-section-heading{flex-wrap:nowrap;align-items:flex-start;margin-bottom:0}
 .supply-card h3{min-width:0;overflow-wrap:anywhere}

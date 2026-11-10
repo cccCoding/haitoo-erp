@@ -231,6 +231,23 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  supply-count-worker:
+    build:
+      context: ./backend
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
+    logging: *default-logging
+    command: python -m app.supply_count_worker
+    environment:
+      DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
+      SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   matrix-worker:
     build:
       context: ./backend

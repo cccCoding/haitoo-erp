@@ -1319,7 +1319,7 @@ class MatrixMigrationSQLTests(unittest.TestCase):
         try:
             with engine.begin() as connection:
                 config = alembic_config(connection)
-                self.assertEqual(ScriptDirectory.from_config(config).get_heads(), ['20261108_74'])
+                self.assertEqual(ScriptDirectory.from_config(config).get_heads(), ['20261110_75'])
                 command.upgrade(config, '20261105_69')
                 connection.execute(text("INSERT INTO hub_runtime_locks "
                     "(id, company_id, container_code, task_id) VALUES (1, 1, 'legacy-env', 42)"))

@@ -14,6 +14,24 @@ from app.schema_version import alembic_config, assert_schema_current, schema_hea
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_supply_counts_migration_creates_empty_summaries_and_preserves_materials(self):
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, "20261108_74")
+            connection.execute(text("INSERT INTO material_assets "
+                "(id, company_id, url, name, sku, claimed_by, created_at, usage_status, supply_listed) "
+                "VALUES (900, 1, 'https://img/old', '旧素材', 'OLD', 1, CURRENT_TIMESTAMP, 'unused', 1)"))
+            command.upgrade(config, "head")
+            for table in ("supply_template_counts", "supply_user_exhausted_counts"):
+                self.assertEqual(connection.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one(), 0)
+            indexes = {row["name"]: row["column_names"] for row in inspect(connection).get_indexes("material_assets")}
+            self.assertEqual(indexes["ix_material_assets_supply_template"], ["company_id", "supply_listed", "template_id"])
+            self.assertEqual(connection.execute(text("SELECT sku, supply_listed FROM material_assets WHERE id=900")).one(), ("OLD", 1))
+            command.downgrade(config, "20261108_74")
+            self.assertNotIn("supply_template_counts", inspect(connection).get_table_names())
+            self.assertNotIn("supply_user_exhausted_counts", inspect(connection).get_table_names())
+            self.assertEqual(connection.execute(text("SELECT sku FROM material_assets WHERE id=900")).scalar_one(), "OLD")
+
     def test_task_list_indexes_preserve_tasks_and_support_scoped_pagination(self):
         names = {
             'ix_pod_tasks_company_type_id_status': ['company_id', 'task_type', 'id', 'status'],
