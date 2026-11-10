@@ -28,6 +28,7 @@ const config=ref({enabled:false,listing_enabled:false}),total=ref(0),page=ref(1)
 const groupOptions=ref<string[]>([])
 const filters=ref({q:'',site:'',group:'',ungrouped:false}),selected=ref<number[]>([]),allFiltered=ref(false)
 const appliedFilters=ref({...filters.value}),selectedEnvs=new Map<number,any>()
+const hideAccountNames=ref(true)
 const dialog=ref(''),previewData=ref<any>(null),run=ref<any>(null),events=ref<any[]>([]),logFloor=ref(0),runPage=ref(1),runTotal=ref(0)
 const historyScope=ref<any>(null),historyRuns=ref<any[]>([]),historyPage=ref(1),historyTotal=ref(0),historyLoading=ref(false)
 const runItemId=ref<number|null>(null),runFromHistory=ref(false),logsMore=ref(false)
@@ -85,6 +86,14 @@ function sortAria(key:string):'none'|'ascending'|'descending'{
  return dataSort.value.direction==='asc'?'ascending':'descending'
 }
 function sortIcon(key:string){return dataSort.value.key!==key?'':dataSort.value.direction==='asc'?'↑':'↓'}
+function accountNameText(name:string){
+ if(!hideAccountNames.value)return name
+ const characters=Array.from(name)
+ if(characters.length<=1)return characters.length?'****':''
+ const visibleCount=characters.length>=6?2:1
+ const suffix=characters.length>2?characters.slice(-visibleCount).join(''):''
+ return `${characters.slice(0,visibleCount).join('')}****${suffix}`
+}
 function productShare(count:number|null|undefined){
  const active=stats.value.active
  return `占总商品 ${count==null||active==null||active===0?'—':`${(count/active*100).toFixed(1)}%`}`
@@ -321,10 +330,10 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
       <select v-model="filters.site" class="mx-filter-site" aria-label="站点"><option value="">全部站点</option><option>MY</option><option value="unknown">未知站点</option></select>
       <div class="mx-filter-actions"><button type="submit" class="primary">筛选</button></div>
     </form>
-    <div v-if="tab==='environments'" class="mx-toolbar"><button class="mx-sync" :disabled="busy||!!syncPending.length" title="同步当前账号已配置团队的所有在线设备" @click="syncEnvironments"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M20 12a8 8 0 1 1-2.3-5.7L20 9"/></svg>{{syncPending.length?'同步中…':'同步环境'}}</button><button :disabled="loading||busy||!total" title="选择当前筛选条件下的全部环境，包含其他分页" @click="selectCurrent">全选当前</button><button @click="selected=[];allFiltered=false">清空选择</button><button :disabled="!selectedCount||busy||loading" @click="openOverrides">批量设置站点/活跃</button><button class="primary" :disabled="!selectedCount||busy||!config.enabled" @click="openManual">批量执行</button><span class="mx-selected">已选 {{selectedCount}}</span></div>
+    <div v-if="tab==='environments'" class="mx-toolbar"><button class="mx-sync" :disabled="busy||!!syncPending.length" title="同步当前账号已配置团队的所有在线设备" @click="syncEnvironments"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M20 12a8 8 0 1 1-2.3-5.7L20 9"/></svg>{{syncPending.length?'同步中…':'同步环境'}}</button><button :disabled="loading||busy||!total" title="选择当前筛选条件下的全部环境，包含其他分页" @click="selectCurrent">全选当前</button><button @click="selected=[];allFiltered=false">清空选择</button><button type="button" class="mx-hide-names" :aria-pressed="hideAccountNames" @click="hideAccountNames=!hideAccountNames"><span v-if="hideAccountNames" aria-hidden="true">✓</span>隐藏名称</button><button :disabled="!selectedCount||busy||loading" @click="openOverrides">批量设置站点/活跃</button><button class="primary" :disabled="!selectedCount||busy||!config.enabled" @click="openManual">批量执行</button><span class="mx-selected">已选 {{selectedCount}}</span></div>
     <div class="mx-table-wrap" :aria-busy="loading"><table><thead><tr><th v-if="tab==='environments'">选择</th><th v-for="column in identityColumns" :key="column.key" :aria-sort="tab==='data'?sortAria(column.key):undefined"><button v-if="tab==='data'" type="button" class="mx-sort-header" @click="toggleDataSort(column.key)">{{column.label}}<span aria-hidden="true">{{sortIcon(column.key)}}</span></button><template v-else>{{column.label}}</template></th><template v-if="tab==='environments'"><th>店铺</th><th>绑定账号</th><th title="当前上架的产品数量">产品</th><th title="管理订单－全部标签页的订单数量；历史快照显示近7天订单数；尚未采集时显示 —">订单</th><th>活跃</th><th>上品 / 执行</th><th>采集</th></template><template v-else><th v-for="column in dataColumns" :key="column.key" :aria-sort="sortAria(column.key)"><button type="button" class="mx-sort-header" @click="toggleDataSort(column.key)">{{column.label}}<span aria-hidden="true">{{sortIcon(column.key)}}</span></button></th></template><th>操作</th></tr></thead><tbody>
       <tr v-for="row in visibleRows" :key="row.id" :class="{selected:allFiltered||selected.includes(row.id)}"><td v-if="tab==='environments'"><input type="checkbox" :aria-label="`选择环境 ${row.container_code}`" :disabled="busy||loading" :checked="allFiltered||selected.includes(row.id)" @change="toggle(row.id)"/></td><td><b>{{row.name}}</b><small>{{row.container_code}}</small></td><td>{{row.group||'未分组'}}</td><td><span class="mx-tag">{{row.site||'未知'}}</span></td>
-      <template v-if="tab==='environments'"><td>{{row.shop?.name||'待识别'}}<small>{{row.shop?.external_id}}</small></td><td>{{row.account_names.join(' / ')||'—'}}</td><td :title="row.snapshot?.observed_at">{{display(row.snapshot?.active)}}</td><td :title="row.snapshot?.orders_total!=null?'管理订单－全部标签页显示数量':row.snapshot?.orders==null?'尚未采集订单数据':`近7天订单：${row.snapshot.window_start} — ${row.snapshot.window_end}`">{{display(row.snapshot?.orders_total ?? row.snapshot?.orders)}}</td><td><span :class="{'mx-activity-normal':row.activity_status==='normal','mx-activity-closed':row.activity_status==='closed'}">{{row.activity_status==='normal'?'正常':row.activity_status==='closed'?'封店':'未检测'}}</span></td><td><span class="mx-state" :class="row.latest_item?.status">{{label(row.latest_item?.stage)}}</span><small>{{label(row.latest_item?.submission)}}</small></td><td>{{label(row.latest_item?.collection_status)}}<small v-if="row.snapshot?.stale">数据超过24小时</small></td></template>
+      <template v-if="tab==='environments'"><td>{{row.shop?.name||'待识别'}}<small>{{row.shop?.external_id}}</small></td><td>{{row.account_names.map(accountNameText).join(' / ')||'—'}}</td><td :title="row.snapshot?.observed_at">{{display(row.snapshot?.active)}}</td><td :title="row.snapshot?.orders_total!=null?'管理订单－全部标签页显示数量':row.snapshot?.orders==null?'尚未采集订单数据':`近7天订单：${row.snapshot.window_start} — ${row.snapshot.window_end}`">{{display(row.snapshot?.orders_total ?? row.snapshot?.orders)}}</td><td><span :class="{'mx-activity-normal':row.activity_status==='normal','mx-activity-closed':row.activity_status==='closed'}">{{row.activity_status==='normal'?'正常':row.activity_status==='closed'?'封店':'未检测'}}</span></td><td><span class="mx-state" :class="row.latest_item?.status">{{label(row.latest_item?.stage)}}</span><small>{{label(row.latest_item?.submission)}}</small></td><td>{{label(row.latest_item?.collection_status)}}<small v-if="row.snapshot?.stale">数据超过24小时</small></td></template>
       <template v-else><td>{{display(row.snapshot?.active)}}</td><td>{{display(row.snapshot?.with_views)}}</td><td>{{display(row.snapshot?.zero_views)}}</td><td>{{display(row.snapshot?.impressions)}}</td><td>{{display(row.snapshot?.clicks)}}</td><td>{{percent(row.snapshot?.ctr)}}</td><td :title="row.snapshot?.gmv_scope==='all_products'?'最近30天全部商品GMV':'在售商品已知GMV小计'">{{display(row.snapshot?.gmv)}} {{row.snapshot?.gmv!=null?row.snapshot.currency:''}}</td><td :title="row.snapshot?.sell_through_rate==null?'尚无商品销量数据':'有销量商品数 ÷ 已采集销量的商品数'">{{percent(row.snapshot?.sell_through_rate)}}</td><td>{{display(row.snapshot?.violations_score)}}</td><td>{{row.snapshot?.observed_at?new Date(row.snapshot.observed_at).toLocaleString():'未采集'}}<small v-if="row.snapshot?.stale">已过期</small></td></template>
       <td class="mx-row-actions"><button v-if="tab==='environments'" @click="openHistory(row)">运行记录</button><button v-else :disabled="!row.shop" @click="showShop(row)">商品明细</button></td></tr>
       <tr v-if="!rows.length"><td :colspan="tab==='environments'?12:14" class="mx-empty">{{loading?'正在加载…':'暂无环境，请启动连接器，并在设备管理中配置连接和同步环境'}}</td></tr></tbody></table></div>
@@ -514,6 +523,10 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
 .mx-filter-actions button{min-height:36px}
 .mx-toolbar{gap:8px;padding:8px 16px 12px;border-bottom:1px solid var(--mx-line);font-size:12px}
 .mx-toolbar button{min-height:32px;padding:5px 10px}
+.matrix .mx-hide-names{background:#ede8fb;border-color:#ede8fb;color:#6043d4}
+.matrix .mx-hide-names:hover{background:#e3daf8;border-color:#e3daf8}
+.matrix .mx-hide-names[aria-pressed="true"]{background:#6043d4;border-color:#6043d4;color:#fff}
+.matrix .mx-hide-names[aria-pressed="true"]:hover{background:#5235c1;border-color:#5235c1}
 .matrix .mx-sync{background:#2563eb;border-color:#2563eb;color:#fff;font-weight:600}
 .matrix .mx-sync:hover{background:#1d4ed8;border-color:#1d4ed8;color:#fff}
 .mx-selected{margin-left:auto;color:#7e719f;font-size:12px;font-weight:500;white-space:nowrap}
