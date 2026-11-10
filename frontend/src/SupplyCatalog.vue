@@ -631,7 +631,9 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
             <div class="supply-template-grid">
               <article v-for="item in filteredTemplates" :key="item.id" class="supply-card">
                 <div class="supply-template-cover">
-                  <img v-if="item.cover_url" :src="imageUrl(item.cover_url)" :alt="item.name" loading="lazy"/>
+                  <button v-if="item.cover_url" type="button" class="supply-template-preview" :aria-label="`查看 ${item.name} 大图`" title="点击查看大图" @click="preview={url:item.cover_url,name:item.name,kind:'template'}">
+                    <img :src="imageUrl(item.cover_url)" :alt="item.name" loading="lazy"/>
+                  </button>
                   <span v-else>暂无模板图片</span>
                   <div class="supply-template-counts" :title="`统计更新：${supplyTime(item.counts_updated_at)}。包含侵权素材，我的可用为累计使用未满 3 次的素材条数。`">
                     <template v-if="item.counts_updated_at != null">
@@ -802,7 +804,7 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
         <div class="modal-actions"><button v-if="canDownload(jobDetail)" class="primary" :disabled="!!busy" @click="downloadJob(jobDetail)">下载 Excel</button><span v-else>{{supplyFileStatus(jobDetail)}}</span></div>
       </section>
     </div>
-    <div v-if="preview" class="modal-backdrop" @click.self="preview=null"><section v-dialog-focus="{close:()=>{preview=null},busy:false}" class="modal-card supply-dialog supply-image-dialog" role="dialog" aria-modal="true" aria-label="素材图片预览"><button class="modal-close" aria-label="关闭预览" @click="preview=null">×</button><img :src="imageUrl(preview.url)" :alt="preview.name || preview.sku"/><p>{{preview.sku || preview.name}}</p></section></div>
+    <div v-if="preview" class="modal-backdrop" @click.self="preview=null"><section v-dialog-focus="{close:()=>{preview=null},busy:false}" class="modal-card supply-dialog supply-image-dialog" role="dialog" aria-modal="true" :aria-label="preview.kind==='template'?'模板图片预览':'素材图片预览'"><button class="modal-close" aria-label="关闭预览" @click="preview=null">×</button><img :src="imageUrl(preview.url)" :alt="preview.name || preview.sku"/><p>{{preview.sku || preview.name}}</p></section></div>
   </section>
 </template>
 
@@ -850,6 +852,8 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
 .supply-template-counts strong{color:#5940cb;font-variant-numeric:tabular-nums}
 .supply-template-counts small{color:#946200}
 .supply-template-cover img{width:100%;height:100%;object-fit:contain}
+.supply-template-cover .supply-template-preview{display:block;width:100%;height:100%;padding:0;border:0;border-radius:0;background:transparent;cursor:zoom-in}
+.supply-template-preview:focus-visible{outline:2px solid #7c5cff;outline-offset:-3px}
 .supply-card .supply-section-heading{flex-wrap:nowrap;align-items:flex-start;margin-bottom:0}
 .supply-card h3{min-width:0;overflow-wrap:anywhere}
 .supply-tag.published{background:#eaf9ef;color:#167144;flex-shrink:0}
