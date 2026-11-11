@@ -136,7 +136,7 @@ Agent仅同步当前Hub用户有权访问的目录。每批包含snapshot_key、
 
 服务端仅配置MATRIX_RELEASE_PUBLIC_KEYS公钥JSON。Agent从内置trusted_keys.json或用户明确指定的HAITOO_RELEASE_KEYS_FILE读取公钥；默认空库拒绝在线分发。私钥只在离线发布环境，sign_release.py生成清单。
 
-发布包存私有R2独立前缀matrix-releases，公司隔离并鉴权下载。已发布同版本不可换内容；停用阻止后续下载。生产公钥不由开发测试临时密钥替代。
+站点插件存私有 R2 的 matrix-releases 前缀，继续公司隔离并鉴权下载。连接器改用平台全局 connector_releases 记录及 connector 前缀，首次安装与自动更新共用签名发布；按系统、架构、三段版本选择稳定版本，测试版本仅下发指定设备。大文件通过 connector-staging 临时链接直传，读回校验及 ETag 条件复制后归档。已发布同版本不可换内容；撤回阻止后续下载及暂存激活。生产公钥不由开发测试临时密钥替代。
 
 更新仅在设备空闲时检查，间隔15分钟。校验签名、平台、协议、文件和空间后写独立版本槽。Agent通过独立帮助进程等待旧进程结束、启动新版本并等待健康确认；失败恢复旧命令，问题包熔断。保持原托盘/控制台启动方式。
 

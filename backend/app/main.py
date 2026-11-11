@@ -355,6 +355,8 @@ app.include_router(matrix_router)
 app.include_router(matrix_releases_router)
 from .hub_v5.management import router as matrix_management_router
 app.include_router(matrix_management_router)
+from .hub_v5.connector_releases import router as connector_releases_router
+app.include_router(connector_releases_router)
 from .hub_v5.installers import router as agent_installers_router
 app.include_router(agent_installers_router)
 from .hub_v5.limits import MatrixRequestLimit

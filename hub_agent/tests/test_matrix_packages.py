@@ -298,9 +298,9 @@ class UpdateLifecycleTests(unittest.TestCase):
     def test_successful_health_switch_preserves_previous_slot(self):
         from updater import apply_update
         from unittest.mock import MagicMock
-        transaction,m=self.agent_transaction();child=MagicMock();child.poll.return_value=None
+        transaction,m=self.agent_transaction();child=MagicMock();child.pid=999999;child.poll.return_value=None
         def spawn(*args,**kwargs):
-            Path(kwargs['env']['HAITOO_UPDATE_HEALTH']).write_text('{"ready":true}')
+            Path(kwargs['env']['HAITOO_UPDATE_HEALTH']).write_text(json.dumps({'ready':True,'version':m['version']}))
             return child
         with patch('updater.keys',return_value=self.keys),patch('updater.target',return_value=('macos','arm64')),patch('updater.os.kill',side_effect=ProcessLookupError()),patch('updater.subprocess.Popen',side_effect=spawn):apply_update(transaction)
         self.assertEqual(json.loads((self.root/'current-agent.json').read_text())['manifest']['sha256'],m['sha256'])
@@ -310,7 +310,7 @@ class UpdateLifecycleTests(unittest.TestCase):
     def test_failed_health_restarts_previous_and_quarantines_package(self):
         from updater import apply_update
         from unittest.mock import MagicMock
-        transaction,m=self.agent_transaction();child=MagicMock();child.poll.return_value=1
+        transaction,m=self.agent_transaction();child=MagicMock();child.pid=999999;child.poll.return_value=1
         with patch('updater.keys',return_value=self.keys),patch('updater.target',return_value=('macos','arm64')),patch('updater.os.kill',side_effect=ProcessLookupError()),patch('updater.subprocess.Popen',return_value=child) as spawn:apply_update(transaction)
         self.assertFalse((self.root/'current-agent.json').exists())
         self.assertEqual(spawn.call_args_list[-1].args[0],['/safe/old-agent','tray'])
@@ -331,3 +331,184 @@ class ReleaseArchiveTests(unittest.TestCase):
             (root/'outside').write_text('private')
             (source/'external').symlink_to(root/'outside')
             with self.assertRaises(ValueError):package_directory(source,root/'unsafe.zip')
+
+
+class AutomaticUpdateTests(unittest.IsolatedAsyncioTestCase):
+    setUp = PackageTests.setUp
+    package = PackageTests.package
+
+    def release(self):
+        archive, manifest = self.package({'agent.py': b'print("new")'})
+        manifest.update(kind='agent', version='5.3.0', min_launcher_version='5.2.0')
+        manifest['signature'] = base64.b64encode(self.key.sign(canonical(manifest))).decode()
+        return archive, {'id': 12, 'manifest': manifest}
+
+    def client(self, archive, row):
+        from types import SimpleNamespace
+        async def download(identity, destination, size, **kwargs): destination.write_bytes(archive.read_bytes())
+        return SimpleNamespace(request=AsyncMock(side_effect=lambda method, path, **kw: [row] if path.endswith('connector-releases') else []),
+                               connector_download_release=AsyncMock(side_effect=download), matrix_download_release=AsyncMock())
+
+    async def test_busy_download_prepares_without_restart_and_idle_activates(self):
+        archive, row = self.release(); client = self.client(archive, row); manager = UpdateManager(self.root, client)
+        with patch('updater.keys', return_value=self.keys), patch('updater.target', return_value=('macos', 'arm64')), patch('updater.subprocess.Popen') as spawn:
+            self.assertFalse(await manager.check(can_activate=False))
+            client.connector_download_release.assert_awaited_once(); spawn.assert_not_called()
+            self.assertEqual(manager.state['status'], 'waiting_idle')
+            self.assertFalse((self.root / 'pending-agent.json').exists())
+            self.assertTrue(await manager.activate()); spawn.assert_called_once()
+            self.assertEqual(json.loads((self.root / 'pending-agent.json').read_text())['manifest'], row['manifest'])
+
+    async def test_network_failure_retries_without_quarantining_version(self):
+        archive, row = self.release(); client = self.client(archive, row)
+        client.connector_download_release.side_effect = TimeoutError('offline')
+        manager = UpdateManager(self.root, client)
+        with patch('updater.keys', return_value=self.keys), patch('updater.target', return_value=('macos', 'arm64')):
+            self.assertFalse(await manager.check(can_activate=False))
+            self.assertEqual(manager.state['status'], 'retry')
+            self.assertFalse((self.root / 'blocked-releases.json').exists())
+            self.assertGreater(manager.next_check, 0)
+            manager.request_check(); await manager.check(can_activate=False)
+            self.assertEqual(client.connector_download_release.await_count, 2)
+
+    async def test_corrupt_package_is_quarantined(self):
+        archive, row = self.release(); client = self.client(archive, row)
+        archive.write_bytes(b'broken')
+        manager = UpdateManager(self.root, client)
+        with patch('updater.keys', return_value=self.keys), patch('updater.target', return_value=('macos', 'arm64')):
+            await manager.check(can_activate=False)
+        self.assertEqual(manager.state['status'], 'rejected')
+        self.assertIn(row['manifest']['sha256'], json.loads((self.root / 'blocked-releases.json').read_text()))
+
+    async def test_withdrawn_staged_release_does_not_activate(self):
+        archive, row = self.release(); client = self.client(archive, row); manager = UpdateManager(self.root, client)
+        with patch('updater.keys', return_value=self.keys), patch('updater.target', return_value=('macos', 'arm64')), patch('updater.subprocess.Popen') as spawn:
+            await manager.check(can_activate=False)
+            client.request.side_effect = None; client.request.return_value = []
+            self.assertFalse(await manager.activate()); spawn.assert_not_called()
+        self.assertIsNone(manager.prepared)
+        self.assertFalse((self.root / 'staged-agent.json').exists())
+
+    async def test_old_launcher_requires_installer_and_disk_failure_is_retryable(self):
+        archive, row = self.release(); client = self.client(archive, row); manager = UpdateManager(self.root, client)
+        with patch('updater.keys', return_value=self.keys), patch('updater.target', return_value=('macos', 'arm64')), patch.dict('os.environ', {'HAITOO_LAUNCHER_VERSION': '5.1.0'}):
+            await manager.check(can_activate=False)
+            self.assertEqual(manager.state['status'], 'installer_required')
+            client.connector_download_release.assert_not_awaited()
+        from types import SimpleNamespace
+        manager.request_check()
+        with patch('updater.keys', return_value=self.keys), patch('updater.target', return_value=('macos', 'arm64')), patch('updater.shutil.disk_usage', return_value=SimpleNamespace(free=0)):
+            await manager.check(can_activate=False)
+            self.assertEqual(manager.state['status'], 'insufficient_space')
+            self.assertFalse((self.root / 'blocked-releases.json').exists())
+
+
+class NativeArchiveTests(unittest.TestCase):
+    setUp = PackageTests.setUp
+
+    def test_signed_macos_internal_symlinks_preserve_bundle_structure(self):
+        from package_release import package_directory
+        from package_security import verify_directory
+        source = self.root / 'Agent.app'; (source / 'Contents/Frameworks/Versions/A').mkdir(parents=True)
+        (source / 'Contents/Frameworks/Versions/A/binary').write_bytes(b'mach-o')
+        (source / 'Contents/Frameworks/Versions/Current').symlink_to('A')
+        archive = package_directory(source, self.root / 'update.zip', preserve_links=True)
+        with zipfile.ZipFile(archive) as z:
+            files = {i.filename: hashlib.sha256(z.read(i)).hexdigest() for i in z.infolist()}
+            links = {i.filename: z.read(i).decode() for i in z.infolist() if stat.S_ISLNK(i.external_attr >> 16)}
+        manifest = {'kind':'agent', 'version':'5.3.0', 'platform':'macos', 'arch':'arm64', 'key_id':'test',
+                    'entrypoint':'Agent.app/Contents/Frameworks/Versions/A/binary', 'files':files, 'symlinks':links,
+                    'sha256':hashlib.sha256(archive.read_bytes()).hexdigest(), 'size':archive.stat().st_size, 'protocol_min':5, 'protocol_max':5}
+        manifest['signature'] = base64.b64encode(self.key.sign(canonical(manifest))).decode()
+        verify_manifest(manifest, self.keys, 'macos', 'arm64')
+        directory = unpack_verified(archive, manifest, self.root / 'slot')
+        link = directory / 'Agent.app/Contents/Frameworks/Versions/Current'
+        self.assertTrue(link.is_symlink()); self.assertEqual((link / 'binary').read_bytes(), b'mach-o')
+        verify_directory(directory, manifest)
+        link.unlink(); link.symlink_to('/etc')
+        with self.assertRaises(ValueError): verify_directory(directory, manifest)
+
+
+class InterruptedUpdateTests(UpdateLifecycleTests):
+    def test_damaged_staged_files_recover_previous_after_interruption(self):
+        from updater import apply_update
+        transaction, manifest = self.agent_transaction()
+        data = json.loads(transaction.read_text()); data['created_at'] = 0; atomic(transaction, data)
+        (self.root / 'versions' / manifest['sha256'] / manifest['entrypoint']).write_text('damaged')
+        with patch('updater.keys', return_value=self.keys), patch('updater.target', return_value=('macos', 'arm64')), patch('updater.subprocess.Popen') as spawn:
+            apply_update(transaction)
+        self.assertFalse(transaction.exists())
+        spawn.assert_called_once(); self.assertEqual(spawn.call_args.args[0], ['/safe/old-agent', 'tray'])
+        self.assertEqual(json.loads((self.root / 'update-result.json').read_text())['status'], 'rolled_back')
+
+
+class StagedStartupTests(unittest.TestCase):
+    def test_new_version_does_not_reactivate_its_own_staged_transaction(self):
+        from updater import VERSION
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            atomic(root/'staged-agent.json',{'id':12,'manifest':{'version':VERSION,'sha256':'a'*64}})
+            manager=UpdateManager(root,AsyncMock())
+            self.assertIsNone(manager.prepared)
+            # 原辅助进程仍需要原暂存事务，子进程只忽略，不抢先删除。
+            self.assertTrue((root/'staged-agent.json').exists())
+
+
+class RealChildUpdateTests(unittest.TestCase):
+    setUp = PackageTests.setUp
+    package = PackageTests.package
+
+    def test_real_child_reports_version_before_pointer_commit(self):
+        import subprocess
+        from updater import apply_update
+        source = b'''import json,os,time
+from pathlib import Path
+Path(os.environ['HAITOO_UPDATE_HEALTH']).write_text(json.dumps({'ready':True,'version':'5.0.1'}))
+time.sleep(30)
+'''
+        archive, manifest = self.package({'agent.py': source})
+        manifest['kind'] = 'agent'; manifest['signature'] = base64.b64encode(self.key.sign(canonical(manifest))).decode()
+        unpack_verified(archive, manifest, self.root / 'versions' / manifest['sha256'])
+        transaction = self.root / 'pending-agent.json'
+        atomic(transaction, {'manifest':manifest, 'parent_pid':123456789, 'created_at':0, 'previous_command':['/safe/old-agent','tray']})
+        children = []; original = subprocess.Popen
+        def spawn(*args, **kwargs):
+            child = original(*args, **kwargs); children.append(child); return child
+        try:
+            with patch('updater.keys', return_value=self.keys), patch('updater.target', return_value=('macos','arm64')), patch('updater.subprocess.Popen', side_effect=spawn):
+                apply_update(transaction)
+            self.assertEqual(len(children),1)
+            self.assertEqual(json.loads((self.root/'current-agent.json').read_text())['manifest'],manifest)
+            self.assertEqual(json.loads((self.root/'update-result.json').read_text())['status'],'installed')
+            self.assertFalse(transaction.exists())
+        finally:
+            for child in children:
+                if child.poll() is None:child.terminate()
+                child.wait(timeout=5)
+
+
+class MacReleaseSigningTests(unittest.TestCase):
+    setUp = PackageTests.setUp
+
+    def test_formal_manifest_signs_macos_bundle_with_linked_version_and_trust_files(self):
+        from package_release import package_directory
+        from sign_release import main
+        source=self.root/'Agent.app';resources=source/'Contents/Resources';frameworks=source/'Contents/Frameworks'
+        resources.mkdir(parents=True);frameworks.mkdir()
+        (resources/'agent-version.json').write_text('{"version":"5.3.0"}')
+        (resources/'trusted_keys.json').write_text(json.dumps(self.keys))
+        for name in ('agent-version.json','trusted_keys.json'):
+            (frameworks/name).symlink_to('../Resources/'+name)
+        (source/'agent.py').write_text('print("agent")')
+        archive=package_directory(source,self.root/'update.zip',preserve_links=True)
+        installer=self.root/'HaitooHubAgent-macos-arm64-5.3.0.dmg';installer.write_bytes(b'test installer')
+        private=self.root/'private.pem'
+        private.write_bytes(self.key.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()))
+        output=self.root/'manifest.json'
+        args=['sign_release.py','--package',str(archive),'--installer',str(installer),'--key',str(private),'--key-id','test',
+              '--version','5.3.0','--platform','macos','--arch','arm64','--kind','agent','--entrypoint','Agent.app/agent.py','--output',str(output)]
+        with patch.object(sys,'argv',args):main()
+        manifest=json.loads(output.read_text())
+        verify_manifest(manifest,self.keys,'macos','arm64')
+        self.assertEqual(manifest['installer']['sha256'],hashlib.sha256(installer.read_bytes()).hexdigest())
+        self.assertEqual(len(manifest['symlinks']),2)

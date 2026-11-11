@@ -148,7 +148,7 @@ nav a.active { background: #263c60; color: #fff; box-shadow: inset 3px 0 #78a6ff
   .brand { padding: 0; font-size: 16px; }
   .brand img { width: 28px; height: 28px; }
   .shell aside > p { display: none; }
-  nav { display: flex; gap: 4px; margin-top: 14px; }
+  nav { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 14px; }
   nav a { flex: 1; padding: 9px 8px; font-size: 12px; text-align: center; white-space: nowrap; }
   nav a.active { box-shadow: inset 0 -2px #78a6ff; }
   .operator { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 0 0; }

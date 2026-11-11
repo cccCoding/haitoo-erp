@@ -2,6 +2,11 @@ name: 构建 Windows 本地执行器
 
 on:
   workflow_dispatch:
+    inputs:
+      release:
+        description: '正式签名安装包（需配置签名证书、发布私钥及公钥库）'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -21,11 +26,43 @@ jobs:
           python-version: '3.12'
           architecture: x64
 
+      - name: 准备正式签名环境
+        if: inputs.release
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.HAITOO_WINDOWS_PFX_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.HAITOO_WINDOWS_PFX_PASSWORD }}
+          RELEASE_PRIVATE_KEY_BASE64: ${{ secrets.HAITOO_RELEASE_PRIVATE_KEY_BASE64 }}
+          RELEASE_KEY_ID: ${{ vars.HAITOO_RELEASE_KEY_ID }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($value in @($env:SIGNING_PFX_BASE64, $env:SIGNING_PASSWORD, $env:RELEASE_PRIVATE_KEY_BASE64, $env:RELEASE_KEY_ID)) {
+            if (-not $value) { throw '缺少正式签名配置' }
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'haitoo-signing.pfx'
+          $key = Join-Path $env:RUNNER_TEMP 'haitoo-release.pem'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+          [IO.File]::WriteAllBytes($key, [Convert]::FromBase64String($env:RELEASE_PRIVATE_KEY_BASE64))
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString $env:SIGNING_PASSWORD -AsPlainText -Force)
+          "HAITOO_WINDOWS_CERT_SHA1=$($cert.Thumbprint)" | Out-File $env:GITHUB_ENV -Append
+          "HAITOO_RELEASE_PRIVATE_KEY=$key" | Out-File $env:GITHUB_ENV -Append
+          "HAITOO_RELEASE_KEY_ID=$env:RELEASE_KEY_ID" | Out-File $env:GITHUB_ENV -Append
+          $tool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $tool) { throw '未找到 SignTool' }
+          "SIGNTOOL_EXE=$($tool.FullName)" | Out-File $env:GITHUB_ENV -Append
+          'ISCC_EXE=C:\Program Files (x86)\Inno Setup 6\ISCC.exe' | Out-File $env:GITHUB_ENV -Append
+          Remove-Item -LiteralPath $pfx -Force
+
       - name: 运行测试并打包
         shell: pwsh
         env:
           BUILD_PYTHON: ${{ steps.python.outputs.python-path }}
-        run: ./hub_agent/build_windows.ps1 -PythonExecutable $env:BUILD_PYTHON -RunTests
+        run: |
+          if ('${{ inputs.release }}' -eq 'true') {
+            ./hub_agent/build_windows.ps1 -PythonExecutable $env:BUILD_PYTHON -RunTests -Release
+          } else {
+            ./hub_agent/build_windows.ps1 -PythonExecutable $env:BUILD_PYTHON -RunTests
+          }
 
       - name: 上传完整 Windows 安装包
         uses: actions/upload-artifact@v4
@@ -34,3 +71,13 @@ jobs:
           path: hub_agent/dist/
           if-no-files-found: error
           retention-days: 14
+
+      - name: 清理本次导入的签名凭据
+        if: always() && inputs.release
+        shell: pwsh
+        run: |
+          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'haitoo-release.pem') -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'haitoo-signing.pfx') -Force -ErrorAction SilentlyContinue
+          if ($env:HAITOO_WINDOWS_CERT_SHA1) {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$env:HAITOO_WINDOWS_CERT_SHA1" -Force -ErrorAction SilentlyContinue
+          }

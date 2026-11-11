@@ -16,6 +16,7 @@ from contextlib import suppress, AsyncExitStack
 import platform
 import socket
 import sys
+import subprocess
 import tempfile
 import threading
 import webbrowser
@@ -125,7 +126,10 @@ class ERPClient:
     async def matrix_download_release(self, identity, destination, expected_size):
         await self._matrix_stream("GET", f"/hub-v5/agent/releases/{identity}/file", destination, expected_size)
 
-    async def _matrix_stream(self, method, path, destination, expected_size, **kwargs):
+    async def connector_download_release(self, identity, destination, expected_size, on_progress=None):
+        await self._matrix_stream("GET", f"/hub-v5/agent/connector-releases/{identity}/file", destination, expected_size, on_progress=on_progress)
+
+    async def _matrix_stream(self, method, path, destination, expected_size, on_progress=None, **kwargs):
         if not 0 < expected_size <= 250 * 1024 * 1024:
             raise RuntimeError("下载文件超过本机上限")
         temporary = destination.with_suffix(".download")
@@ -141,6 +145,8 @@ class ERPClient:
                             if size > expected_size:
                                 raise RuntimeError("下载文件大小不一致")
                             stream.write(chunk)
+                            if on_progress:
+                                on_progress(size, expected_size)
                     if size != expected_size:
                         raise RuntimeError("下载文件不完整")
             temporary.replace(destination)
@@ -852,14 +858,29 @@ class AgentRuntime:
                     await asyncio.sleep(60)
             await asyncio.sleep(1)
 
+    async def update_loop(self):
+        while not self.state["stop"]:
+            if self.client and not self.state["login_required"]:
+                from updater import UpdateManager
+                if not self.matrix.updater:
+                    self.matrix.updater = UpdateManager(self.matrix.root, self.client)
+                self.matrix.updater.client = self.client
+                await self.matrix.updater.check(can_activate=False)
+            await asyncio.sleep(2)
+
     async def run(self):
         await self.connector.start()
-        if os.environ.get("HAITOO_UPDATE_HEALTH"):
-            from updater import atomic
-            atomic(Path(os.environ["HAITOO_UPDATE_HEALTH"]), {"ready": True})
         background = []
         try:
             token = keyring.get_password(SERVICE_NAME, TOKEN_KEY)
+            health_path = os.environ.pop("HAITOO_UPDATE_HEALTH", None)
+            if health_path:
+                from updater import atomic, VERSION, keys, target
+                from plugin_manager import load_plugin
+                # 核心模块已加载，验证配置、凭据库和插件可读；远程离线不影响本机健康。
+                load_config()
+                self.matrix.plugin = load_plugin(self.matrix.root, keys(), *target())
+                atomic(Path(health_path), {"ready": True, "version": VERSION})
             if token:
                 client = ERPClient(self.config.get("erp_url", API_URL), token)
                 try:
@@ -877,21 +898,25 @@ class AgentRuntime:
             if not self.client:
                 self.require_login()
             background = [asyncio.create_task(self.heartbeat_loop()), asyncio.create_task(self.sync_loop()),
-                          asyncio.create_task(self.authorization_loop())]
+                          asyncio.create_task(self.authorization_loop()), asyncio.create_task(self.update_loop())]
             while not self.state["stop"]:
                 if self.state["login_required"]:
                     if self.client:
                         self.require_login()
                     await asyncio.sleep(1)
                     continue
+                if await self.matrix.check_updates():
+                    self.state.update(stop=True, update_exit=True)
+                    break
+                if self.matrix.updater and self.matrix.updater.prepared:
+                    self.state["status"] = "更新已准备，正在确认发布状态"
+                    await asyncio.sleep(POLL_SECONDS)
+                    continue
                 if self.state["paused"]:
                     self.state["status"] = "已暂停领取"
                 elif self.matrix.enabled and await self.matrix.try_next():
                     continue
                 else:
-                    if await self.matrix.check_updates():
-                        self.state.update(stop=True, update_exit=True)
-                        break
                     self.state["status"] = self.state.get("matrix_status") or "在线，等待 ERP 任务"
                 await asyncio.sleep(POLL_SECONDS)
         finally:
@@ -959,9 +984,33 @@ def run_tray(config):
                 runtime.execution.cancel()
         loop.call_soon_threadsafe(stop)
         icon.stop()
+    def check_updates(*_):
+        def request():
+            if runtime.matrix.updater:
+                runtime.matrix.updater.request_check()
+            runtime.state["status"] = "正在检查更新"
+        loop.call_soon_threadsafe(request)
+    def toggle_startup(*_):
+        from startup import configure, bootstrap_command
+        try:
+            enabled = not runtime.config.get("autostart", True)
+            configure(enabled, bootstrap_command())
+            runtime.config["autostart"] = enabled; save_config(runtime.config)
+        except Exception as exc:
+            runtime.state["status"] = str(exc)
+    def update_status(_):
+        from updater import VERSION
+        state = runtime.matrix.updater.state if runtime.matrix.updater else {}
+        labels = {"checking":"检查更新", "downloading":"正在下载", "waiting_idle":"等待任务结束后更新", "restart_requested":"正在更新", "retry":"更新失败，稍后重试", "rejected":"更新包校验失败", "no_trusted_keys":"更新公钥未配置", "insufficient_space":"磁盘空间不足", "installer_required":"请在 ERP 下载新版安装程序", "installed":"更新成功", "rolled_back":"已恢复上一版本", "up_to_date":"已是最新版本"}
+        progress = f" {state['progress']}%" if state.get('status') == 'downloading' and 'progress' in state else ''
+        return f"版本 {VERSION} · {labels.get(state.get('status'), '等待检查')}{progress}"
     image = Image.new("RGB", (64, 64), "#4d46a5")
     ImageDraw.Draw(image).ellipse((18, 18, 46, 46), fill="white")
     menu = pystray.Menu(pystray.MenuItem(lambda _: runtime.state["status"], None, enabled=False),
+        pystray.MenuItem(update_status, None, enabled=False),
+        pystray.MenuItem("检查更新", check_updates),
+        pystray.MenuItem("登录电脑后自动启动", toggle_startup, checked=lambda _: runtime.config.get("autostart", True), enabled=bool(getattr(sys, "frozen", False))),
+        pystray.MenuItem("打开日志目录", lambda *_: subprocess.Popen(["open", str(LOG_DIRECTORY)]) if platform.system() == "Darwin" else os.startfile(str(LOG_DIRECTORY))),
         pystray.MenuItem("打开 ERP 矩阵管理", lambda *_: webbrowser.open(f"{PORTAL_URL}/settings/shops?tab=environments")),
         pystray.MenuItem("退出", quit_app))
     threading.Thread(target=worker, daemon=True).start()
@@ -1012,6 +1061,16 @@ def main() -> None:
     from updater import forward
     if args.command in {None, "tray", "console", "run"} and forward(APP_SUPPORT_PATH / "matrix"):
         return
+    if getattr(sys, "frozen", False) and args.command in {None, "tray", "console", "run"}:
+        from startup import configure, bootstrap_command, migrate_legacy
+        config = load_config()
+        try:
+            if not config.get("startup_migrated"):
+                migrate_legacy()
+                config["startup_migrated"] = True; save_config(config)
+            configure(config.get("autostart", True), bootstrap_command())
+        except Exception:
+            logger.warning("登录自启设置失败，请从托盘重试")
     if args.command == "register":
         asyncio.run(register(args))
     elif args.command == "pair":

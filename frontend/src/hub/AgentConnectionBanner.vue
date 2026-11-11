@@ -6,7 +6,7 @@ import { probeLocalAgent, type LocalAgentState } from './local-agent'
 const props = defineProps<{ token: string }>()
 const state = ref<LocalAgentState>('checking')
 const checking = ref(false), downloading = ref(''), error = ref('')
-type Installer = {platform: 'windows' | 'macos'; arch: string; version: string; filename: string; size: number}
+type Installer = {id: number; platform: 'windows' | 'macos'; arch: string; version: string; filename: string; size: number}
 const installers = ref<Installer[]>([]), packagesLoaded = ref(false)
 const api = axios.create({baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000'})
 let poll: ReturnType<typeof setInterval> | undefined, disposed = false
@@ -33,7 +33,7 @@ async function download(item: Installer) {
   downloading.value = item.filename; error.value = ''
   try {
     const {data} = await api.get(`/hub-v5/agent-installers/${item.platform}/${item.arch}/file`, {
-      headers:{Authorization:`Bearer ${props.token}`}, responseType:'blob', signal:requests.signal,
+      params:{release_id:item.id}, headers:{Authorization:`Bearer ${props.token}`}, responseType:'blob', signal:requests.signal,
     })
     if (disposed) return
     const url = URL.createObjectURL(data), anchor = document.createElement('a')
@@ -83,7 +83,7 @@ onUnmounted(() => {
           <span v-if="packagesLoaded&&!installers.some(i=>i.platform===platform)" class="local-agent-unavailable">{{platform==='windows'?'Windows':'macOS'}} 版暂未提供</span>
         </template>
       </div>
-      <p>运行连接器后，在 ERP 授权此电脑。若已启动仍未检测到，请允许浏览器访问本地网络。</p>
+      <p>安装并启动连接器后，在 ERP 授权此电脑。之后连接器自动检查更新。若已启动仍未检测到，请允许浏览器访问本地网络。</p>
       <p v-if="error" role="alert">{{error}}</p>
     </aside>
   </div>

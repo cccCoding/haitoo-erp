@@ -1,43 +1,30 @@
-"""首次安装包下载；目录由部署配置，用户不能指定本机路径。"""
-import re
-from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
-from ..config import get_settings
+"""首次下载与自动更新共用平台稳定发布记录，不再扫描服务器本地目录。"""
+from fastapi import APIRouter, Depends
+from ..database import get_db
 from .api import matrix_user
+from .connector_releases import TARGETS, applicable, download
+from . import service as s
 
 router = APIRouter(prefix='/hub-v5', tags=['Agent安装包'])
-NAME = re.compile(r'^HaitooHubAgent-(windows|macos)-(x64|arm64)-(\d+\.\d+\.\d+)\.zip$')
-
-
-def installer_files():
-    root = Path(get_settings().hub_agent_installer_dir).resolve()
-    latest = {}
-    if not root.is_dir():
-        return latest
-    for path in root.iterdir():
-        match = NAME.fullmatch(path.name)
-        if not match or path.is_symlink() or not path.is_file():
-            continue
-        platform, arch, version = match.groups()
-        key = (platform, arch)
-        row = {'platform':platform, 'arch':arch, 'version':version, 'filename':path.name, 'size':path.stat().st_size}
-        if row['size'] <= 0 or row['size'] > 250 * 1024 * 1024:
-            continue
-        if key not in latest or tuple(map(int,version.split('.'))) > tuple(map(int,latest[key]['version'].split('.'))):
-            latest[key] = row
-    return latest
 
 
 @router.get('/agent-installers')
-def installers(actor=Depends(matrix_user)):
-    return {'items':list(installer_files().values())}
+def installers(actor=Depends(matrix_user), db=Depends(get_db)):
+    items = []
+    for platform, arch in sorted(TARGETS):
+        rows = applicable(db, platform, arch)
+        if rows:
+            row = rows[0]
+            items.append({'id': row.id, 'platform': platform, 'arch': arch, 'version': row.version,
+                          **row.manifest['installer']})
+    return {'items': items}
 
 
 @router.get('/agent-installers/{platform}/{arch}/file')
-def installer_download(platform:str, arch:str, actor=Depends(matrix_user)):
-    row = installer_files().get((platform,arch))
+def installer_download(platform: str, arch: str, release_id: int | None = None,
+                       actor=Depends(matrix_user), db=Depends(get_db)):
+    rows = applicable(db, platform, arch)
+    row = next((r for r in rows if release_id is None or r.id == release_id), None)
     if not row:
-        raise HTTPException(404, '该系统的Agent安装包尚未提供，请联系管理员')
-    path = Path(get_settings().hub_agent_installer_dir).resolve() / row['filename']
-    return FileResponse(path,media_type='application/zip',filename=row['filename'],headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})
+        s.fail('该系统安装包尚未提供或已撤回，请刷新下载列表', 404)
+    return download(row, 'installer')

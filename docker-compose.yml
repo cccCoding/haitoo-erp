@@ -72,7 +72,6 @@ services:
       LOG_TIMEZONE: ${LOG_TIMEZONE:-Asia/Hong_Kong}
       LOGIN_CLIENT_IP_SOURCE: ${LOGIN_CLIENT_IP_SOURCE:-auto}
       MATRIX_RELEASE_PUBLIC_KEYS: ${MATRIX_RELEASE_PUBLIC_KEYS:-{}}
-      HUB_AGENT_INSTALLER_DIR: /opt/haitoo/agent-installers
       # 模型平台密钥由公司管理员在成员管理中按员工配置。
       GRSAI_BASE_URL: ${GRSAI_BASE_URL:-https://grsaiapi.com}
       GRSAI_DIRECT_STORAGE_ENABLED: ${GRSAI_DIRECT_STORAGE_ENABLED:-false}
@@ -89,8 +88,6 @@ services:
       R2_HUB_EXPORT_BUCKET: ${R2_HUB_EXPORT_BUCKET:-}
       R2_ENDPOINT: ${R2_ENDPOINT:-}
       R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-https://img.haitoro.com}
-    volumes:
-      - ./hub_agent/dist:/opt/haitoo/agent-installers:ro
     expose:
       - "8000"
     depends_on:

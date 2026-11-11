@@ -1,36 +1,138 @@
-"""首次下载不需要已有Agent，且不开放任意文件或外部用户访问。"""
-import tempfile
+"""首次下载与平台更新统一发布、权限、版本不可变与撤回。"""
+import base64
+import hashlib
+import io
+import json
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from tests.test_supply_catalog import SupplyFixture
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+from app.hub_v5.connector_releases import router as release_router
 from app.hub_v5.installers import router
+from app.hub_v5.api import agent_auth
+from app.models import User, Role, HubAgent
+from app.security import create_access_token
+from tests.test_supply_catalog import SupplyFixture, TEST_PASSWORD_HASH
 
 
-class InstallerTests(SupplyFixture,unittest.TestCase):
+class MemoryStorage:
+    def __init__(self): self.objects = {}
+    def put_object(self, Bucket, Key, Body, **kw):
+        self.objects[Key] = Body.read() if hasattr(Body, 'read') else Body
+    def get_object(self, Bucket, Key):
+        content = self.objects[Key]
+        return {'Body': io.BytesIO(content), 'ContentLength': len(content), 'ETag': hashlib.md5(content).hexdigest()}
+
+    def generate_presigned_url(self, operation, Params, ExpiresIn):
+        return 'https://private.example/' + Params['Key']
+    def copy_object(self, Bucket, Key, CopySource, CopySourceIfMatch, **kw):
+        content = self.objects[CopySource['Key']]
+        if hashlib.md5(content).hexdigest() != CopySourceIfMatch:raise ValueError('changed')
+        self.objects[Key] = content
+    def delete_object(self, Bucket, Key):self.objects.pop(Key, None)
+
+
+class InstallerTests(SupplyFixture, unittest.TestCase):
     def setUp(self):
-        super().setUp();self.app.include_router(router)
-        self.directory=tempfile.TemporaryDirectory();self.addCleanup(self.directory.cleanup)
-        self.root=Path(self.directory.name)
-        self.settings=patch('app.hub_v5.installers.get_settings',return_value=SimpleNamespace(hub_agent_installer_dir=self.directory.name))
-        self.settings.start();self.addCleanup(self.settings.stop)
+        super().setUp(); self.app.include_router(router); self.app.include_router(release_router)
+        self.key = Ed25519PrivateKey.generate()
+        public = base64.b64encode(self.key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
+        self.enterContext(patch('app.hub_v5.releases.get_settings', return_value=SimpleNamespace(matrix_release_public_keys=json.dumps({'test': public}))))
+        self.storage = MemoryStorage()
+        self.enterContext(patch('app.hub_v5.connector_releases.location', side_effect=lambda m, k: (self.storage, 'private', f'{m["version"]}/{m["platform"]}/{m["arch"]}/{k}')))
+        with self.sessions() as db:
+            user = User(id=8, company_id=None, email='super@example.com', name='平台', role=Role.SUPER_ADMIN, password_hash=TEST_PASSWORD_HASH)
+            db.add(user)
+            db.add(HubAgent(id=10, company_id=1, user_id=1, name='test', platform='macos', is_active=True, token_hash='a'*64))
+            db.commit(); self.tokens[8] = create_access_token(user)
+        self.agent_id = 10
+        self.app.dependency_overrides[agent_auth] = lambda: SimpleNamespace(id=self.agent_id)
 
-    def test_only_latest_known_installer_is_downloaded(self):
-        for version in ('5.0.0','5.0.2','5.0.10'):
-            (self.root/f'HaitooHubAgent-macos-arm64-{version}.zip').write_bytes(version.encode())
-        (self.root/'private.txt').write_text('not downloadable')
-        response=self.request('GET','/hub-v5/agent-installers')
-        self.assertEqual(response.status_code,200,response.text)
-        self.assertEqual(len(response.json()['items']),1)
-        self.assertEqual(response.json()['items'][0]['version'],'5.0.10')
-        response=self.request('GET','/hub-v5/agent-installers/macos/arm64/file')
-        self.assertEqual(response.content,b'5.0.10')
-        self.assertIn('no-store',response.headers['cache-control'])
-        self.assertEqual(self.request('GET','/hub-v5/agent-installers/windows/x64/file').status_code,404)
+    def package(self, version='5.2.0', platform='macos', arch='arm64', content=b'update', installer=b'installer'):
+        manifest = {'kind': 'agent', 'version': version, 'platform': platform, 'arch': arch,
+                    'sha256': hashlib.sha256(content).hexdigest(), 'size': len(content), 'key_id': 'test',
+                    'protocol_min': 5, 'protocol_max': 5, 'entrypoint': 'agent', 'files': {'agent': hashlib.sha256(content).hexdigest()},
+                    'min_launcher_version': '5.2.0', 'installer': {'filename': f'HaitooHubAgent-{platform}-{arch}-{version}.{ "exe" if platform=="windows" else "dmg"}',
+                    'size': len(installer), 'sha256': hashlib.sha256(installer).hexdigest()}}
+        manifest['signature'] = base64.b64encode(self.key.sign(json.dumps(manifest, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode())).decode()
+        return manifest, content, installer
 
-    def test_no_token_external_user_and_symlink_are_not_downloadable(self):
-        (self.root/'HaitooHubAgent-macos-x64-5.0.0.zip').symlink_to('/etc/hosts')
+    def upload(self, package=None, uid=8):
+        manifest, content, installer = package or self.package()
+        return self.request('POST', '/admin/connector-releases', uid=uid,
+            data={'manifest_json': json.dumps(manifest)}, files={'artifact': ('update.zip', content), 'installer': ('installer', installer)})
+
+    def stage(self, row, stage, ids=None):
+        return self.request('PUT', f'/admin/connector-releases/{row["id"]}/stage', uid=8,
+                            json={'revision': row['revision'], 'stage': stage, 'test_agent_ids': ids or []})
+
+    def test_draft_test_stable_withdrawal_and_downloads_share_one_record(self):
+        response = self.upload(); self.assertEqual(response.status_code, 200, response.text); row = response.json()
+        self.assertEqual(self.request('GET', '/hub-v5/agent-installers').json()['items'], [])
+        response = self.stage(row, 'test', [10]); self.assertEqual(response.status_code, 200, response.text); row = response.json()
+        url = '/hub-v5/agent/connector-releases?platform=macos&arch=arm64'
+        self.assertEqual(self.client.get(url).json()[0]['id'], row['id'])
+        self.agent_id = 20; self.assertEqual(self.client.get(url).json(), [])
+        self.assertEqual(self.client.get(f'/hub-v5/agent/connector-releases/{row["id"]}/file').status_code, 404)
+        self.assertEqual(self.request('GET', '/hub-v5/agent-installers').json()['items'], [])
+        response = self.stage(row, 'stable'); self.assertEqual(response.status_code, 200, response.text); row = response.json()
+        items = self.request('GET', '/hub-v5/agent-installers').json()['items']; self.assertEqual(items[0]['id'], row['id'])
+        response = self.request('GET', f'/hub-v5/agent-installers/macos/arm64/file?release_id={row["id"]}')
+        self.assertEqual(response.content, b'installer'); self.assertIn('no-store', response.headers['cache-control'])
+        self.assertEqual(self.client.get(f'/hub-v5/agent/connector-releases/{row["id"]}/file').content, b'update')
+        response = self.stage(row, 'withdrawn'); self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.get(url).json(), [])
+        self.assertEqual(self.request('GET', f'/hub-v5/agent-installers/macos/arm64/file?release_id={row["id"]}').status_code, 404)
+        self.assertEqual(self.stage(response.json(), 'stable').status_code, 422)
+
+    def test_platform_admin_only_and_download_authentication(self):
+        for uid in (1, 2, 5):
+            self.assertEqual(self.upload(uid=uid).status_code, 403)
+            self.assertEqual(self.request('GET', '/admin/connector-releases', uid=uid).status_code, 403)
+        self.assertIn(self.client.get('/hub-v5/agent-installers').status_code, (401, 403))
+        self.assertEqual(self.request('GET', '/hub-v5/agent-installers', uid=4).status_code, 403)
+
+    def test_immutable_content_signature_and_missing_installer(self):
+        row = self.upload().json(); self.assertEqual(self.upload().json()['id'], row['id'])
+        self.assertEqual(self.upload(self.package(content=b'changed')).status_code, 409)
+        manifest, content, installer = self.package('5.3.0'); manifest['version'] = '5.4.0'
+        self.assertEqual(self.upload((manifest, content, installer)).status_code, 422)
+        self.assertEqual(self.upload(self.package('5.3.0')[:2] + (b'wrong',)).status_code, 422)
+        self.assertEqual(self.upload(self.package(platform='windows', arch='arm64')).status_code, 422)
+
+    def test_semver_platform_selection_and_stale_revision(self):
+        for version in ('5.2.9', '5.2.10'):
+            row = self.upload(self.package(version)).json(); response = self.stage(row, 'stable')
+            self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.stage(row, 'withdrawn').status_code, 409)
+        items = self.request('GET', '/hub-v5/agent-installers').json()['items']
+        self.assertEqual(items[0]['version'], '5.2.10')
+        self.assertEqual(self.request('GET', '/hub-v5/agent-installers/windows/x64/file').status_code, 404)
+        self.assertEqual(self.request('GET', '/hub-v5/agent-installers/macos/arm64/file?release_id=9999').status_code, 404)
+
+
+    def test_direct_upload_only_archives_verified_content_and_removes_temporary_files(self):
+        package = self.package(); manifest, content, installer = package
+        response = self.request('POST','/admin/connector-releases/uploads',uid=8,json=manifest)
+        self.assertEqual(response.status_code,200,response.text);pending=response.json()
+        self.assertEqual(pending['stage'],'uploading')
+        self.assertEqual(self.stage(pending,'stable').status_code,422)
         self.assertEqual(self.request('GET','/hub-v5/agent-installers').json()['items'],[])
-        self.assertEqual(self.request('GET','/hub-v5/agent-installers',uid=4).status_code,403)
-        self.assertIn(self.client.get('/hub-v5/agent-installers').status_code,(401,403))
+        sources = {kind:url.removeprefix('https://private.example/') for kind,url in pending['uploads'].items()}
+        self.storage.objects[sources['update']] = content
+        self.storage.objects[sources['installer']] = b'wrong'
+        response = self.request('POST',f"/admin/connector-releases/{pending['id']}/complete",uid=8,json={})
+        self.assertEqual(response.status_code,422,response.text)
+        self.storage.objects[sources['installer']] = installer
+        response = self.request('POST',f"/admin/connector-releases/{pending['id']}/complete",uid=8,json={})
+        self.assertEqual(response.status_code,200,response.text);row=response.json()
+        self.assertEqual(row['stage'],'draft')
+        self.assertTrue(all(key not in self.storage.objects for key in sources.values()))
+        self.assertEqual(self.stage(row,'stable').status_code,200)
+        # 未过期临时链接再次写入也无法修改已经归档的安装程序。
+        self.storage.objects[sources['installer']] = b'late overwrite'
+        self.assertEqual(self.request('GET','/hub-v5/agent-installers/macos/arm64/file').content,installer)
+        response = self.request('POST','/admin/connector-releases/uploads',uid=8,json=manifest)
+        self.assertNotIn('uploads',response.json())

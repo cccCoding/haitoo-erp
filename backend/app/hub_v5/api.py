@@ -111,7 +111,7 @@ def heartbeat(payload: Heartbeat, agent=Depends(agent_auth), db=Depends(get_db))
     device.capabilities = payload.capabilities
     device.local_paused = payload.local_paused
     # 状态仅取公开枚举，不接收路径、异常原文或凭据。
-    device.update_state = {k: str(v)[:100] for k,v in payload.update_state.items() if k in {"status", "version", "plugin_version", "plugin_digest", "error_code"}}
+    device.update_state = {k: str(v)[:100] for k,v in payload.update_state.items() if k in {"status", "version", "plugin_version", "plugin_digest", "error_code", "target_version", "progress"}}
     db.commit()
     owner = db.get(User, agent.user_id)
     grant = permissions.access(db, owner)

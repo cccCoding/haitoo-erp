@@ -1,4 +1,4 @@
-"""创建可签名ZIP；将包内合法链接展开为普通文件，不携带外部文件。"""
+"""创建可签名 ZIP；macOS 可保留签名清单中的内部链接，禁止携带外部文件。"""
 import argparse
 import stat
 import zipfile
@@ -6,7 +6,7 @@ from pathlib import Path
 from package_security import safe_path,MAX_UNPACKED,MAX_PACKAGE
 
 
-def package_directory(source,destination):
+def package_directory(source,destination,preserve_links=False):
     source=Path(source).resolve();destination=Path(destination).resolve()
     if not source.is_dir() or destination.is_relative_to(source):raise ValueError('请选择目录，输出ZIP须在源目录之外')
     files=[];total=0
@@ -14,7 +14,11 @@ def package_directory(source,destination):
         nonlocal total
         resolved=current.resolve()
         if not resolved.is_relative_to(source):raise ValueError('发布目录包含指向外部的链接')
-        if current.is_dir():
+        if current.is_symlink() and preserve_links:
+            from package_security import safe_link
+            safe_link(relative.as_posix(),current.readlink().as_posix())
+            files.append((current,relative.as_posix()))
+        elif current.is_dir():
             if resolved in ancestors:raise ValueError('发布目录包含循环链接')
             for child in sorted(current.iterdir()):walk(child,relative/child.name,ancestors|{resolved})
         elif current.is_file():
@@ -30,6 +34,10 @@ def package_directory(source,destination):
         with zipfile.ZipFile(temporary,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as archive:
             for path,name in files:
                 info=zipfile.ZipInfo(name);info.compress_type=zipfile.ZIP_DEFLATED
+                if path.is_symlink() and preserve_links:
+                    info.external_attr=(stat.S_IFLNK|0o777)<<16
+                    archive.writestr(info,path.readlink().as_posix().encode('utf-8'))
+                    continue
                 info.external_attr=(stat.S_IFREG|(0o755 if path.stat().st_mode&0o111 else 0o644))<<16
                 with path.open('rb') as reader,archive.open(info,'w') as writer:
                     import shutil
@@ -43,7 +51,8 @@ def package_directory(source,destination):
 def main():
     parser=argparse.ArgumentParser(description='创建可签名的Agent或插件ZIP')
     parser.add_argument('--source',required=True);parser.add_argument('--output',required=True)
-    args=parser.parse_args();print(package_directory(args.source,args.output))
+    parser.add_argument('--preserve-links',action='store_true')
+    args=parser.parse_args();print(package_directory(args.source,args.output,args.preserve_links))
 
 
 if __name__=='__main__':main()

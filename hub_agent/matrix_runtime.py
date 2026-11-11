@@ -253,4 +253,5 @@ class MatrixRuntime:
     async def check_updates(self):
         if self.claim or self.host.current_claim:return False
         if not self.updater:self.updater=UpdateManager(self.root,self.client)
+        self.updater.client=self.client
         return await self.updater.check()

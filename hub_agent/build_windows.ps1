@@ -1,9 +1,16 @@
 param(
     [string]$PythonExecutable = "",
-    [switch]$RunTests
+    [switch]$RunTests,
+    [switch]$Release
 )
 
 $ErrorActionPreference = "Stop"
+if ($Release) {
+    foreach ($name in @('HAITOO_WINDOWS_CERT_SHA1', 'HAITOO_RELEASE_PRIVATE_KEY', 'HAITOO_RELEASE_KEY_ID')) {
+        if (-not [Environment]::GetEnvironmentVariable($name)) { throw "正式构建缺少环境变量 $name" }
+    }
+    if (-not (Get-Content (Join-Path $PSScriptRoot 'trusted_keys.json') -Raw | ConvertFrom-Json).PSObject.Properties.Count) { throw '正式构建必须内置发布公钥' }
+}
 Set-Location $PSScriptRoot
 
 if ($PythonExecutable) {
@@ -24,8 +31,8 @@ Invoke-BuildPython -PythonArguments @("-m", "pip", "install", "-r", "requirement
 if ($RunTests) {
     Invoke-BuildPython -PythonArguments @("-m", "unittest", "discover", "-s", "tests")
 }
-Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--clean", "--windowed", "--add-data", "trusted_keys.json;.", "--add-data", "agent-version.json;.", "--name", "HaitooHubAgent", "haitoo_hub_agent.py")
-Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--clean", "--console", "--add-data", "trusted_keys.json;.", "--add-data", "agent-version.json;.", "--name", "HaitooHubAgentConsole", "haitoo_hub_agent.py")
+Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--windowed", "--add-data", "trusted_keys.json;.", "--add-data", "agent-version.json;.", "--name", "HaitooHubAgent", "haitoo_hub_agent.py")
+Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--console", "--add-data", "trusted_keys.json;.", "--add-data", "agent-version.json;.", "--name", "HaitooHubAgentConsole", "haitoo_hub_agent.py")
 Copy-Item .\start_and_pair_windows.cmd .\dist\启动并配对.cmd
 
 foreach ($required in @("HaitooHubAgent\HaitooHubAgent.exe", "HaitooHubAgentConsole\HaitooHubAgentConsole.exe", "启动并配对.cmd")) {
@@ -44,3 +51,26 @@ if ($LASTEXITCODE -ne 0) { throw "无法确认构建架构" }
 $downloadZip = Join-Path "$PSScriptRoot\dist" "HaitooHubAgent-windows-$agentArch-$agentVersion.zip"
 Compress-Archive -Path @(".\dist\HaitooHubAgent", ".\dist\HaitooHubAgentConsole", ".\dist\启动并配对.cmd") -DestinationPath $downloadZip -Force
 Write-Host "网页下载包：$downloadZip"
+
+if ($Release) {
+    if ($agentArch -ne 'x64') { throw '当前正式 Windows 仅支持 x64' }
+    $signTool = if ($env:SIGNTOOL_EXE) { $env:SIGNTOOL_EXE } else { 'signtool.exe' }
+    $iscc = if ($env:ISCC_EXE) { $env:ISCC_EXE } else { 'ISCC.exe' }
+    foreach ($binary in @('.\dist\HaitooHubAgent\HaitooHubAgent.exe', '.\dist\HaitooHubAgentConsole\HaitooHubAgentConsole.exe')) {
+        & $signTool sign /sha1 $env:HAITOO_WINDOWS_CERT_SHA1 /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $binary
+        if ($LASTEXITCODE -ne 0) { throw 'Windows 程序签名失败' }
+        & $signTool verify /pa $binary
+        if ($LASTEXITCODE -ne 0) { throw 'Windows 签名验证失败' }
+    }
+    & $iscc "/DAgentVersion=$agentVersion" '.\install\windows\installer.iss'
+    if ($LASTEXITCODE -ne 0) { throw 'Inno Setup 安装包构建失败' }
+    $baseName = "HaitooHubAgent-windows-x64-$agentVersion"
+    $installer = "dist/$baseName.exe"
+    & $signTool sign /sha1 $env:HAITOO_WINDOWS_CERT_SHA1 /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $installer
+    if ($LASTEXITCODE -ne 0) { throw '安装包签名失败' }
+    & $signTool verify /pa $installer
+    if ($LASTEXITCODE -ne 0) { throw '安装包签名验证失败' }
+    Invoke-BuildPython -PythonArguments @('package_release.py', '--source', 'dist/HaitooHubAgent', '--output', "dist/$baseName-update.zip")
+    Invoke-BuildPython -PythonArguments @('sign_release.py', '--package', "dist/$baseName-update.zip", '--installer', $installer, '--key', $env:HAITOO_RELEASE_PRIVATE_KEY, '--key-id', $env:HAITOO_RELEASE_KEY_ID, '--version', $agentVersion, '--platform', 'windows', '--arch', 'x64', '--kind', 'agent', '--entrypoint', 'HaitooHubAgent/HaitooHubAgent.exe', '--output', "dist/$baseName-manifest.json")
+    Write-Host "正式产物：$installer、$baseName-update.zip、$baseName-manifest.json"
+}

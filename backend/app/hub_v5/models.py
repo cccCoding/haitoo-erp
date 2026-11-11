@@ -268,3 +268,20 @@ class MatrixRelease(TenantRow, Base):
     manifest: Mapped[dict] = mapped_column(JSON)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ConnectorRelease(Base):
+    """平台连接器发布；不继承租户行，站点插件仍保留公司隔离。"""
+    __tablename__ = "connector_releases"
+    __table_args__ = (UniqueConstraint("version", "platform", "arch", name="uq_connector_release_target"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    version: Mapped[str] = mapped_column(String(40))
+    platform: Mapped[str] = mapped_column(String(16))
+    arch: Mapped[str] = mapped_column(String(16))
+    manifest: Mapped[dict] = mapped_column(JSON)
+    stage: Mapped[str] = mapped_column(String(16), default="draft")
+    upload_nonce: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    test_agent_ids: Mapped[list] = mapped_column(JSON, default=list)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    history: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
