@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Request, Query, Response, HTTPException
 from sqlalchemy import select, func, or_
 from ..database import get_db
-from ..security import current_internal_user
+from ..security import current_user
 from ..models import HubAgent, HubUploadTask, User, Role, Company
 from .. import hub
 from ..supply_common import digest
@@ -20,8 +20,8 @@ from . import service as s, collections as c, listing, permissions
 router = APIRouter(prefix="/hub-v5", tags=["TK矩阵管理"])
 
 
-def internal_actor(actor=Depends(current_internal_user), db=Depends(get_db)):
-    if not actor.company_id or actor.role not in permissions.ROLES: s.fail("请使用公司运营账号",403)
+def internal_actor(actor=Depends(current_user), db=Depends(get_db)):
+    if not actor.company_id or actor.role not in permissions.ROLES: s.fail("请使用已支持矩阵的公司账号",403)
     company=db.get(Company,actor.company_id)
     if not company or not company.is_active:s.fail("公司不可用",403)
     db.info["matrix_authenticated"] = {"user_id": actor.id, "token_version": actor.token_version}
@@ -48,7 +48,7 @@ def agent_auth(request: Request, db=Depends(get_db)):
     from ..main import hub_agent_from_request
     agent = hub_agent_from_request(request, db)
     owner = db.get(User, agent.user_id)
-    if owner.role not in {Role.COMPANY_ADMIN, Role.MEMBER, Role.TEAM_LEADER}: s.fail("账号不能运行矩阵任务", 403)
+    if owner.role not in permissions.ROLES: s.fail("账号不能运行矩阵任务", 403)
     db.info["matrix_authenticated"] = {"user_id": owner.id, "agent_id": agent.id, "token_hash": agent.token_hash}
     return agent
 
@@ -60,18 +60,12 @@ def admin(actor):
 @router.get("/config")
 def config(actor=Depends(matrix_user), db=Depends(get_db)):
     row = db.get(MatrixCompany, actor.company_id)
-    return {"enabled": bool(row and row.enabled), "listing_enabled": bool(row and row.listing_enabled)}
+    return {"enabled": bool(row and row.enabled), "listing_enabled": bool(row and row.enabled)}
 
 
 @router.put("/config")
 def set_config(payload: CompanyInput, actor=Depends(matrix_user), db=Depends(get_db)):
-    admin(actor); s.guard(db, actor.company_id); admin(actor)
-    row = db.get(MatrixCompany, actor.company_id)
-    if not row:
-        row = MatrixCompany(company_id=actor.company_id); db.add(row)
-    row.enabled, row.listing_enabled = payload.enabled, payload.enabled and payload.listing_enabled
-    s.audit(db, actor, "company.configure", actor.company_id, payload.model_dump()); db.commit()
-    return config(actor, db)
+    s.fail("请在 admin 公司配置中设置启用 TK 矩阵", 403)
 
 
 @router.get("/agents")

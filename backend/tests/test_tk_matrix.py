@@ -445,10 +445,10 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         self.assertIn('执行环境不一致',rejected.json()['detail'])
         self.assertEqual(self.ar('POST',f'/agent/items/{item}/environment-target',agent=2,json=creds).status_code,404)
 
-    def test_environment_target_rechecks_operation_permission(self):
+    def test_environment_target_rechecks_matrix_permission(self):
         run=self.member_run();item,creds=self.claim(run,agent=8)
         with self.sessions() as db:
-            db.get(MatrixMemberPermission,2).collect_enabled=False;db.commit()
+            db.get(MatrixMemberPermission,2).enabled=False;db.commit()
         self.assertEqual(self.ar('POST',f'/agent/items/{item}/environment-target',agent=8,json=creds).status_code,403)
 
     def test_listing_can_prepare_using_environment_target(self):
@@ -484,6 +484,23 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
                 with self.sessions() as db:
                     with self.assertRaisesRegex(Exception,'马来西亚跨境'):
                         s.freeze_strategy(db,db.get(User,1),strategy)
+
+    def test_listing_rejects_other_catalog_sites_after_site_is_changed(self):
+        strategy = self.create_strategy(uid=1)
+        with self.sessions() as db:
+            db.get(TiktokCategoryCatalog, 1).site = 'ID'
+            db.commit()
+        config = {'tasks': ['listing.catalog'], 'strategies': {'MY': strategy}}
+        for path, payload in (
+            ('/hub-v5/operations', {'name': '印尼类目策略', **config}),
+            ('/hub-v5/manual/preview', {'environment_ids': [self.env], **config}),
+        ):
+            response = self.request('POST', path, json=payload)
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertIn('马来西亚跨境', response.text)
+        with self.sessions() as db:
+            with self.assertRaisesRegex(Exception, '马来西亚跨境'):
+                s.freeze_strategy(db, db.get(User, 1), strategy)
 
     def test_direct_manual_checks_tasks_and_freezes_listing_strategy(self):
         self.assertEqual(self.request('POST','/hub-v5/manual/preview',json={'tasks':[],'environment_ids':[self.env]}).status_code,422)
@@ -932,6 +949,17 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         self.assertEqual(response.status_code,200,response.text)
         with self.sessions() as db:self.assertTrue(all(a.item_id==item and a.state=='prepared' for a in db.scalars(select(MatrixAllocation))))
 
+    def test_manual_resolution_does_not_require_evidence(self):
+        run,_=self.make_run();item,creds=self.claim(run)
+        with self.sessions() as db:
+            row=db.get(MatrixItem,item);row.status='failed';row.submission='not_started';db.commit()
+        response=self.request('POST',f'/hub-v5/run-items/{item}/resolve',json={'action':'cancel'})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json()['status'],'cancelled')
+        with self.sessions() as db:
+            event=db.scalars(select(MatrixEvent).where(MatrixEvent.run_id==run['id'],MatrixEvent.kind=='manual.resolve')).one()
+            self.assertEqual(event.payload,{'action':'cancel','evidence':'','item_id':item})
+
     def test_partial_known_acceptance_cannot_replay_entire_file(self):
         run,_=self.make_run();item,creds=self.claim(run)
         with self.sessions() as db:
@@ -953,10 +981,11 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         with self.sessions() as db:
             rejected=next(a for a in db.scalars(select(MatrixAllocation)) if a.payload['index']==1)
             rid=rejected.id;rejected.item_id=999;rejected.state='reserved';db.commit()
-        response=self.request('POST',f'/hub-v5/run-items/{item}/resolve',json={'action':'confirm-submitted','evidence':'平台核对其余九组均已受理，一组已拒绝'})
+        response=self.request('POST',f'/hub-v5/run-items/{item}/resolve',json={'action':'confirm-submitted'})
         self.assertEqual(response.status_code,200,response.text)
         self.assertEqual(response.json()['status'],'partial_success')
         self.assertEqual(response.json()['result']['listing']['rejected'],[1])
+        self.assertEqual(response.json()['result']['listing']['receipt'],'人工核对确认提交')
         with self.sessions() as db:
             self.assertEqual((db.get(MatrixAllocation,rid).item_id,db.get(MatrixAllocation,rid).state),(999,'reserved'))
             self.assertEqual(sum(a.state=='confirmed' for a in db.scalars(select(MatrixAllocation))),9)
@@ -1215,8 +1244,142 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         saved=self.request('PUT','/hub-v5/admin/members/2',json=body)
         self.assertEqual(saved.status_code,200,saved.text)
         self.assertEqual(self.request('PUT','/hub-v5/admin/members/2',json=body).status_code,409)
-        self.assertEqual(self.request('POST','/hub-v5/operations',uid=2,json={'name':'无权上品','tasks':['listing.catalog']}).status_code,403)
+        self.assertTrue(saved.json()['collect_enabled'])
+        self.assertTrue(saved.json()['listing_enabled'])
+        self.operation(listing=True,uid=2)
         self.assertEqual(self.request('PUT','/hub-v5/admin/members/1',json=body).status_code,403)
+
+    def test_unified_grant_ignores_legacy_task_flags_and_supply_defaults_off(self):
+        with self.sessions() as db:
+            row=db.get(MatrixMemberPermission,2)
+            row.collect_enabled=row.listing_enabled=False
+            db.commit()
+        access=self.request('GET','/hub-v5/access',uid=2).json()
+        self.assertTrue(access['enabled'])
+        self.assertTrue(access['collect_enabled'])
+        self.assertTrue(access['listing_enabled'])
+        self.operation(uid=2)
+        self.operation(listing=True,uid=2)
+        saved=self.request('PUT','/hub-v5/admin/members/2',json={'enabled':True,'view_scope':'own','expected_revision':1})
+        self.assertEqual(saved.status_code,200,saved.text)
+        self.assertTrue(saved.json()['collect_enabled'])
+        self.assertTrue(saved.json()['listing_enabled'])
+        self.assertFalse(self.request('GET','/hub-v5/access',uid=4).json()['enabled'])
+        self.assertEqual(self.request('PUT','/supply/users/4/matrix',json={'enabled':True,'expected_revision':0}).status_code,200)
+
+    def supply_matrix_run(self, listing=False):
+        grant=self.request('PUT','/supply/users/4/matrix',json={'enabled':True,'expected_revision':0})
+        self.assertEqual(grant.status_code,200,grant.text)
+        self.agent_tokens[8]='e'*48
+        with self.sessions() as db:
+            db.add(HubAgent(id=8,company_id=1,user_id=4,name='货盘电脑',platform='macos',is_active=True,
+                token_hash=hashlib.sha256(self.agent_tokens[8].encode()).hexdigest(),last_seen_at=datetime.utcnow()))
+            db.commit()
+        self.beat(8)
+        env=self.sync(8,[{'container_code':'supply-env','name':'货盘环境','group_name':'货盘','site':'MY'}])[0]
+        operation=self.operation(listing=listing,uid=4)
+        response=self.request('POST','/hub-v5/plans',uid=4,json={'name':'货盘计划','agent_id':8,'operation_id':operation['id'],'environment_ids':[env]})
+        self.assertEqual(response.status_code,200,response.text)
+        plan=response.json()
+        preview=self.request('POST',f"/hub-v5/plans/{plan['id']}/preview",uid=4,json={})
+        self.assertEqual(preview.status_code,200,preview.text)
+        self.assertEqual(preview.json()['errors'],[])
+        run=self.client.post(f"/hub-v5/plans/{plan['id']}/runs",json={'preview_token':preview.json()['preview_token'],'expected_revision':plan['revision']},headers={'Authorization':f'Bearer {self.tokens[4]}','Idempotency-Key':str(uuid4())})
+        self.assertEqual(run.status_code,200,run.text)
+        return run.json()
+
+    def test_supply_matrix_full_run_and_own_data_isolation(self):
+        foreign_run,_=self.make_run()
+        run=self.supply_matrix_run(listing=True)
+        members=self.request('GET','/hub-v5/admin/members').json()['items']
+        self.assertEqual(next(m for m in members if m['id']==4)['role'],'supply_user')
+        self.assertEqual(self.request('GET','/hub-v5/environments',uid=4).json()['total'],1)
+        self.assertTrue(all(d['user_id']==4 for d in self.request('GET','/hub-v5/agents',uid=4).json()))
+        self.assertEqual(self.request('GET',f"/hub-v5/runs/{foreign_run['id']}",uid=4).status_code,404)
+        self.assertEqual(self.request('POST','/hub-v5/agents/1/commands',uid=4,json={'kind':'pause'}).status_code,404)
+        self.assertEqual(self.request('GET','/hub-v5/admin/members',uid=4).status_code,403)
+        self.assertEqual(self.request('PUT','/supply/users/4/matrix',json={'enabled':True,'view_scope':'company','expected_revision':1}).status_code,422)
+        with self.sessions() as db:
+            db.get(MatrixMemberPermission,4).view_scope='company';db.commit()
+        self.assertEqual(self.request('GET','/hub-v5/access',uid=4).json()['view_scope'],'own')
+        self.assertEqual(self.request('GET','/hub-v5/environments',uid=4).json()['total'],1)
+        item,creds=self.claim(run,8)
+        self.assertEqual(self.ar('POST',f'/agent/items/{item}/environment-target',8,json=creds).status_code,200)
+        response=self.ar('POST',f'/agent/items/{item}/listing-preparations',8,json=creds)
+        self.assertEqual(response.status_code,200,response.text)
+        with self.sessions() as db:
+            job=db.get(SupplyJob,db.get(MatrixItem,item).supply_job_id)
+            self.assertEqual((job.user_id,job.agent_id,job.agent_name),(4,1,'原代理'))
+            self.assertFalse(job.snapshot['internal_usage'])
+        revoke=self.request('PUT','/supply/users/4/matrix',json={'enabled':False,'expected_revision':1})
+        self.assertEqual(revoke.status_code,200,revoke.text)
+        self.assertEqual(self.request('GET','/hub-v5/environments',uid=4).status_code,403)
+        self.assertEqual(self.ar('GET','/agent/queue',8).json()['items'],[])
+        with self.sessions() as db:self.assertTrue(db.get(MatrixRun,run['id']).stop_requested)
+
+    def test_supply_matrix_permission_has_single_admin_entry_and_revision(self):
+        rows=self.request('GET','/supply/users').json()['items']
+        account=next(row for row in rows if row['id']==4)
+        self.assertFalse(account['matrix_enabled'])
+        self.assertEqual(account['matrix_revision'],0)
+        self.assertEqual(self.request('PUT','/hub-v5/admin/members/4',json={'enabled':True,'expected_revision':0}).status_code,404)
+        for uid in (2,3,4):
+            self.assertEqual(self.request('PUT','/supply/users/4/matrix',uid=uid,json={'enabled':True,'expected_revision':0}).status_code,403)
+        self.assertEqual(self.request('PUT','/supply/users/4/matrix',uid=5,json={'enabled':True,'expected_revision':0}).status_code,404)
+        enabled=self.request('PUT','/supply/users/4/matrix',json={'enabled':True,'expected_revision':0})
+        self.assertEqual(enabled.status_code,200,enabled.text)
+        self.assertTrue(enabled.json()['matrix_enabled'])
+        self.assertEqual(enabled.json()['matrix_revision'],1)
+        self.assertEqual(self.request('PUT','/supply/users/4/matrix',json={'enabled':False,'expected_revision':0}).status_code,409)
+        self.assertTrue(self.request('GET','/hub-v5/access',uid=4).json()['enabled'])
+        with self.sessions() as db:db.get(User,4).is_active=False;db.commit()
+        disabled=self.request('PUT','/supply/users/4/matrix',json={'enabled':False,'expected_revision':1})
+        self.assertEqual(disabled.status_code,200,disabled.text)
+        self.assertFalse(disabled.json()['matrix_enabled'])
+
+    def test_supply_matrix_expiry_blocks_jwt_agent_and_scheduler(self):
+        run=self.supply_matrix_run()
+        with self.sessions() as db:
+            db.get(User,4).supply_expires_at=datetime.utcnow()-timedelta(seconds=1)
+            plan=db.get(MatrixPlan,run['plan_id']);plan.config={**plan.config,'scheduled':True,'time':'09:00','timezone':'Asia/Shanghai'}
+            db.commit()
+        self.assertEqual(self.request('GET','/hub-v5/access',uid=4).status_code,401)
+        self.assertEqual(self.ar('GET','/agent/config',8).status_code,401)
+        self.assertEqual(self.request('PUT','/supply/users/4/matrix',json={'enabled':True,'expected_revision':1}).status_code,409)
+        from app.hub_v5.worker import schedule_plan
+        from app.hub_v5 import permissions
+        with self.sessions() as db:
+            self.assertFalse(permissions.access(db,db.get(User,4))['enabled'])
+            schedule_plan(db,run['plan_id'])
+            self.assertIsNone(db.scalar(select(MatrixFire)))
+            db.get(User,4).supply_expires_at=datetime.utcnow()+timedelta(days=1)
+            db.get(User,4).is_active=False;db.commit()
+        self.assertEqual(self.request('GET','/hub-v5/access',uid=4).status_code,401)
+        self.assertEqual(self.ar('GET','/agent/config',8).status_code,401)
+
+    def test_supply_matrix_pairing_requires_grant_and_does_not_open_internal_routes(self):
+        from app import main
+        for path,endpoint,method in (
+            ('/hub-agent/pairings',main.create_hub_agent_pairing,'POST'),
+            ('/hub-agent/pairings/complete',main.complete_hub_agent_pairing,'POST'),
+            ('/hub-agents/register',main.register_hub_agent,'POST'),
+            ('/hub-agent/templates',main.hub_agent_templates,'GET'),
+            ('/templates',main.list_templates,'GET')):
+            self.app.add_api_route(path,endpoint,methods=[method])
+        code=self.client.post('/hub-agent/pairings',json={'name':'货盘配对电脑','platform':'macos'}).json()['code']
+        self.assertEqual(self.request('POST','/hub-agent/pairings/complete',uid=4,json={'code':code}).status_code,403)
+        self.assertEqual(self.request('POST','/hub-agents/register',uid=4,json={'name':'货盘注册电脑','platform':'macos'}).status_code,403)
+        self.assertEqual(self.request('PUT','/supply/users/4/matrix',json={'enabled':True,'expected_revision':0}).status_code,200)
+        paired=self.request('POST','/hub-agent/pairings/complete',uid=4,json={'code':code})
+        self.assertEqual(paired.status_code,200,paired.text)
+        registered=self.request('POST','/hub-agents/register',uid=4,json={'name':'货盘注册电脑','platform':'macos'})
+        self.assertEqual(registered.status_code,200,registered.text)
+        self.assertEqual(registered.json()['agent']['user_id'],4)
+        legacy=self.client.get('/hub-agent/templates',headers={'X-Hub-Protocol':main.hub.PROTOCOL,'X-Hub-Agent-Token':registered.json()['agent_token']})
+        self.assertEqual(legacy.status_code,403,legacy.text)
+        self.assertEqual(self.request('GET','/templates',uid=4).status_code,403)
+        with self.sessions() as db:db.get(HubAgent,1).is_active=False;db.commit()
+        self.assertEqual(self.request('POST','/hub-agents/register',uid=4,json={'name':'电脑1','platform':'macos'}).status_code,403)
 
     def test_company_view_is_read_only_for_other_members_runs_and_devices(self):
         run,_=self.make_run()
@@ -1270,10 +1433,10 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
             self.assertEqual(db.scalar(select(MatrixAllocation.state).where(MatrixAllocation.item_id==item)),'released')
             self.assertIsNone(db.scalar(select(HubRuntimeLock).where(HubRuntimeLock.company_id==1)).matrix_item_id)
 
-    def test_claim_and_scheduler_recheck_operation_grants(self):
+    def test_claim_and_scheduler_recheck_matrix_grant(self):
         run=self.member_run();item=run['items'][0]['id']
         with self.sessions() as db:
-            db.get(MatrixMemberPermission,2).collect_enabled=False
+            db.get(MatrixMemberPermission,2).enabled=False
             plan=db.get(MatrixPlan,run['plan_id']);plan.config={**plan.config,'scheduled':True,'time':'09:00','timezone':'Asia/Shanghai'};db.commit()
         self.assertEqual(self.ar('POST',f'/agent/items/{item}/claim',8,json={}).status_code,403)
         from app.hub_v5.worker import schedule_plan
@@ -1319,7 +1482,7 @@ class MatrixMigrationSQLTests(unittest.TestCase):
         try:
             with engine.begin() as connection:
                 config = alembic_config(connection)
-                self.assertEqual(ScriptDirectory.from_config(config).get_heads(), ['20261110_75'])
+                self.assertEqual(ScriptDirectory.from_config(config).get_heads(), ['20261110_76'])
                 command.upgrade(config, '20261105_69')
                 connection.execute(text("INSERT INTO hub_runtime_locks "
                     "(id, company_id, container_code, task_id) VALUES (1, 1, 'legacy-env', 42)"))

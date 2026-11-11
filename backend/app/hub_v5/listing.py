@@ -5,7 +5,7 @@ import secrets
 import time
 from datetime import timedelta
 from sqlalchemy import select
-from ..models import SupplyJob, SupplyJobMaterial, User, Company, HubUploadTask, HubUploadAttempt
+from ..models import SupplyJob, SupplyJobMaterial, SupplyAgent, User, Company, Role, HubUploadTask, HubUploadAttempt
 from ..supply_common import ACTIVE_STATES, digest, user_can_run
 from ..supply_files import read_supply_export
 from ..supply_quota import QUOTA_VERSION, allocate_links, sku_use_counts
@@ -48,7 +48,7 @@ def manual_confirmation(db,item,evidence):
         row=db.scalar(select(MatrixAllocation).where(MatrixAllocation.shop_id==item.shop_id,MatrixAllocation.combination_hash==signature))
         if not row or row.item_id!=item.id or row.state=='released':fail('原组合占用记录已变化，不能人工确认')
         row.state='confirmed'
-    item.result={**item.result,'manual_confirmation':evidence,'listing':{'accepted':sorted(set(range(len(links)))-rejected),'rejected':sorted(rejected),'receipt':'人工核对：'+evidence}}
+    item.result={**item.result,'manual_confirmation':evidence,'listing':{'accepted':sorted(set(range(len(links)))-rejected),'rejected':sorted(rejected),'receipt':'人工核对：'+evidence if evidence else '人工核对确认提交'}}
     return bool(rejected)
 
 
@@ -57,6 +57,9 @@ def enqueue(db, item, run):
     owner = db.get(User, run.owner_id)
     permissions.require_tasks(db,owner,run.frozen["config"]["tasks"])
     if not user_can_run(owner, db.get(Company, run.company_id)): fail("任务所有者不可用", 403)
+    supply_agent = db.get(SupplyAgent, owner.supply_agent_id) if owner.role == Role.SUPPLY_USER and owner.supply_agent_id else None
+    if owner.role == Role.SUPPLY_USER and (not supply_agent or supply_agent.company_id != owner.company_id):
+        fail("货盘账号缺少有效代理，请联系公司管理员", 422)
     if not item.shop_id: fail("请先关联本次执行环境")
     if item.supply_job_id: return db.get(SupplyJob, item.supply_job_id)
     if db.scalar(select(SupplyJob.id).where(SupplyJob.company_id == item.company_id, SupplyJob.user_id == run.owner_id, SupplyJob.state.in_(ACTIVE_STATES))):
@@ -102,9 +105,10 @@ def enqueue(db, item, run):
             db.add(MatrixAllocation(company_id=item.company_id, shop_id=item.shop_id, combination_hash=link["combination_hash"], item_id=item.id, payload=link))
     snap = {"strategy": params, "template": frozen["template"], "template_version": frozen["template_version"],
         "title_engine": "v1", "title_profile": None, "title_market_id": None, "catalog_options": frozen["catalog_options"],
-        "catalog_type": frozen["catalog_type"], "candidates": candidates, "seed": seed, "internal_usage": True,
+        "catalog_type": frozen["catalog_type"], "candidates": candidates, "seed": seed, "internal_usage": owner.role != Role.SUPPLY_USER,
         "expected_rows": frozen["expected_rows"], "user_name": owner.name}
     job = SupplyJob(company_id=item.company_id, user_id=run.owner_id, strategy_id=frozen["strategy_id"],
+        agent_id=supply_agent.id if supply_agent else None, agent_name=supply_agent.name if supply_agent else None,
         template_id=params["template_id"], category_catalog_id=params["category_catalog_id"], idempotency_key=f"matrix-item-{item.id}",
         request_hash=digest(snap), snapshot=snap, category_blob=base64.b64decode(frozen["category_blob"]),
         checkpoint={"links": links, "quota_version": QUOTA_VERSION},

@@ -16,7 +16,7 @@ router = APIRouter(prefix="/hub-v5/admin", tags=["矩阵管理"])
 
 def member_view(db, user):
     return {"id": user.id, "name": user.name, "user_code": user.user_code, "role": user.role.value,
-        "is_active": user.is_active, **permissions.access(db, user)}
+        "is_active": user.is_active, "is_expired": user.role == Role.SUPPLY_USER and permissions.supply_user_is_expired(user), **permissions.access(db, user)}
 
 
 @router.get("/members")
@@ -32,8 +32,20 @@ def update_member(identity:int,payload:MemberPermissionInput,actor=Depends(matri
     if actor.role!=Role.COMPANY_ADMIN:s.fail("仅公司管理员可操作",403)
     user=db.get(User,identity)
     if not user or user.company_id!=actor.company_id or user.role not in permissions.ROLES:s.fail("成员不存在",404)
+    if user.role==Role.SUPPLY_USER:s.fail("请在公开货盘的货盘用户中设置矩阵权限",404)
+    result=set_member_permission(db,actor,user,payload)
+    db.commit()
+    return result
+
+
+def set_member_permission(db,actor,user,payload):
+    """调用方持有公司锁；两个账号管理入口共用授权及停止运行逻辑。"""
+    identity=user.id
     if user.role==Role.COMPANY_ADMIN:s.fail("公司管理员默认拥有管理权限，不能修改",403)
     if not user.is_active and payload.enabled:s.fail("请先在成员管理启用该账号")
+    if user.role==Role.SUPPLY_USER and payload.enabled:
+        if permissions.supply_user_is_expired(user):s.fail("请先在货盘账号管理为该账号续期")
+        if payload.view_scope!="own":s.fail("货盘用户仅可查看本人矩阵数据",422)
     row=db.get(MatrixMemberPermission,identity)
     if payload.expected_revision!=(row.revision if row else 0):s.fail("授权已被修改，请刷新后重试")
     before=permissions.access(db,user)
@@ -41,9 +53,9 @@ def update_member(identity:int,payload:MemberPermissionInput,actor=Depends(matri
         row=MatrixMemberPermission(user_id=identity,company_id=actor.company_id,revision=0)
         db.add(row)
     row.enabled=payload.enabled
-    row.collect_enabled=payload.enabled and payload.collect_enabled
-    row.listing_enabled=payload.enabled and payload.listing_enabled
-    row.view_scope=payload.view_scope if payload.enabled else "own"
+    row.collect_enabled=payload.enabled
+    row.listing_enabled=payload.enabled
+    row.view_scope=payload.view_scope if payload.enabled and user.role!=Role.SUPPLY_USER else "own"
     row.revision+=1;row.updated_at=s.utcnow()
     db.flush()
     stopped=[]
@@ -55,7 +67,6 @@ def update_member(identity:int,payload:MemberPermissionInput,actor=Depends(matri
         db.add(MatrixCommand(company_id=actor.company_id,agent_id=run.agent_id,kind="stop",payload={"run_id":run.id},expires_at=s.utcnow()+timedelta(minutes=5)))
         s.recompute(db,run)
     s.audit(db,actor,"member.permission",identity,{"before":before,"after":permissions.access(db,user),"stop_requested_runs":stopped})
-    db.commit()
     return member_view(db,user)
 
 

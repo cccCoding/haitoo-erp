@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import {ref,computed,onMounted,onUnmounted,watch} from 'vue'
+import {ref,computed,onMounted,onUnmounted,watch,nextTick} from 'vue'
 import {useRoute,useRouter} from 'vue-router'
 import axios from 'axios'
 import {dialogFocus as vDialogFocus} from '../dialog-focus'
-import {label,display,percent,windowBuckets,filterParams,deviceSetup,groupRunEvents,environmentSyncTargets,sortMatrixRows} from './matrix'
+import {label,display,percent,windowBuckets,filterParams,deviceSetup,environmentSyncTargets,sortMatrixRows} from './matrix'
 import AgentConnectionBanner from './AgentConnectionBanner.vue'
 import MatrixDevices from './MatrixDevices.vue'
+import MatrixRunViewer from './MatrixRunViewer.vue'
+import MatrixRunHistory from './MatrixRunHistory.vue'
+import {createRunViewer,formatRunLogs} from './run-viewer'
 import PlanShopSelect from './PlanShopSelect.vue'
 const props=defineProps<{token:string;user:any}>()
 const emit=defineEmits<{unauthorized:[];'access-change':[enabled:boolean]}>()
@@ -17,7 +20,7 @@ function setTab(value:string){void router.replace({query:{...route.query,tab:val
 const devices=ref<any[]>([]),operations=ref<any[]>([]),plans=ref<any[]>([]),strategies=ref<any[]>([]),rows=ref<any[]>([]),runs=ref<any[]>([]),stats=ref<any>({windows:[]})
 const catalogs=ref<any[]>([])
 const listingStrategies=computed(()=>{
- const crossBorderIds=new Set(catalogs.value.filter(c=>c.template_type==='tiktok_cross_border').map(c=>c.id))
+ const crossBorderIds=new Set(catalogs.value.filter(c=>c.template_type==='tiktok_cross_border'&&c.site==='MY').map(c=>c.id))
  return strategies.value.filter(s=>crossBorderIds.has(s.category_catalog_id)&&(s.title_site||'MY')==='MY')
 })
 const activeRun=ref<any>(null),runSummary=ref<Record<string,number>>({})
@@ -29,11 +32,14 @@ const groupOptions=ref<string[]>([])
 const filters=ref({q:'',site:'',group:'',ungrouped:false}),selected=ref<number[]>([]),allFiltered=ref(false)
 const appliedFilters=ref({...filters.value}),selectedEnvs=new Map<number,any>()
 const hideAccountNames=ref(true)
-const dialog=ref(''),previewData=ref<any>(null),run=ref<any>(null),events=ref<any[]>([]),logFloor=ref(0),runPage=ref(1),runTotal=ref(0)
-const historyScope=ref<any>(null),historyRuns=ref<any[]>([]),historyPage=ref(1),historyTotal=ref(0),historyLoading=ref(false)
-const runItemId=ref<number|null>(null),runFromHistory=ref(false),logsMore=ref(false)
-let logRequest=0,historyRequest=0
-const logGroups=computed(()=>groupRunEvents(visibleEvents.value))
+const viewer=createRunViewer(async id=>(await api.get(`/hub-v5/runs/${id}`,auth())).data,async(id,params)=>(await api.get(`/hub-v5/runs/${id}/events`,{...auth(),params})).data,()=>emit('unauthorized'))
+const {run,events,itemId:runItemId,more:logsMore,loading:logsLoading,error:logsError}=viewer
+const runView=ref<'overview'|'logs'>('overview'),logNotice=ref('')
+const dialog=ref(''),previewData=ref<any>(null),runPage=ref(1),runTotal=ref(0)
+const historyScope=ref<any>(null),historyRuns=ref<any[]>([]),historyPage=ref(1),historyTotal=ref(0),historyLoading=ref(false),historyError=ref(''),historyScroll=ref(0)
+const runFromHistory=ref(false)
+let historyRequest=0
+let historyTrigger:HTMLElement|null=null
 const taskNames=(tasks:string[])=>['listing.catalog','shop.collect'].filter(task=>tasks.includes(task)).map(task=>task==='shop.collect'?'店铺采集':'自动上品').join(' + ')
 const timeText=(value:string)=>value?new Date(value).toLocaleString('zh-CN'):'—'
 const detail=ref<any>(null),detailPage=ref(1),detailQ=ref(''),detailTotal=ref(0),shopId=ref<number|null>(null)
@@ -45,7 +51,7 @@ const operationEditor=ref<any>({name:'',tasks:[],strategies:{}}),operationEditin
 const manual=ref<any>({tasks:[],strategies:{}})
 const previewBatches=computed(()=>previewData.value?.batches||[])
 const runPages=computed(()=>Math.max(1,Math.ceil(runTotal.value/20)))
-const editing=ref<number|null>(null),resolution=ref({item:null as any,action:'retry',evidence:''}),releaseFile=ref<File|null>(null),manifestText=ref(''),releaseEnabled=ref(false),releases=ref<any[]>([])
+const editing=ref<number|null>(null),resolution=ref({item:null as any,action:'retry'}),releaseFile=ref<File|null>(null),manifestText=ref(''),releaseEnabled=ref(false),releases=ref<any[]>([])
 const pages=computed(()=>Math.max(1,Math.ceil(total.value/size.value)))
 const ownDevices=computed(()=>devices.value.filter(d=>d.user_id===props.user.id&&d.version!=='协议4'&&d.is_active))
 const syncPending=ref<{id:number;name:string;previous:string|null}[]>([]),syncMessage=ref(''),syncHelp=ref(false)
@@ -57,8 +63,7 @@ watch(syncMessage,value=>{if(value)feedbackSource.value='sync'},{flush:'sync'})
 const feedbackMessage=computed(()=>feedbackSource.value==='error'?error.value:feedbackSource.value==='sync'?syncMessage.value:notice.value)
 
 const selectedCount=computed(()=>allFiltered.value?total.value:selected.value.length)
-const current=computed(()=>run.value||activeRun.value)
-const visibleEvents=computed(()=>events.value.filter(e=>e.seq>logFloor.value))
+const current=computed(()=>['run','resolve'].includes(dialog.value)?run.value:activeRun.value)
 const cards=computed(()=>[
  ['已采集店铺',`${stats.value.collected||0} / ${stats.value.total||0}`],['在售商品',display(stats.value.active)],['有浏览商品',display(stats.value.with_views),productShare(stats.value.with_views),'views'],['零浏览商品',display(stats.value.zero_views),productShare(stats.value.zero_views),'zero-views'],
  ['总曝光',windowBuckets(stats.value.windows,'impressions')],['总点击',windowBuckets(stats.value.windows,'clicks'),`点击率 ${windowBuckets(stats.value.windows,'ctr')}`],['有违规店铺',`${stats.value.violations||0} / ${stats.value.violations_covered||0}`]])
@@ -183,7 +188,7 @@ async function syncEnvironments(){
 }
 function openDevices(){error.value='';notice.value='';dialog.value='devices'}
 function dismiss(){if(busy.value)return;if(['plan','operation','manual'].includes(dialog.value))return;if(dialog.value==='deletePlan'){dialog.value='plan';return}if(dialog.value==='deleteOperation'){dialog.value='operation';return}if(!busy.value)close()}
-function close(){++planShopRequest;++historyRequest;historyLoading.value=false;dialog.value='';previewData.value=null;resolution.value={item:null,action:'retry',evidence:''}}
+function close(){if(dialog.value==='resolve'){dialog.value='run';return}const restoreHistory=dialog.value==='history'||(dialog.value==='run'&&runFromHistory.value);viewer.close();++planShopRequest;++historyRequest;historyLoading.value=false;dialog.value='';previewData.value=null;resolution.value={item:null,action:'retry'};if(restoreHistory)void nextTick(()=>{if(historyTrigger?.isConnected)historyTrigger.focus()})}
 async function command(device:any,kind:string){await perform(async()=>{await api.post(`/hub-v5/agents/${device.id}/commands`,{kind},auth());notice.value=kind==='refresh'?'已请求同步，完整目录上传后会显示在环境列表中':kind==='pause'?'已暂停此电脑接收新任务':kind==='resume'?'已恢复此电脑接收新任务':'已撤销此电脑授权';await Promise.all([loadDevices(),loadRows()])})}
 async function loadPlanShops(){
  const request=++planShopRequest,agent=editor.value.agent_id
@@ -249,38 +254,34 @@ async function createRuns(){
  let created:any[]=[]
  if(previewData.value.manual){const {data}=await api.post('/hub-v5/manual/runs',{previews:previewBatches.value.map((p:any)=>({preview_token:p.preview_token,expected_revision:p.revision}))},headers);created=data.items}
  else {const p=previewBatches.value[0];const {data}=await api.post(`/hub-v5/plans/${p.plan_id}/runs`,{preview_token:p.preview_token,expected_revision:p.revision},headers);created=[data]}
- ++logRequest;run.value=created[0]||null;runItemId.value=null;events.value=[];logFloor.value=0;close();executeKey.value='';runPage.value=1;notice.value=`已创建 ${created.length} 次运行，可在运行记录中查看进度`;await loadRuns()
+ viewer.close();run.value=null;events.value=[];close();executeKey.value='';runPage.value=1;notice.value=`已创建 ${created.length} 次运行，可在运行记录中查看进度`;await loadRuns()
 }
 async function loadHistory(){
- const request=++historyRequest;historyLoading.value=true
+ const request=++historyRequest;historyLoading.value=true;historyError.value=''
  try{const {data}=await api.get('/hub-v5/runs',{...auth(),params:{page:historyPage.value,...(historyScope.value?{environment_id:historyScope.value.id}:{})}})
  if(request!==historyRequest||disposed)return
  historyRuns.value=data.items;historyTotal.value=data.total
- }catch(e){if(request===historyRequest)handle(e)}finally{if(request===historyRequest)historyLoading.value=false}
+ }catch(e:any){if(request===historyRequest){if(e.response?.status===401)emit('unauthorized');historyError.value=typeof e.response?.data?.detail==='string'?e.response.data.detail:'运行记录加载失败，请重试'}}finally{if(request===historyRequest)historyLoading.value=false}
 }
-async function openHistory(row?:any){historyScope.value=row||null;historyPage.value=1;historyRuns.value=[];historyTotal.value=0;error.value='';dialog.value='history';await loadHistory()}
-async function openRun(value:any,itemId:number|null=null,fromHistory=false,showDialog=true){
- const request=++logRequest
- const params=itemId?{item_id:itemId}:{}
- const [r,e]=await Promise.all([api.get(`/hub-v5/runs/${value.id}`,{...auth(),params}),api.get(`/hub-v5/runs/${value.id}/events`,{...auth(),params})])
- if(request!==logRequest||disposed)return
- run.value=r.data;runItemId.value=itemId;events.value=e.data;logsMore.value=e.data.length===500;logFloor.value=0;runFromHistory.value=fromHistory;if(showDialog)dialog.value='run'
+async function changeHistoryPage(value:number){historyPage.value=value;historyScroll.value=0;historyRuns.value=[];await loadHistory()}
+async function openHistory(row?:any){historyTrigger=document.activeElement instanceof HTMLElement?document.activeElement:null;historyScroll.value=0;historyScope.value=row||null;historyPage.value=1;historyRuns.value=[];historyTotal.value=0;error.value='';dialog.value='history';await loadHistory()}
+async function openRun(value:any,itemId:number|null=null,fromHistory=false,view:'overview'|'logs'='overview'){
+ if(fromHistory){++historyRequest;historyLoading.value=false}runFromHistory.value=fromHistory;runView.value=view;logNotice.value='';dialog.value='run'
+ await viewer.open(value,itemId)
 }
-async function backToHistory(){dialog.value='history';await loadHistory()}
-async function stopCurrent(){const target=current.value;if(!target)return;await perform(async()=>{await api.post(`/hub-v5/runs/${target.id}/stop`,{},auth());notice.value='已请求停止，正在等待设备安全结束';if(run.value?.id===target.id)await logs();await loadRuns()})}
-async function logs(){
- if(!run.value)return
- const request=logRequest,id=run.value.id,itemId=runItemId.value,after=events.value[events.value.length-1]?.seq||0
- const params={after_seq:after,...(itemId?{item_id:itemId}:{})}
- const [r,e]=await Promise.all([api.get(`/hub-v5/runs/${id}`,{...auth(),params:itemId?{item_id:itemId}:{}}),api.get(`/hub-v5/runs/${id}/events`,{...auth(),params})])
- if(request!==logRequest||disposed||run.value?.id!==id)return
- run.value=r.data;const seen=new Set(events.value.map(event=>event.seq));events.value=[...events.value,...e.data.filter((event:any)=>!seen.has(event.seq))];logsMore.value=e.data.length===500
+async function selectRunItem(id:number|null){if(id===runItemId.value)return;logNotice.value='';await viewer.select(id)}
+async function backToHistory(){viewer.close();dialog.value='history';await loadHistory()}
+async function stopCurrent(){const target=current.value;if(!target)return;await perform(async()=>{await api.post(`/hub-v5/runs/${target.id}/stop`,{},auth());notice.value='已请求停止，正在等待设备安全结束';await logs();await loadRuns()})}
+async function logs(){if(dialog.value==='run')await viewer.load()}
+async function copyLogs(){
+ const id=run.value?.id,scope=runItemId.value
+ const show=(message:string)=>{if(dialog.value==='run'&&run.value?.id===id&&runItemId.value===scope)logNotice.value=message}
+ try{await navigator.clipboard.writeText(formatRunLogs(events.value));show('当前范围日志已复制')}catch{show('复制失败，请检查浏览器剪贴板权限后重试')}
 }
-async function copyLogs(){await perform(async()=>{await navigator.clipboard.writeText(visibleEvents.value.map(e=>`${e.seq} ${e.created_at} 执行项 ${e.item_id||'—'} 第${e.attempt_number||'—'}次 ${JSON.stringify(e.payload)}`).join('\n'));notice.value='日志已复制'})}
 async function showShop(row:any){if(!row.shop)return;shopId.value=row.shop.id;detail.value=null;detailPage.value=1;detailQ.value='';await loadDetail();if(detail.value)dialog.value='shop'}
 async function loadDetail(){await perform(async()=>{const {data}=await api.get(`/hub-v5/shops/${shopId.value}/snapshots`,{...auth(),params:{page:detailPage.value,q:detailQ.value}});detail.value=data;detailTotal.value=data.total;expandedProductSkus.value={}})}
-function resolveItem(item:any){resolution.value={item,action:item.submission==='unknown'||item.submission==='request_sent'?'confirm-submitted':run.value?.stop_requested?'cancel':item.submission==='confirmed'?'retransmit':'retry',evidence:''};dialog.value='resolve'}
-async function saveResolution(){await perform(async()=>{await api.post(`/hub-v5/run-items/${resolution.value.item.id}/resolve`,{action:resolution.value.action,evidence:resolution.value.evidence},auth());close();await logs();await loadRows()})}
+function resolveItem(item:any){error.value='';resolution.value={item,action:item.submission==='unknown'||item.submission==='request_sent'?'confirm-submitted':run.value?.stop_requested?'cancel':item.submission==='confirmed'?'retransmit':'retry'};dialog.value='resolve'}
+async function saveResolution(){await perform(async()=>{await api.post(`/hub-v5/run-items/${resolution.value.item.id}/resolve`,{action:resolution.value.action},auth());dialog.value='run';await logs();await Promise.all([loadRows(),loadRuns()])})}
 async function downloadProducts(){await perform(async()=>{const {data}=await api.get(`/hub-v5/shops/${shopId.value}/export`,{...auth(),params:{q:detailQ.value},responseType:'blob'});const url=URL.createObjectURL(data);const a=document.createElement('a');a.href=url;a.download='店铺商品与SKU.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)})}
 async function download(){await perform(async()=>{const {data}=await api.get('/hub-v5/exports',{...auth(),params:filterParams(appliedFilters.value),responseType:'blob'});const url=URL.createObjectURL(data);const a=document.createElement('a');a.href=url;a.download=`店铺数据-${new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Hong_Kong'})}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)})}
 const overrideSite=ref('keep'),overrideActivity=ref('keep')
@@ -289,7 +290,7 @@ async function saveOverrides(){await perform(async()=>{if(allFiltered.value)thro
 async function checkAccess(){
  const previous=access.value
  const {data}=await api.get('/hub-v5/access',auth());access.value=data;accessLoaded.value=true;emit('access-change',!!data.enabled)
- if(!data.enabled||previous.view_scope!==data.view_scope){selected.value=[];allFiltered.value=false;selectedEnvs.clear();++logRequest;run.value=null;events.value=[];historyRuns.value=[];historyScope.value=null;syncPending.value=[];syncMessage.value='';syncHelp.value=false;close()}
+ if(!data.enabled||previous.view_scope!==data.view_scope){selected.value=[];allFiltered.value=false;selectedEnvs.clear();viewer.close();run.value=null;events.value=[];historyRuns.value=[];historyScope.value=null;syncPending.value=[];syncMessage.value='';syncHelp.value=false;dialog.value='';close()}
  if(!data.enabled){devices.value=[];rows.value=[];plans.value=[];operations.value=[];runs.value=[];total.value=0}
  return !previous.enabled&&data.enabled
 }
@@ -297,13 +298,13 @@ const canManageRun=(value:any)=>value&&(access.value.is_admin||value.owner_id===
 watch(()=>props.user.id,()=>{selected.value=[];allFiltered.value=false;void initialize()})
 async function initialize(){try{await checkAccess();if(access.value.enabled)await refresh()}catch(e){handle(e);accessLoaded.value=true}}
 onMounted(()=>{void initialize();poll=setInterval(async()=>{if(polling||busy.value||disposed)return;polling=true;try{const activated=await checkAccess();if(!access.value.enabled)return;if(activated){await refresh();return}await logs();await Promise.all([loadRuns(),loadDevices(),...(dialog.value==='history'&&!historyLoading.value?[loadHistory()]:[])]);if(tab.value==='automation')await loadAutomation();if(tab.value==='data')stats.value=(await api.get('/hub-v5/shops/metrics',{...auth(),params:filterParams(appliedFilters.value)})).data;await loadRows()}catch(e){handle(e)}finally{polling=false}},5000)})
-onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
+onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval(poll)})
 </script>
 
 <template>
 <section class="matrix page">
   <div v-if="!accessLoaded" class="mx-access-state">正在读取矩阵权限…</div>
-  <div v-else-if="!access.enabled" class="mx-access-state"><h2>尚未获得矩阵使用授权</h2><p>请联系公司管理员，在「企业管理 → TK 矩阵」中为你授权。</p><p v-if="error" class="error">{{error}}</p><button @click="initialize">重新检查授权</button></div>
+  <div v-else-if="!access.enabled" class="mx-access-state"><h2>尚未获得矩阵使用授权</h2><p>请联系公司管理员，为你的账号启用“使用矩阵”。</p><p v-if="error" class="error">{{error}}</p><button @click="initialize">重新检查授权</button></div>
   <template v-else>
   <AgentConnectionBanner :token="token">
     <template #navigation>
@@ -349,14 +350,17 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
   </div>
   <div v-if="tab!=='data'" class="mx-bottom">
     <section class="mx-panel mx-runs-panel"><div class="mx-summary"><h2>全部运行记录 <small>{{runTotal}}</small></h2><button :disabled="busy" @click="perform(loadRuns)">刷新</button></div>
-      <div class="mx-runs-scroll"><table class="mx-runs-table"><thead><tr><th>运行 / 操作</th><th>设备 / 范围</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody><tr v-for="r in runs" :key="r.id" :class="{'is-current':run?.id===r.id}"><td><b>#{{r.id}} · {{taskNames(r.tasks)}}</b><small>{{r.plan_name||'临时执行'}} · {{r.trigger==='scheduled'?'定时':'手动'}}</small></td><td>{{r.device_name||`设备 #${r.agent_id}`}}<small>{{r.items.length}} 个环境</small></td><td><span class="mx-state" :class="r.status">{{label(r.status)}}</span></td><td>{{timeText(r.created_at)}}</td><td><div class="mx-row-actions"><button :disabled="busy" @click="perform(()=>openRun(r,null,false,false))">日志</button><button :disabled="busy" @click="perform(()=>openRun(r))">详情</button></div></td></tr><tr v-if="!runs.length"><td colspan="5" class="mx-list-empty">暂无运行记录</td></tr></tbody></table></div>
+      <div class="mx-runs-scroll"><table class="mx-runs-table"><thead><tr><th>运行 / 操作</th><th>设备 / 范围</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody><tr v-for="r in runs" :key="r.id" :class="{'is-current':run?.id===r.id}"><td><b>#{{r.id}} · {{taskNames(r.tasks)}}</b><small>{{r.plan_name||'临时执行'}} · {{r.trigger==='scheduled'?'定时':'手动'}}</small></td><td>{{r.device_name||`设备 #${r.agent_id}`}}<small>{{r.items.length}} 个环境</small></td><td><span class="mx-state" :class="r.status">{{label(r.status)}}</span></td><td>{{timeText(r.created_at)}}</td><td><div class="mx-row-actions"><button :disabled="busy" @click="openRun(r)">详情</button></div></td></tr><tr v-if="!runs.length"><td colspan="5" class="mx-list-empty">暂无运行记录</td></tr></tbody></table></div>
       <footer class="mx-pagination"><span>共 {{runTotal}} 次运行</span><button :disabled="busy||runPage<=1" @click="runPage--;perform(loadRuns)">上一页</button><span>{{runPage}} / {{runPages}}</span><button :disabled="busy||runPage>=runPages" @click="runPage++;perform(loadRuns)">下一页</button></footer>
     </section>
-    <section class="mx-panel mx-log-panel"><div class="mx-summary"><h2>当前日志</h2><button :disabled="!run" @click="copyLogs">复制</button><button @click="logFloor=events[events.length-1]?.seq||0">清屏</button></div><div class="mx-run-summary" v-if="current"><b>#{{current.id}} {{label(current.status)}}</b><span>{{current.items.filter((i:any)=>['succeeded','partial_success','failed','cancelled'].includes(i.status)).length}} / {{current.items.length}} 个环境结束</span></div><div class="mx-log" role="log" aria-label="运行日志"><div v-for="e in visibleEvents" :key="e.seq"><span>#{{e.seq}}</span> {{e.payload.message||e.payload.stage||e.kind}}</div><p v-if="!visibleEvents.length">{{run?'暂无已上报日志':'点击左侧运行记录的「日志」查看进度'}}</p></div></section>
   </div>
   </template>
 </section>
-<div v-if="dialog&&access.enabled" class="modal-backdrop mx-backdrop" @click.self="dismiss"><section :key="dialog" v-dialog-focus="{close:dismiss,busy}" class="modal-card mx-dialog" :class="{'mx-dialog-devices':dialog==='devices','mx-dialog-override':dialog==='override','mx-dialog-manual':dialog==='manual','mx-dialog-editor':['operation','plan'].includes(dialog),'mx-dialog-preview':dialog==='preview'}" role="dialog" aria-modal="true" aria-labelledby="matrix-dialog-title"><div class="mx-summary"><h2 id="matrix-dialog-title">{{({devices:'设备管理',plan:editing?'编辑运营计划':'新建运营计划',deletePlan:'删除运营计划',operation:operationEditing?'编辑操作方案':'新建操作方案',deleteOperation:'删除操作方案',manual:'临时批量执行',preview:'执行预览',run:'运行详情',history:historyScope?'店铺运行记录':'全部运行记录',shop:'商品明细',resolve:'人工核对',override:'批量设置站点/活跃',releases:'签名升级与插件分发'} as any)[dialog]}}</h2><button :disabled="busy" aria-label="关闭弹窗" @click="dialog==='deletePlan'?dialog='plan':dialog==='deleteOperation'?dialog='operation':close()">关闭</button></div>
+<MatrixRunHistory v-if="dialog==='history'&&access.enabled" :scope="historyScope" :runs="historyRuns" :total="historyTotal" :page="historyPage" :loading="historyLoading" :error="historyError" :scroll-top="historyScroll" @close="close" @refresh="loadHistory" @page="changeHistoryPage" @scroll="historyScroll=$event" @open="(value,itemId)=>openRun(value,itemId,true)"><template #legacy><slot name="legacy"/></template></MatrixRunHistory>
+<MatrixRunViewer v-if="['run','resolve'].includes(dialog)&&access.enabled&&run" :run="run" :events="events" :item-id="runItemId" v-model:view="runView" :loading="logsLoading" :error="logsError" :more="logsMore" :busy="busy" :from-history="runFromHistory" :can-manage="!!canManageRun(run)" :resolving="dialog==='resolve'" :notice="logNotice" @close="close" @back="backToHistory" @select="selectRunItem" @refresh="logs" @copy="copyLogs" @resolve="resolveItem">
+<template #resolution><p v-if="error" class="error" role="alert">{{error}}</p><form class="mx-form" @submit.prevent="saveResolution"><p>请核对原环境及本次文件的真实平台结果；未知提交不得直接取消或重复导入。</p><label>处理方式<select v-model="resolution.action"><option value="confirm-submitted">确认未知部分已提交</option><option value="confirm-not-submitted">确认未提交并取消，不再执行</option><option value="retry" :disabled="run?.stop_requested||run?.owner_id!==user.id">确认未提交，再重试原文件</option><option value="retransmit" :disabled="run?.stop_requested||run?.owner_id!==user.id">仅重传原采集数据</option><option value="cancel">取消明确未提交项</option></select></label><button :disabled="busy" class="primary">保存核对结果</button></form></template>
+</MatrixRunViewer>
+<div v-if="dialog&&!['run','resolve','history'].includes(dialog)&&access.enabled" class="modal-backdrop mx-backdrop" @click.self="dismiss"><section :key="dialog" v-dialog-focus="{close:dismiss,busy}" class="modal-card mx-dialog" :class="{'mx-dialog-devices':dialog==='devices','mx-dialog-override':dialog==='override','mx-dialog-manual':dialog==='manual','mx-dialog-editor':['operation','plan'].includes(dialog),'mx-dialog-preview':dialog==='preview'}" role="dialog" aria-modal="true" aria-labelledby="matrix-dialog-title"><div class="mx-summary"><h2 id="matrix-dialog-title">{{({devices:'设备管理',plan:editing?'编辑运营计划':'新建运营计划',deletePlan:'删除运营计划',operation:operationEditing?'编辑操作方案':'新建操作方案',deleteOperation:'删除操作方案',manual:'临时批量执行',preview:'执行预览',run:'运行详情',history:historyScope?'店铺运行记录':'全部运行记录',shop:'商品明细',resolve:'人工核对',override:'批量设置站点/活跃',releases:'签名升级与插件分发'} as any)[dialog]}}</h2><button :disabled="busy" aria-label="关闭弹窗" @click="dialog==='deletePlan'?dialog='plan':dialog==='deleteOperation'?dialog='operation':close()">关闭</button></div>
 <div v-if="feedbackMessage" class="mx-feedback" :class="{'is-error':feedbackSource==='error'}" :role="feedbackSource==='error'?'alert':'status'" aria-live="polite"><span>{{feedbackMessage}}</span><button v-if="feedbackSource==='sync'&&syncHelp" @click="openDevices">前往设备管理</button></div>
 <template v-if="dialog==='devices'">
   <p class="mx-devices-intro">这里只显示你自己的电脑。连接 HubStudio 并同步环境后，即可回到环境列表操作。</p>
@@ -385,39 +389,8 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
 <ul v-if="previewData?.manual&&previewData.errors.length" class="error"><li v-for="(message,i) in previewData.errors" :key="i">{{message}}</li></ul>
 <div class="mx-manual-footer"><button type="button" :disabled="busy" @click="close">取消</button><button class="primary" :disabled="busy||!manual.tasks.length">{{busy?'提交中…':'创建并执行'}}</button></div></form>
 <template v-if="dialog==='preview'&&previewData"><p>{{previewData.manual?'临时批量执行':'计划立即运行'}} · {{taskNames(previewData.tasks)}} · {{previewData.environment_count}} 个环境 · {{previewBatches.length}} 台设备</p><ul v-if="previewData.errors.length" class="error"><li v-for="(e,i) in previewData.errors" :key="i">{{e}}</li></ul><section v-for="batch in previewBatches" :key="batch.agent_id" class="mx-preview-batch"><h3>{{devices.find(d=>d.id===batch.agent_id)?.name||`设备 #${batch.agent_id}`}} <small>{{batch.environments.length}} 个环境</small></h3><div v-for="(s,site) in batch.strategies" :key="site" class="mx-device-card"><b>{{site}} · {{s.name}}</b><span>每店 {{s.link_count}} 个商品组 · {{s.sku_count}} SKU · 售价 {{s.price}} MYR</span></div><div class="mx-preview-env"><span v-for="e in batch.environments" :key="e.id">{{e.name}} / {{e.site}} / {{e.container_code}}</span></div></section><p>{{previewData.tasks.includes('listing.catalog')?'本次执行将使用已冻结的环境和货盘参数，并向 TikTok 提交商品。':'本次仅采集店铺数据，不提交商品。'}}</p><div class="mx-manual-footer"><button :disabled="busy" @click="previewData.manual?dialog='manual':close()">{{previewData.manual?'返回调整':'取消'}}</button><button class="primary" :disabled="busy||previewData.errors.length>0" @click="execute">{{busy?'提交中…':'确认创建运行'}}</button></div></template>
-<template v-if="dialog==='run'&&run">
-<div class="mx-actions"><button v-if="runFromHistory" @click="backToHistory">← 返回运行记录</button><button :disabled="busy||!visibleEvents.length" @click="copyLogs">复制日志</button></div>
-<p>#{{run.id}} · 批次{{label(run.status)}} · {{timeText(run.created_at)}} · {{taskNames(run.tasks)}}</p>
-<p class="mx-record-meta">{{run.trigger==='scheduled'?'定时执行':'手动执行'}} · {{run.plan_name||'临时执行'}} · {{run.operation_name}} · {{run.device_name||`设备 #${run.agent_id}`}} · {{run.owner_name||`成员 #${run.owner_id}`}}</p>
-<div v-for="item in run.items" :key="item.id" class="mx-device-card">
- <b>{{item.environment_name||`环境 #${item.environment_id}`}} · {{label(item.status)}}</b>
- <span>{{item.shop?`${item.shop.name} / ${item.shop.site} / ${item.shop.external_id||'按环境归档'}`:'当次尚未识别店铺'}} · {{label(item.stage)}}</span>
- <span>提交：{{label(item.submission)}} · 数据：{{label(item.collection_status)}}</span>
- <p v-if="item.error" class="error">{{item.error}}</p><p v-if="item.result.listing">已接受 {{item.result.listing.accepted.length}} · 明确拒绝 {{item.result.listing.rejected.length}}</p>
- <div class="mx-attempts"><span v-for="attempt in item.attempts" :key="attempt.id">第 {{attempt.number}} 次尝试 · {{label(attempt.status)}} · {{timeText(attempt.started_at)}}</span><span v-if="!item.attempts.length">尚未开始执行</span></div>
- <div class="mx-actions"><button v-if="!runItemId" @click="perform(()=>openRun(run,item.id,runFromHistory))">查看此店铺步骤日志</button><button v-if="canManageRun(run)&&['awaiting_attention','failed','partial_success'].includes(item.status)" @click="resolveItem(item)">人工核对</button></div>
-</div>
-<p class="mx-record-meta">按执行顺序展示已上报的步骤；历史记录未上报的细节无法补回。</p>
-<div class="mx-step-list"><details v-for="group in logGroups" :key="group.key" class="mx-step" open>
- <summary><b>{{label(group.stage)}}</b><span>{{group.itemId?`执行项 #${group.itemId}`:'批次事件'}} · {{group.attempt?`第 ${group.attempt} 次尝试`:'未关联尝试'}} · {{group.events.length}} 条</span></summary>
- <div class="mx-step-events"><div v-for="event in group.events" :key="event.seq"><time>{{timeText(event.created_at)}}</time><span>{{event.payload.message||label(event.payload.status||event.payload.stage||event.kind)}}</span><details><summary>事件详情 #{{event.seq}}</summary><pre>{{JSON.stringify(event.payload,null,2)}}</pre></details></div></div>
-</details><p v-if="!logGroups.length" class="mx-empty">{{run.items.some((item:any)=>item.attempts.length)?'暂无可关联到此执行项的日志':'尚未开始执行，暂无步骤日志'}}</p></div>
-<button v-if="logsMore" :disabled="busy" @click="perform(logs)">继续加载日志</button>
-</template>
-<template v-if="dialog==='history'">
- <div v-if="historyScope" class="mx-history-context"><b>{{historyScope.shop?.name||historyScope.name}}</b><span>{{historyScope.name}} / {{historyScope.container_code}}</span><small>包含此环境的历史，以及当前已识别店铺的关联执行；当次店铺身份以执行详情为准。</small></div>
- <button :disabled="historyLoading" @click="loadHistory">{{historyLoading?'加载中…':'刷新记录'}}</button>
- <div :aria-busy="historyLoading"><article v-for="r in historyRuns" :key="r.id" class="mx-history-record">
-  <div class="mx-summary"><b>#{{r.id}} · {{taskNames(r.tasks)}}</b><span>批次{{label(r.status)}}</span></div>
-  <p class="mx-record-meta">{{timeText(r.created_at)}} · {{r.trigger==='scheduled'?'定时执行':'手动执行'}} · {{r.plan_name||'临时执行'}} · {{r.operation_name}} · {{r.device_name||`设备 #${r.agent_id}`}} · {{r.owner_name||`成员 #${r.owner_id}`}}</p>
-  <template v-if="historyScope"><div v-for="item in r.items" :key="item.id" class="mx-history-item"><div><b>{{item.environment_name||`环境 #${item.environment_id}`}} · {{label(item.status)}}</b><small>{{item.shop?`${item.shop.name} / ${item.shop.external_id||'按环境归档'}`:'当次尚未识别店铺'}} · 采集{{label(item.collection_status)}} · 上品{{label(item.submission)}}</small><small v-if="item.result.listing">已接受 {{item.result.listing.accepted.length}} · 明确拒绝 {{item.result.listing.rejected.length}}</small><small v-if="item.error" class="error">{{item.error}}</small></div><button :disabled="busy" @click="perform(()=>openRun(r,item.id,true))">查看步骤日志</button></div></template>
-  <div v-else class="mx-actions"><span>{{r.items.length}} 个环境</span><button :disabled="busy" @click="perform(()=>openRun(r,null,true))">查看批次详情</button></div>
- </article><p v-if="!historyRuns.length" class="mx-empty">{{historyLoading?'正在加载运行记录…':'暂无运行记录'}}</p></div>
- <div class="mx-pagination"><button :disabled="historyPage<=1||historyLoading" @click="historyPage--;loadHistory()">上一页</button><span>{{historyPage}} / {{Math.max(1,Math.ceil(historyTotal/20))}} · 共 {{historyTotal}} 次运行</span><button :disabled="historyPage*20>=historyTotal||historyLoading" @click="historyPage++;loadHistory()">下一页</button></div>
- <details v-if="!historyScope"><summary>历史固定 XLSX 上品记录</summary><slot name="legacy"/></details>
-</template>
 <template v-if="dialog==='shop'&&detail"><p>快照 #{{detail.snapshot?.id||'—'}} · {{detail.snapshot?.observed_at||'尚未采集'}}</p><p v-if="['product_management','product_analysis'].includes(detail.snapshot?.collection_kind)">在售 {{display(detail.snapshot.active)}} 个商品 · 浏览次数 {{display(detail.snapshot.views)}} · SKU {{display(detail.snapshot.sku_count)}} 条 · {{detail.snapshot.views_covered}}/{{detail.snapshot.active}} 个商品提供浏览次数。浏览次数取平台近28天字段，未推断精确起止日期。</p><p v-if="detail.snapshot?.window_start">{{detail.snapshot.window_start}} — {{detail.snapshot.window_end}} · {{detail.snapshot.timezone}}<span v-if="detail.snapshot.collection_kind==='product_analysis'"> · 最近30天（含今天，结束时间为次日零点）</span></p><p v-if="detail.snapshot?.collection_kind==='product_analysis'&&detail.snapshot?.traffic_unknown>0">分析数据覆盖 {{detail.snapshot.traffic_covered}}/{{detail.snapshot.active}} 个在售商品 · 已知曝光 {{display(detail.snapshot.known_impressions)}} · 已知点击 {{display(detail.snapshot.known_clicks)}}。其余商品经ID查询后平台无记录，指标保持未知。</p><div class="mx-notice"><span v-for="(state,section) in detail.snapshot?.sections" :key="section">{{({identity:'执行目标',products:'商品分页与SKU',traffic:'商品流量',metrics:'经营指标',health:'健康状态'} as any)[section]}}：{{state==='completed'?'完成':state==='unsupported'?'暂不支持':'失败'}}　</span><p v-for="(reason,section) in detail.snapshot?.reasons" :key="section">{{reason}}</p></div><form class="mx-actions" @submit.prevent="detailPage=1;loadDetail()"><input v-model="detailQ" placeholder="商品名 / 商品ID" aria-label="搜索商品"/><button>搜索</button><button type="button" :disabled="busy||!detail.snapshot" @click="downloadProducts">导出商品及SKU CSV</button></form><div class="mx-product-details"><table><thead><tr><th>商品ID</th><th>名称</th><th>在售</th><th>浏览次数</th><th>曝光</th><th>点击</th><th>点击率</th><th>GMV</th><th>成交件数</th><th>SKU 数量</th><th>SKU 明细</th></tr></thead><tbody><tr v-for="p in detail.products" :key="p.external_id"><td>{{p.external_id}}</td><td class="mx-product-name">{{p.name}}</td><td>{{p.active?'是':'否'}}</td><td :title="p.views_reason||''">{{display(p.views)}}</td><td :title="p.traffic_reason||''">{{display(p.impressions)}}<small v-if="p.traffic_reason">平台无分析记录</small></td><td :title="p.traffic_reason||''">{{display(p.clicks)}}</td><td>{{percent(p.impressions>0&&p.clicks!=null?p.clicks/p.impressions:null)}}</td><td :title="p.traffic_reason||''">{{display(p.gmv)}} {{p.gmv!=null?detail.snapshot?.currency:''}}</td><td>{{display(p.sales_count)}}</td><td>{{display(p.sku_count)}}</td><td><details v-if="p.skus?.length" @toggle="expandedProductSkus[p.external_id]=($event.target as HTMLDetailsElement).open"><summary>查看 {{p.skus.length}} 条 SKU</summary><table v-if="expandedProductSkus[p.external_id]" class="mx-sku-details"><thead><tr><th>SKU ID</th><th>规格</th><th>商家SKU</th><th>库存</th><th>原价（MYR）</th><th>促销价（MYR）</th></tr></thead><tbody><tr v-for="(sku,i) in p.skus" :key="i"><td>{{sku.external_id||'—'}}</td><td>{{sku.name||'未单独展示'}}</td><td>{{sku.seller_sku||'—'}}</td><td>{{display(sku.stock)}}</td><td>{{sku.price}}</td><td>{{sku.sale_price||'—'}}</td></tr></tbody></table></details><span v-else>—</span></td></tr></tbody></table></div><div class="mx-pagination"><button :disabled="detailPage<=1" @click="detailPage--;loadDetail()">上一页</button><span>{{detailPage}} · 共{{detailTotal}}项</span><button :disabled="detailPage*50>=detailTotal" @click="detailPage++;loadDetail()">下一页</button></div></template>
-<form v-if="dialog==='resolve'" class="mx-form" @submit.prevent="saveResolution"><p>请核对原环境及本次文件的真实平台结果；未知提交不得直接取消或重复导入。</p><label>处理方式<select v-model="resolution.action"><option value="confirm-submitted">确认未知部分已提交</option><option value="confirm-not-submitted">确认未提交并取消，不再执行</option><option value="retry" :disabled="run?.stop_requested||run?.owner_id!==user.id">确认未提交，再重试原文件</option><option value="retransmit" :disabled="run?.stop_requested||run?.owner_id!==user.id">仅重传原采集数据</option><option value="cancel">取消明确未提交项</option></select></label><label>核对依据<textarea v-model="resolution.evidence" required minlength="5" maxlength="1000" rows="4"/></label><button :disabled="busy" class="primary">保存核对结果</button></form>
+
 <form v-if="dialog==='override'" class="mx-form" @submit.prevent="saveOverrides"><p>对已选 {{selectedCount}} 个环境设置站点或活跃状态，选择“不修改”将保留原值。共享环境需管理员操作。</p><label>站点<select v-model="overrideSite"><option value="keep">不修改</option><option>MY</option><option value="">清除人工覆盖</option></select></label><label>活跃<select v-model="overrideActivity"><option value="keep">不修改</option><option value="normal">正常</option><option value="closed">封店</option><option value="unchecked">未检测</option></select></label><button class="primary" :disabled="busy||(overrideSite==='keep'&&overrideActivity==='keep')">保存</button></form>
 
 </section></div>
@@ -465,22 +438,6 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
 .mx-feedback button{flex-shrink:0}
 .mx-feedback.is-error{background:#fff2f2;border-color:#f0d1d4;color:#b84a51}
 
-.mx-record-meta{font-size:12px;color:#747d91;line-height:1.7}
-.mx-history-context,.mx-attempts{display:flex;flex-direction:column;gap:6px;margin:12px 0;color:#697287;font-size:12px}
-.mx-history-context b{font-size:16px;color:#34394c}
-.mx-history-record{border:1px solid #e5e7ee;border-radius:8px;padding:16px;margin-top:12px}
-.mx-history-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-top:1px solid #eee}
-.mx-history-item small{display:block;margin-top:6px;overflow-wrap:anywhere}
-.mx-history-item button{flex-shrink:0}
-.mx-step{border:1px solid #e5e7ee;border-radius:8px;margin:10px 0;overflow:hidden}
-.mx-step>summary{padding:12px;cursor:pointer;background:#f8f9fc}
-.mx-step>summary span{margin-left:12px;color:#747d91;font-size:12px}
-.mx-step-events{padding:0 14px}
-.mx-step-events>div{padding:12px 0;border-top:1px solid #eee;overflow-wrap:anywhere}
-.mx-step-events time{display:block;color:#747d91;font-size:11px;margin-bottom:4px}
-.mx-step-events details{font-size:11px;color:#747d91;margin-top:6px}
-.mx-step-events pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto}
-@media(max-width:600px){.mx-history-item{align-items:flex-start;flex-direction:column}.mx-step>summary span{display:block;margin:6px 0 0}}
 
 .mx-dialog.mx-dialog-override{width:min(520px,96vw)}
 .mx-dialog-override .mx-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
@@ -547,10 +504,8 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
 .mx-pagination>span:first-child{margin-right:auto}
 .mx-pagination select{display:inline-block;width:65px;height:32px;min-height:32px;margin:0;padding:4px 8px;border:1px solid #dfe2eb;border-radius:6px;background:#fff;font:inherit}
 .mx-pagination button{min-height:32px;padding:5px 10px}
-.mx-bottom{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);align-items:stretch;gap:16px;margin-top:16px}
+.mx-bottom{display:grid;grid-template-columns:minmax(0,1fr);align-items:stretch;gap:16px;margin-top:16px}
 .mx-operations{display:flex;flex-direction:column;gap:12px;padding:16px;min-height:320px}
-.mx-log-panel{min-width:0;overflow:hidden;display:flex;flex-direction:column;min-height:320px}
-.mx-log-panel>.mx-log{flex:1;max-height:none;min-height:240px;height:0}
 .mx-operations h2{margin:0;font-size:14px;font-weight:600}
 .mx-operations>p{margin:0;color:#8a92a2;font-size:12px;line-height:1.7}
 .mx-operations a{color:#756296;font-size:12px}
@@ -567,9 +522,6 @@ onUnmounted(()=>{disposed=true;++generation;if(poll)clearInterval(poll)})
 .mx-plans button{min-height:24px;padding:1px 3px;border:0;background:transparent;color:#6043d4}
 .mx-plans small{display:block;margin-top:8px;color:#8a92a2;font-size:11px;line-height:1.8}
 .mx-execute{margin-top:auto;justify-content:space-between;padding-top:12px;border-top:1px solid #edf0f5;font-size:12px;color:#8a92a2}
-.mx-log{min-height:160px;max-height:320px;overflow:auto;padding:14px;background:#1d273b;color:#b7c7d4;font:11px/1.9 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
-.mx-log span{color:#8396b0}.mx-log p{margin:0;font:inherit;color:#8396b0}
-.mx-run-summary{display:flex;align-items:center;flex-wrap:wrap;gap:12px;padding:12px 16px;font-size:12px}
 .mx-data-summary{min-height:46px;margin-bottom:12px;padding:0;border:0;border-radius:0;background:transparent}
 .mx-cards{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:10px;margin-bottom:14px}
 .mx-cards article{padding:14px 12px;border:1px solid var(--mx-line);border-radius:8px;background:#fff}

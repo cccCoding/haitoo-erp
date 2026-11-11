@@ -316,6 +316,10 @@ class AdminCompanyCreate(BaseModel):
     admin_password: str = Field(min_length=8, max_length=128)
 
 
+class AdminMatrixUpdate(BaseModel):
+    enabled: bool = Field(strict=True)
+
+
 class AdminPasswordUpdate(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
@@ -580,6 +584,7 @@ class TiktokCategoryAttributeInputModeUpdate(BaseModel):
 
 
 class TiktokCategoryCatalogUpdate(BaseModel):
+    site: Literal["MY", "ID"] | None = None
     name: str | None = Field(default=None, min_length=1, max_length=120)
     attribute_input_modes: list[TiktokCategoryAttributeInputModeUpdate] = Field(default_factory=list, max_length=1000)
 

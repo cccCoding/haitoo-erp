@@ -37,7 +37,7 @@ from .schemas import MaterialInfringementInput, MaterialInfringementBatchInput
 from .product_library_rankings import SnapshotAlreadyRunning, company_run_lock, create_daily_snapshot, enqueue_ranking_task, task_payload
 from .schemas import MAX_PRODUCT_LIBRARY_SELECTION, HubEnvironmentSync, HubEnvironmentToggle, HubTaskClaimInput, HubTaskAction, ProductLibraryShopAssignment, ProductLibraryTitleGenerate, ProductLibraryDraftSource, ProductLibraryDraftCreate, ProductLibraryDraftBatchCreate
 from .login_rate_limit import cleanup_expired_login_counters, clear_email_failures, client_ip, count_ip_attempt, lock_email_failures, record_email_failure
-from .schemas import AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, OperatorGroupCreate, OperatorGroupUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
+from .schemas import AdminMatrixUpdate, AdminCompanyCreate, AdminPasswordUpdate, AIProviderCredentialUpdate, AIProviderSettingUpdate, BatchCarouselSkipInput, BatchCarouselTaskCreate, BatchImageReviewConfirm, BatchMainImageSkipInput, BatchMainImageTaskCreate, ClaimMaterials, DraftCarouselOrderUpdate, DraftDispatchInput, DraftImageApply, DraftImagesConfirm, DraftImageTaskCreate, DraftMiaoshouPublishInput, DraftTitleGenerate, DraftUpdate, HubAgentPairingCompleteInput, HubAgentRegisterInput, HubShopBindingUpdate, HubUploadTaskCreate, HubUploadTaskReport, HubstudioAccountUpdate, ImageUploadPresignInput, LocalShopCreate, LoginInput, MaterialDraftBatchCreate, MaterialDraftCreate, MaterialUploadCommitInput, MaterialUploadPresignInput, MemberCreate, MemberUpdate, MiaoshouAccountUpdate, MiaoshouShopQuery, MyUserCodeUpdate, OperatorGroupCreate, OperatorGroupUpdate, PodTaskCreate, ProductLibraryBatchTemplateInput, ShopeeDraftExportInput, ShopManagerUpdate, ShopOut, TaskBatchRetry, TaskQueueSettingUpdate, TemplateCreate, TemplateGroupCreate, TemplateUpdate, TiktokCategoryCatalogUpdate, TiktokDraftExportInput, UploadPresignInput, UserOut, UserTemplatePromptCreate, UserTemplatePromptUpdate, UserTemplateWhiteImageCreate, UserTemplateWhiteImageUpdate
 from .security import (create_access_token, current_internal_user as current_user, current_creative_user as creative_user,
                        current_user as authenticated_user, hash_password, require_roles,
                        validate_supply_user_access, verify_password)
@@ -483,6 +483,7 @@ def hub_agent_from_request(request: Request, db: Session) -> HubAgent:
     company = db.get(Company, agent.company_id)
     if not owner or not owner.is_active or owner.company_id != agent.company_id or not company or not company.is_active:
         raise HTTPException(401, "执行器所属账号或公司已停用")
+    validate_supply_user_access(owner, db)
     agent.last_seen_at = datetime.utcnow()
     db.commit()
     return agent
@@ -506,7 +507,10 @@ def hub_agent_view(agent: HubAgent) -> dict:
 def hub_protocol_agent(request: Request, db: Session) -> HubAgent:
     if request.headers.get("X-Hub-Protocol") != hub.PROTOCOL:
         raise HTTPException(426, "请升级本地执行器后继续")
-    return hub_agent_from_request(request, db)
+    agent = hub_agent_from_request(request, db)
+    if db.get(User, agent.user_id).role == Role.SUPPLY_USER:
+        raise HTTPException(403, "货盘用户请使用新版 TK 矩阵连接器")
+    return agent
 
 
 def user_code_in_use(db: Session, company_id: int | None, user_code: str, excluding_user_id: int | None = None) -> bool:
@@ -657,8 +661,13 @@ def list_hub_agents(user: User = Depends(require_roles(Role.COMPANY_ADMIN)), db:
 def create_hub_agent(payload: HubAgentRegisterInput, user: User, db: Session) -> tuple[HubAgent, str]:
     if not user.company_id:
         raise HTTPException(400, "请使用所属公司的 ERP 账号授权执行器")
+    if user.role == Role.SUPPLY_USER:
+        from .hub_v5.permissions import require_access
+        require_access(db, user)
     name = payload.name.strip()
     existing = db.scalar(select(HubAgent).where(HubAgent.company_id == user.company_id, HubAgent.name == name))
+    if existing and user.role == Role.SUPPLY_USER and existing.user_id != user.id:
+        raise HTTPException(403, "不能使用其他成员的设备名称，请更换名称")
     if existing and existing.is_active:
         raise HTTPException(400, "当前公司已存在同名 Hub 执行器")
     raw_token = secrets.token_urlsafe(48)
@@ -675,7 +684,7 @@ def create_hub_agent(payload: HubAgentRegisterInput, user: User, db: Session) ->
 
 
 @app.post("/hub-agents/register")
-def register_hub_agent(payload: HubAgentRegisterInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def register_hub_agent(payload: HubAgentRegisterInput, user: User = Depends(authenticated_user), db: Session = Depends(get_db)):
     agent, raw_token = create_hub_agent(payload, user, db)
     # 仅在首次注册响应中返回，调用方必须写入系统凭据库。
     return {"agent": hub_agent_view(agent), "agent_token": raw_token}
@@ -692,7 +701,7 @@ def create_hub_agent_pairing(payload: HubAgentRegisterInput, db: Session = Depen
 
 
 @app.post("/hub-agent/pairings/complete")
-def complete_hub_agent_pairing(payload: HubAgentPairingCompleteInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def complete_hub_agent_pairing(payload: HubAgentPairingCompleteInput, user: User = Depends(authenticated_user), db: Session = Depends(get_db)):
     from .hub_v5.permissions import require_access
     require_access(db, user)
     pairing = db.get(HubAgentPairing, hashlib.sha256(payload.code.encode()).hexdigest())
@@ -2606,6 +2615,8 @@ def list_admin_companies(user: User = Depends(require_roles(Role.SUPER_ADMIN)), 
     companies = db.scalars(select(Company).order_by(Company.id.desc())).all()
     result = []
     from .models import CrossCompanyCollectionPermissionLog
+    from .hub_v5.models import MatrixCompany
+    matrix_enabled = dict(db.execute(select(MatrixCompany.company_id, MatrixCompany.enabled)).all())
     for company in companies:
         permission_log = db.scalar(select(CrossCompanyCollectionPermissionLog).where(
             CrossCompanyCollectionPermissionLog.company_id == company.id).order_by(
@@ -2615,12 +2626,32 @@ def list_admin_companies(user: User = Depends(require_roles(Role.SUPER_ADMIN)), 
             "name": company.name,
             "is_active": company.is_active,
             "cross_company_collect_enabled": company.cross_company_collect_enabled,
+            "tk_matrix_enabled": bool(matrix_enabled.get(company.id)),
             "cross_company_collect_updated_at": timestamp_ms(permission_log.created_at) if permission_log else None,
             "cross_company_collect_updated_by": permission_log.changed_by if permission_log else None,
             "created_at": timestamp_ms(company.created_at),
             "admin_users": [UserOut.model_validate(item) for item in db.scalars(select(User).where(User.company_id == company.id, User.role == Role.COMPANY_ADMIN).order_by(User.id)).all()],
         })
     return result
+
+
+@app.put("/admin/companies/{company_id}/tk-matrix")
+def set_admin_company_matrix(company_id: int, payload: AdminMatrixUpdate,
+                             user: User = Depends(require_roles(Role.SUPER_ADMIN)), db: Session = Depends(get_db)):
+    from .hub_v5 import service as matrix_service
+    from .hub_v5.models import MatrixCompany
+    if db.get(Company, company_id) is None:
+        raise HTTPException(404, "公司不存在")
+    matrix_service.guard(db, company_id)
+    row = db.get(MatrixCompany, company_id)
+    if row is None:
+        row = MatrixCompany(company_id=company_id)
+        db.add(row)
+    row.enabled = row.listing_enabled = payload.enabled
+    matrix_service.audit(db, SimpleNamespace(company_id=company_id, id=user.id),
+                         "company.configure", company_id, {"enabled": payload.enabled})
+    db.commit()
+    return {"enabled": row.enabled}
 
 
 def admin_company_read_scope(db: Session, company_id: int):
@@ -4065,7 +4096,7 @@ def normalized_tiktok_product_name(value: str | None) -> str:
 def serialize_tiktok_catalog(catalog: TiktokCategoryCatalog, *, include_options: bool = False) -> dict:
     result = {
         "id": catalog.id, "name": catalog.name, "source_filename": catalog.source_filename, "template_type": catalog.template_type,
-        "template_version": catalog.template_version, "category_count": len((catalog.parsed_options or {}).get("categories", [])),
+        "site": catalog.site, "template_version": catalog.template_version, "category_count": len((catalog.parsed_options or {}).get("categories", [])),
         "created_at": timestamp_ms(catalog.created_at), "updated_at": timestamp_ms(catalog.updated_at),
     }
     if include_options:
@@ -4090,10 +4121,15 @@ async def create_tiktok_category_catalog(
     template_type: str = Form("tiktok_local", pattern="^(tiktok_local|tiktok_cross_border|shopee_basic)$"),
     user: User = Depends(require_roles(Role.COMPANY_ADMIN)),
     db: Session = Depends(get_db),
+    site: str = Form("MY", pattern="^(MY|ID)$"),
 ):
     # 直接调用路由函数的旧测试/脚本不会经过 FastAPI 的 Form 注入。
     if template_type not in {"tiktok_local", "tiktok_cross_border", "shopee_basic"}:
         template_type = "tiktok_local"
+    if not isinstance(site, str):
+        site = "MY"
+    if site not in {"MY", "ID"}:
+        raise HTTPException(400, "不支持的类目库站点")
     catalog_name = name.strip()
     if not catalog_name:
         raise HTTPException(400, "类目库名称不能为空")
@@ -4117,7 +4153,7 @@ async def create_tiktok_category_catalog(
     if not options.get("categories"):
         raise HTTPException(400, "模板中没有可用类目")
     catalog = TiktokCategoryCatalog(
-        company_id=user.company_id, name=catalog_name, source_filename=source_filename, template_type=template_type,
+        company_id=user.company_id, name=catalog_name, source_filename=source_filename, template_type=template_type, site=site,
         template_version=options.get("template_version"), template_blob=template_bytes,
         parsed_options=options, created_by=user.id,
     )
@@ -4144,6 +4180,8 @@ def update_tiktok_category_catalog(
         raise HTTPException(404, "类目库不存在")
     if payload.name is not None:
         catalog.name = payload.name
+    if payload.site is not None:
+        catalog.site = payload.site
     options = json.loads(json.dumps(catalog_listing_options(catalog)))
     for change in payload.attribute_input_modes:
         fields = options.get("attributes_by_category", {}).get(change.category)

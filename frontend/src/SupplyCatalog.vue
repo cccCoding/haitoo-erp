@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { categorySiteLabel } from './category-sites'
 import { shippingInsuranceError, shippingInsuranceSelection } from './tiktok-export'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import axios from 'axios'
@@ -66,6 +67,7 @@ const originalUserExpiry = ref('')
 const renewUser = ref<any>(null), renewMonths = ref(12), templateEditing = ref<any>(null), fallbackTitle = ref('')
 const showStrategy = ref(false), strategyEditing = ref<number | null>(null), strategyForm = ref<SupplyStrategyForm>(emptySupplyStrategy())
 const strategyOptions = ref<any>(null), optionsLoading = ref(false), strategyError = ref(''), dialogError = ref('')
+const strategyCatalogs = computed(() => catalogs.value.filter(catalog => catalog.site === strategyForm.value.title_site))
 const usageMaterial = ref<any>(null), usage = ref<SupplyUsageTask[]>([]), usageLoading = ref(false), jobDetail = ref<any>(null)
 const jobLinks = computed(() => (jobDetail.value?.links || jobDetail.value?.drafts || []).map((row: any) => ({ ...row, diagnostics: supplyTitleDiagnostics(row) })))
 const jobFallbackCount = computed(() => jobLinks.value.filter((row: any) => row.diagnostics.isFallback).length)
@@ -87,6 +89,18 @@ const templatesScope = createSupplyRequestScope()
 let managerRequest = 0, agentRequest = 0
 let stopped = false, materialRequest = 0, listingRequest = 0, optionsRequest = 0, jobRequest = 0, accessRefreshing = false
 const pollingAbort = new AbortController()
+watch(strategyCatalogs, available => {
+  if (strategyForm.value.category_catalog_id && !available.some(catalog => catalog.id === strategyForm.value.category_catalog_id)) {
+    optionsRequest++
+    strategyForm.value.category_catalog_id = null
+    strategyForm.value.category_name = ''
+    strategyForm.value.attributes = {}
+    strategyForm.value.shipping_insurance = null
+    strategyOptions.value = null
+    optionsLoading.value = false
+    strategyError.value = ''
+  }
+}, { flush: 'sync' })
 function startJobPolling() {
   if (pollTimer !== undefined) clearInterval(pollTimer)
   pollTimer = setInterval(() => { if (props.token && !document.hidden) void loadJobs(true) }, jobPollInterval.value)
@@ -152,7 +166,7 @@ function templateLabel(id: number) { return templates.value.find(item => item.id
 function catalogLabel(type: string) { return type === 'tiktok_cross_border' ? '跨境店' : '本土店' }
 function strategyCatalogLabel(catalogId: number) {
   const catalog = catalogs.value.find(item => item.id === catalogId)
-  return catalog ? `${catalog.name}（${catalogLabel(catalog.template_type)}）` : '—'
+  return catalog ? `${catalog.name}（${catalogLabel(catalog.template_type)} · ${categorySiteLabel(catalog.site)}）` : '—'
 }
 function progressLabel(job: any) {
   if (typeof job.progress === 'string') return job.progress
@@ -449,6 +463,8 @@ async function loadStrategyOptions(preserve = false) {
   finally { if (request === optionsRequest) optionsLoading.value = false }
 }
 function editStrategy(row?: any) {
+  optionsRequest++
+  optionsLoading.value = false
   strategyEditing.value = row?.id || null
   strategyForm.value = row ? supplyStrategyPayload({ ...emptySupplyStrategy(), ...row, infringement_filter: row.infringement_filter ?? 'include', attributes: Object.fromEntries(Object.entries(row.attributes || {}).map(([key,value])=>[key, Array.isArray(value) ? value.join(', ') : String(value)])) }) : emptySupplyStrategy()
   strategyError.value = ''; showStrategy.value = true
@@ -456,6 +472,10 @@ function editStrategy(row?: any) {
   else strategyOptions.value = null
 }
 async function saveStrategy() {
+  if (!strategyCatalogs.value.some(catalog => catalog.id === strategyForm.value.category_catalog_id)) {
+    strategyError.value = '请选择标题词库站点对应的类目库'
+    return
+  }
   strategyError.value = validateSupplyStrategy(strategyForm.value, selectedTemplate.value?.sizes?.length || 1, categoryAttributes.value)
   if (!strategyError.value) strategyError.value = shippingInsuranceError(strategyForm.value.shipping_insurance, strategyOptions.value)
   if (strategyError.value) return
@@ -514,6 +534,14 @@ async function saveAgent() {
     if (agentForm.value.id) await api.patch(`/supply/agents/${agentForm.value.id}`, { name: agentForm.value.name.trim() }, { headers: headers.value })
     else await api.post('/supply/agents', { name: agentForm.value.name.trim() }, { headers: headers.value })
     showAgent.value = false; await loadUsers(); notice.value = '代理已保存。'
+  })
+}
+async function toggleUserMatrix(row:any) {
+  const enabled=!row.matrix_enabled
+  await action(`matrix-${row.id}`, async()=>{
+    const {data}=await api.put(`/supply/users/${row.id}/matrix`, {enabled,expected_revision:row.matrix_revision}, {headers:headers.value})
+    users.value=users.value.map(item=>item.id===row.id?data:item)
+    notice.value=`${row.name} 的矩阵权限已${enabled?'开启':'关闭'}。`
   })
 }
 function editUser(row?: any) {
@@ -682,10 +710,10 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
             <tbody><tr v-for="row in agents" :key="row.id"><td>{{row.id}}</td><td>{{supplyTime(row.created_at)}}</td><td>{{row.name}}</td><td v-if="canAdmin"><button :disabled="!!busy" @click="editAgent(row)">编辑</button></td></tr></tbody>
           </table>
         </div><p v-if="!agents.length" class="empty">暂无代理。</p>
-        <div class="supply-section-heading"><h3>货盘用户</h3><button v-if="canAdmin" class="secondary" :disabled="!!busy || !agents.length" @click="editUser()">创建货盘用户</button></div><p class="supply-help">账号由公司管理员创建，并绑定代理。{{canAdmin?'可在编辑中直接修改到期时间；修改时间或续期不会解除停用，恢复不会延长有效期。':'货盘管理员可查看用户信息，账号管理由公司管理员处理。'}}</p>
+        <div class="supply-section-heading"><h3>货盘用户</h3><button v-if="canAdmin" class="secondary" :disabled="!!busy || !agents.length" @click="editUser()">创建货盘用户</button></div><p class="supply-help">账号由公司管理员创建，并绑定代理。“使用矩阵”默认关闭，开启后仅可访问本人矩阵数据；账号停用或到期后不可使用。{{canAdmin?'可在编辑中直接修改到期时间；修改时间或续期不会解除停用，恢复不会延长有效期。':'货盘管理员可查看用户信息，账号管理由公司管理员处理。'}}</p>
         <form class="supply-filters supply-user-filters" @submit.prevent="searchUsers"><label>搜索<input v-model="userSearch" type="search" placeholder="姓名、邮箱或代理名称" :disabled="usersLoading || !!busy"/></label><button class="primary" :disabled="usersLoading || !!busy">查询</button></form>
         <p v-if="usersLoading" class="supply-help" role="status">正在加载货盘用户…</p>
-        <div class="supply-table-wrap" :aria-busy="usersLoading"><table><thead><tr><th>用户</th><th>邮箱</th><th>代理</th><th>状态</th><th>使用到期</th><th v-if="canAdmin">操作</th></tr></thead><tbody><tr v-for="row in users" :key="row.id"><td>{{row.name}}</td><td class="supply-email">{{row.email}}</td><td>{{row.agent_name || agents.find(agent=>agent.id===row.agent_id)?.name || '—'}}</td><td>{{accountStatus(row)}}</td><td>{{supplyTime(row.supply_expires_at)}}</td><td v-if="canAdmin"><div class="supply-actions"><button :disabled="!!busy" @click="editUser(row)">编辑</button><button :disabled="!!busy" @click="renewUser=row;renewMonths=12;dialogError=''">续期</button><button :class="{danger:row.is_active}" :disabled="!!busy" @click="toggleUser(row)">{{row.is_active?'停用':'恢复'}}</button></div></td></tr></tbody></table></div><p v-if="!users.length && !usersLoading" class="empty">{{appliedUserSearch ? '没有符合搜索条件的货盘用户。' : '暂无货盘用户。'}}</p>
+        <div class="supply-table-wrap" :aria-busy="usersLoading"><table><thead><tr><th>用户</th><th>邮箱</th><th>代理</th><th>状态</th><th>使用到期</th><th>使用矩阵</th><th v-if="canAdmin">操作</th></tr></thead><tbody><tr v-for="row in users" :key="row.id"><td>{{row.name}}</td><td class="supply-email">{{row.email}}</td><td>{{row.agent_name || agents.find(agent=>agent.id===row.agent_id)?.name || '—'}}</td><td>{{accountStatus(row)}}</td><td>{{supplyTime(row.supply_expires_at)}}</td><td><div class="supply-matrix-switch"><button type="button" role="switch" class="supply-matrix-toggle" :aria-checked="!!row.matrix_enabled" :aria-busy="busy===`matrix-${row.id}`" :disabled="!canAdmin||!!busy||(!row.matrix_enabled&&(!row.is_active||row.expired))" :aria-label="`允许 ${row.name} 使用矩阵`" @click="toggleUserMatrix(row)"><span aria-hidden="true"></span></button></div></td><td v-if="canAdmin"><div class="supply-actions"><button :disabled="!!busy" @click="editUser(row)">编辑</button><button :disabled="!!busy" @click="renewUser=row;renewMonths=12;dialogError=''">续期</button><button :class="{danger:row.is_active}" :disabled="!!busy" @click="toggleUser(row)">{{row.is_active?'停用':'恢复'}}</button></div></td></tr></tbody></table></div><p v-if="!users.length && !usersLoading" class="empty">{{appliedUserSearch ? '没有符合搜索条件的货盘用户。' : '暂无货盘用户。'}}</p>
         <footer class="supply-pagination" aria-label="货盘用户分页"><span>共 {{userTotal}} 条</span><label>每页 <select v-model.number="userPageSize" :disabled="usersLoading || !!busy" @change="action('load-users',()=>loadUserPage(1))"><option v-for="size in userPageSizeOptions" :key="size" :value="size">{{size}}</option></select> 条</label><button :disabled="usersLoading || !!busy || userPage===1" @click="action('load-users',()=>loadUserPage(userPage-1))">上一页</button><span>第 {{userPage}} / {{userPages}} 页</span><button :disabled="usersLoading || !!busy || userPage>=userPages" @click="action('load-users',()=>loadUserPage(userPage+1))">下一页</button></footer>
       </section>
       <section v-else-if="tab==='statistics' && canManage">
@@ -751,7 +779,7 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
       </section>
     </div>
 
-    <div v-if="showStrategy" class="modal-backdrop" @click.self="!busy && (showStrategy=false)"><section v-dialog-focus="{close:()=>{showStrategy=false},busy:!!busy}" class="modal-card supply-dialog supply-strategy-dialog" role="dialog" aria-modal="true" aria-labelledby="supply-strategy-title"><button class="modal-close" :disabled="!!busy" aria-label="关闭策略" @click="showStrategy=false">×</button><h2 id="supply-strategy-title">{{strategyEditing?'编辑':'新增'}}生成策略</h2><form @submit.prevent="saveStrategy"><div class="supply-form-grid"><label>策略名称<input v-model="strategyForm.name" required maxlength="100"/></label><label>公开产品模板<TemplateSelect v-model="strategyForm.template_id" required :templates="publicTemplates"/></label><label>标题词库站点<select v-model="strategyForm.title_site" required><option v-for="market in titleMarkets" :key="market.site" :value="market.site">{{market.siteName}} · {{market.languageName}}</option></select></label><label>类目库 / 店铺类型<select v-model="strategyForm.category_catalog_id" required @change="loadStrategyOptions()"><option :value="null" disabled>请选择类目库</option><option v-for="row in catalogs" :key="row.id" :value="row.id">{{row.name}}（{{catalogLabel(row.template_type)}}）</option></select></label><div class="supply-field"><span>商品类目</span><SearchableSelect v-model="strategyForm.category_name" :options="strategyOptions?.categories || []" value-key="name" label-key="name" :disabled="optionsLoading" placeholder="请选择商品类目" @change="strategyForm.attributes={}"/></div><label>售价<input v-model="strategyForm.price" type="number" step="0.01" min="0.01" max="999999" required/></label><label>库存<input v-model.number="strategyForm.stock" type="number" min="0" max="999999" step="1" required/></label><label v-if="strategyOptions?.capabilities?.supports_cod !== false">货到付款（COD）<select v-model="strategyForm.cod"><option value="Y">Y</option><option value="N">N</option></select></label><label v-if="strategyOptions?.capabilities?.supports_shipping_insurance">运输保险（Shipping insurance）<select v-model="strategyForm.shipping_insurance" required><option v-for="value in strategyOptions.shipping_insurance_options" :key="value" :value="value">{{value}}</option></select><small>仅适用于 Tokopedia，默认 Optional。</small></label><label>每个链接素材 SKU 数<input v-model.number="strategyForm.sku_count" type="number" min="5" max="9" step="1" required/></label><label>侵权筛选<select v-model="strategyForm.infringement_filter"><option value="exclude">过滤侵权</option><option value="include">不过滤侵权</option><option value="only">全部侵权</option></select></label><label>链接数量<input v-model.number="strategyForm.link_count" type="number" min="10" max="50" step="1" required/></label></div><p class="supply-help">预计 {{expectedRows.toLocaleString()}} 个数据行 / 最多 4,994 行。每个素材按 {{selectedTemplate?.sizes?.length || 1}} 个尺码展开。</p><p class="supply-help">过滤侵权：仅使用不侵权素材；不过滤侵权：允许两种状态；全部侵权：仅使用侵权素材。任务采用提交时的标记。</p><p v-if="optionsLoading" class="supply-help">正在加载类目与属性…</p><section v-if="categoryAttributes.length" class="supply-attributes"><h3>类目属性</h3><div class="supply-form-grid"><label v-for="field in categoryAttributes" :key="field.field"><span>{{field.label || field.field}}<b v-if="field.required" class="required"> *</b></span><input v-model="strategyForm.attributes[field.field]" type="text" maxlength="500" :required="field.required" :placeholder="field.options?.length?'填写模板支持值':'按商品实际信息填写'"/><small v-if="field.options?.length">支持值：{{field.options.join('、')}}</small><small v-if="field.input_mode==='multiple'">多个值用逗号分隔。</small></label></div></section><p class="supply-help">提交前请管理员在“标题词库 → 对应站点 → 模板配置”中完善产品分类、性别、年龄及确认属性。站点兜底标题保存后即可使用，未设置时使用英文兜底。</p><p v-if="strategyError || dialogError" class="error" role="alert">{{strategyError || dialogError}}</p><div class="modal-actions"><button type="button" class="ghost" :disabled="!!busy" @click="showStrategy=false">取消</button><button class="primary" :disabled="!!busy || optionsLoading || !strategyOptions">{{busy==='strategy'?'保存中…':'保存策略'}}</button></div></form></section></div>
+    <div v-if="showStrategy" class="modal-backdrop" @click.self="!busy && (showStrategy=false)"><section v-dialog-focus="{close:()=>{showStrategy=false},busy:!!busy}" class="modal-card supply-dialog supply-strategy-dialog" role="dialog" aria-modal="true" aria-labelledby="supply-strategy-title"><button class="modal-close" :disabled="!!busy" aria-label="关闭策略" @click="showStrategy=false">×</button><h2 id="supply-strategy-title">{{strategyEditing?'编辑':'新增'}}生成策略</h2><form @submit.prevent="saveStrategy"><div class="supply-form-grid"><label>策略名称<input v-model="strategyForm.name" required maxlength="100"/></label><label>公开产品模板<TemplateSelect v-model="strategyForm.template_id" required :templates="publicTemplates"/></label><label>标题词库站点<select v-model="strategyForm.title_site" required><option v-for="market in titleMarkets" :key="market.site" :value="market.site">{{market.siteName}} · {{market.languageName}}</option></select></label><label>类目库 / 店铺类型<select v-model="strategyForm.category_catalog_id" required @change="loadStrategyOptions()"><option :value="null" disabled>请选择类目库</option><option v-for="row in strategyCatalogs" :key="row.id" :value="row.id">{{row.name}}（{{catalogLabel(row.template_type)}} · {{categorySiteLabel(row.site)}}）</option></select></label><div class="supply-field"><span>商品类目</span><SearchableSelect v-model="strategyForm.category_name" :options="strategyOptions?.categories || []" value-key="name" label-key="name" :disabled="optionsLoading" placeholder="请选择商品类目" @change="strategyForm.attributes={}"/></div><label>售价<input v-model="strategyForm.price" type="number" step="0.01" min="0.01" max="999999" required/></label><label>库存<input v-model.number="strategyForm.stock" type="number" min="0" max="999999" step="1" required/></label><label v-if="strategyOptions?.capabilities?.supports_cod !== false">货到付款（COD）<select v-model="strategyForm.cod"><option value="Y">Y</option><option value="N">N</option></select></label><label v-if="strategyOptions?.capabilities?.supports_shipping_insurance">运输保险（Shipping insurance）<select v-model="strategyForm.shipping_insurance" required><option v-for="value in strategyOptions.shipping_insurance_options" :key="value" :value="value">{{value}}</option></select><small>仅适用于 Tokopedia，默认 Optional。</small></label><label>每个链接素材 SKU 数<input v-model.number="strategyForm.sku_count" type="number" min="5" max="9" step="1" required/></label><label>侵权筛选<select v-model="strategyForm.infringement_filter"><option value="exclude">过滤侵权</option><option value="include">不过滤侵权</option><option value="only">全部侵权</option></select></label><label>链接数量<input v-model.number="strategyForm.link_count" type="number" min="10" max="50" step="1" required/></label></div><p class="supply-help">预计 {{expectedRows.toLocaleString()}} 个数据行 / 最多 4,994 行。每个素材按 {{selectedTemplate?.sizes?.length || 1}} 个尺码展开。</p><p class="supply-help">过滤侵权：仅使用不侵权素材；不过滤侵权：允许两种状态；全部侵权：仅使用侵权素材。任务采用提交时的标记。</p><p v-if="optionsLoading" class="supply-help">正在加载类目与属性…</p><section v-if="categoryAttributes.length" class="supply-attributes"><h3>类目属性</h3><div class="supply-form-grid"><label v-for="field in categoryAttributes" :key="field.field"><span>{{field.label || field.field}}<b v-if="field.required" class="required"> *</b></span><input v-model="strategyForm.attributes[field.field]" type="text" maxlength="500" :required="field.required" :placeholder="field.options?.length?'填写模板支持值':'按商品实际信息填写'"/><small v-if="field.options?.length">支持值：{{field.options.join('、')}}</small><small v-if="field.input_mode==='multiple'">多个值用逗号分隔。</small></label></div></section><p class="supply-help">提交前请管理员在“标题词库 → 对应站点 → 模板配置”中完善产品分类、性别、年龄及确认属性。站点兜底标题保存后即可使用，未设置时使用英文兜底。</p><p v-if="strategyError || dialogError" class="error" role="alert">{{strategyError || dialogError}}</p><div class="modal-actions"><button type="button" class="ghost" :disabled="!!busy" @click="showStrategy=false">取消</button><button class="primary" :disabled="!!busy || optionsLoading || !strategyOptions">{{busy==='strategy'?'保存中…':'保存策略'}}</button></div></form></section></div>
     <div v-if="templateEditing" class="modal-backdrop" @click.self="!busy && (templateEditing=null)"><section v-dialog-focus="{close:()=>{templateEditing=null},busy:!!busy}" class="modal-card supply-dialog" role="dialog" aria-modal="true" aria-labelledby="supply-fallback-title"><button class="modal-close" :disabled="!!busy" aria-label="关闭" @click="templateEditing=null">×</button><h2 id="supply-fallback-title">{{templateEditing.name}} · 兜底基础标题</h2><p>货盘按策略所选站点的词库生成标题，失败时优先使用对应语言的兜底标题；未设置时使用下方兜底标题。站点兜底标题在“标题词库 → 对应站点 → 模板配置”中维护。</p><form @submit.prevent="saveFallback"><label>货盘兜底标题<textarea v-model="fallbackTitle" rows="4" :minlength="SUPPLY_TITLE_MINIMUM" :maxlength="SUPPLY_TITLE_MAXIMUM" required placeholder="Printed Long Sleeve Nursing Maxi Dress"></textarea></label><p v-if="dialogError" class="error" role="alert">{{dialogError}}</p><div class="modal-actions"><button class="primary" :disabled="!!busy">保存货盘兜底标题</button></div></form></section></div>
     <div v-if="showAgent" class="modal-backdrop" @click.self="!busy && (showAgent=false)"><section v-dialog-focus="{close:()=>{showAgent=false},busy:!!busy}" class="modal-card supply-dialog" role="dialog" aria-modal="true" aria-labelledby="supply-agent-title"><button class="modal-close" :disabled="!!busy" aria-label="关闭" @click="showAgent=false">×</button><h2 id="supply-agent-title">{{agentForm.id?'编辑':'新增'}}代理</h2><form @submit.prevent="saveAgent"><label>代理名称<input v-model="agentForm.name" maxlength="100" required/></label><p v-if="dialogError" class="error" role="alert">{{dialogError}}</p><div class="modal-actions"><button class="primary" :disabled="!!busy">保存代理</button></div></form></section></div>
     <div v-if="showUser" class="modal-backdrop" @click.self="!busy && (showUser=false)"><section v-dialog-focus="{close:()=>{showUser=false},busy:!!busy}" class="modal-card supply-dialog" role="dialog" aria-modal="true" aria-labelledby="supply-user-title"><button class="modal-close" :disabled="!!busy" aria-label="关闭" @click="showUser=false">×</button><h2 id="supply-user-title">{{userEditing?'编辑':'创建'}}货盘用户</h2><form @submit.prevent="saveUser"><label>姓名<input v-model="userForm.name" maxlength="80" required/></label><label>邮箱<input v-model="userForm.email" type="email" maxlength="255" autocomplete="off" required/></label><label>{{userEditing?'重设密码（留空保留）':'密码'}}<input v-model="userForm.password" type="password" minlength="8" maxlength="72" :required="!userEditing" autocomplete="new-password"/></label><label>所属代理<select v-model="userForm.agent_id" required><option :value="null" disabled>请选择代理</option><option v-for="row in agents" :key="row.id" :value="row.id">{{row.name}}</option></select></label><label v-if="userEditing">使用到期时间<input v-model="userForm.supply_expires_at" type="datetime-local" step="1" min="0001-01-01T08:00:00" max="9999-12-31T23:59:59" required/></label><label v-else>使用有效期（月）<input v-model.number="userForm.months" type="number" min="1" max="1200" step="1" required/></label><p class="supply-help">{{userEditing?'可直接修改到期时间；设为已到期会取消未完成任务。修改时间不会解除停用；修改代理不影响历史任务统计。':'有效期从创建时间起按自然月计算，默认 12 个月。'}}</p><p v-if="dialogError" class="error" role="alert">{{dialogError}}</p><div class="modal-actions"><button class="primary" :disabled="!!busy">{{busy==='user'?'保存中…':'保存账号'}}</button></div></form></section></div>
@@ -809,6 +837,13 @@ onUnmounted(() => { window.removeEventListener('resize', clearListingHoverPrevie
 </template>
 
 <style scoped>
+.supply-matrix-switch{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.supply-catalog .supply-matrix-toggle{display:inline-flex;align-items:center;flex:none;justify-content:flex-start;width:38px;min-width:38px;height:22px;min-height:22px;margin:0;padding:3px;border:0;border-radius:999px;background:#c5cad5;box-shadow:none;cursor:pointer;transition:background .15s}
+.supply-catalog .supply-matrix-toggle>span{display:block;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0002;transition:transform .15s}
+.supply-catalog .supply-matrix-toggle[aria-checked=true]{background:#6043d4}.supply-catalog .supply-matrix-toggle[aria-checked=true]>span{transform:translateX(16px)}
+.supply-catalog .supply-matrix-toggle:disabled{opacity:.45;cursor:not-allowed}.supply-catalog .supply-matrix-toggle:focus-visible{outline:2px solid #7256e7;outline-offset:3px}
+@media(prefers-reduced-motion:reduce){.supply-catalog .supply-matrix-toggle,.supply-catalog .supply-matrix-toggle>span{transition:none}}
+
 .supply-link-heading{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .supply-title-summary,.supply-tag.supply-title-fallback{background:#fff6df;color:#875c12}
 .supply-title-summary{padding:12px 14px;border-radius:8px}

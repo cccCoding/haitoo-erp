@@ -316,6 +316,7 @@ class TiktokCategoryCatalog(Base):
     source_filename: Mapped[str] = mapped_column(String(255))
     # tiktok_local / tiktok_cross_border / shopee_basic；用于选择平台解析与导出适配器。
     template_type: Mapped[str] = mapped_column(String(32), default="tiktok_local", nullable=False, index=True)
+    site: Mapped[str] = mapped_column(String(2), default="MY", server_default="MY", nullable=False)
     template_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     template_blob: Mapped[bytes] = mapped_column(
         LargeBinary().with_variant(MEDIUMBLOB(), "mysql").with_variant(MEDIUMBLOB(), "mariadb")

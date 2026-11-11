@@ -17,6 +17,7 @@ class CompanyInput(Input):
 
 class MemberPermissionInput(Input):
     enabled: bool
+    # 兼容旧客户端；采集和上品权限统一由 enabled 决定。
     collect_enabled: bool = False
     listing_enabled: bool = False
     view_scope: Literal["own", "company"] = "own"
@@ -220,7 +221,7 @@ class Report(AttemptInput):
 
 class Resolve(Input):
     action: Literal["confirm-submitted", "confirm-not-submitted", "retry", "retransmit", "cancel"]
-    evidence: str = Field(min_length=5, max_length=1000)
+    evidence: str = Field(default="", max_length=1000)
 
 
 class CollectionHeader(Input):

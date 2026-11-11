@@ -80,6 +80,11 @@ class GrantInput(Input):
     enabled: bool
 
 
+class MatrixGrantInput(Input):
+    enabled: bool = Field(strict=True)
+    expected_revision: int = Field(ge=0)
+
+
 class TemplatePatch(Input):
     supply_public: bool | None = None
     supply_fallback_title: str | None = Field(default=None, max_length=SUPPLY_TITLE_MAXIMUM)
@@ -165,6 +170,8 @@ def commit_unique(db, message):
 
 
 def user_payload(db, user):
+    from .hub_v5.models import MatrixMemberPermission
+    matrix = db.get(MatrixMemberPermission, user.id)
     agent = db.get(SupplyAgent, user.supply_agent_id) if user.supply_agent_id else None
     return {"id": user.id, "name": user.name, "email": user.email, "role": user.role.value,
         "is_active": user.is_active, "supply_admin": user.supply_admin, "agent_id": user.supply_agent_id,
@@ -172,7 +179,9 @@ def user_payload(db, user):
         "agent_created_at": timestamp(agent.created_at) if agent and agent.company_id == user.company_id else None,
         "supply_expires_at": timestamp(user.supply_expires_at),
         "expired": user.role == Role.SUPPLY_USER and supply_user_is_expired(user),
-        "created_at": timestamp(user.created_at)}
+        "created_at": timestamp(user.created_at),
+        "matrix_enabled": bool(matrix and matrix.company_id == user.company_id and matrix.enabled),
+        "matrix_revision": matrix.revision if matrix and matrix.company_id == user.company_id else 0}
 
 
 def target_user(db, user, identity):
@@ -235,6 +244,19 @@ def users(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=1000),
     items = db.scalars(query.order_by(User.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     return {"items": [user_payload(db, item) for item in items],
         "total": total, "page": page, "page_size": page_size}
+
+
+@router.put("/users/{identity}/matrix")
+def set_user_matrix(identity: int, payload: MatrixGrantInput, user=Depends(supply_actor), db: Session = Depends(get_db)):
+    lock_actor(db, user, admin=True)
+    item = target_user(db, user, identity)
+    from .hub_v5.management import set_member_permission
+    from .hub_v5.schemas import MemberPermissionInput
+    set_member_permission(db, user, item, MemberPermissionInput(
+        enabled=payload.enabled, view_scope="own", expected_revision=payload.expected_revision))
+    audit(db, user, "matrix_permission", "user", item.id, payload.model_dump())
+    db.commit()
+    return user_payload(db, item)
 
 
 @router.post("/users")
@@ -479,7 +501,7 @@ def list_material(identity: int, payload: ListingInput, user=Depends(supply_mate
 
 @router.get("/catalogs")
 def catalogs(user=Depends(supply_actor), db: Session = Depends(get_db)):
-    return [{"id": item.id, "name": item.name, "template_type": item.template_type,
+    return [{"id": item.id, "name": item.name, "template_type": item.template_type, "site": item.site,
         "template_version": item.template_version} for item in db.scalars(select(TiktokCategoryCatalog).where(
             TiktokCategoryCatalog.company_id == user.company_id,
             TiktokCategoryCatalog.template_type.in_(("tiktok_local", "tiktok_cross_border"))).order_by(TiktokCategoryCatalog.id)).all()]

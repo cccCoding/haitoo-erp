@@ -41,6 +41,7 @@ class TiktokCategoryCatalogTests(unittest.TestCase):
         with self.session_factory() as db:
             result = self.create_catalog(db)
             self.assertEqual(result["name"], "穆斯林服装")
+            self.assertEqual(result["site"], "MY")
             self.assertEqual(result["template_version"], "V5.0.2")
             self.assertEqual(result["category_count"], 41)
             options = result["options"]
@@ -67,6 +68,21 @@ class TiktokCategoryCatalogTests(unittest.TestCase):
             self.assertEqual(updated_pattern["input_mode"], "select")
             with self.assertRaisesRegex(HTTPException, "不存在"):
                 main.get_tiktok_export_options(catalog_id, user=db.get(User, 2), db=db)
+
+    def test_catalog_site_can_be_imported_changed_and_read(self) -> None:
+        with self.session_factory() as db:
+            upload = UploadFile(filename="id.xlsx", file=BytesIO(TEMPLATE_PATH.read_bytes()))
+            result = asyncio.run(main.create_tiktok_category_catalog(
+                "印尼类目", upload, site="ID", user=db.get(User, 1), db=db))
+            self.assertEqual(result["site"], "ID")
+            catalog_id = result["id"]
+            with self.assertRaises(HTTPException):
+                main.update_tiktok_category_catalog(catalog_id, TiktokCategoryCatalogUpdate(site="MY"), user=db.get(User, 2), db=db)
+            updated = main.update_tiktok_category_catalog(
+                catalog_id, TiktokCategoryCatalogUpdate(site="MY"), user=db.get(User, 1), db=db)
+            self.assertEqual(updated["site"], "MY")
+            self.assertEqual(main.list_tiktok_category_catalogs(user=db.get(User, 1), db=db)[0]["site"], "MY")
+            self.assertEqual(main.get_tiktok_export_options(catalog_id, user=db.get(User, 1), db=db)["category_catalog"]["site"], "MY")
 
     def test_invalid_workbook_is_rejected_without_creating_catalog(self) -> None:
         with self.session_factory() as db:

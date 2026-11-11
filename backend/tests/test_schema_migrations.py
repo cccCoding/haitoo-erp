@@ -14,6 +14,21 @@ from app.schema_version import alembic_config, assert_schema_current, schema_hea
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_category_site_migration_defaults_legacy_catalogs_to_my(self):
+        with self.engine.begin() as connection:
+            config = alembic_config(connection)
+            command.upgrade(config, "20261110_75")
+            connection.execute(text("INSERT INTO tiktok_category_catalogs "
+                "(id, company_id, name, source_filename, template_type, template_blob, parsed_options, created_at, updated_at) "
+                "VALUES (900, 1, '旧类目', 'old.xlsx', 'tiktok_cross_border', X'00', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"))
+            command.upgrade(config, "head")
+            self.assertEqual(connection.execute(text(
+                "SELECT name, site FROM tiktok_category_catalogs WHERE id=900")).one(), ('旧类目', 'MY'))
+            connection.execute(text("UPDATE tiktok_category_catalogs SET site='ID' WHERE id=900"))
+            command.downgrade(config, "20261110_75")
+            self.assertNotIn('site', {c['name'] for c in inspect(connection).get_columns('tiktok_category_catalogs')})
+            self.assertEqual(connection.execute(text("SELECT name FROM tiktok_category_catalogs WHERE id=900")).scalar_one(), '旧类目')
+
     def test_supply_counts_migration_creates_empty_summaries_and_preserves_materials(self):
         with self.engine.begin() as connection:
             config = alembic_config(connection)
