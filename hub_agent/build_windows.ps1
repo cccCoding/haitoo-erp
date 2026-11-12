@@ -46,7 +46,10 @@ Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--col
 # 对真实打包产物执行离线检查，不使用构建机的系统时区库。
 & .\dist\HaitooHubAgentConsole\HaitooHubAgentConsole.exe check-timezones
 if ($LASTEXITCODE -ne 0) { throw "Windows 安装包缺少站点时区数据，停止发布" }
-Copy-Item .\start_and_pair_windows.cmd .\dist\启动并配对.cmd
+# 显式输出 UTF-8 无 BOM 和 CRLF，避免 Git 换行设置或系统代码页破坏 CMD。
+$launcherText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'start_and_pair_windows.cmd'), [Text.Encoding]::UTF8)
+$launcherText = $launcherText -replace '\r?\n', "`r`n"
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'dist\启动并配对.cmd'), $launcherText, (New-Object Text.UTF8Encoding($false)))
 
 foreach ($required in @("HaitooHubAgent\HaitooHubAgent.exe", "HaitooHubAgentConsole\HaitooHubAgentConsole.exe", "启动并配对.cmd")) {
     if (-not (Test-Path (Join-Path "$PSScriptRoot\dist" $required))) {
