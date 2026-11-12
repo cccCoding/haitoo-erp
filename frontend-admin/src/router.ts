@@ -9,7 +9,8 @@ export const adminRoutes: RouteRecordRaw[] = [
   { path: '/conpanies', name: 'companies', component: RouteOutlet },
   { path: '/companies', redirect: { name: 'companies' } },
   { path: '/models', name: 'models', component: RouteOutlet },
-  { path: '/connector-releases', name: 'releases', component: RouteOutlet },
+  { path: '/matrix', name: 'matrix', component: RouteOutlet },
+  { path: '/connector-releases', redirect: { name: 'matrix', query: { tab: 'releases' } } },
   { path: '/data', name: 'data', component: RouteOutlet },
   { path: '/:pathMatch(.*)*', redirect: { name: 'overview' } },
 ]

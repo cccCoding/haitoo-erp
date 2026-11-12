@@ -4,7 +4,7 @@ import re
 from playwright.async_api import TimeoutError as BrowserTimeout, expect
 from datetime import datetime, timedelta
 from decimal import Decimal
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from urllib.parse import urlsplit, parse_qs, urlencode
 
 # 声明代码实现的能力；公司与成员授权始终由 ERP 后台校验。
@@ -21,6 +21,13 @@ def profile(site,shop_type='cross_border'):
     value=PROFILES.get((site,shop_type))
     if value is None:raise RuntimeError('当前仅支持马来西亚（MY）跨境店，不支持本土店或其他站点')
     return value
+
+
+def site_timezone(site):
+    try:
+        return ZoneInfo(profile(site)['timezone'])
+    except ZoneInfoNotFoundError as exc:
+        raise RuntimeError('连接器缺少站点时区数据，请更新或重新安装新版连接器后重试') from exc
 
 
 def allowed(url,site):
@@ -202,7 +209,7 @@ def analysis_page(data):
 
 async def collect_analysis(page,site,products,check_stop,progress,wait_verification,request):
     config=profile(site)
-    today=datetime.now(ZoneInfo(config['timezone'])).replace(hour=0,minute=0,second=0,microsecond=0)
+    today=datetime.now(site_timezone(site)).replace(hour=0,minute=0,second=0,microsecond=0)
     start=today-timedelta(days=29);end=today+timedelta(days=1)
     dates={'start':start.strftime('%Y-%m-%d'),'end':end.strftime('%Y-%m-%d')}
     query=urlencode({'shop_region':site,'timeRange':f"{dates['start']}|{dates['end']}",'shortcut':'last30days'})
@@ -406,7 +413,7 @@ async def collect(page,site,identity,check_stop,progress):
             page_number+=1;await asyncio.sleep(.2)
         start,end,shop_gmv=await collect_analysis(page,site,products,check_stop,progress,wait_verification,request)
         orders_total=await collect_order_count(page,site,check_stop,progress,wait_verification)
-        observed=datetime.now(ZoneInfo(config['timezone']))
+        observed=datetime.now(site_timezone(site))
         covered=sum(p.get('impressions') is not None for p in products)
         await progress('collection_checked',f'商品管理及最近30天商品分析采集完成：{total} 个在售商品、{sum(p["sku_count"] for p in products)} 条SKU；{covered} 个商品有分析数据，{total-covered} 个商品经ID查询确认无记录，已标记未知；全部订单 {orders_total} 个')
         return {'header':{'identity':identity,'collection_kind':'product_analysis','product_scope':'on_sale','on_sale_count':total,

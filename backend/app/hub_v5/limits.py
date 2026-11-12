@@ -7,7 +7,7 @@ class MatrixRequestLimit:
     def __init__(self,app):self.app=app
 
     async def __call__(self,scope,receive,send):
-        if scope['type']!='http' or not (scope.get('path','').startswith('/hub-v5/') or scope.get('path','').startswith('/admin/connector-releases')):
+        if scope['type']!='http' or not (scope.get('path','').startswith('/hub-v5/') or scope.get('path','').startswith('/admin/matrix/') or scope.get('path','').startswith('/admin/connector-releases')):
             return await self.app(scope,receive,send)
         limit=510*1024*1024 if scope['path']=='/admin/connector-releases' and scope['method']=='POST' else 260*1024*1024 if scope['path']=='/hub-v5/releases' and scope['method']=='POST' else 4*1024*1024
         headers=dict(scope.get('headers',[]))

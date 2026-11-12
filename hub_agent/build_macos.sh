@@ -31,7 +31,7 @@ if $RELEASE; then BUILD_DISTRIBUTION=signed; fi
 "$PROJECT_PYTHON" -c 'import json,sys; from pathlib import Path; info=json.loads(Path("agent-version.json").read_text()); info["distribution"]=sys.argv[2]; Path(sys.argv[1]).write_text(json.dumps(info))' "$PACKAGE_DIRECTORY/agent-version.json" "$BUILD_DISTRIBUTION"
 if $RELEASE; then
   # PyInstaller 的 codesign_identity 确保嵌套 Mach-O 先签名，最后签应用整体。
-  "$PROJECT_PYTHON" -m PyInstaller --noconfirm --windowed --osx-bundle-identifier com.haitoo.hub-agent --codesign-identity "$HAITOO_MAC_SIGN_IDENTITY" --osx-entitlements-file install/macos/entitlements.plist --add-data "trusted_keys.json:." --add-data "$PACKAGE_DIRECTORY/agent-version.json:." --name HaitooHubAgent haitoo_hub_agent.py
+  "$PROJECT_PYTHON" -m PyInstaller --noconfirm --collect-all tzdata --windowed --osx-bundle-identifier com.haitoo.hub-agent --codesign-identity "$HAITOO_MAC_SIGN_IDENTITY" --osx-entitlements-file install/macos/entitlements.plist --add-data "trusted_keys.json:." --add-data "$PACKAGE_DIRECTORY/agent-version.json:." --name HaitooHubAgent haitoo_hub_agent.py
   codesign --force --options runtime --timestamp --entitlements install/macos/entitlements.plist --sign "$HAITOO_MAC_SIGN_IDENTITY" dist/HaitooHubAgent.app
   codesign --verify --deep --strict dist/HaitooHubAgent.app
   ditto -c -k --keepParent dist/HaitooHubAgent.app "$PACKAGE_DIRECTORY/notarize.zip"
@@ -49,8 +49,8 @@ if $RELEASE; then
   "$PROJECT_PYTHON" sign_release.py --package "dist/$BASENAME-update.zip" --installer "dist/$BASENAME.dmg" --key "$HAITOO_RELEASE_PRIVATE_KEY" --key-id "$HAITOO_RELEASE_KEY_ID" --version "$AGENT_VERSION" --platform macos --arch "$AGENT_ARCH" --kind agent --entrypoint HaitooHubAgent.app/Contents/MacOS/HaitooHubAgent --output "dist/$BASENAME-manifest.json"
   echo "正式发布产物：dist/$BASENAME.dmg、-update.zip、-manifest.json"
 else
-  "$PROJECT_PYTHON" -m PyInstaller --noconfirm --windowed --osx-bundle-identifier com.haitoo.hub-agent --add-data "trusted_keys.json:." --add-data "$PACKAGE_DIRECTORY/agent-version.json:." --name HaitooHubAgent haitoo_hub_agent.py
-  "$PROJECT_PYTHON" -m PyInstaller --noconfirm --console --add-data "trusted_keys.json:." --add-data "$PACKAGE_DIRECTORY/agent-version.json:." --name HaitooHubAgentConsole haitoo_hub_agent.py
+  "$PROJECT_PYTHON" -m PyInstaller --noconfirm --collect-all tzdata --windowed --osx-bundle-identifier com.haitoo.hub-agent --add-data "trusted_keys.json:." --add-data "$PACKAGE_DIRECTORY/agent-version.json:." --name HaitooHubAgent haitoo_hub_agent.py
+  "$PROJECT_PYTHON" -m PyInstaller --noconfirm --collect-all tzdata --console --add-data "trusted_keys.json:." --add-data "$PACKAGE_DIRECTORY/agent-version.json:." --name HaitooHubAgentConsole haitoo_hub_agent.py
   cp start_and_pair_macos.command dist/启动并配对.command
   chmod +x dist/启动并配对.command
   (cd dist && zip -qry "$PACKAGE_DIRECTORY/$BASENAME.zip" HaitooHubAgent.app HaitooHubAgentConsole 启动并配对.command)

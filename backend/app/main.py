@@ -353,8 +353,9 @@ from .hub_v5.api import router as matrix_router
 from .hub_v5.releases import router as matrix_releases_router
 app.include_router(matrix_router)
 app.include_router(matrix_releases_router)
-from .hub_v5.management import router as matrix_management_router
+from .hub_v5.management import router as matrix_management_router, platform_router as matrix_platform_router
 app.include_router(matrix_management_router)
+app.include_router(matrix_platform_router)
 from .hub_v5.connector_releases import router as connector_releases_router
 app.include_router(connector_releases_router)
 from .hub_v5.installers import router as agent_installers_router

@@ -1063,11 +1063,22 @@ def main() -> None:
     register_parser.add_argument("--erp-url", required=True); register_parser.add_argument("--user-token", required=True)
     register_parser.add_argument("--name", required=True); register_parser.add_argument("--hubstudio-url", default="http://127.0.0.1:6873")
     commands.add_parser("run"); commands.add_parser("tray"); commands.add_parser("pair"); commands.add_parser("console")
+    commands.add_parser("check-timezones", help="检查内置站点时区数据，不连接服务器")
     update_parser = commands.add_parser("apply-update")
     update_parser.add_argument("--transaction", required=True)
     rollback_parser = commands.add_parser("rollback")
     rollback_parser.add_argument("--kind", choices=("agent", "plugin"), required=True)
     args = parser.parse_args()
+    if args.command == "check-timezones":
+        from zoneinfo import ZoneInfo, reset_tzpath
+        from plugins.tiktok import PROFILES, site_timezone
+        # 禁用系统时区目录，验证安装包自身携带的数据，避免构建机掩盖缺失。
+        reset_tzpath(())
+        ZoneInfo.clear_cache()
+        for site, _ in PROFILES:
+            zone = site_timezone(site)
+            print(f"Timezone OK: {zone.key}")
+        return
     if args.command == "apply-update":
         from updater import apply_update
         apply_update(args.transaction)

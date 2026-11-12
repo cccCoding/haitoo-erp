@@ -41,8 +41,11 @@ $metadata = Get-Content .\agent-version.json -Raw | ConvertFrom-Json
 $metadata | Add-Member -NotePropertyName distribution -NotePropertyValue $(if ($Release) { 'signed' } else { 'internal' }) -Force
 [IO.File]::WriteAllText($metadataPath, ($metadata | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
 try {
-Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--windowed", "--add-data", "trusted_keys.json;.", "--add-data", "${metadataPath};.", "--name", "HaitooHubAgent", "haitoo_hub_agent.py")
-Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--console", "--add-data", "trusted_keys.json;.", "--add-data", "${metadataPath};.", "--name", "HaitooHubAgentConsole", "haitoo_hub_agent.py")
+Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--collect-all", "tzdata", "--windowed", "--add-data", "trusted_keys.json;.", "--add-data", "${metadataPath};.", "--name", "HaitooHubAgent", "haitoo_hub_agent.py")
+Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--collect-all", "tzdata", "--console", "--add-data", "trusted_keys.json;.", "--add-data", "${metadataPath};.", "--name", "HaitooHubAgentConsole", "haitoo_hub_agent.py")
+# 对真实打包产物执行离线检查，不使用构建机的系统时区库。
+& .\dist\HaitooHubAgentConsole\HaitooHubAgentConsole.exe check-timezones
+if ($LASTEXITCODE -ne 0) { throw "Windows 安装包缺少站点时区数据，停止发布" }
 Copy-Item .\start_and_pair_windows.cmd .\dist\启动并配对.cmd
 
 foreach ($required in @("HaitooHubAgent\HaitooHubAgent.exe", "HaitooHubAgentConsole\HaitooHubAgentConsole.exe", "启动并配对.cmd")) {

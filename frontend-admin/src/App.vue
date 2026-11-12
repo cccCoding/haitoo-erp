@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import axios from 'axios'
 import DataManagement from './DataManagement.vue'
-import ConnectorReleases from './ConnectorReleases.vue'
+import MatrixManagement from './MatrixManagement.vue'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
 
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8001' })
@@ -14,10 +14,10 @@ const queueSettings = ref({ submit_interval_ms: 1000, result_interval_ms: 5000, 
 const loading = ref(false), saving = ref(''), error = ref('')
 const toast = ref(''), toastKind = ref<'ok' | 'error'>('ok')
 const refreshing = ref(false)
-const pageDescriptions: Record<string, string> = { overview: '查看平台规模、任务状态与队列健康情况', companies: '管理企业开通与管理员账号', models: '管理印花模型与任务提交参数', releases: '发布连接器、验证测试设备并管理各系统稳定版本', data: '跨公司查阅模板、创作素材、素材、产品和店铺数据' }
+const pageDescriptions: Record<string, string> = { overview: '查看平台规模、任务状态与队列健康情况', companies: '管理企业开通与管理员账号', models: '管理印花模型与任务提交参数', matrix: '按公司查看矩阵统计、管理设备并维护连接器版本', data: '跨公司查阅模板、创作素材、素材、产品和店铺数据' }
 const route = useRoute()
 const activePage = computed(() => route.name)
-const connectorReleases = ref<InstanceType<typeof ConnectorReleases> | null>(null)
+const matrixManagement = ref<InstanceType<typeof MatrixManagement> | null>(null)
 const dataManagement = ref<InstanceType<typeof DataManagement> | null>(null)
 const showCompanyForm = ref(false)
 // 采集与 TK 矩阵使用行内开关直接保存；保存成功后才更新界面状态，失败保持原值。
@@ -77,7 +77,7 @@ async function refreshPage() {
   try {
     if (!user.value || activePage.value !== 'data') await loadAdmin()
     if (activePage.value === 'data') await dataManagement.value?.refresh()
-    if (activePage.value === 'releases') await connectorReleases.value?.refresh()
+    if (activePage.value === 'matrix') await matrixManagement.value?.refresh()
   } catch (e: any) { error.value = e.response?.data?.detail || '刷新失败，请稍后重试' }
   finally { refreshing.value = false }
 }
@@ -161,8 +161,8 @@ onMounted(() => token.value && loadAdmin().catch((e: any) => {
     <form class="login-card" @submit.prevent="login"><img class="mark" src="/brand-icon.png" alt="Haitoro" width="34" height="34" /><p class="eyebrow">Haitoro PLATFORM</p><h1>超级管理员后台</h1><p>管理平台运行概况和印花贴合模型。</p><label>邮箱<input v-model="email" type="email" autocomplete="username" required /></label><label>密码<input v-model="password" type="password" autocomplete="current-password" required /></label><button class="primary" type="submit" :disabled="loading">{{ loading ? '登录中…' : '登录后台' }}</button><small>仅超级管理员可访问</small><p v-if="error" class="error">{{ error }}</p></form>
   </main>
   <main v-else class="shell">
-    <aside><div class="brand"><img src="/brand-icon.png" alt="Haitoro" width="34" height="34" /> Haitoro</div><p>平台后台</p><nav aria-label="后台导航"><RouterLink :to="{name:'overview'}" :class="{active:activePage==='overview'}">概览</RouterLink><RouterLink :to="{name:'companies'}" :class="{active:activePage==='companies'}">公司管理</RouterLink><RouterLink :to="{name:'models'}" :class="{active:activePage==='models'}">模型管理</RouterLink><RouterLink :to="{name:'data'}" :class="{active:activePage==='data'}">数据管理</RouterLink><RouterLink :to="{name:'releases'}" :class="{active:activePage==='releases'}">连接器版本</RouterLink></nav><div class="operator"><b>{{ user?.name }}</b><small>超级管理员</small><button @click="logout">退出登录</button></div></aside>
-    <section class="content"><header><div><p class="eyebrow">PLATFORM ADMIN</p><h1>{{activePage==='overview'?'平台概览':activePage==='companies'?'公司管理':activePage==='models'?'模型管理':activePage==='releases'?'连接器版本':'数据管理'}}</h1><p class="page-description">{{ pageDescriptions[String(activePage)] }}</p></div><button v-if="activePage!=='data'" class="refresh" :disabled="refreshing" :aria-busy="refreshing" @click="refreshPage">{{ refreshing ? '刷新中…' : '刷新数据' }}</button></header>
+    <aside><div class="brand"><img src="/brand-icon.png" alt="Haitoro" width="34" height="34" /> Haitoro</div><p>平台后台</p><nav aria-label="后台导航"><RouterLink :to="{name:'overview'}" :class="{active:activePage==='overview'}">概览</RouterLink><RouterLink :to="{name:'companies'}" :class="{active:activePage==='companies'}">公司管理</RouterLink><RouterLink :to="{name:'models'}" :class="{active:activePage==='models'}">模型管理</RouterLink><RouterLink :to="{name:'data'}" :class="{active:activePage==='data'}">数据管理</RouterLink><RouterLink :to="{name:'matrix'}" :class="{active:activePage==='matrix'}">矩阵管理</RouterLink></nav><div class="operator"><b>{{ user?.name }}</b><small>超级管理员</small><button @click="logout">退出登录</button></div></aside>
+    <section class="content"><header><div><p class="eyebrow">PLATFORM ADMIN</p><h1>{{activePage==='overview'?'平台概览':activePage==='companies'?'公司管理':activePage==='models'?'模型管理':activePage==='matrix'?'矩阵管理':'数据管理'}}</h1><p class="page-description">{{ pageDescriptions[String(activePage)] }}</p></div><button v-if="activePage!=='data'" class="refresh" :disabled="refreshing" :aria-busy="refreshing" @click="refreshPage">{{ refreshing ? '刷新中…' : '刷新数据' }}</button></header>
       <section class="page"><template v-if="activePage==='overview'"><div class="metrics"><article><span>公司</span><b>{{ overview?.companies ?? '—' }}</b><small>已开通企业</small></article><article><span>店铺</span><b>{{ overview?.shops ?? '—' }}</b><small>已授权店铺</small></article><article><span>平台用户</span><b>{{ overview?.users ?? '—' }}</b><small>含平台管理员</small></article><article><span>进行中任务</span><b>{{ overview?.running_tasks ?? '—' }}</b><small>累计 {{ overview?.tasks ?? 0 }} 个任务</small></article></div><section class="panel queue-health" :class="{'queue-alert':overview?.queue?.alert}"><div class="heading"><div><h2>印花任务队列</h2><p>告警阈值：待处理超过 200 个、最早等待超过 10 分钟，或近 15 分钟失败率超过 10%。</p></div><span class="queue-health-state">{{!overview?.queue?'尚未加载':overview.queue.alert?'需要关注':'运行正常'}}</span></div><div class="queue-metrics"><article><span>待处理</span><b>{{overview?.queue?.queued ?? 0}}</b><small>其中重试 {{overview?.queue?.retrying ?? 0}} 个任务</small></article><article><span>运行中</span><b>{{overview?.queue?.running ?? 0}}</b><small>最早等待 {{overview?.queue?.oldest_wait_minutes ?? 0}} 分钟</small></article><article><span>近 1 小时吞吐</span><b>{{overview?.queue?.completed_prints_last_hour ?? 0}}</b><small>{{overview?.queue?.completed_tasks_last_hour ?? 0}} 个任务</small></article><article><span>近 15 分钟失败率</span><b>{{overview?.queue?.failure_rate_15m ?? 0}}%</b><small>近 1 小时最终失败 {{overview?.queue?.failed_tasks_last_hour ?? 0}} 个任务</small></article></div><div class="queue-model-table"><div class="queue-model-head"><span>平台</span><span>模型</span><span>待处理</span><span>运行中</span><span>最终失败</span></div><div v-for="item in overview?.queue?.model_backlog || []" :key="`${item.provider}-${item.model}`" class="queue-model-row"><b>{{item.provider}}</b><code>{{item.model}}</code><span>{{item.queued}}</span><span>{{item.running}}</span><span :class="item.failed?'bad':''">{{item.failed}}</span></div><p v-if="!(overview?.queue?.model_backlog?.length)" class="queue-empty">当前没有积压或失败任务。</p></div></section></template>
         <template v-else-if="activePage==='companies'">
           <section class="panel companies">
@@ -193,7 +193,7 @@ onMounted(() => token.value && loadAdmin().catch((e: any) => {
             <p v-if="!companies.length" class="empty">暂无公司，点击“开通公司”创建企业账号。</p>
           </section>
         </template>
-        <ConnectorReleases v-else-if="activePage==='releases'" ref="connectorReleases" :token="token" @unauthorized="logout" />
+        <MatrixManagement v-else-if="activePage==='matrix'" ref="matrixManagement" :token="token" :companies="companies" @unauthorized="logout" />
         <DataManagement v-else-if="activePage==='data'" ref="dataManagement" :token="token" :companies="companies" @unauthorized="logout" />
         <section v-else class="panel model-panel">
           <div class="heading model-heading">

@@ -1,17 +1,31 @@
-"""公司管理员的成员授权、全公司设备与执行统计。"""
+"""公司管理员的成员授权、全公司设备与执行统计，以及平台管理员的跨公司设备管理。"""
 from collections import Counter, defaultdict
+from types import SimpleNamespace
 from typing import Literal
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
 from ..database import get_db
-from ..models import User, Role, HubAgent
-from .api import matrix_admin
-from .models import MatrixMemberPermission, MatrixRun, MatrixItem, MatrixCommand, MatrixAccess, MatrixEnvironment, MatrixShop
-from .schemas import MemberPermissionInput
+from ..models import User, Role, HubAgent, Company
+from ..security import current_user
+from .api import matrix_admin, config as matrix_config, set_connection as set_device_connection, device_command as run_device_command
+from .installers import installers_impl, installer_download
+from .models import MatrixMemberPermission, MatrixRun, MatrixItem, MatrixCommand, MatrixAccess, MatrixEnvironment
+from .schemas import MemberPermissionInput, ConnectionInput, DeviceCommand
 from . import service as s, permissions
 
 router = APIRouter(prefix="/hub-v5/admin", tags=["矩阵管理"])
+# 平台管理员没有公司会话；按所选公司生成受限操作身份，审计仍记录平台管理员本人。
+platform_router = APIRouter(prefix="/admin/matrix", tags=["平台矩阵管理"])
+
+
+def platform_actor(company_id: int, actor=Depends(current_user), db=Depends(get_db)):
+    if actor.role != Role.SUPER_ADMIN or actor.company_id is not None:
+        s.fail("仅平台管理员可操作", 403)
+    if db.get(Company, company_id) is None:
+        s.fail("公司不存在", 404)
+    return SimpleNamespace(id=actor.id, company_id=company_id, role=Role.COMPANY_ADMIN,
+        name=actor.name, token_version=actor.token_version, is_active=True)
 
 
 def member_view(db, user):
@@ -21,6 +35,10 @@ def member_view(db, user):
 
 @router.get("/members")
 def members(q: str = Query("",max_length=200), actor=Depends(matrix_admin), db=Depends(get_db)):
+    return members_payload(db, actor, q)
+
+
+def members_payload(db, actor, q=""):
     query=select(User).where(User.company_id==actor.company_id,User.role.in_(permissions.ROLES))
     if q:query=query.where(User.name.contains(q,autoescape=True))
     return {"items":[member_view(db,u) for u in db.scalars(query.order_by(User.id))]}
@@ -72,6 +90,10 @@ def set_member_permission(db,actor,user,payload):
 
 @router.get("/devices")
 def devices(user_id:int|None=Query(None,gt=0),actor=Depends(matrix_admin),db=Depends(get_db)):
+    return devices_payload(db, actor, user_id)
+
+
+def devices_payload(db, actor, user_id=None):
     query=select(HubAgent).where(HubAgent.company_id==actor.company_id)
     if user_id:query=query.where(HubAgent.user_id==user_id)
     counts=dict(db.execute(select(MatrixAccess.agent_id,func.count(func.distinct(MatrixAccess.environment_id))).where(MatrixAccess.available.is_(True)).group_by(MatrixAccess.agent_id)).all())
@@ -86,6 +108,10 @@ def devices(user_id:int|None=Query(None,gt=0),actor=Depends(matrix_admin),db=Dep
 def statistics(start:date|None=None,end:date|None=None,user_id:int|None=Query(None,gt=0),agent_id:int|None=Query(None,gt=0),
     site:Literal["","MY","ID","unknown"]="",task:Literal["","shop.collect","listing.catalog"]="",
     actor=Depends(matrix_admin),db=Depends(get_db)):
+    return statistics_payload(db, actor, start, end, user_id, agent_id, site, task)
+
+
+def statistics_payload(db, actor, start=None, end=None, user_id=None, agent_id=None, site="", task=""):
     today=(s.utcnow()+timedelta(hours=8)).date()
     start,end=start or today-timedelta(days=6),end or today
     if end<start or (end-start).days>365:s.fail("请选择不超过366天的有效日期范围",422)
@@ -127,3 +153,48 @@ def statistics(start:date|None=None,end:date|None=None,user_id:int|None=Query(No
             "online_devices":sum(bool(a.last_seen_at and a.last_seen_at>s.utcnow()-timedelta(seconds=45)) for a in current_agents),"environments":env_count,"shops":shop_count},
         "by_member":[{"user_id":uid,"name":names.get(uid,"已移除成员"),**totals(counts)} for uid,counts in sorted(by_member.items())],
         "daily":[{"date":(start+timedelta(days=n)).isoformat(),**totals(by_day[(start+timedelta(days=n)).isoformat()])} for n in range((end-start).days+1)]}
+
+
+# 平台后台复用公司范围计算；写操作仍经过公司锁、设备归属和审计校验。
+@platform_router.get("/companies/{company_id}/members")
+def platform_members(company_id:int,q:str=Query("",max_length=200),actor=Depends(platform_actor),db=Depends(get_db)):
+    return members_payload(db,actor,q)
+
+
+@platform_router.get("/companies/{company_id}/devices")
+def platform_devices(company_id:int,user_id:int|None=Query(None,gt=0),actor=Depends(platform_actor),db=Depends(get_db)):
+    return devices_payload(db,actor,user_id)
+
+
+@platform_router.get("/companies/{company_id}/statistics")
+def platform_statistics(company_id:int,start:date|None=None,end:date|None=None,user_id:int|None=Query(None,gt=0),agent_id:int|None=Query(None,gt=0),
+    site:Literal["","MY","ID","unknown"]="",task:Literal["","shop.collect","listing.catalog"]="",
+    actor=Depends(platform_actor),db=Depends(get_db)):
+    return statistics_payload(db,actor,start,end,user_id,agent_id,site,task)
+
+
+@platform_router.get("/companies/{company_id}/config")
+def platform_config(company_id:int,actor=Depends(platform_actor),db=Depends(get_db)):
+    return matrix_config(actor,db)
+
+
+@platform_router.put("/companies/{company_id}/agents/{identity}/connection")
+def platform_connection(company_id:int,identity:int,payload:ConnectionInput,actor=Depends(platform_actor),db=Depends(get_db)):
+    return set_device_connection(identity,payload,actor=actor,db=db)
+
+
+@platform_router.post("/companies/{company_id}/agents/{identity}/commands")
+def platform_command(company_id:int,identity:int,payload:DeviceCommand,actor=Depends(platform_actor),db=Depends(get_db)):
+    return run_device_command(identity,payload,actor=actor,db=db)
+
+
+@platform_router.get("/companies/{company_id}/agent-installers")
+def platform_installers(company_id:int,distribution:Literal['signed','internal','all']='signed',agent_id:int|None=None,
+    actor=Depends(platform_actor),db=Depends(get_db)):
+    return installers_impl(actor,db,distribution,agent_id)
+
+
+@platform_router.get("/companies/{company_id}/agent-installers/{platform}/{arch}/file")
+def platform_installer_download(company_id:int,platform:str,arch:str,release_id:int|None=None,
+    distribution:Literal["signed","internal"]="signed",agent_id:int|None=None,actor=Depends(platform_actor),db=Depends(get_db)):
+    return installer_download(platform,arch,release_id,distribution,agent_id,actor=actor,db=db)
