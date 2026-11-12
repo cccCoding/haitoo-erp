@@ -10,7 +10,6 @@ if [[ ! -f "$CONSOLE_APP" ]]; then
   read -r -p "按回车键关闭..."
   exit 1
 fi
-xattr -dr com.apple.quarantine "$SCRIPT_DIR/HaitooHubAgentConsole" "$SCRIPT_DIR/HaitooHubAgent.app" "$LAUNCHER_PATH" 2>/dev/null || true
 chmod +x "$CONSOLE_APP" "$LAUNCHER_PATH"
 if lsof -nP -iTCP:45679 -sTCP:LISTEN >/dev/null 2>&1; then
   echo "连接器端口 45679 已被占用。如需重启，请先退出已有连接器。"
@@ -20,6 +19,7 @@ if lsof -nP -iTCP:45679 -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 echo "正在启动 Haitoo Hub 连接器；首次启动将打开 ERP 矩阵页面进行授权。"
 echo "关闭这个终端窗口 = 停止连接器。"
+echo "若系统拒绝运行，请查看“系统设置 → 隐私与安全性”中的实际提示，或在 ERP 查看手动安装指导。"
 "$CONSOLE_APP" console
 CONNECTOR_EXIT=$?
 echo "连接器已停止（退出码：$CONNECTOR_EXIT）。"

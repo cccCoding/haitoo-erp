@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import {computed,ref,watch} from 'vue'
+import AgentUpdateHelp from './AgentUpdateHelp.vue'
+import {updateRecovery} from './update-recovery'
 import {deviceSetup} from './matrix'
-const updateLabels:Record<string,string>={idle:'等待检查',checking:'检查更新',downloading:'正在下载',waiting_idle:'等待当前任务完成',restart_requested:'正在重启',installed:'更新成功',rolled_back:'已恢复上一版本',retry:'下载失败，稍后重试',rejected:'包校验失败',no_trusted_keys:'更新公钥未配置',insufficient_space:'磁盘空间不足',installer_required:'请下载新版安装程序',up_to_date:'已是最新版本'}
+const updateLabels:Record<string,string>={manual_installed:'已确认手动安装',manual_required:'需要人工处理',retry_requested:'已请求重试',idle:'等待检查',checking:'检查更新',downloading:'正在下载',waiting_idle:'等待当前任务完成',restart_requested:'正在重启',installed:'更新成功',rolled_back:'已恢复上一版本',retry:'下载失败，稍后重试',rejected:'包校验失败',no_trusted_keys:'更新公钥未配置',insufficient_space:'磁盘空间不足',installer_required:'请下载新版安装程序',up_to_date:'已是最新版本'}
 function updateLabel(state:any){return updateLabels[state?.status]||'尚未上报'}
-const props=defineProps<{devices:any[];config:{enabled:boolean;listing_enabled:boolean};busy:boolean;administrator?:boolean}>()
+const props=defineProps<{devices:any[];config:{enabled:boolean;listing_enabled:boolean};busy:boolean;administrator?:boolean;token:string;userId?:number}>()
 const emit=defineEmits<{save:[device:any,identity:string];command:[device:any,kind:string]}>()
 const drafts=ref<Record<number,string>>({}),previous:Record<number,string>={}
 const expanded=ref<Record<number,boolean>>({})
@@ -19,6 +21,7 @@ watch(()=>props.devices,devices=>{for(const d of devices){if(!(d.id in drafts.va
       <div class="md-metrics"><span>成员 <b>{{d.user_name||'—'}}</b></span><span>环境 <b>{{d.environment_count??'—'}}</b></span><span>任务 <b>{{!d.is_active||!d.online?'不可接收':d.paused?'已暂停':setup.code==='ready'?'按方案接收':'未就绪'}}</b></span><span v-if="!['ready','offline','revoked','paused'].includes(setup.code)" class="md-attention">{{setup.title}}</span></div>
       <div class="md-actions"><button class="md-primary" :disabled="busy||!setup.canSync" @click="emit('command',d,'refresh')">{{setup.code==='hub'?'重新连接':'同步环境'}}</button><button class="md-toggle" :aria-expanded="!!expanded[d.id]" :aria-controls="`matrix-device-details-${d.id}`" :aria-label="`${expanded[d.id]?'收起':'查看'} ${d.name} 的设备详情`" @click="expanded[d.id]=!expanded[d.id]">{{expanded[d.id]?'收起详情':'查看详情'}}<span class="md-chevron" :class="{'is-expanded':expanded[d.id]}" aria-hidden="true">⌄</span></button></div>
     </div>
+    <AgentUpdateHelp v-if="updateRecovery(d.update_state).needed" :token="token" :device="d" :can-retry="administrator||userId===d.user_id" :busy="busy"/>
     <div v-show="expanded[d.id]" :id="`matrix-device-details-${d.id}`" class="md-details">
       <dl class="md-status"><div><dt>HubStudio</dt><dd :class="{'is-connected':d.hub_connected}">{{d.hub_connected?'已连接':'未连接'}}</dd></div><div><dt>环境同步</dt><dd>{{d.sync_at?new Date(d.sync_at).toLocaleString():'尚未同步'}}</dd></div><div><dt>设备 ID / 连接器版本</dt><dd>{{d.id}} / {{d.version||'—'}}</dd></div><div><dt>自动更新</dt><dd>{{updateLabel(d.update_state)}}<span v-if="d.update_state?.status==='downloading'&&d.update_state?.progress"> {{d.update_state.progress}}%</span><span v-if="d.update_state?.target_version"> · 目标 {{d.update_state.target_version}}</span><span v-if="d.update_state?.error_code"> · {{d.update_state.error_code}}</span></dd></div><div><dt>站点能力</dt><dd>采集 {{d.capabilities?.['shop.collect']?.join(' / ')||'未开放'}} · 上品 {{d.capabilities?.['listing.catalog']?.join(' / ')||'未开放'}}</dd></div></dl>
       <div class="md-guidance" :class="{'is-ready':setup.code==='ready'}"><b>{{setup.title}}</b><span>{{setup.description}}</span></div>

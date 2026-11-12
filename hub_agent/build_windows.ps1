@@ -1,16 +1,19 @@
 param(
     [string]$PythonExecutable = "",
     [switch]$RunTests,
-    [switch]$Release
+    [switch]$Release,
+    [switch]$InternalRelease
 )
 
 $ErrorActionPreference = "Stop"
-if ($Release) {
-    foreach ($name in @('HAITOO_WINDOWS_CERT_SHA1', 'HAITOO_RELEASE_PRIVATE_KEY', 'HAITOO_RELEASE_KEY_ID')) {
+if ($Release -and $InternalRelease) { throw '不能同时选择正式签名与内部发布模式' }
+if ($Release -or $InternalRelease) {
+    foreach ($name in @('HAITOO_RELEASE_PRIVATE_KEY', 'HAITOO_RELEASE_KEY_ID')) {
         if (-not [Environment]::GetEnvironmentVariable($name)) { throw "正式构建缺少环境变量 $name" }
     }
-    if (-not (Get-Content (Join-Path $PSScriptRoot 'trusted_keys.json') -Raw | ConvertFrom-Json).PSObject.Properties.Count) { throw '正式构建必须内置发布公钥' }
+    if (-not (Get-Content (Join-Path $PSScriptRoot 'trusted_keys.json') -Raw | ConvertFrom-Json).PSObject.Properties.Count) { throw '发布构建必须内置公司的更新公钥' }
 }
+if ($Release -and -not $env:HAITOO_WINDOWS_CERT_SHA1) { throw '正式签名构建缺少 HAITOO_WINDOWS_CERT_SHA1' }
 Set-Location $PSScriptRoot
 
 if ($PythonExecutable) {
@@ -31,8 +34,15 @@ Invoke-BuildPython -PythonArguments @("-m", "pip", "install", "-r", "requirement
 if ($RunTests) {
     Invoke-BuildPython -PythonArguments @("-m", "unittest", "discover", "-s", "tests")
 }
-Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--windowed", "--add-data", "trusted_keys.json;.", "--add-data", "agent-version.json;.", "--name", "HaitooHubAgent", "haitoo_hub_agent.py")
-Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--console", "--add-data", "trusted_keys.json;.", "--add-data", "agent-version.json;.", "--name", "HaitooHubAgentConsole", "haitoo_hub_agent.py")
+$metadataDirectory = Join-Path ([IO.Path]::GetTempPath()) ("haitoo-agent-build-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $metadataDirectory | Out-Null
+$metadataPath = Join-Path $metadataDirectory 'agent-version.json'
+$metadata = Get-Content .\agent-version.json -Raw | ConvertFrom-Json
+$metadata | Add-Member -NotePropertyName distribution -NotePropertyValue $(if ($Release) { 'signed' } else { 'internal' }) -Force
+[IO.File]::WriteAllText($metadataPath, ($metadata | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+try {
+Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--windowed", "--add-data", "trusted_keys.json;.", "--add-data", "${metadataPath};.", "--name", "HaitooHubAgent", "haitoo_hub_agent.py")
+Invoke-BuildPython -PythonArguments @("-m", "PyInstaller", "--noconfirm", "--console", "--add-data", "trusted_keys.json;.", "--add-data", "${metadataPath};.", "--name", "HaitooHubAgentConsole", "haitoo_hub_agent.py")
 Copy-Item .\start_and_pair_windows.cmd .\dist\启动并配对.cmd
 
 foreach ($required in @("HaitooHubAgent\HaitooHubAgent.exe", "HaitooHubAgentConsole\HaitooHubAgentConsole.exe", "启动并配对.cmd")) {
@@ -43,7 +53,7 @@ foreach ($required in @("HaitooHubAgent\HaitooHubAgent.exe", "HaitooHubAgentCons
 
 Write-Host "已生成：$PSScriptRoot\dist\HaitooHubAgent\HaitooHubAgent.exe"
 Write-Host "首次安装/排错入口：$PSScriptRoot\dist\启动并配对.cmd"
-Write-Host "发布前请使用代码签名证书签名，并用 Inno Setup/WiX 制作安装包。"
+if ($InternalRelease) { Write-Host "内部发布使用公司更新签名，不需要 Windows 商业代码签名证书。" } else { Write-Host "正式发布请使用 -Release 完成代码签名与安装器构建。" }
 
 $agentVersion = (Get-Content .\agent-version.json -Raw | ConvertFrom-Json).version
 $agentArch = & .\.build-venv\Scripts\python.exe -c "import platform; print('arm64' if platform.machine().lower() in ('arm64','aarch64') else 'x64')"
@@ -73,4 +83,15 @@ if ($Release) {
     Invoke-BuildPython -PythonArguments @('package_release.py', '--source', 'dist/HaitooHubAgent', '--output', "dist/$baseName-update.zip")
     Invoke-BuildPython -PythonArguments @('sign_release.py', '--package', "dist/$baseName-update.zip", '--installer', $installer, '--key', $env:HAITOO_RELEASE_PRIVATE_KEY, '--key-id', $env:HAITOO_RELEASE_KEY_ID, '--version', $agentVersion, '--platform', 'windows', '--arch', 'x64', '--kind', 'agent', '--entrypoint', 'HaitooHubAgent/HaitooHubAgent.exe', '--output', "dist/$baseName-manifest.json")
     Write-Host "正式产物：$installer、$baseName-update.zip、$baseName-manifest.json"
+}
+
+if ($InternalRelease) {
+    if ($agentArch -ne 'x64') { throw '当前 Windows 内部发布仅支持 x64' }
+    $baseName = "HaitooHubAgent-windows-x64-$agentVersion"
+    Invoke-BuildPython -PythonArguments @('package_release.py', '--source', 'dist/HaitooHubAgent', '--output', "dist/$baseName-update.zip")
+    Invoke-BuildPython -PythonArguments @('sign_release.py', '--distribution', 'internal', '--package', "dist/$baseName-update.zip", '--installer', $downloadZip, '--key', $env:HAITOO_RELEASE_PRIVATE_KEY, '--key-id', $env:HAITOO_RELEASE_KEY_ID, '--version', $agentVersion, '--platform', 'windows', '--arch', 'x64', '--kind', 'agent', '--entrypoint', 'HaitooHubAgent/HaitooHubAgent.exe', '--output', "dist/$baseName-manifest.json")
+    Write-Host "内部发布产物：$baseName.zip、$baseName-update.zip、$baseName-manifest.json；程序未使用 Windows 商业证书签名。"
+}
+} finally {
+    Remove-Item -LiteralPath $metadataDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }

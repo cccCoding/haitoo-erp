@@ -13,8 +13,19 @@ import zipfile
 from pathlib import Path
 from package_security import verify_manifest, unpack_verified, verify_directory, version_tuple, MAX_UNPACKED
 from plugin_manager import load_plugin
+from update_recovery import record_failure, retry_failed, launch_error
 
-VERSION = json.loads(Path(__file__).with_name('agent-version.json').read_text(encoding='utf-8'))['version']
+BUILD_INFO = json.loads(Path(__file__).with_name('agent-version.json').read_text(encoding='utf-8'))
+VERSION = BUILD_INFO['version']
+DISTRIBUTION = BUILD_INFO.get('distribution', 'signed')
+
+
+class NativeSignatureError(ValueError):
+    pass
+
+
+class UpdateChannelError(ValueError):
+    pass
 
 
 def target():
@@ -68,18 +79,21 @@ def installed_entry(root, manifest):
     directory = Path(root) / 'versions' / manifest['sha256']
     verify_directory(directory, manifest)
     entry = directory / manifest['entrypoint']
-    verify_native(entry)
+    verify_native(entry, manifest)
     return entry
 
 
-def verify_native(entry):
+def verify_native(entry, manifest=None):
     """正式冻结程序还须通过操作系统签名检查；源码调试仅使用清单签名。"""
+    if (manifest or {}).get('distribution', 'signed') == 'internal':
+        if DISTRIBUTION != 'internal':raise UpdateChannelError('当前安装未启用内部更新，请手动安装内部版')
+        return  # 内部模式仍由调用方校验 Ed25519 与所有文件摘要。
     if not getattr(sys, 'frozen', False):
         return
     if platform.system() == 'Darwin':
         bundle = next((p for p in entry.parents if p.suffix == '.app'), None)
         if bundle is None:
-            raise ValueError('macOS 更新入口必须在签名应用内')
+            raise NativeSignatureError('macOS 更新入口必须在签名应用内')
         command = ['/usr/bin/codesign', '--verify', '--deep', '--strict', str(bundle)]
     else:
         command = ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
@@ -87,7 +101,7 @@ def verify_native(entry):
     try:
         subprocess.run(command, check=True, capture_output=True, timeout=60, env={**os.environ, 'HAITOO_VERIFY_ENTRY': str(entry)}, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     except (subprocess.SubprocessError, OSError) as exc:
-        raise ValueError('操作系统代码签名验证失败') from exc
+        raise NativeSignatureError('操作系统代码签名验证失败') from exc
 
 
 def forward(root):
@@ -111,8 +125,9 @@ def forward(root):
         return False
     try:
         entry = installed_entry(root, manifest)
-    except Exception:
+    except Exception as exc:
         quarantine(root, manifest['sha256'])
+        record_failure(root, manifest, 'NATIVE_SIGNATURE_FAILED' if isinstance(exc, NativeSignatureError) else 'PACKAGE_VALIDATION_FAILED', info.get('release_id'))
         previous = read(root / 'previous-agent.json', {})
         if 'manifest' in previous:
             try:
@@ -127,7 +142,14 @@ def forward(root):
     own = Path(sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]).resolve()
     if entry.resolve() == own:
         return False
-    subprocess.Popen(launcher(entry) + [current_command()[-1]], env=clean_env(), close_fds=True)
+    try:
+        subprocess.Popen(launcher(entry) + [current_command()[-1]], env=clean_env(), close_fds=True)
+    except OSError as exc:
+        quarantine(root, manifest['sha256']); record_failure(root, manifest, launch_error(exc), info.get('release_id'))
+        previous = read(root / 'previous-agent.json', {})
+        if 'manifest' in previous:atomic(pointer, previous)
+        else:pointer.unlink(missing_ok=True)
+        return False
     return True
 
 
@@ -147,6 +169,26 @@ class UpdateManager:
         self.force = False
         self.plugin_check = 0
 
+    def reported_state(self):
+        result = read(self.root / 'update-result.json', {})
+        value = {**self.state, 'distribution': DISTRIBUTION}
+        if result.get('manual_required'):
+            active = self.state.get('status') in {'downloading', 'waiting_idle', 'restart_requested'}
+            value = {**value, **result}
+            if active:value.update({key:self.state[key] for key in ('status','target_version','progress') if key in self.state})
+        return value
+
+    def retry_failed_update(self, expected_sha256=None):
+        if expected_sha256 is not None and read(self.root/'failed-agent.json',{}).get('manifest',{}).get('sha256')!=expected_sha256:return False
+        if self.lock.locked():return False
+        try:
+            if not retry_failed(self.root):return False
+        except (ValueError, OSError, KeyError, TypeError):
+            return False
+        self.state = {'status': 'retry_requested'}
+        self.request_check()
+        return True
+
     def request_check(self):
         self.force = True; self.next_check = 0; self.next_activation = 0
 
@@ -157,24 +199,35 @@ class UpdateManager:
             row = self.prepared; manifest = row['manifest']
             # 暂存后撤回的包不再启动。离线时保留旧版本，稍后再确认。
             try:
-                rows = await self.client.request('GET', '/hub-v5/agent/connector-releases', params=dict(zip(('platform', 'arch'), target())))
+                rows = await self.client.request('GET', '/hub-v5/agent/connector-releases', params={**dict(zip(('platform', 'arch'), target())), 'distribution':DISTRIBUTION})
                 if not any(r['id'] == row['id'] and r['manifest'] == manifest for r in rows):
                     self.prepared = None; (self.root / 'staged-agent.json').unlink(missing_ok=True)
                     self.state = {'status': 'idle'}
                     return False
                 await asyncio.to_thread(installed_entry, self.root, manifest)
+            except (NativeSignatureError, UpdateChannelError) as exc:
+                quarantine(self.root, manifest['sha256']); self.prepared = None
+                (self.root / 'staged-agent.json').unlink(missing_ok=True)
+                self.state = record_failure(self.root, manifest, 'NATIVE_SIGNATURE_FAILED' if isinstance(exc, NativeSignatureError) else 'UPDATE_CHANNEL_MISMATCH', row['id'])
+                return False
             except ValueError:
                 quarantine(self.root, manifest['sha256']); self.prepared = None
                 (self.root / 'staged-agent.json').unlink(missing_ok=True)
-                self.state = {'status': 'rejected', 'error_code': 'PACKAGE_VALIDATION_FAILED'}
+                self.state = record_failure(self.root, manifest, 'PACKAGE_VALIDATION_FAILED', row['id'])
                 return False
             except Exception:
                 self.next_activation = time.monotonic() + 60
                 self.state = {'status': 'retry', 'error_code': 'RELEASE_CHECK_FAILED', 'target_version': manifest['version']}
                 return False
             transaction = self.root / 'pending-agent.json'
-            atomic(transaction, {'manifest': manifest, 'parent_pid': os.getpid(), 'created_at': time.time(), 'previous_command': current_command()})
-            subprocess.Popen(current_command()[:-1] + ['apply-update', '--transaction', str(transaction)], env=clean_env(), close_fds=True)
+            atomic(transaction, {'manifest': manifest, 'release_id': row['id'], 'parent_pid': os.getpid(), 'created_at': time.time(), 'previous_command': current_command()})
+            try:
+                subprocess.Popen(current_command()[:-1] + ['apply-update', '--transaction', str(transaction)], env=clean_env(), close_fds=True)
+            except OSError as exc:
+                transaction.unlink(missing_ok=True); (self.root/'staged-agent.json').unlink(missing_ok=True)
+                self.prepared=None; quarantine(self.root,manifest['sha256'])
+                self.state=record_failure(self.root,manifest,launch_error(exc),row['id'])
+                return False
             self.state = {'status': 'restart_requested', 'target_version': manifest['version']}
             return True
 
@@ -197,7 +250,7 @@ class UpdateManager:
                 if not trust:
                     self.state = {'status': 'no_trusted_keys'}; return False
                 platform_name, arch = target()
-                params = {'platform': platform_name, 'arch': arch}
+                params = {'platform': platform_name, 'arch': arch, 'distribution':DISTRIBUTION}
                 rows = await self.client.request('GET', '/hub-v5/agent/connector-releases', params=params)
                 # 插件故障不会阻塞连接器自身更新。
                 if plugin_due:
@@ -223,7 +276,7 @@ class UpdateManager:
                         verify_manifest(manifest, trust, platform_name, arch)
                         self.state = {'status': 'checking', 'target_version': manifest['version']}
                         if kind == 'agent' and version_tuple(manifest.get('min_launcher_version', '0.0.0')) > version_tuple(os.environ.get('HAITOO_LAUNCHER_VERSION', VERSION)):
-                            self.state['status'] = 'installer_required'; return False
+                            self.state = record_failure(self.root, manifest, 'LAUNCHER_TOO_OLD', row['id']); return False
                         if shutil.disk_usage(self.root).free < manifest['size'] + MAX_UNPACKED:
                             self.state['status'] = 'insufficient_space'; return False
                         directory = self.root / ('plugins' if kind == 'plugin' else 'versions') / manifest['sha256']
@@ -240,15 +293,19 @@ class UpdateManager:
                             await asyncio.to_thread(shutil.rmtree, staging, True)
                             await asyncio.to_thread(unpack_verified, package, manifest, staging)
                             if kind == 'agent':
-                                await asyncio.to_thread(verify_native, staging / manifest['entrypoint'])
+                                await asyncio.to_thread(verify_native, staging / manifest['entrypoint'], manifest)
                             if directory.exists():
                                 await asyncio.to_thread(verify_directory, directory, manifest)
                                 await asyncio.to_thread(shutil.rmtree, staging, True)
                             else:
                                 staging.replace(directory)
+                        except (NativeSignatureError, UpdateChannelError) as exc:
+                            quarantine(self.root, manifest['sha256'])
+                            self.state = record_failure(self.root, manifest, 'NATIVE_SIGNATURE_FAILED' if isinstance(exc, NativeSignatureError) else 'UPDATE_CHANNEL_MISMATCH', row['id'])
+                            return False
                         except (ValueError, UnicodeError, zipfile.BadZipFile):
                             quarantine(self.root, manifest['sha256'])
-                            self.state = {'status': 'rejected', 'target_version': manifest['version'], 'error_code': 'PACKAGE_VALIDATION_FAILED'}
+                            self.state = record_failure(self.root, manifest, 'PACKAGE_VALIDATION_FAILED', row['id']) if kind=='agent' else {'status':'rejected','error_code':'PACKAGE_VALIDATION_FAILED'}
                             return False
                         finally:
                             package.unlink(missing_ok=True)
@@ -270,7 +327,7 @@ class UpdateManager:
                         self.state = {'status': 'plugin_installed', 'plugin_version': manifest['version']}
                     except ValueError:
                         quarantine(self.root, manifest['sha256'])
-                        self.state = {'status': 'rejected', 'error_code': 'PACKAGE_VALIDATION_FAILED'}
+                        self.state = record_failure(self.root, manifest, 'PACKAGE_VALIDATION_FAILED', row['id']) if kind=='agent' else {'status':'rejected','error_code':'PACKAGE_VALIDATION_FAILED'}
                         return False
                 self.failures = 0
                 if self.state['status'] == 'checking': self.state = {'status': 'up_to_date'}
@@ -323,7 +380,11 @@ def _apply_update(transaction):
         else:
             return
     health.unlink(missing_ok=True)
-    child = subprocess.Popen(launcher(entry) + [mode], env={**clean_env(), 'HAITOO_UPDATE_HEALTH': str(health)}, close_fds=True)
+    try:
+        child = subprocess.Popen(launcher(entry) + [mode], env={**clean_env(), 'HAITOO_UPDATE_HEALTH': str(health)}, close_fds=True)
+    except OSError as exc:
+        exc.update_launch_error = True
+        raise
     data['child_pid'] = child.pid
     atomic(transaction, data)
     healthy = False
@@ -338,19 +399,35 @@ def _apply_update(transaction):
         prior = read(pointer, {'command': data['previous_command']})
         if prior.get('manifest', {}).get('sha256') != manifest['sha256']:
             atomic(root / 'previous-agent.json', prior)
-        atomic(pointer, {'manifest': manifest})
+        atomic(pointer, {'manifest': manifest, 'release_id': data.get('release_id')})
         high_path = root / 'release-highwater.json'; high = read(high_path, {}); high['agent'] = manifest['version']; atomic(high_path, high)
         atomic(root / 'update-result.json', {'status': 'installed', 'version': manifest['version']})
-        cleanup_versions(root)
+        try:cleanup_versions(root)
+        except OSError:pass  # 更新已提交，旧缓存清理失败不影响新版本运行。
     else:
         if child.poll() is None:
             child.terminate(); child.wait(timeout=15)
         quarantine(root, manifest['sha256'])
-        atomic(root / 'update-result.json', {'status': 'rolled_back', 'target_version': manifest['version'], 'error_code': 'NEW_VERSION_START_FAILED'})
+        record_failure(root, manifest, 'NEW_VERSION_START_FAILED', data.get('release_id'))
     # 先完成事务，再启动旧版本，避免旧入口重新进入同一事务。
     transaction.unlink(missing_ok=True); (root / 'staged-agent.json').unlink(missing_ok=True); health.unlink(missing_ok=True)
     if not healthy:
-        subprocess.Popen(data['previous_command'], env=clean_env(), close_fds=True)
+        restore_previous(root, data)
+
+
+def restore_previous(root, data):
+    commands=[data['previous_command']]
+    try:
+        baseline=json.loads(os.environ.get('HAITOO_BOOTSTRAP_COMMAND','null'))
+        if isinstance(baseline,list) and baseline and baseline not in commands:commands.append(baseline)
+    except ValueError:pass
+    for command in commands:
+        try:
+            subprocess.Popen(command,env=clean_env(),close_fds=True)
+            return True
+        except OSError:continue
+    record_failure(root,data.get('manifest',{}),'OLD_VERSION_START_FAILED',data.get('release_id'))
+    return False
 
 
 def apply_update(transaction):
@@ -369,7 +446,7 @@ def apply_update(transaction):
             return
         try:
             _apply_update(transaction)
-        except Exception:
+        except Exception as exc:
             data = read(transaction, {})
             if not data: return
             # 父进程仍在运行时不额外启动副本，下一次启动会重新处理事务。
@@ -381,9 +458,10 @@ def apply_update(transaction):
             if 'sha256' in manifest: quarantine(root, manifest['sha256'])
             Path(transaction).unlink(missing_ok=True)
             (root / 'staged-agent.json').unlink(missing_ok=True)
-            atomic(root / 'update-result.json', {'status': 'rolled_back', 'error_code': 'UPDATE_INTERRUPTED'})
+            code = launch_error(exc) if getattr(exc, 'update_launch_error', False) else 'NATIVE_SIGNATURE_FAILED' if isinstance(exc, NativeSignatureError) else 'PACKAGE_VALIDATION_FAILED' if isinstance(exc, ValueError) else 'UPDATE_INTERRUPTED'
+            record_failure(root, manifest, code, data.get('release_id'))
             if data.get('previous_command'):
-                subprocess.Popen(data['previous_command'], env=clean_env(), close_fds=True)
+                restore_previous(root, data)
 
 
 def rollback(root, kind):

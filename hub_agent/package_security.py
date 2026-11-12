@@ -34,7 +34,8 @@ def safe_path(name):
 
 def verify_manifest(manifest,keys,platform,arch):
     required={'kind','version','platform','arch','sha256','size','key_id','signature','protocol_min','protocol_max','entrypoint','files'}
-    if not required.issubset(manifest) or set(manifest)-required-{'installer','min_launcher_version','symlinks'}:raise ValueError('签名清单字段不正确')
+    if not required.issubset(manifest) or set(manifest)-required-{'installer','min_launcher_version','symlinks','distribution'}:raise ValueError('签名清单字段不正确')
+    if manifest.get('distribution','signed') not in {'signed','internal'} or manifest['kind']!='agent' and 'distribution' in manifest:raise ValueError('发布渠道无效')
     version_tuple(manifest['version'])
     if manifest['kind'] not in {'agent','plugin'} or (manifest['platform'],manifest['arch'])!=(platform,arch):raise ValueError('发布平台不匹配')
     if type(manifest['protocol_min']) is not int or type(manifest['protocol_max']) is not int or not manifest['protocol_min']<=5<=manifest['protocol_max']:raise ValueError('协议不兼容')

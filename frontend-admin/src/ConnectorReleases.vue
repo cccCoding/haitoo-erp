@@ -61,14 +61,14 @@ defineExpose({refresh})
       <p v-if="error" class="release-error" role="alert">{{error}}</p><p v-if="notice" class="release-notice" role="status">{{notice}}</p>
       <details><summary>上传新版本</summary><form class="release-form" @submit.prevent="upload">
         <label>签名清单 JSON<textarea v-model="manifest" rows="6" required :disabled="busy" placeholder="粘贴构建流水线生成的 manifest.json" /></label>
-        <div class="release-files"><label>完整更新包 ZIP<input type="file" accept=".zip" required :disabled="busy" @change="artifact=($event.target as HTMLInputElement).files?.[0]||null" /></label><label>首次安装包（Windows EXE / macOS DMG）<input type="file" accept=".exe,.dmg" required :disabled="busy" @change="installer=($event.target as HTMLInputElement).files?.[0]||null" /></label></div>
-        <p>发布前请完成平台代码签名；macOS 需完成公证。私钥保留在构建环境，平台只配置发布公钥。</p><button class="primary" :disabled="busy">{{busy?(uploadProgress||'处理中…'):'校验并保存草稿'}}</button>
+        <div class="release-files"><label>完整更新包 ZIP<input type="file" accept=".zip" required :disabled="busy" @change="artifact=($event.target as HTMLInputElement).files?.[0]||null" /></label><label>首次安装包（EXE / DMG / 内部 ZIP）<input type="file" accept=".exe,.dmg,.zip" required :disabled="busy" @change="installer=($event.target as HTMLInputElement).files?.[0]||null" /></label></div>
+        <p>正式版须完成系统代码签名和 Mac 公证；内部 ZIP 须用内部发布模式构建。两种模式均验证公司的更新包签名，私钥不上传。</p><button class="primary" :disabled="busy">{{busy?(uploadProgress||'处理中…'):'校验并保存草稿'}}</button>
       </form></details>
     </section>
     <section class="panel">
       <h2>发布记录</h2><p v-if="!loaded">{{busy?'正在加载版本…':'列表尚未加载，请重试。'}}</p><p v-else-if="!rows.length">暂无版本，请先上传正式安装包及更新包。</p>
       <article v-for="row in rows" :key="row.id" class="release-row">
-        <div class="release-title"><strong>{{row.version}} · {{row.platform==='windows'?'Windows': 'macOS'}} {{row.arch==='arm64'?'Apple 芯片':'Intel / x64'}}</strong><span class="release-badge">{{labels[row.stage]}}</span></div>
+        <div class="release-title"><strong>{{row.version}} · {{row.manifest.distribution==='internal'?'内部 ZIP':'正式签名版'}} · {{row.platform==='windows'?'Windows': 'macOS'}} {{row.arch==='arm64'?'Apple 芯片':'Intel / x64'}}</strong><span class="release-badge">{{labels[row.stage]}}</span></div>
         <p v-if="row.stage==='uploading'">上传尚未完成。重新上传同一份清单和文件即可继续；该版本不会分发给设备。</p><p>{{row.manifest.installer.filename}} · {{(row.manifest.installer.size/1024/1024).toFixed(1)}} MB</p>
         <form v-if="['draft','test'].includes(row.stage)" class="release-test" @submit.prevent="change(row,'test')"><label>测试设备 ID（ERP 设备详情中的 ID，逗号分隔）<input v-model="testing[row.id]" required pattern="[0-9,，\s]+" :disabled="busy" /></label><button class="secondary" :disabled="busy">开放给测试设备</button></form>
         <div class="release-buttons"><button v-if="['draft','test'].includes(row.stage)" class="primary" :disabled="busy" @click="change(row,'stable')">向所有公司开放稳定版</button><button v-if="row.stage!=='withdrawn'" class="secondary" :disabled="busy" @click="change(row,'withdrawn')">撤回此版本</button></div>

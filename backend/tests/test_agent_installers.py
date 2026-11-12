@@ -50,12 +50,13 @@ class InstallerTests(SupplyFixture, unittest.TestCase):
         self.agent_id = 10
         self.app.dependency_overrides[agent_auth] = lambda: SimpleNamespace(id=self.agent_id)
 
-    def package(self, version='5.2.0', platform='macos', arch='arm64', content=b'update', installer=b'installer'):
+    def package(self, version='5.2.0', platform='macos', arch='arm64', content=b'update', installer=b'installer', distribution='signed'):
         manifest = {'kind': 'agent', 'version': version, 'platform': platform, 'arch': arch,
                     'sha256': hashlib.sha256(content).hexdigest(), 'size': len(content), 'key_id': 'test',
                     'protocol_min': 5, 'protocol_max': 5, 'entrypoint': 'agent', 'files': {'agent': hashlib.sha256(content).hexdigest()},
-                    'min_launcher_version': '5.2.0', 'installer': {'filename': f'HaitooHubAgent-{platform}-{arch}-{version}.{ "exe" if platform=="windows" else "dmg"}',
+                    'min_launcher_version': '5.2.0', 'installer': {'filename': f'HaitooHubAgent-{platform}-{arch}-{version}.{ 'zip' if distribution=='internal' else 'exe' if platform=='windows' else 'dmg'}',
                     'size': len(installer), 'sha256': hashlib.sha256(installer).hexdigest()}}
+        if distribution=='internal':manifest['distribution']='internal';manifest['min_launcher_version']='5.3.0'
         manifest['signature'] = base64.b64encode(self.key.sign(json.dumps(manifest, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode())).decode()
         return manifest, content, installer
 
@@ -136,3 +137,30 @@ class InstallerTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(self.request('GET','/hub-v5/agent-installers/macos/arm64/file').content,installer)
         response = self.request('POST','/admin/connector-releases/uploads',uid=8,json=manifest)
         self.assertNotIn('uploads',response.json())
+
+
+    def test_internal_zip_releases_are_explicit_and_do_not_replace_signed_channel(self):
+        signed=self.stage(self.upload().json(),'stable').json()
+        internal=self.upload(self.package('5.3.0',distribution='internal'))
+        self.assertEqual(internal.status_code,200,internal.text)
+        internal=self.stage(internal.json(),'stable').json()
+        normal=self.client.get('/hub-v5/agent/connector-releases?platform=macos&arch=arm64').json()
+        self.assertEqual(normal[0]['id'],signed['id'])
+        rows=self.client.get('/hub-v5/agent/connector-releases?platform=macos&arch=arm64&distribution=internal').json()
+        self.assertEqual(rows[0]['id'],internal['id'])
+        items=self.request('GET','/hub-v5/agent-installers?distribution=all').json()['items']
+        self.assertEqual({r['distribution'] for r in items},{'internal','signed'})
+        response=self.request('GET',f"/hub-v5/agent-installers/macos/arm64/file?release_id={internal['id']}&distribution=internal")
+        self.assertEqual(response.content,b'installer')
+        self.assertEqual(self.request('GET',f"/hub-v5/agent-installers/macos/arm64/file?release_id={internal['id']}").status_code,404)
+
+    def test_test_device_manual_download_requires_visible_device_and_remains_withdrawable(self):
+        row=self.upload(self.package(distribution='internal')).json()
+        row=self.stage(row,'test',[10]).json()
+        self.assertEqual(self.request('GET','/hub-v5/agent-installers?distribution=internal').json()['items'],[])
+        url=f"/hub-v5/agent-installers/macos/arm64/file?distribution=internal&agent_id=10&release_id={row['id']}"
+        self.assertEqual(self.request('GET',url).content,b'installer')
+        self.assertEqual(self.request('GET',url,uid=5).status_code,404)
+        self.assertEqual(self.request('GET',url.replace('agent_id=10','agent_id=999')).status_code,404)
+        self.assertEqual(self.stage(row,'withdrawn').status_code,200)
+        self.assertEqual(self.request('GET',url).status_code,404)

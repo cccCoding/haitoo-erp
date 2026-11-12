@@ -41,7 +41,7 @@ async function refresh(){await perform(async()=>{const results=await Promise.all
 ]);for(const result of results)if(result.status==='rejected')throw result.reason})}
 
 async function saveConnection(device:any,identity:string){await perform(async()=>{await api.put(`/hub-v5/agents/${device.id}/connection`,{hub_identity:identity},auth());notice.value='团队配置已保存，等待连接器自动同步';await loadDevices()})}
-async function command(device:any,kind:string){await perform(async()=>{await api.post(`/hub-v5/agents/${device.id}/commands`,{kind},auth());notice.value=kind==='refresh'?'已请求设备同步':kind==='revoke'?'设备授权已撤销':'设备接收状态已更新';await loadDevices()})}
+async function command(device:any,kind:string){await perform(async()=>{await api.post(`/hub-v5/agents/${device.id}/commands`,{kind},auth());notice.value=kind==='retry_update'?'已请求设备重新尝试更新':kind==='refresh'?'已请求设备同步':kind==='revoke'?'设备授权已撤销':'设备接收状态已更新';await loadDevices()})}
 onMounted(async()=>{try{const {data}=await api.get('/hub-v5/access',auth());if(!data.is_admin){forbidden.value=true;return}ready.value=true;await refresh();poll=setInterval(()=>{if(!busy.value&&!disposed)void loadDevices().catch(handle)},10000)}catch(e){handle(e)}})
 onUnmounted(()=>{disposed=true;if(poll)clearInterval(poll)})
 </script>
@@ -59,7 +59,7 @@ onUnmounted(()=>{disposed=true;if(poll)clearInterval(poll)})
       <div class="ma-panel"><div class="ma-section-title"><h2>成员执行统计</h2><small>成功率按成功 /（成功 + 失败 + 部分成功）计算；取消不计入分母</small></div><div class="ma-table-wrap"><table><thead><tr><th>成员</th><th>运行次数</th><th>排队中</th><th>执行中</th><th>成功</th><th>失败</th><th>部分成功</th><th>待人工</th><th>已取消</th><th>成功率</th></tr></thead><tbody><tr v-for="m in stats.by_member" :key="m.user_id"><td>{{m.name}}</td><td>{{m.total}}</td><td>{{m.queued}}</td><td>{{m.running}}</td><td>{{m.succeeded}}</td><td>{{m.failed}}</td><td>{{m.partial_success}}</td><td>{{m.awaiting_attention}}</td><td>{{m.cancelled}}</td><td>{{percent(m.success_rate)}}</td></tr><tr v-if="!stats.by_member.length"><td colspan="10" class="ma-empty">暂无符合筛选条件的运行</td></tr></tbody></table></div></div>
 
     </template>
-    <template v-else-if="tab==='devices'"><div class="ma-section-title"><div></div><div class="ma-inline"><select v-model="deviceUser" aria-label="按成员筛选设备"><option value="">全部成员</option><option v-for="m in members" :key="m.id" :value="m.id">{{m.name}}</option></select><button :disabled="busy" @click="perform(loadDevices)">刷新</button></div></div><MatrixDevices :devices="filteredDevices" :config="config" :busy="busy" administrator @save="saveConnection" @command="command"/></template>
+    <template v-else-if="tab==='devices'"><div class="ma-section-title"><div></div><div class="ma-inline"><select v-model="deviceUser" aria-label="按成员筛选设备"><option value="">全部成员</option><option v-for="m in members" :key="m.id" :value="m.id">{{m.name}}</option></select><button :disabled="busy" @click="perform(loadDevices)">刷新</button></div></div><MatrixDevices :token="token" :devices="filteredDevices" :config="config" :busy="busy" administrator @save="saveConnection" @command="command"/></template>
     <template v-else-if="tab==='settings'"><details class="ma-panel ma-advanced"><summary>连接器版本与站点插件</summary><MatrixReleaseManager :token="token" @unauthorized="emit('unauthorized')"/></details></template>
   </template>
 </section>

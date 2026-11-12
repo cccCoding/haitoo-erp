@@ -14,8 +14,10 @@ from package_security import canonical,safe_path,version_tuple
 def main():
     p=argparse.ArgumentParser(description='离线签名Agent或插件ZIP')
     for name in ('package','key','key-id','version','platform','arch','kind','entrypoint','output'):p.add_argument('--'+name,required=True)
+    p.add_argument('--distribution',choices=('signed','internal'),default='signed')
     p.add_argument('--installer');p.add_argument('--min-launcher-version',default='5.2.0')
     a=p.parse_args();version_tuple(a.version)
+    if a.distribution=='internal' and (a.kind!='agent' or not a.installer):raise ValueError('内部更新必须提供连接器 ZIP 安装包')
     key=serialization.load_pem_private_key(Path(a.key).read_bytes(),password=None)
     if not isinstance(key,Ed25519PrivateKey):raise ValueError('需要Ed25519私钥')
     with zipfile.ZipFile(a.package) as z:
@@ -28,6 +30,10 @@ def main():
     if a.kind=='agent':
         with zipfile.ZipFile(a.package) as z:
             versions=[json.loads(z.read(name))['version'] for name in files if (name=='agent-version.json' or name.endswith('/agent-version.json')) and not stat.S_ISLNK(z.getinfo(name).external_attr>>16)]
+        if a.distribution=='internal':
+            with zipfile.ZipFile(a.package) as z:
+                metadata=[json.loads(z.read(name)) for name in files if name.endswith('/agent-version.json') and not stat.S_ISLNK(z.getinfo(name).external_attr>>16)]
+            if not metadata or any(item.get('distribution')!='internal' for item in metadata):raise ValueError('内部更新包必须内置内部渠道元数据')
         if not versions or any(version!=a.version for version in versions):raise ValueError('Agent清单版本必须与包内agent-version.json一致')
     package=Path(a.package).read_bytes()
     manifest={'kind':a.kind,'version':a.version,'platform':a.platform,'arch':a.arch,'sha256':hashlib.sha256(package).hexdigest(),
@@ -45,12 +51,15 @@ def main():
             stores=[json.loads(z.read(name)) for name in files if (name=='trusted_keys.json' or name.endswith('/trusted_keys.json')) and not stat.S_ISLNK(z.getinfo(name).external_attr>>16)]
         if not stores or any(store.get(a.key_id)!=public for store in stores):raise ValueError('正式包必须内置信任当前发布签名的公钥')
         installer=Path(a.installer)
-        suffix='exe' if a.platform=='windows' else 'dmg'
+        suffix='zip' if a.distribution=='internal' else 'exe' if a.platform=='windows' else 'dmg'
         expected=f'HaitooHubAgent-{a.platform}-{a.arch}-{a.version}.{suffix}'
         if installer.name!=expected:raise ValueError('安装包名称须为 '+expected)
         with installer.open('rb') as stream:checksum=hashlib.file_digest(stream,'sha256').hexdigest()
         manifest['installer']={'filename':installer.name,'size':installer.stat().st_size,'sha256':checksum}
         version_tuple(a.min_launcher_version);manifest['min_launcher_version']=a.min_launcher_version
+    if a.distribution=='internal':
+        manifest['distribution']='internal'
+        manifest['min_launcher_version']=max(manifest['min_launcher_version'],'5.3.0',key=version_tuple)
     manifest['signature']=base64.b64encode(key.sign(canonical(manifest))).decode()
     Path(a.output).write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
 

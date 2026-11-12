@@ -6,7 +6,7 @@ import { probeLocalAgent, type LocalAgentState } from './local-agent'
 const props = defineProps<{ token: string }>()
 const state = ref<LocalAgentState>('checking')
 const checking = ref(false), downloading = ref(''), error = ref('')
-type Installer = {id: number; platform: 'windows' | 'macos'; arch: string; version: string; filename: string; size: number}
+type Installer = {id: number; platform: 'windows' | 'macos'; arch: string; version: string; filename: string; size: number; distribution:string}
 const installers = ref<Installer[]>([]), packagesLoaded = ref(false)
 const api = axios.create({baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000'})
 let poll: ReturnType<typeof setInterval> | undefined, disposed = false
@@ -22,7 +22,7 @@ async function check() {
 }
 async function loadInstallers() {
   try {
-    const {data} = await api.get('/hub-v5/agent-installers', {headers:{Authorization:`Bearer ${props.token}`}, signal:requests.signal})
+    const {data} = await api.get('/hub-v5/agent-installers', {params:{distribution:'all'}, headers:{Authorization:`Bearer ${props.token}`}, signal:requests.signal})
     if (!disposed) {installers.value = data.items; packagesLoaded.value = true}
   } catch {
     if (!disposed) {packagesLoaded.value = true; error.value = '安装包列表读取失败，请稍后重试或联系管理员。'}
@@ -33,7 +33,7 @@ async function download(item: Installer) {
   downloading.value = item.filename; error.value = ''
   try {
     const {data} = await api.get(`/hub-v5/agent-installers/${item.platform}/${item.arch}/file`, {
-      params:{release_id:item.id}, headers:{Authorization:`Bearer ${props.token}`}, responseType:'blob', signal:requests.signal,
+      params:{release_id:item.id,distribution:item.distribution}, headers:{Authorization:`Bearer ${props.token}`}, responseType:'blob', signal:requests.signal,
     })
     if (disposed) return
     const url = URL.createObjectURL(data), anchor = document.createElement('a')
@@ -78,7 +78,7 @@ onUnmounted(() => {
         <strong>{{state==='legacy'?'更新连接器以继续使用':'启动连接器以同步本机环境'}}</strong>
         <template v-for="platform in (['windows','macos'] as const)" :key="platform">
           <button v-for="item in installers.filter(i=>i.platform===platform)" :key="item.filename" type="button" :disabled="!!downloading" @click="download(item)">
-            {{downloading===item.filename?'下载中…':`下载 ${platform==='windows'?'Windows':'macOS'} 版${item.arch==='arm64'?(platform==='macos'?'（Apple 芯片）':'（ARM64）'):'（Intel / x64）'}`}}
+            {{downloading===item.filename?'下载中…':`下载 ${platform==='windows'?'Windows':'macOS'} 版${item.arch==='arm64'?(platform==='macos'?'（Apple 芯片）':'（ARM64）'):'（Intel / x64）'}${item.distribution==='internal'?' · 内部 ZIP':''}`}}
           </button>
           <span v-if="packagesLoaded&&!installers.some(i=>i.platform===platform)" class="local-agent-unavailable">{{platform==='windows'?'Windows':'macOS'}} 版暂未提供</span>
         </template>

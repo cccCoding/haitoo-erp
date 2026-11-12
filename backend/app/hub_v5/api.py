@@ -111,7 +111,8 @@ def heartbeat(payload: Heartbeat, agent=Depends(agent_auth), db=Depends(get_db))
     device.capabilities = payload.capabilities
     device.local_paused = payload.local_paused
     # 状态仅取公开枚举，不接收路径、异常原文或凭据。
-    device.update_state = {k: str(v)[:100] for k,v in payload.update_state.items() if k in {"status", "version", "plugin_version", "plugin_digest", "error_code", "target_version", "progress"}}
+    device.update_state = {k: str(v)[:100] for k,v in payload.update_state.items() if k in {"status", "version", "plugin_version", "plugin_digest", "error_code", "target_version", "progress", "distribution", "failed_sha256", "release_id"}}
+    device.update_state["manual_required"] = payload.update_state.get("manual_required") is True
     db.commit()
     owner = db.get(User, agent.user_id)
     grant = permissions.access(db, owner)
@@ -153,7 +154,16 @@ def device_command(identity: int, payload: DeviceCommand, actor=Depends(matrix_u
         if not device: s.fail("设备尚未升级协议5")
         device.paused = payload.kind == "pause"
     if payload.kind == "refresh" and not s.device_view(db, agent)["online"]: s.fail("设备离线，无法刷新")
-    command = MatrixCommand(company_id=actor.company_id, agent_id=identity, kind=payload.kind, payload={}, expires_at=s.utcnow()+timedelta(minutes=5))
+    command_payload={}
+    if payload.kind=='retry_update':
+        if not device or not agent.is_active or not s.device_view(db,agent)['online']:s.fail('设备离线或已撤销，无法请求重试')
+        if not device.update_state.get('manual_required') or device.update_state.get('error_code') not in {'LAUNCH_PERMISSION_DENIED','NEW_VERSION_START_FAILED','UPDATE_LAUNCH_FAILED','UPDATE_INTERRUPTED'}:s.fail('当前失败不能直接重试，请下载新版或联系管理员')
+        command_payload={'expected_sha256':device.update_state.get('failed_sha256','')}
+        if len(command_payload['expected_sha256'])!=64:s.fail('缺少失败版本记录，请从本机托盘重试')
+        pending=db.scalars(select(MatrixCommand).where(MatrixCommand.agent_id==identity,MatrixCommand.kind=='retry_update',MatrixCommand.acknowledged_at.is_(None),MatrixCommand.expires_at>s.utcnow())).all()
+        for queued in pending:
+            if queued.payload==command_payload:return {'command_id':queued.id,'status':'requested'}
+    command = MatrixCommand(company_id=actor.company_id, agent_id=identity, kind=payload.kind, payload=command_payload, expires_at=s.utcnow()+(timedelta(days=1) if payload.kind=='retry_update' else timedelta(minutes=5)))
     db.add(command); s.audit(db, actor, "device."+payload.kind, identity, {}); db.commit()
     return {"command_id": command.id, "status": "requested"}
 

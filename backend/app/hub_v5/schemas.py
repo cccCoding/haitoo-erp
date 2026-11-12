@@ -306,7 +306,7 @@ class CollectionPart(AttemptInput):
 
 
 class DeviceCommand(Input):
-    kind: Literal["refresh", "pause", "resume", "revoke"]
+    kind: Literal["refresh", "pause", "resume", "revoke", "retry_update"]
 
 
 class ReleaseInput(Input):

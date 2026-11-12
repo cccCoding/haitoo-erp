@@ -1471,6 +1471,27 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         self.assertEqual(self.request('GET','/hub-v5/admin/statistics?start=2025-01-01&end=2026-11-06').status_code,422)
 
 
+    def test_update_recovery_state_and_retry_are_device_scoped(self):
+        payload={'install_uuid':str(__import__('uuid').UUID(int=1)),'version':'5.3.0','hub_connected':True,
+            'capabilities':{'shop.collect':['MY'],'listing.catalog':['MY']},
+            'update_state':{'manual_required':True,'status':'manual_required','error_code':'LAUNCH_PERMISSION_DENIED',
+                'failed_sha256':'a'*64,'release_id':'7','distribution':'internal','target_version':'5.4.0',
+                'download_url':'https://attacker.invalid/file','token':'must-not-persist'}}
+        response=self.ar('POST','/agent/heartbeat',json=payload);self.assertEqual(response.status_code,200,response.text)
+        with self.sessions() as db:
+            state=db.get(MatrixDevice,1).update_state
+            self.assertIs(state['manual_required'],True);self.assertNotIn('download_url',state);self.assertNotIn('token',state)
+        self.assertEqual(self.request('POST','/hub-v5/agents/1/commands',uid=2,json={'kind':'retry_update'}).status_code,404)
+        self.assertEqual(self.request('POST','/hub-v5/agents/1/commands',uid=5,json={'kind':'retry_update'}).status_code,404)
+        response=self.request('POST','/hub-v5/agents/1/commands',json={'kind':'retry_update'})
+        self.assertEqual(response.status_code,200,response.text)
+        rows=self.ar('GET','/agent/commands').json()
+        self.assertTrue(any(row['kind']=='retry_update' and row['payload']=={'expected_sha256':'a'*64} for row in rows))
+        payload['update_state']['error_code']='PACKAGE_VALIDATION_FAILED'
+        self.assertEqual(self.ar('POST','/agent/heartbeat',json=payload).status_code,200)
+        self.assertEqual(self.request('POST','/hub-v5/agents/1/commands',json={'kind':'retry_update'}).status_code,409)
+
+
 class MatrixMigrationSQLTests(unittest.TestCase):
     def test_upgrade_from_main_preserves_legacy_locks_and_downgrade(self):
         from alembic import command

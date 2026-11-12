@@ -66,7 +66,7 @@ class MatrixRuntime:
         result=await self.client.post('/hub-v5/agent/heartbeat',json={'install_uuid':self.install_uuid,'version':VERSION,
             'hub_connected':bool(self.host.state.get('hub_connected')),'capabilities':self.capabilities(),
             'local_paused':bool(self.host.state.get('paused')),
-            'update_state':{**(self.updater.state if self.updater else {}),'plugin_version':getattr(self.adapter(),'VERSION','builtin'),
+            'update_state':{**(self.updater.reported_state() if self.updater else {}),'plugin_version':getattr(self.adapter(),'VERSION','builtin'),
                 'plugin_digest':getattr(self.adapter(),'DIGEST','builtin')}})
         identity=result.get('hub_identity', self.host.config.get('matrix_hub_identity'))
         if identity != self.host.config.get('matrix_hub_identity'):
@@ -87,6 +87,9 @@ class MatrixRuntime:
             return
         for command in await self.client.request('GET','/hub-v5/agent/commands'):
             if command['kind']=='refresh':await self.host.sync()
+            elif command['kind']=='retry_update':
+                if not self.updater:self.updater=UpdateManager(self.root,self.client)
+                self.updater.retry_failed_update(command.get('payload',{}).get('expected_sha256'))
             elif command['kind']=='stop' and self.claim and command['payload'].get('run_id')==self.claim['item']['run_id']:self.stop_requested=True
             await self.client.post(f"/hub-v5/agent/commands/{command['id']}/ack",json={})
 

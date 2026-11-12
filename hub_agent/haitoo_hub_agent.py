@@ -881,6 +881,9 @@ class AgentRuntime:
                 load_config()
                 self.matrix.plugin = load_plugin(self.matrix.root, keys(), *target())
                 atomic(Path(health_path), {"ready": True, "version": VERSION})
+            if not health_path:
+                from update_recovery import confirm_manual_install
+                confirm_manual_install(self.matrix.root)
             if token:
                 client = ERPClient(self.config.get("erp_url", API_URL), token)
                 try:
@@ -990,6 +993,20 @@ def run_tray(config):
                 runtime.matrix.updater.request_check()
             runtime.state["status"] = "正在检查更新"
         loop.call_soon_threadsafe(request)
+    def show_update_help(*_):
+        from updater import DISTRIBUTION
+        webbrowser.open(f"{PORTAL_URL}/settings/shops?tab=environments&connector_update_help=1&distribution={DISTRIBUTION}")
+    def retry_update(*_):
+        def request():
+            if runtime.matrix.updater and runtime.matrix.updater.retry_failed_update():
+                runtime.state["status"] = "已请求重试更新，等待当前任务结束"
+            else:
+                runtime.state["status"] = "此失败不能直接重试，请查看处理步骤并手动安装新版"
+        loop.call_soon_threadsafe(request)
+    def can_retry_update(_):
+        from update_recovery import RETRYABLE
+        state = runtime.matrix.updater.reported_state() if runtime.matrix.updater else {}
+        return bool(state.get("manual_required") and state.get("error_code") in RETRYABLE)
     def toggle_startup(*_):
         from startup import configure, bootstrap_command
         try:
@@ -1000,8 +1017,8 @@ def run_tray(config):
             runtime.state["status"] = str(exc)
     def update_status(_):
         from updater import VERSION
-        state = runtime.matrix.updater.state if runtime.matrix.updater else {}
-        labels = {"checking":"检查更新", "downloading":"正在下载", "waiting_idle":"等待任务结束后更新", "restart_requested":"正在更新", "retry":"更新失败，稍后重试", "rejected":"更新包校验失败", "no_trusted_keys":"更新公钥未配置", "insufficient_space":"磁盘空间不足", "installer_required":"请在 ERP 下载新版安装程序", "installed":"更新成功", "rolled_back":"已恢复上一版本", "up_to_date":"已是最新版本"}
+        state = runtime.matrix.updater.reported_state() if runtime.matrix.updater else {}
+        labels = {"manual_installed":"已确认手动安装", "manual_required":"更新需要人工处理，当前版本保留", "retry_requested":"已请求重试", "checking":"检查更新", "downloading":"正在下载", "waiting_idle":"等待任务结束后更新", "restart_requested":"正在更新", "retry":"更新失败，稍后重试", "rejected":"更新包校验失败", "no_trusted_keys":"更新公钥未配置", "insufficient_space":"磁盘空间不足", "installer_required":"请在 ERP 下载新版安装程序", "installed":"更新成功", "rolled_back":"已恢复上一版本", "up_to_date":"已是最新版本"}
         progress = f" {state['progress']}%" if state.get('status') == 'downloading' and 'progress' in state else ''
         return f"版本 {VERSION} · {labels.get(state.get('status'), '等待检查')}{progress}"
     image = Image.new("RGB", (64, 64), "#4d46a5")
@@ -1009,6 +1026,8 @@ def run_tray(config):
     menu = pystray.Menu(pystray.MenuItem(lambda _: runtime.state["status"], None, enabled=False),
         pystray.MenuItem(update_status, None, enabled=False),
         pystray.MenuItem("检查更新", check_updates),
+        pystray.MenuItem("更新处理步骤与手动安装", show_update_help),
+        pystray.MenuItem("处理后重试更新", retry_update, enabled=can_retry_update),
         pystray.MenuItem("登录电脑后自动启动", toggle_startup, checked=lambda _: runtime.config.get("autostart", True), enabled=bool(getattr(sys, "frozen", False))),
         pystray.MenuItem("打开日志目录", lambda *_: subprocess.Popen(["open", str(LOG_DIRECTORY)]) if platform.system() == "Darwin" else os.startfile(str(LOG_DIRECTORY))),
         pystray.MenuItem("打开 ERP 矩阵管理", lambda *_: webbrowser.open(f"{PORTAL_URL}/settings/shops?tab=environments")),

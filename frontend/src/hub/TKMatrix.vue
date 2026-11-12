@@ -4,6 +4,8 @@ import {useRoute,useRouter} from 'vue-router'
 import axios from 'axios'
 import {dialogFocus as vDialogFocus} from '../dialog-focus'
 import {label,display,percent,windowBuckets,filterParams,deviceSetup,environmentSyncTargets,sortMatrixRows} from './matrix'
+import AgentUpdateHelp from './AgentUpdateHelp.vue'
+import {updateRecovery} from './update-recovery'
 import AgentConnectionBanner from './AgentConnectionBanner.vue'
 import MatrixDevices from './MatrixDevices.vue'
 import MatrixRunViewer from './MatrixRunViewer.vue'
@@ -189,7 +191,7 @@ async function syncEnvironments(){
 function openDevices(){error.value='';notice.value='';dialog.value='devices'}
 function dismiss(){if(busy.value)return;if(['plan','operation','manual'].includes(dialog.value))return;if(dialog.value==='deletePlan'){dialog.value='plan';return}if(dialog.value==='deleteOperation'){dialog.value='operation';return}if(!busy.value)close()}
 function close(){if(dialog.value==='resolve'){dialog.value='run';return}const restoreHistory=dialog.value==='history'||(dialog.value==='run'&&runFromHistory.value);viewer.close();++planShopRequest;++historyRequest;historyLoading.value=false;dialog.value='';previewData.value=null;resolution.value={item:null,action:'retry'};if(restoreHistory)void nextTick(()=>{if(historyTrigger?.isConnected)historyTrigger.focus()})}
-async function command(device:any,kind:string){await perform(async()=>{await api.post(`/hub-v5/agents/${device.id}/commands`,{kind},auth());notice.value=kind==='refresh'?'已请求同步，完整目录上传后会显示在环境列表中':kind==='pause'?'已暂停此电脑接收新任务':kind==='resume'?'已恢复此电脑接收新任务':'已撤销此电脑授权';await Promise.all([loadDevices(),loadRows()])})}
+async function command(device:any,kind:string){await perform(async()=>{await api.post(`/hub-v5/agents/${device.id}/commands`,{kind},auth());notice.value=kind==='retry_update'?'已请求重试更新，当前任务结束后检查；请先处理实际系统提示':kind==='refresh'?'已请求同步，完整目录上传后会显示在环境列表中':kind==='pause'?'已暂停此电脑接收新任务':kind==='resume'?'已恢复此电脑接收新任务':'已撤销此电脑授权';await Promise.all([loadDevices(),loadRows()])})}
 async function loadPlanShops(){
  const request=++planShopRequest,agent=editor.value.agent_id
  planShops.value=[];planShopsError.value='';planShopsLoading.value=true
@@ -318,6 +320,8 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
     <button class="mx-device-button" @click="openDevices">设备管理</button>
     <button v-if="canManageRun(current)&&['running','queued'].includes(current.status)" class="mx-danger" :disabled="busy||current.stop_requested" @click="stopCurrent">{{current.stop_requested?'停止请求中':'停止当前运行'}}</button>
   </AgentConnectionBanner>
+  <AgentUpdateHelp v-if="route.query.connector_update_help==='1'" :token="token" :distribution="route.query.distribution==='internal'?'internal':'signed'"/>
+  <div v-if="devices.some(d=>updateRecovery(d.update_state).needed)" class="mx-notice" role="status">有连接器更新需要人工处理，当前版本和授权保留。<button @click="openDevices">查看设备更新指导</button></div>
   <div v-if="pairingCode" class="mx-notice mx-pairing" role="status"><p>确认连接此电脑，连接器将同步 HubStudio 环境并接收矩阵任务。</p><button class="primary" :disabled="busy" @click="authorizeConnector">授权此电脑连接器</button></div>
   <template v-if="!dialog"><div v-if="feedbackMessage" class="mx-feedback" :class="{'is-error':feedbackSource==='error'}" :role="feedbackSource==='error'?'alert':'status'" aria-live="polite"><span>{{feedbackMessage}}</span><button v-if="feedbackSource==='sync'&&syncHelp" @click="openDevices">前往设备管理</button></div></template>
   <div v-if="configLoaded&&!config.enabled" class="mx-banner">公司矩阵功能尚未启用。<router-link v-if="access.is_admin" to="/settings/tk-matrix?tab=settings">前往矩阵管理设置</router-link><span v-else>请联系公司管理员。</span></div>
@@ -364,7 +368,7 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
 <div v-if="feedbackMessage" class="mx-feedback" :class="{'is-error':feedbackSource==='error'}" :role="feedbackSource==='error'?'alert':'status'" aria-live="polite"><span>{{feedbackMessage}}</span><button v-if="feedbackSource==='sync'&&syncHelp" @click="openDevices">前往设备管理</button></div>
 <template v-if="dialog==='devices'">
   <p class="mx-devices-intro">这里只显示你自己的电脑。连接 HubStudio 并同步环境后，即可回到环境列表操作。</p>
-  <MatrixDevices :devices="devices" :config="config" :busy="busy" @save="saveConnection" @command="command"/>
+  <MatrixDevices :token="token" :user-id="user.id" :devices="devices" :config="config" :busy="busy" @save="saveConnection" @command="command"/>
 </template>
 <form v-if="dialog==='plan'" class="mx-form" @submit.prevent="savePlan">
 <label>计划名称<input v-model="editor.name" required maxlength="120"/></label>

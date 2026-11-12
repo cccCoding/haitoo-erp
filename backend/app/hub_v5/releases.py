@@ -21,7 +21,7 @@ MAX_PACKAGE=250*1024*1024
 
 def validate_manifest(manifest):
     required={"kind","version","platform","arch","sha256","size","key_id","signature","protocol_min","protocol_max","entrypoint","files"}
-    if not isinstance(manifest,dict) or not required.issubset(manifest) or set(manifest)-required-{"installer", "min_launcher_version", "symlinks"}:s.fail("发布清单字段不正确",422)
+    if not isinstance(manifest,dict) or not required.issubset(manifest) or set(manifest)-required-{"installer", "min_launcher_version", "symlinks", "distribution"}:s.fail("发布清单字段不正确",422)
     if any(not isinstance(manifest[k],str) for k in ("kind","version","platform","arch","sha256","key_id","signature","entrypoint")):s.fail("发布清单类型不正确",422)
     if manifest["kind"] not in {"agent","plugin"} or manifest["platform"] not in {"windows","macos"} or manifest["arch"] not in {"x64","arm64"}:s.fail("发布目标不受支持",422)
     if not re.fullmatch(r"\d+\.\d+\.\d+",manifest["version"]):s.fail("版本必须是三段数字",422)
@@ -30,9 +30,10 @@ def validate_manifest(manifest):
     if type(manifest["protocol_min"]) is not int or type(manifest["protocol_max"]) is not int or not manifest["protocol_min"]<=5<=manifest["protocol_max"]:s.fail("发布协议范围不兼容",422)
     for path,checksum in manifest["files"].items():
         if not isinstance(path,str) or path.startswith("/") or "\\" in path or ":" in path or any(p in {"", ".", ".."} for p in path.split("/")) or not isinstance(checksum,str) or not re.fullmatch(r"[a-f0-9]{64}",checksum):s.fail("发布文件路径不安全",422)
+    if manifest.get("distribution","signed") not in {"signed","internal"} or manifest["kind"]!="agent" and "distribution" in manifest:s.fail("发布渠道无效",422)
     if "installer" in manifest:
         item=manifest["installer"]
-        extension="exe" if manifest["platform"]=="windows" else "dmg"
+        extension="zip" if manifest.get("distribution")=="internal" else "exe" if manifest["platform"]=="windows" else "dmg"
         expected=f'HaitooHubAgent-{manifest["platform"]}-{manifest["arch"]}-{manifest["version"]}.{extension}'
         if not isinstance(item,dict) or set(item)!={"filename","size","sha256"} or item["filename"]!=expected or type(item["size"]) is not int or not 0<item["size"]<=MAX_PACKAGE or not isinstance(item["sha256"],str) or not re.fullmatch(r"[a-f0-9]{64}",item["sha256"]):s.fail("首次安装包清单无效",422)
     if "min_launcher_version" in manifest and (not isinstance(manifest["min_launcher_version"],str) or not re.fullmatch(r"\d+\.\d+\.\d+",manifest["min_launcher_version"])):s.fail("启动入口版本无效",422)

@@ -38,13 +38,13 @@ def summary(row):
     return {k: getattr(row, k) for k in ('id', 'version', 'platform', 'arch', 'manifest', 'stage', 'test_agent_ids', 'revision', 'history')}
 
 
-def applicable(db, platform, arch, agent_id=None):
+def applicable(db, platform, arch, agent_id=None, distribution="signed"):
     if (platform, arch) not in TARGETS:
         return []
     rows = db.scalars(select(ConnectorRelease).where(
         ConnectorRelease.platform == platform, ConnectorRelease.arch == arch,
         ConnectorRelease.stage.in_(['stable', 'test']))).all()
-    return sorted((r for r in rows if r.stage == 'stable' or agent_id in r.test_agent_ids),
+    return sorted((r for r in rows if r.manifest.get('distribution','signed') == distribution and (r.stage == 'stable' or agent_id in r.test_agent_ids)),
                   key=lambda r: tuple(map(int, r.version.split('.'))), reverse=True)
 
 
@@ -242,9 +242,9 @@ def set_stage(identity: int, payload: StageInput, actor=Depends(platform_admin),
 
 
 @router.get('/hub-v5/agent/connector-releases')
-def agent_releases(platform: str, arch: str, agent=Depends(agent_auth), db=Depends(get_db)):
+def agent_releases(platform: str, arch: str, distribution: str = "signed", agent=Depends(agent_auth), db=Depends(get_db)):
     # 只下发最高适用版本；故障版本隔离后等待修复版，避免在多个坏版本间循环。
-    return [{'id': r.id, 'manifest': r.manifest} for r in applicable(db, platform, arch, agent.id)[:1]]
+    return [{'id': r.id, 'manifest': r.manifest} for r in applicable(db, platform, arch, agent.id, distribution)[:1]]
 
 
 @router.get('/hub-v5/agent/connector-releases/{identity}/file')

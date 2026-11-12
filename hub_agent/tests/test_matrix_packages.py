@@ -339,7 +339,7 @@ class AutomaticUpdateTests(unittest.IsolatedAsyncioTestCase):
 
     def release(self):
         archive, manifest = self.package({'agent.py': b'print("new")'})
-        manifest.update(kind='agent', version='5.3.0', min_launcher_version='5.2.0')
+        manifest.update(kind='agent', version='5.4.0', min_launcher_version='5.2.0')
         manifest['signature'] = base64.b64encode(self.key.sign(canonical(manifest))).decode()
         return archive, {'id': 12, 'manifest': manifest}
 
@@ -377,7 +377,7 @@ class AutomaticUpdateTests(unittest.IsolatedAsyncioTestCase):
         manager = UpdateManager(self.root, client)
         with patch('updater.keys', return_value=self.keys), patch('updater.target', return_value=('macos', 'arm64')):
             await manager.check(can_activate=False)
-        self.assertEqual(manager.state['status'], 'rejected')
+        self.assertEqual(manager.state['status'], 'manual_required')
         self.assertIn(row['manifest']['sha256'], json.loads((self.root / 'blocked-releases.json').read_text()))
 
     async def test_withdrawn_staged_release_does_not_activate(self):
@@ -393,7 +393,7 @@ class AutomaticUpdateTests(unittest.IsolatedAsyncioTestCase):
         archive, row = self.release(); client = self.client(archive, row); manager = UpdateManager(self.root, client)
         with patch('updater.keys', return_value=self.keys), patch('updater.target', return_value=('macos', 'arm64')), patch.dict('os.environ', {'HAITOO_LAUNCHER_VERSION': '5.1.0'}):
             await manager.check(can_activate=False)
-            self.assertEqual(manager.state['status'], 'installer_required')
+            self.assertEqual(manager.state['error_code'], 'LAUNCHER_TOO_OLD')
             client.connector_download_release.assert_not_awaited()
         from types import SimpleNamespace
         manager.request_check()
@@ -439,7 +439,7 @@ class InterruptedUpdateTests(UpdateLifecycleTests):
             apply_update(transaction)
         self.assertFalse(transaction.exists())
         spawn.assert_called_once(); self.assertEqual(spawn.call_args.args[0], ['/safe/old-agent', 'tray'])
-        self.assertEqual(json.loads((self.root / 'update-result.json').read_text())['status'], 'rolled_back')
+        self.assertEqual(json.loads((self.root / 'update-result.json').read_text())['status'], 'manual_required')
 
 
 class StagedStartupTests(unittest.TestCase):

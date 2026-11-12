@@ -8,6 +8,11 @@ on:
         type: boolean
         default: false
 
+      internal_release:
+        description: '内部 ZIP 自动更新包（只需 Ed25519 发布密钥，无需 Windows 商业证书）'
+        type: boolean
+        default: false
+
 permissions:
   contents: read
 
@@ -25,6 +30,25 @@ jobs:
         with:
           python-version: '3.12'
           architecture: x64
+
+      - name: 检查构建模式
+        shell: pwsh
+        run: |
+          if ('${{ inputs.release }}' -eq 'true' -and '${{ inputs.internal_release }}' -eq 'true') { throw '正式签名与内部发布不能同时勾选' }
+
+      - name: 准备内部发布密钥
+        if: inputs.internal_release && !inputs.release
+        shell: pwsh
+        env:
+          RELEASE_PRIVATE_KEY_BASE64: ${{ secrets.HAITOO_RELEASE_PRIVATE_KEY_BASE64 }}
+          RELEASE_KEY_ID: ${{ vars.HAITOO_RELEASE_KEY_ID }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:RELEASE_PRIVATE_KEY_BASE64 -or -not $env:RELEASE_KEY_ID) { throw '内部发布需要 Ed25519 私钥和密钥 ID，不需要 Windows PFX' }
+          $key = Join-Path $env:RUNNER_TEMP 'haitoo-release.pem'
+          [IO.File]::WriteAllBytes($key, [Convert]::FromBase64String($env:RELEASE_PRIVATE_KEY_BASE64))
+          "HAITOO_RELEASE_PRIVATE_KEY=$key" | Out-File $env:GITHUB_ENV -Append
+          "HAITOO_RELEASE_KEY_ID=$env:RELEASE_KEY_ID" | Out-File $env:GITHUB_ENV -Append
 
       - name: 准备正式签名环境
         if: inputs.release
@@ -60,6 +84,8 @@ jobs:
         run: |
           if ('${{ inputs.release }}' -eq 'true') {
             ./hub_agent/build_windows.ps1 -PythonExecutable $env:BUILD_PYTHON -RunTests -Release
+          } elseif ('${{ inputs.internal_release }}' -eq 'true') {
+            ./hub_agent/build_windows.ps1 -PythonExecutable $env:BUILD_PYTHON -RunTests -InternalRelease
           } else {
             ./hub_agent/build_windows.ps1 -PythonExecutable $env:BUILD_PYTHON -RunTests
           }
@@ -73,7 +99,7 @@ jobs:
           retention-days: 14
 
       - name: 清理本次导入的签名凭据
-        if: always() && inputs.release
+        if: always() && (inputs.release || inputs.internal_release)
         shell: pwsh
         run: |
           Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'haitoo-release.pem') -Force -ErrorAction SilentlyContinue
