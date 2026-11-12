@@ -12,7 +12,7 @@ const email = ref(''), password = ref('')
 const user = ref<any>(null), overview = ref<any>(null), providers = ref<any[]>([]), companies = ref<any[]>([])
 const queueSettings = ref({ submit_interval_ms: 1000, result_interval_ms: 5000, result_concurrency: 5 })
 const loading = ref(false), saving = ref(''), error = ref('')
-const toast = ref('')
+const toast = ref(''), toastKind = ref<'ok' | 'error'>('ok')
 const refreshing = ref(false)
 const pageDescriptions: Record<string, string> = { overview: '查看平台规模、任务状态与队列健康情况', companies: '管理企业开通与管理员账号', models: '管理印花模型与任务提交参数', releases: '发布连接器、验证测试设备并管理各系统稳定版本', data: '跨公司查阅模板、创作素材、素材、产品和店铺数据' }
 const route = useRoute()
@@ -20,31 +20,31 @@ const activePage = computed(() => route.name)
 const connectorReleases = ref<InstanceType<typeof ConnectorReleases> | null>(null)
 const dataManagement = ref<InstanceType<typeof DataManagement> | null>(null)
 const showCompanyForm = ref(false)
-const collectionTarget = ref<any>(null), collectionEnabled = ref(false), collectionError = ref('')
-function openCollectionSettings(company:any) { collectionTarget.value = company; collectionEnabled.value = company.cross_company_collect_enabled; collectionError.value = '' }
-function closeCollectionSettings() { if (saving.value !== 'collection') collectionTarget.value = null }
-async function saveCollectionSettings() {
-  if (!collectionTarget.value || saving.value === 'collection') return
-  saving.value = 'collection'; collectionError.value = ''
+// 采集与 TK 矩阵使用行内开关直接保存；保存成功后才更新界面状态，失败保持原值。
+const featureSaving = ref<Record<string, boolean>>({})
+function featureBusy(company: any, feature: 'collection' | 'matrix') { return Boolean(featureSaving.value[`${company.id}:${feature}`]) }
+async function toggleCompanyFeature(company: any, feature: 'collection' | 'matrix') {
+  const key = feature === 'collection' ? 'cross_company_collect_enabled' : 'tk_matrix_enabled'
+  const busyKey = `${company.id}:${feature}`
+  if (featureSaving.value[busyKey]) return
+  featureSaving.value = { ...featureSaving.value, [busyKey]: true }
+  const next = !company[key]
   try {
-    await api.put(`/admin/companies/${collectionTarget.value.id}/cross-company-collection`,{enabled:collectionEnabled.value},{headers:headers.value})
-    await loadAdmin(); collectionTarget.value = null; showToast('采集权限已保存')
-  } catch(e:any) { collectionError.value = e.response?.data?.detail || '保存失败，请重试' }
-  finally { saving.value = '' }
-}
-const matrixTarget = ref<any>(null), matrixEnabled = ref(false), matrixError = ref('')
-function openMatrixSettings(company:any) { matrixTarget.value = company; matrixEnabled.value = company.tk_matrix_enabled; matrixError.value = '' }
-function closeMatrixSettings() { if (saving.value !== 'matrix') matrixTarget.value = null }
-async function saveMatrixSettings() {
-  if (!matrixTarget.value || saving.value === 'matrix') return
-  saving.value = 'matrix'; matrixError.value = ''
-  try {
-    const {data} = await api.put(`/admin/companies/${matrixTarget.value.id}/tk-matrix`, {enabled:matrixEnabled.value}, {headers:headers.value})
-    const company = companies.value.find(row => row.id === matrixTarget.value.id)
-    if (company) company.tk_matrix_enabled = data.enabled
-    matrixTarget.value = null; showToast('TK 矩阵配置已保存')
-  } catch(e:any) { matrixError.value = e.response?.data?.detail || '保存失败，请重试' }
-  finally { saving.value = '' }
+    if (feature === 'collection') {
+      await api.put(`/admin/companies/${company.id}/cross-company-collection`, { enabled: next }, { headers: headers.value })
+      company.cross_company_collect_enabled = next
+    } else {
+      const { data } = await api.put(`/admin/companies/${company.id}/tk-matrix`, { enabled: next }, { headers: headers.value })
+      company.tk_matrix_enabled = Boolean(data.enabled)
+    }
+    showToast(feature === 'collection' ? (next ? '已开启采集权限' : '已关闭采集权限') : (next ? '已启用 TK 矩阵' : '已停用 TK 矩阵'))
+  } catch (e: any) {
+    showToast(e.response?.data?.detail || '配置保存失败，请重试', 'error')
+  } finally {
+    const remaining = { ...featureSaving.value }
+    delete remaining[busyKey]
+    featureSaving.value = remaining
+  }
 }
 const passwordTarget = ref<{ companyId: number; adminId: number; name: string; email: string } | null>(null)
 const newPassword = ref(''), confirmPassword = ref(''), passwordError = ref('')
@@ -120,8 +120,6 @@ function closePasswordForm() {
   newPassword.value = ''; confirmPassword.value = ''; passwordError.value = ''
 }
 watch(() => route.path, () => {
-  closeCollectionSettings()
-  closeMatrixSettings()
   showCompanyForm.value = false
   showProviderForm.value = false
   closePasswordForm()
@@ -140,7 +138,7 @@ async function updateAdminPassword() {
   finally { saving.value = '' }
 }
 let toastTimer: ReturnType<typeof setTimeout> | undefined
-function showToast(message: string) { toast.value = message; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = '' }, 3000) }
+function showToast(message: string, kind: 'ok' | 'error' = 'ok') { toast.value = message; toastKind.value = kind; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.value = '' }, 3000) }
 function logout() { localStorage.removeItem('haitoro_admin_token'); token.value = ''; user.value = null; overview.value = null; providers.value = []; companies.value = [] }
 api.interceptors.response.use(
   response => response,
@@ -166,7 +164,35 @@ onMounted(() => token.value && loadAdmin().catch((e: any) => {
     <aside><div class="brand"><img src="/brand-icon.png" alt="Haitoro" width="34" height="34" /> Haitoro</div><p>平台后台</p><nav aria-label="后台导航"><RouterLink :to="{name:'overview'}" :class="{active:activePage==='overview'}">概览</RouterLink><RouterLink :to="{name:'companies'}" :class="{active:activePage==='companies'}">公司管理</RouterLink><RouterLink :to="{name:'models'}" :class="{active:activePage==='models'}">模型管理</RouterLink><RouterLink :to="{name:'data'}" :class="{active:activePage==='data'}">数据管理</RouterLink><RouterLink :to="{name:'releases'}" :class="{active:activePage==='releases'}">连接器版本</RouterLink></nav><div class="operator"><b>{{ user?.name }}</b><small>超级管理员</small><button @click="logout">退出登录</button></div></aside>
     <section class="content"><header><div><p class="eyebrow">PLATFORM ADMIN</p><h1>{{activePage==='overview'?'平台概览':activePage==='companies'?'公司管理':activePage==='models'?'模型管理':activePage==='releases'?'连接器版本':'数据管理'}}</h1><p class="page-description">{{ pageDescriptions[String(activePage)] }}</p></div><button v-if="activePage!=='data'" class="refresh" :disabled="refreshing" :aria-busy="refreshing" @click="refreshPage">{{ refreshing ? '刷新中…' : '刷新数据' }}</button></header>
       <section class="page"><template v-if="activePage==='overview'"><div class="metrics"><article><span>公司</span><b>{{ overview?.companies ?? '—' }}</b><small>已开通企业</small></article><article><span>店铺</span><b>{{ overview?.shops ?? '—' }}</b><small>已授权店铺</small></article><article><span>平台用户</span><b>{{ overview?.users ?? '—' }}</b><small>含平台管理员</small></article><article><span>进行中任务</span><b>{{ overview?.running_tasks ?? '—' }}</b><small>累计 {{ overview?.tasks ?? 0 }} 个任务</small></article></div><section class="panel queue-health" :class="{'queue-alert':overview?.queue?.alert}"><div class="heading"><div><h2>印花任务队列</h2><p>告警阈值：待处理超过 200 个、最早等待超过 10 分钟，或近 15 分钟失败率超过 10%。</p></div><span class="queue-health-state">{{!overview?.queue?'尚未加载':overview.queue.alert?'需要关注':'运行正常'}}</span></div><div class="queue-metrics"><article><span>待处理</span><b>{{overview?.queue?.queued ?? 0}}</b><small>其中重试 {{overview?.queue?.retrying ?? 0}} 个任务</small></article><article><span>运行中</span><b>{{overview?.queue?.running ?? 0}}</b><small>最早等待 {{overview?.queue?.oldest_wait_minutes ?? 0}} 分钟</small></article><article><span>近 1 小时吞吐</span><b>{{overview?.queue?.completed_prints_last_hour ?? 0}}</b><small>{{overview?.queue?.completed_tasks_last_hour ?? 0}} 个任务</small></article><article><span>近 15 分钟失败率</span><b>{{overview?.queue?.failure_rate_15m ?? 0}}%</b><small>近 1 小时最终失败 {{overview?.queue?.failed_tasks_last_hour ?? 0}} 个任务</small></article></div><div class="queue-model-table"><div class="queue-model-head"><span>平台</span><span>模型</span><span>待处理</span><span>运行中</span><span>最终失败</span></div><div v-for="item in overview?.queue?.model_backlog || []" :key="`${item.provider}-${item.model}`" class="queue-model-row"><b>{{item.provider}}</b><code>{{item.model}}</code><span>{{item.queued}}</span><span>{{item.running}}</span><span :class="item.failed?'bad':''">{{item.failed}}</span></div><p v-if="!(overview?.queue?.model_backlog?.length)" class="queue-empty">当前没有积压或失败任务。</p></div></section></template>
-        <template v-else-if="activePage==='companies'"><section class="panel companies"><div class="heading heading-actions"><div><h2>公司与账号</h2><p>开通公司、管理管理员账号，并配置公司采集与 TK 矩阵权限。</p></div><button class="primary compact" @click="showCompanyForm=true">开通公司</button></div><div class="company-table"><div class="company-head"><span>ID</span><span>公司</span><span>管理员账号</span><span>采集</span><span>TK 矩阵</span><span>开通时间</span></div><div v-for="company in companies" :key="company.id" class="company-row"><span>{{company.id}}</span><span><b>{{company.name}}</b></span><div class="company-admin-list"><div v-for="admin in company.admin_users" :key="admin.id" class="company-admin"><b>{{admin.name}}</b><small>{{admin.email}}</small><button class="secondary" type="button" @click="openPasswordForm(company, admin)">修改密码</button></div><small v-if="!company.admin_users.length">未配置管理员</small></div><div class="company-collection"><small class="company-feature-label">采集</small><b>{{company.cross_company_collect_enabled?'已开启':'未开启'}}</b><button class="secondary" @click="openCollectionSettings(company)">设置</button></div><div class="company-collection"><small class="company-feature-label">TK 矩阵</small><b>{{company.tk_matrix_enabled?'已启用':'未启用'}}</b><button class="secondary" :aria-label="`配置 ${company.name} 的 TK 矩阵`" @click="openMatrixSettings(company)">设置</button></div><span>{{new Date(company.created_at).toLocaleDateString()}}</span></div></div><p v-if="!companies.length" class="empty">暂无公司，点击“开通公司”创建企业账号。</p></section></template>
+        <template v-else-if="activePage==='companies'">
+          <section class="panel companies">
+            <div class="heading heading-actions"><div></div><button class="primary compact" @click="showCompanyForm=true">开通公司</button></div>
+            <div class="company-table">
+              <div class="company-head"><span>公司</span><span>管理员账号</span><span>邮箱</span><span>开通时间</span><span>采集</span><span>TK 矩阵</span><span>操作</span></div>
+              <div v-for="company in companies" :key="company.id" class="company-row">
+                <span class="company-name"><b>{{ company.name }}</b></span>
+                <div class="company-admin-cell" data-label="管理员账号">
+                  <div v-for="admin in company.admin_users" :key="admin.id" class="company-admin-slot"><b>{{ admin.name }}</b></div>
+                  <small v-if="!company.admin_users.length" class="company-admin-empty">未配置管理员</small>
+                </div>
+                <div class="company-admin-cell" data-label="邮箱">
+                  <div v-for="admin in company.admin_users" :key="admin.id" class="company-admin-slot"><span>{{ admin.email }}</span></div>
+                </div>
+                <span class="company-created" data-label="开通时间">{{ new Date(company.created_at).toLocaleDateString() }}</span>
+                <div class="company-feature" data-label="采集">
+                  <button type="button" class="switch" role="switch" :aria-checked="Boolean(company.cross_company_collect_enabled)" :aria-busy="featureBusy(company,'collection')" :aria-label="`${company.name}的采集权限，当前${company.cross_company_collect_enabled ? '已开启' : '未开启'}`" :title="company.cross_company_collect_enabled ? '点击关闭采集权限' : '点击开启采集权限'" :disabled="featureBusy(company,'collection')" @click="toggleCompanyFeature(company,'collection')"><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span></button>
+                </div>
+                <div class="company-feature" data-label="TK 矩阵">
+                  <button type="button" class="switch" role="switch" :aria-checked="Boolean(company.tk_matrix_enabled)" :aria-busy="featureBusy(company,'matrix')" :aria-label="`${company.name}的 TK 矩阵开关，当前${company.tk_matrix_enabled ? '已启用' : '未启用'}`" :title="company.tk_matrix_enabled ? '点击停用 TK 矩阵' : '点击启用 TK 矩阵'" :disabled="featureBusy(company,'matrix')" @click="toggleCompanyFeature(company,'matrix')"><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span></button>
+                </div>
+                <div class="company-admin-cell" data-label="操作">
+                  <div v-for="admin in company.admin_users" :key="admin.id" class="company-admin-slot"><button class="secondary" type="button" @click="openPasswordForm(company, admin)">修改密码</button></div>
+                </div>
+              </div>
+            </div>
+            <p v-if="!companies.length" class="empty">暂无公司，点击“开通公司”创建企业账号。</p>
+          </section>
+        </template>
         <ConnectorReleases v-else-if="activePage==='releases'" ref="connectorReleases" :token="token" @unauthorized="logout" />
         <DataManagement v-else-if="activePage==='data'" ref="dataManagement" :token="token" :companies="companies" @unauthorized="logout" />
         <section v-else class="panel model-panel">
@@ -189,12 +215,10 @@ onMounted(() => token.value && loadAdmin().catch((e: any) => {
       </footer>
     </section>
   </main>
-  <div v-if="collectionTarget" v-dialog-focus="{close:closeCollectionSettings,busy:saving==='collection'}" class="modal-backdrop" @click.self="closeCollectionSettings"><form class="modal" role="dialog" aria-modal="true" aria-labelledby="collection-settings-title" @submit.prevent="saveCollectionSettings"><button class="close" type="button" :disabled="saving==='collection'" @click="closeCollectionSettings">关闭</button><h2 id="collection-settings-title">采集权限</h2><p>开启后，该公司管理员可浏览所有其他已启用公司的素材库、产品库，并采集图片到本公司素材库。后续新公司自动纳入来源范围。</p><p>关闭后,立即停止新的浏览与采集，已有素材和采集记录继续保留。</p><label class="collection-switch"><input v-model="collectionEnabled" type="checkbox" :disabled="saving==='collection'"/>开启采集</label><p v-if="collectionError" class="error" role="alert">{{collectionError}}</p><button class="primary" :disabled="saving==='collection'">{{saving==='collection'?'保存中…':'保存'}}</button></form></div>
-  <div v-if="matrixTarget" v-dialog-focus="{close:closeMatrixSettings,busy:saving==='matrix'}" class="modal-backdrop" @click.self="closeMatrixSettings"><form class="modal" role="dialog" aria-modal="true" aria-labelledby="matrix-settings-title" @submit.prevent="saveMatrixSettings"><button class="close" type="button" :disabled="saving==='matrix'" @click="closeMatrixSettings">关闭</button><h2 id="matrix-settings-title">公司 TK 矩阵配置</h2><p>{{matrixTarget.name}}</p><p>启用后，已授权成员可同步环境、创建和执行矩阵方案。采集与自动上品仍需成员授权及设备对应站点的执行能力。</p><label class="collection-switch"><input v-model="matrixEnabled" type="checkbox" :disabled="saving==='matrix'"/>启用 TK 矩阵</label><p v-if="matrixError" class="error" role="alert">{{matrixError}}</p><button class="primary" :disabled="saving==='matrix'">{{saving==='matrix'?'保存中…':'保存'}}</button></form></div>
   <div v-if="showCompanyForm" v-dialog-focus="{close:closeCompanyForm,busy:saving==='company'}" class="modal-backdrop" @click.self="closeCompanyForm"><form class="modal" role="dialog" aria-modal="true" aria-labelledby="company-dialog-title" @submit.prevent="createCompany"><button class="close" type="button" :disabled="saving==='company'" @click="closeCompanyForm">关闭</button><h2 id="company-dialog-title">开通公司</h2><p>创建公司和管理员账号。</p><p v-if="error" class="error">{{error}}</p><label>公司名称<input v-model="companyForm.name" maxlength="120" required /></label><label>管理员姓名<input v-model="companyForm.admin_name" maxlength="80" required /></label><label>管理员邮箱<input v-model="companyForm.admin_email" type="email" required /></label><label>初始密码<input v-model="companyForm.admin_password" type="password" minlength="8" placeholder="至少 8 个字符" required /><small>至少 8 个字符</small></label><button class="primary" type="submit" :disabled="saving==='company'">{{saving==='company'?'开通中…':'确认开通'}}</button></form></div>
   <div v-if="passwordTarget" v-dialog-focus="{close:closePasswordForm,busy:saving==='password'}" class="modal-backdrop" @click.self="saving !== 'password' && closePasswordForm()"><form class="modal" role="dialog" aria-modal="true" aria-labelledby="password-dialog-title" @submit.prevent="updateAdminPassword"><button class="close" type="button" :disabled="saving==='password'" @click="closePasswordForm">关闭</button><h2 id="password-dialog-title">修改管理员密码</h2><p>{{passwordTarget.name}} · {{passwordTarget.email}}</p><p v-if="passwordError" class="error" role="alert">{{passwordError}}</p><label>新密码<input v-model="newPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required /><small>8–128 个字符</small></label><label>确认新密码<input v-model="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required /></label><button class="primary" type="submit" :disabled="saving==='password'">{{saving==='password'?'保存中…':'确认修改'}}</button></form></div>
   <div v-if="showProviderForm" v-dialog-focus="{close:closeProviderForm,busy:saving===providerForm.provider}" class="modal-backdrop" @click.self="closeProviderForm"><form class="modal provider-modal" role="dialog" aria-modal="true" aria-labelledby="provider-dialog-title" @submit.prevent="saveProviderForm"><button class="close" type="button" :disabled="saving===providerForm.provider" @click="closeProviderForm">关闭</button><p class="section-kicker">模型配置</p><h2 id="provider-dialog-title">修改 {{ providerForm.display_name }}</h2><p>调整每条任务提交给服务商的印花数量。</p><p v-if="error" class="error" role="alert">{{error}}</p><label>模型标识<input v-model="providerForm.model" maxlength="120" required placeholder="输入服务商提供的模型 ID" /></label><div class="modal-field-grid"><label>单个任务印花图数量<input v-model.number="providerForm.images_per_task" type="number" min="1" max="100" step="1" required /><small>批量快捷操作会按此数量拆成多条独立任务。</small></label></div><div class="modal-tip"><b>结果映射要求</b><span>只有服务商明确保证输出顺序与输入印花一致时才能设为大于 1；不确定时必须保持 1，避免结果关联错图。</span></div><label class="modal-switch"><input v-model="providerForm.enabled" type="checkbox" /> 启用此模型</label><div class="modal-actions"><button class="secondary" type="button" :disabled="saving===providerForm.provider" @click="closeProviderForm">取消</button><button class="primary" type="submit" :disabled="saving===providerForm.provider">{{saving===providerForm.provider?'保存中…':'保存修改'}}</button></div></form></div>
-  <div v-if="toast" class="toast" role="status">{{ toast }}</div>
+  <div v-if="toast" class="toast" :class="{'toast-error': toastKind === 'error'}" :role="toastKind === 'error' ? 'alert' : 'status'">{{ toast }}</div>
   <footer v-if="!token" class="site-footer">
     <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">粤ICP备2026142752号-1</a>
   </footer>

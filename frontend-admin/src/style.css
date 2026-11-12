@@ -66,7 +66,7 @@ input[type=checkbox] { accent-color: var(--admin-primary); }
 nav { display: grid; gap: 6px; }
 nav a { display: block; padding: 11px 14px; border-radius: 8px; color: #bac6d8; text-decoration: none; font-size: 13px; font-weight: 500; }
 nav a:hover { background: #ffffff0a; color: white; }
-nav a.active { background: #263c60; color: #fff; box-shadow: inset 3px 0 #78a6ff; font-weight: 600; }
+nav a.active { background: var(--admin-primary); color: #fff; box-shadow: 0 4px 14px #2563eb40; font-weight: 600; }
 .operator { margin-top: auto; padding: 22px 10px 0; border-top: 1px solid #ffffff14; }
 .operator b, .operator small { display: block; }
 .operator b { font-size: 13px; font-weight: 600; }
@@ -109,13 +109,17 @@ nav a.active { background: #263c60; color: #fff; box-shadow: inset 3px 0 #78a6ff
 .queue-model-row { border-top: 1px solid var(--admin-border); }
 .queue-model-row code { overflow-wrap: anywhere; }
 .queue-empty, .empty { margin: 0; padding: 36px 24px; color: var(--admin-muted); text-align: center; font-size: 13px; }
-.company-head, .company-row { display: grid; grid-template-columns: 52px minmax(120px,1fr) minmax(180px,1.4fr) minmax(100px,.7fr) minmax(100px,.7fr) 100px; gap: 20px; align-items: center; padding: 14px 24px; min-width: 600px; text-align: left; }
+.company-head, .company-row { display: grid; grid-template-columns: minmax(120px,1.1fr) minmax(110px,.9fr) minmax(180px,1.3fr) 100px 60px 60px 92px; gap: 16px; align-items: center; padding: 14px 24px; min-width: 880px; text-align: left; }
 .company-row { border-top: 1px solid var(--admin-border); font-size: 13px; }
-.company-row > span:first-child { color: var(--admin-muted); font-variant-numeric: tabular-nums; }
+.company-name b { overflow-wrap: anywhere; }
 .company-row b { display: block; font-weight: 600; }
-.company-row small { display: block; margin-top: 3px; color: var(--admin-muted); font-size: 12px; overflow-wrap: anywhere; }
-.company-admin + .company-admin { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--admin-border); }
-.company-admin .secondary { min-height: 30px; margin-top: 10px; padding: 4px 10px; font-size: 11px; }
+.company-admin-cell { display: grid; align-content: center; }
+.company-admin-slot { display: flex; align-items: center; min-height: 38px; }
+.company-admin-slot span { color: var(--admin-muted); font-size: 12px; overflow-wrap: anywhere; }
+.company-admin-slot .secondary { min-height: 30px; padding: 4px 10px; font-size: 11px; }
+.company-admin-empty { display: block; color: var(--admin-muted); font-size: 12px; }
+.company-feature { display: flex; align-items: center; }
+.company-created { color: var(--admin-muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .company-row:hover, .queue-model-row:hover { background: #fbfcfe; }
 .notice { margin: 0; padding: 14px 24px; background: #fffbeb; color: #92400e; font-size: 12px; line-height: 1.7; }
 
@@ -150,7 +154,6 @@ nav a.active { background: #263c60; color: #fff; box-shadow: inset 3px 0 #78a6ff
   .shell aside > p { display: none; }
   nav { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 14px; }
   nav a { flex: 1; padding: 9px 8px; font-size: 12px; text-align: center; white-space: nowrap; }
-  nav a.active { box-shadow: inset 0 -2px #78a6ff; }
   .operator { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 0 0; }
   .operator small { margin: 0; }
   .operator button { min-height: 28px; margin: 0 0 0 auto; }
@@ -167,10 +170,14 @@ nav a.active { background: #263c60; color: #fff; box-shadow: inset 3px 0 #78a6ff
   .queue-metrics article { padding: 18px; border-bottom: 1px solid var(--admin-border); }
   .queue-metrics article:nth-child(2) { border-right: 0; }
   .company-head { display: none; }
-  .company-row { grid-template-columns: 36px minmax(0,1fr); min-width: 0; gap: 12px; padding: 18px 20px; }
-  .company-admin-list { grid-column: 2; }
-  .company-row > span:last-child { grid-column: 2; color: var(--admin-muted); font-size: 12px; }
-  .company-row > span:last-child::before { content: '\5f00\901a\65f6\95f4 ';  }
+  .company-row { grid-template-columns: minmax(0,1fr); min-width: 0; gap: 12px; padding: 18px 20px; align-items: start; }
+  .company-admin-cell, .company-feature, .company-created { grid-column: 1; }
+  .company-admin-cell::before, .company-feature::before, .company-created::before { content: attr(data-label); display: block; margin-bottom: 4px; color: var(--admin-muted); font-size: 11px; }
+  .company-admin-cell:empty { display: none; }
+  .company-admin-slot { min-height: 34px; }
+  .company-feature { justify-content: space-between; }
+  .company-feature::before { margin-bottom: 0; }
+  .company-created { display: block; }
   .modal-backdrop { padding: 16px; }
   .modal { max-height: calc(100dvh - 32px); padding: 24px; }
   .login-card { padding: 30px 26px; }
@@ -179,8 +186,15 @@ nav a.active { background: #263c60; color: #fff; box-shadow: inset 3px 0 #78a6ff
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
 
-.company-row .company-feature-label { display: none; }
-.company-collection .secondary { margin-top: 8px; }
-.modal .collection-switch { display: flex; align-items: center; gap: 10px; }
-.collection-switch input { width: 18px; height: 18px; }
-@media(max-width:700px) { .company-collection { grid-column: 2; } .company-row .company-feature-label { display: block; margin: 0 0 4px; } }
+/* 采集与 TK 矩阵的行内开关 */
+.switch { display: inline-flex; align-items: center; padding: 8px 0; border-radius: 999px; background: none; }
+.switch-track { position: relative; display: block; width: 40px; height: 22px; border-radius: 999px; background: #cbd5e1; transition: background-color .18s; }
+.switch-knob { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px #0f172a33; transition: transform .18s; }
+.switch:hover:not(:disabled) .switch-track { background: #b6c2d1; }
+.switch[aria-checked="true"] .switch-track { background: var(--admin-primary); }
+.switch[aria-checked="true"]:hover:not(:disabled) .switch-track { background: var(--admin-primary-hover); }
+.switch[aria-checked="true"] .switch-knob { transform: translateX(18px); }
+.switch:disabled { cursor: progress; }
+.switch[aria-busy="true"] .switch-knob { animation: switch-pending .8s ease-in-out infinite; }
+@keyframes switch-pending { 50% { opacity: .35; } }
+.toast-error { border-color: #fecdd3; background: #fff1f2; color: #b4233b; }
