@@ -324,7 +324,7 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
   <div v-if="devices.some(d=>updateRecovery(d.update_state).needed)" class="mx-notice" role="status">有连接器更新需要人工处理，当前版本和授权保留。<button @click="openDevices">查看设备更新指导</button></div>
   <div v-if="pairingCode" class="mx-notice mx-pairing" role="status"><p>确认连接此电脑，连接器将同步 HubStudio 环境并接收矩阵任务。</p><button class="primary" :disabled="busy" @click="authorizeConnector">授权此电脑连接器</button></div>
   <template v-if="!dialog"><div v-if="feedbackMessage" class="mx-feedback" :class="{'is-error':feedbackSource==='error'}" :role="feedbackSource==='error'?'alert':'status'" aria-live="polite"><span>{{feedbackMessage}}</span><button v-if="feedbackSource==='sync'&&syncHelp" @click="openDevices">前往设备管理</button></div></template>
-  <div v-if="configLoaded&&!config.enabled" class="mx-banner">公司矩阵功能尚未启用。<router-link v-if="access.is_admin" to="/settings/tk-matrix?tab=settings">前往矩阵管理设置</router-link><span v-else>请联系公司管理员。</span></div>
+  <div v-if="configLoaded&&!config.enabled" class="mx-banner">公司矩阵功能尚未启用，请联系平台管理员开启。</div>
   <div v-if="tab==='data'" class="mx-summary mx-data-summary"><b>经营数据总览</b><button :disabled="busy" @click="download">导出 CSV</button><button :disabled="busy" @click="refresh">刷新数据</button></div>
   <div v-if="tab==='data'" class="mx-cards"><article v-for="[name,value,share,tone] in cards" :key="name" :class="tone"><span>{{name}}</span><strong>{{value}}</strong><small v-if="share">{{share}}</small></article></div>
   <section v-if="tab!=='automation'" class="mx-panel">
