@@ -5,6 +5,8 @@ import json
 import logging
 import math
 import os
+import re
+import sys
 import time
 import uuid
 from contextlib import suppress
@@ -13,11 +15,28 @@ from urllib.parse import urlsplit,parse_qs
 import httpx
 from playwright.async_api import async_playwright
 from hubstudio import HubstudioClient
+from runtime_settings import validate_erp_url
 from updater import UpdateManager,VERSION,keys,target,atomic
 from plugin_manager import load_plugin
-from plugins import tiktok
+from plugins import tiktok, flash_sales  # 正式能力由签名插件开放；源码回环调试可使用内置秒杀实现。
 
 logger=logging.getLogger(__name__)
+
+
+def execution_error(exc,limit=500):
+    """保留排查所需的错误，去掉 URL 查询和认证秘密后再传回 ERP 或日志。"""
+    def clean_url(match):
+        try:
+            value=urlsplit(match.group())
+            host=value.hostname or ''
+            if ':' in host:host='['+host+']'
+            if value.port:host+=':'+str(value.port)
+            return value.scheme+'://'+host+value.path
+        except ValueError:return '[URL]'
+    detail=re.sub(r'https?://[^\s\x27\x22<>]+',clean_url,str(exc))
+    detail=re.sub(r'(?i)Bearer\s+[^\s,;\x27\x22]+','Bearer [已隐藏]',detail)
+    detail=re.sub(r'(?i)((?:claim_token|access_token|password|secret|cookie)[\x27\x22]?\s*[:=]\s*[\x27\x22]?)[^\s,;\x27\x22]+',r'\1[已隐藏]',detail)
+    return (type(exc).__name__+': '+' '.join(detail.splitlines()))[:limit]
 
 
 def digest(value):
@@ -42,6 +61,16 @@ class MatrixRuntime:
 
     def journal(self):return self.root/'journal'/f"{self.claim['item']['id']}.json"
 
+    def local_flash_debug(self):
+        """只对显式开启本机调试的源码进程开放；以实际客户端地址为准。"""
+        if os.environ.get('HAITOO_LOCAL_DEBUG')!='1' or getattr(sys,'frozen',False):return False
+        endpoint=getattr(self.client,'base_url',None)
+        if not isinstance(endpoint,str):return False
+        try:
+            parsed=urlsplit(validate_erp_url(endpoint,local_debug=True))
+        except (RuntimeError,ValueError):return False
+        return parsed.hostname in {'127.0.0.1','localhost','::1'}
+
     def adapter(self,task=None,site=None):
         if task is not None and site != 'MY':
             raise RuntimeError('当前仅支持马来西亚（MY）跨境店，请更新方案和连接器')
@@ -49,11 +78,15 @@ class MatrixRuntime:
         if task=='shop.collect':return tiktok
         if self.plugin and (task is None or site in self.plugin.CAPABILITIES.get(task,[])):
             return self.plugin
+        if task in {flash_sales.TASK,flash_sales.COLLECT_TASK} and self.local_flash_debug():return flash_sales
         if task is None or site in tiktok.CAPABILITIES.get(task,[]):return tiktok
         raise RuntimeError('当前连接器不支持此站点的任务，请更新连接器')
 
     def capabilities(self):
         capabilities={task:list(sites) for task,sites in tiktok.CAPABILITIES.items()}
+        if self.local_flash_debug():
+            capabilities[flash_sales.TASK]=['MY']
+            capabilities[flash_sales.COLLECT_TASK]=['MY']
         if self.plugin:
             for task,sites in self.plugin.CAPABILITIES.items():
                 if task=='shop.collect':continue
@@ -180,9 +213,9 @@ class MatrixRuntime:
                 try:
                     site=claim['environment']['site']
                     # 按任务、站点固定适配器；插件未覆盖的采集站点使用内置实现。
-                    adapter=self.adapter('listing.catalog' if 'listing.catalog' in tasks else 'shop.collect',site)
+                    adapter=self.adapter('listing.catalog' if 'listing.catalog' in tasks else 'promotion.flash_sale.renew' if 'promotion.flash_sale.renew' in tasks else 'promotion.flash_sale.collect' if 'promotion.flash_sale.collect' in tasks else 'shop.collect',site)
                     collector=self.adapter('shop.collect',site) if 'shop.collect' in tasks else None
-                    if 'listing.catalog' not in tasks:
+                    if not set(tasks)&{'listing.catalog','promotion.flash_sale.renew','promotion.flash_sale.collect'}:
                         await tiktok.open_environment(page,site,self.check_stop,self.progress)
                     target=await self.client.post(self.path('environment-target'),json=self.credentials())
                     identity=target['identity']
@@ -228,12 +261,26 @@ class MatrixRuntime:
                             account=await hub.bound_account(claim['environment']['container_code'])
                             result=await self.upload(port,destination,before_import=before_import,account=account,on_progress=self.progress,
                                 expected_count=file['expected_count'],site=site,page=page)
-                        if not result or set(result.get('accepted',[]))|set(result.get('rejected',[]))!=set(range(file['expected_count'])):raise RuntimeError('平台回执无法核对全部商品，提交结果未知')
+                        count_receipt=(result and type(result.get('accepted_count')) is int
+                            and 0 < result['accepted_count'] <= file['expected_count']
+                            and result.get('imported_count') == file['expected_count']
+                            and not result.get('accepted') and not result.get('rejected'))
+                        if not result or not count_receipt and set(result.get('accepted',[]))|set(result.get('rejected',[]))!=set(range(file['expected_count'])):raise RuntimeError('平台回执无法核对全部商品，提交结果未知')
                         response=await self.client.post(self.path('listing-result'),json={**self.credentials(),**result})
                         listing_confirmed=response['status']=='confirmed'
                         if response.get('partial'):raise RuntimeError('平台部分商品拒绝，请核对明细')
+                    if set(tasks)&{'promotion.flash_sale.renew','promotion.flash_sale.collect'}:
+                        flash_task='promotion.flash_sale.renew' if 'promotion.flash_sale.renew' in tasks else 'promotion.flash_sale.collect'
+                        renewal_adapter=self.adapter(flash_task,site)
+                        async def flash_rpc(suffix,body):
+                            await self.check_stop()
+                            return await self.client.post(self.path('flash-sales/'+suffix),json={**self.credentials(),**body})
+                        execute_flash=renewal_adapter.renew_flash_sales if flash_task=='promotion.flash_sale.renew' else renewal_adapter.collect_flash_sales
+                        result=await execute_flash(page,site,claim.get('config',{}),flash_rpc,self.check_stop,self.progress)
+                        if not result or not result.get('complete'):
+                            raise RuntimeError('秒杀续期存在待核对活动，请查看活动明细')
                     if 'shop.collect' in tasks:
-                        if 'listing.catalog' in tasks:
+                        if set(tasks)&{'listing.catalog','promotion.flash_sale.renew','promotion.flash_sale.collect'}:
                             await tiktok.open_environment(page,site,self.check_stop,self.progress)
                         package=await collector.collect(page,site,identity,self.check_stop,self.progress)
                         journal={**journal,'identity':identity,'collection':package};atomic(journal_path,journal)
@@ -249,9 +296,9 @@ class MatrixRuntime:
             if isinstance(exc,(KeyboardInterrupt,SystemExit)):raise
             if not self.lost_lease:
                 status='awaiting_attention' if submitted and not listing_confirmed else 'partial_success' if listing_confirmed or collection_committed else 'cancelled' if isinstance(exc,asyncio.CancelledError) else 'failed'
-                message=str(exc)[:500] if isinstance(exc,RuntimeError) else '已停止，请查看阶段和平台结果' if isinstance(exc,asyncio.CancelledError) else '执行失败，请查看当前阶段并人工核对'
+                message='已停止，请查看阶段和平台结果' if isinstance(exc,asyncio.CancelledError) else execution_error(exc)
                 with suppress(Exception):await self.client.post(self.path('report'),json={**self.credentials(),'status':status,'message':message})
-            logger.warning('矩阵环境项结束 item=%s error_type=%s',item['id'],type(exc).__name__)
+            logger.warning('矩阵环境项结束 item=%s detail=%s',item['id'],execution_error(exc,1500))
 
     async def check_updates(self):
         if self.claim or self.host.current_claim:return False

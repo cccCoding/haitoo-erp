@@ -1,8 +1,10 @@
 import type { ObjectDirective } from 'vue'
 
 type DialogOptions = { close: () => void; busy?: boolean }
-type DialogState = { options: DialogOptions; previous: HTMLElement | null; overflow: string; keydown: (event: KeyboardEvent) => void }
+type DialogState = { options: DialogOptions; previous: HTMLElement | null; keydown: (event: KeyboardEvent) => void }
 const states = new WeakMap<HTMLElement, DialogState>()
+let activeDialogs = 0
+let originalOverflow = ''
 const focusable = (element: HTMLElement) => Array.from(element.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], summary, [tabindex="0"]')).filter(item => item.getClientRects().length && item.getAttribute('aria-hidden') !== 'true')
 
 // 所有后台弹窗共用键盘行为：初始焦点、Tab 循环、Escape、关闭后还原焦点。
@@ -11,7 +13,6 @@ export const dialogFocus: ObjectDirective<HTMLElement, DialogOptions> = {
     const state: DialogState = {
       options: binding.value,
       previous: document.activeElement instanceof HTMLElement ? document.activeElement : null,
-      overflow: document.body.style.overflow,
       keydown(event) {
         if (event.key === 'Escape') {
           event.preventDefault()
@@ -30,6 +31,8 @@ export const dialogFocus: ObjectDirective<HTMLElement, DialogOptions> = {
     }
     states.set(element, state)
     element.tabIndex = -1
+    // 弹窗切换时，新弹窗可能先挂载；只在首个弹窗打开时保存原状态。
+    if (activeDialogs++ === 0) originalOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     document.addEventListener('keydown', state.keydown)
     queueMicrotask(() => {
@@ -43,7 +46,8 @@ export const dialogFocus: ObjectDirective<HTMLElement, DialogOptions> = {
     const state = states.get(element)
     if (!state) return
     document.removeEventListener('keydown', state.keydown)
-    document.body.style.overflow = state.overflow
+    // 仍有其他弹窗时继续锁定页面，最后一个弹窗关闭后才恢复。
+    if (--activeDialogs === 0) document.body.style.overflow = originalOverflow
     if (state.previous?.isConnected) state.previous.focus()
     states.delete(element)
   },

@@ -28,8 +28,8 @@ def load_plugin(root,keys,platform,arch):
             raise
     if not isinstance(getattr(module,'CAPABILITIES',None),dict):raise ValueError('插件接口不完整')
     for task,sites in module.CAPABILITIES.items():
-        if task not in {'shop.collect','listing.catalog'} or not isinstance(sites,list) or not set(sites)<={'MY','ID'}:raise ValueError('插件声明未知能力')
-        if not callable(getattr(module,'collect' if task=='shop.collect' else 'upload',None)):raise ValueError('插件声明能力缺少实现')
+        if task not in {'shop.collect','listing.catalog','promotion.flash_sale.renew','promotion.flash_sale.collect'} or not isinstance(sites,list) or not set(sites)<={'MY','ID'}:raise ValueError('插件声明未知能力')
+        if not callable(getattr(module,{'shop.collect':'collect','listing.catalog':'upload','promotion.flash_sale.renew':'renew_flash_sales','promotion.flash_sale.collect':'collect_flash_sales'}[task],None)):raise ValueError('插件声明能力缺少实现')
     module.VERSION=manifest['version']
     module.DIGEST=manifest['sha256']
     return module

@@ -21,6 +21,12 @@ test('empty device filters are omitted from HTTP query parameters',()=>{
  assert.deepEqual(filterParams({agent_id:'',q:'',site:null,group:undefined}),{})
  assert.deepEqual(filterParams({agent_id:7,q:'测试环境',exact:'1\n2'}),{agent_id:7,q:'测试环境',exact:'1\n2'})
 })
+test('matrix filters omit an unset collected value and preserve explicit boolean filters',()=>{
+ assert.deepEqual(filterParams({q:'',site:'',group:'',ungrouped:false,collected:''}),{ungrouped:false})
+ for(const collected of [false,true,'false','true']){
+  assert.deepEqual(filterParams({ungrouped:false,collected}),{ungrouped:false,collected})
+ }
+})
 test('unknown values remain different from real zero',()=>{assert.equal(display(null),'—');assert.equal(display(0),'0');assert.equal(percent(null),'—');assert.equal(percent(0),'0.00%')})
 test('traffic cards combine markets in the same window without country prefixes',()=>{
  const windows=[{site:'MY',impressions:100,clicks:10},{site:'ID',impressions:900,clicks:0}]
@@ -88,4 +94,10 @@ test('run scope lists frozen environment names and codes with a fallback for mis
  assert.equal(runEnvironmentScope([{environment_id:1,environment_name:'店铺 A'},{environment_id:2,container_code:'env-2'}]),'店铺 A、环境 #2 / env-2')
  assert.equal(runEnvironmentScope([]),'—')
  assert.deepEqual(filterParams({collected:false,q:''}),{collected:false})
+})
+
+test('listing quantity receipt shows accepted products over imported file total',async()=>{
+ const {listingSummary}=await import('../src/hub/matrix.ts')
+ assert.equal(listingSummary({accepted_count:6,imported_count:10,accepted:[],rejected:[]}), '成功 6 / 导入 10')
+ assert.equal(listingSummary({accepted:[0,1],rejected:[]}), '成功 2 / 导入 2')
 })

@@ -192,6 +192,30 @@ def confirm(db, agent, item_id, payload):
     if item.submission not in {"request_sent", "confirmed"}: fail("未记录本次提交意图")
     job = db.get(SupplyJob, item.supply_job_id)
     expected = set(range(job.snapshot["strategy"]["link_count"]))
+    if payload.accepted_count is not None or payload.imported_count is not None:
+        if (payload.accepted or payload.rejected or payload.accepted_count is None
+                or payload.imported_count != len(expected)
+                or payload.accepted_count > len(expected)):
+            fail("平台数量回执无效", 422)
+        result = {"accepted": [], "rejected": [], "accepted_count": payload.accepted_count,
+                  "imported_count": payload.imported_count, "receipt": payload.receipt}
+        if item.submission == "confirmed":
+            if item.result.get("listing") != result: fail("上品确认内容冲突")
+            return {"status": "confirmed"}
+        # 无逐商品明细，保留全部组合占用，避免释放后重复上品。
+        for row in db.scalars(select(MatrixAllocation).where(MatrixAllocation.item_id == item.id)):
+            row.state = "unknown"
+        item.submission = "confirmed"
+        item.result = {**item.result, "listing": result}
+        task = db.get(HubUploadTask, item.upload_task_id)
+        task.status, task.stage = "completed", "imported"
+        task.submitted_at = task.completed_at = utcnow()
+        task.claim_token = task.lease_expires_at = None
+        from .. import hub
+        hub.finish_attempt(db, task, task.status)
+        event(db, item, "listing.result", result)
+        db.commit()
+        return {"status": "confirmed"}
     accepted, rejected = set(payload.accepted), set(payload.rejected)
     if accepted & rejected or len(accepted) != len(payload.accepted) or len(rejected) != len(payload.rejected) or not (accepted | rejected) <= expected:
         fail("平台逐商品结果无效", 422)

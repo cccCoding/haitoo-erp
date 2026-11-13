@@ -106,3 +106,12 @@ export function sortMatrixRows<T>(rows:T[],key:string,direction:'asc'|'desc'|nul
 export function runEnvironmentScope(items:{environment_name?:string|null;container_code?:string|null;environment_id:number}[]){
  return items.map(item=>[item.environment_name||`环境 #${item.environment_id}`,item.container_code].filter(Boolean).join(' / ')).join('、')||'—'
 }
+
+Object.assign(statusLabels,{flash_scan:'扫描商家秒杀活动',flash_pending:'待处理',flash_prepared:'续期数据已准备',flash_terminate_intent:'准备终止',flash_terminated:'旧活动已终止',flash_copy_intent:'准备复制',flash_draft_confirmed:'草稿已确认',flash_publish_intent:'准备发布',flash_created:'新活动已创建，正在核对',flash_published:'新活动已发布',flash_unknown:'结果待核对',flash_failed:'续期失败',flash_skipped:'已跳过',flash_cancelled:'已取消',flash_attention:'待核对活动',flash_resolved:'人工核对完成'})
+
+export function listingSummary(listing:any):string {
+ if(!listing)return ''
+ const accepted=listing.accepted_count ?? listing.accepted?.length ?? 0
+ const total=listing.imported_count ?? ((listing.accepted?.length ?? 0)+(listing.rejected?.length ?? 0))
+ return `成功 ${accepted} / 导入 ${total}`
+}

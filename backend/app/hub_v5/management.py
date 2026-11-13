@@ -107,7 +107,7 @@ def devices_payload(db, actor, user_id=None):
 
 @router.get("/statistics")
 def statistics(start:date|None=None,end:date|None=None,user_id:int|None=Query(None,gt=0),agent_id:int|None=Query(None,gt=0),
-    site:Literal["","MY","ID","unknown"]="",task:Literal["","shop.collect","listing.catalog"]="",
+    site:Literal["","MY","ID","unknown"]="",task:Literal["","shop.collect","listing.catalog","promotion.flash_sale.renew"]="",
     actor=Depends(matrix_admin),db=Depends(get_db)):
     if user_id is not None and user_id != actor.id:s.fail("筛选对象不存在",404)
     if agent_id is not None:
@@ -192,7 +192,7 @@ def platform_devices(company_id:int,user_id:int|None=Query(None,gt=0),actor=Depe
 
 @platform_router.get("/companies/{company_id}/statistics")
 def platform_statistics(company_id:int,start:date|None=None,end:date|None=None,user_id:int|None=Query(None,gt=0),agent_id:int|None=Query(None,gt=0),
-    site:Literal["","MY","ID","unknown"]="",task:Literal["","shop.collect","listing.catalog"]="",
+    site:Literal["","MY","ID","unknown"]="",task:Literal["","shop.collect","listing.catalog","promotion.flash_sale.renew"]="",
     actor=Depends(platform_actor),db=Depends(get_db)):
     return statistics_payload(db,actor,start,end,user_id,agent_id,site,task)
 

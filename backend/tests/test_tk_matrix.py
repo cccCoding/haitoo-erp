@@ -999,6 +999,35 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         response=self.request('POST',f'/hub-v5/run-items/{item}/resolve',json={'action':'retry','evidence':'尝试重试含已确认商品的文件'})
         self.assertEqual(response.status_code,409,response.text)
 
+    def test_count_only_partial_import_is_success_and_cannot_replay(self):
+        run,_=self.make_run(self.plan(listing=True,tasks=['listing.catalog']));item,creds=self.claim(run);self.bind(item,creds)
+        self.ar('POST',f'/agent/items/{item}/listing-preparations',json=creds)
+        with self.sessions() as db:
+            job=db.get(SupplyJob,db.get(MatrixItem,item).supply_job_id)
+            job.state='completed';job.output_size=100;job.output_sha256='a'*64;job.output_key='stub';job.output_expires_at=datetime.utcnow()+timedelta(days=7);db.commit()
+        self.ar('POST',f'/agent/items/{item}/listing-preparations',json=creds)
+        self.ar('POST',f'/agent/items/{item}/submission',json=creds)
+        path=f'/agent/items/{item}/listing-result'
+        payload={**creds,'accepted_count':6,'imported_count':10,'receipt':'6款商品导入成功'}
+        for invalid in ({'accepted_count':11},{'imported_count':9},{'accepted':[0]}):
+            response=self.ar('POST',path,json={**payload,**invalid})
+            self.assertEqual(response.status_code,422,response.text)
+        for _ in range(2):
+            response=self.ar('POST',path,json=payload)
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(response.json()['status'],'confirmed')
+        result=self.ar('POST',f'/agent/items/{item}/report',json={**creds,'status':'succeeded'})
+        self.assertEqual(result.status_code,200,result.text)
+        with self.sessions() as db:
+            row=db.get(MatrixItem,item)
+            self.assertEqual(row.status,'succeeded')
+            self.assertEqual(row.result['listing']['accepted_count'],6)
+            self.assertEqual(row.result['listing']['imported_count'],10)
+            self.assertTrue(all(a.state=='unknown' for a in db.scalars(select(MatrixAllocation).where(MatrixAllocation.item_id==item))))
+            self.assertEqual(db.get(HubUploadTask,row.upload_task_id).status,'completed')
+        response=self.request('POST',f'/hub-v5/run-items/{item}/resolve',json={'action':'retry'})
+        self.assertEqual(response.status_code,409,response.text)
+
     def test_manual_confirmation_preserves_known_rejections_and_their_new_owner(self):
         run,_=self.make_run(self.plan(listing=True,tasks=['listing.catalog']));item,creds=self.claim(run);self.bind(item,creds)
         self.ar('POST',f'/agent/items/{item}/listing-preparations',json=creds)
@@ -1680,7 +1709,7 @@ class MatrixMigrationSQLTests(unittest.TestCase):
         try:
             with engine.begin() as connection:
                 config = alembic_config(connection)
-                self.assertEqual(ScriptDirectory.from_config(config).get_heads(), ['20261111_77'])
+                self.assertEqual(ScriptDirectory.from_config(config).get_heads(), ['20261113_79'])
                 command.upgrade(config, '20261105_69')
                 connection.execute(text("INSERT INTO hub_runtime_locks "
                     "(id, company_id, container_code, task_id) VALUES (1, 1, 'legacy-env', 42)"))
@@ -1692,6 +1721,9 @@ class MatrixMigrationSQLTests(unittest.TestCase):
                 self.assertIn('design_groups', tables)
                 self.assertIn('matrix_allocations', tables)
                 self.assertIn('connector_releases', tables)
+                self.assertIn('matrix_flash_activities', tables)
+                self.assertIn('matrix_flash_renewals', tables)
+                self.assertIn('matrix_flash_snapshots', tables)
                 command.downgrade(config, '20261105_69')
                 self.assertNotIn('matrix_allocations', inspect(connection).get_table_names())
                 self.assertEqual(tuple(connection.execute(text("SELECT container_code, task_id "

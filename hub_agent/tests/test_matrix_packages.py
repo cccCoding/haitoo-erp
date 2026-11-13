@@ -115,6 +115,49 @@ class MatrixRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 host.config['matrix_collection_validation_sites']=sites
                 self.assertEqual(runtime.capabilities(),{'shop.collect':['MY'],'listing.catalog':['MY']})
 
+    async def test_local_source_debug_exposes_flash_sale_only_for_actual_loopback_client(self):
+        from types import SimpleNamespace
+        from matrix_runtime import MatrixRuntime
+        from plugins import flash_sales
+        with tempfile.TemporaryDirectory() as temp:
+            host=SimpleNamespace(config={},state={},client=SimpleNamespace(base_url='http://127.0.0.1:8001'),current_claim=None)
+            runtime=MatrixRuntime(host,temp,lambda c:None,AsyncMock())
+            with patch.dict('os.environ',{'HAITOO_LOCAL_DEBUG':'1'}),patch('sys.frozen',False,create=True):
+                for endpoint in ('http://127.0.0.1:8001','http://localhost:8001','http://[::1]:8001','https://localhost:8001'):
+                    host.client.base_url=endpoint
+                    self.assertEqual(runtime.capabilities()[flash_sales.TASK],['MY'])
+                    self.assertEqual(runtime.capabilities()[flash_sales.COLLECT_TASK],['MY'])
+                    self.assertIs(runtime.adapter(flash_sales.COLLECT_TASK,'MY'),flash_sales)
+                    self.assertIs(runtime.adapter(flash_sales.TASK,'MY'),flash_sales)
+                for endpoint in ('https://api.haitorok.com','http://127.0.0.1.attacker.invalid:8001','http://user@localhost:8001',None):
+                    host.client.base_url=endpoint
+                    self.assertNotIn(flash_sales.TASK,runtime.capabilities())
+                    with self.assertRaisesRegex(RuntimeError,'不支持'):runtime.adapter(flash_sales.TASK,'MY')
+                host.client.base_url='http://127.0.0.1:8001'
+                with patch('sys.frozen',True,create=True):self.assertNotIn(flash_sales.TASK,runtime.capabilities())
+                with self.assertRaisesRegex(RuntimeError,'仅支持'):runtime.adapter(flash_sales.TASK,'ID')
+                plugin=SimpleNamespace(CAPABILITIES={flash_sales.TASK:['MY']})
+                runtime.plugin=plugin
+                self.assertIs(runtime.adapter(flash_sales.TASK,'MY'),plugin)
+                runtime.plugin=None
+            with patch.dict('os.environ',{'HAITOO_LOCAL_DEBUG':'0'}):
+                self.assertNotIn(flash_sales.TASK,runtime.capabilities())
+
+    async def test_local_debug_heartbeat_reports_flash_sale_capability(self):
+        from types import SimpleNamespace
+        from matrix_runtime import MatrixRuntime
+        from plugins import flash_sales
+        with tempfile.TemporaryDirectory() as temp:
+            client=SimpleNamespace(base_url='http://127.0.0.1:8001',post=AsyncMock(return_value={'enabled':True,'paused':False,'hub_identity':'team'}))
+            host=SimpleNamespace(config={'matrix_hub_identity':'team'},state={'hub_connected':True},client=client,current_claim=None)
+            runtime=MatrixRuntime(host,temp,lambda c:None,AsyncMock())
+            with patch.dict('os.environ',{'HAITOO_LOCAL_DEBUG':'1'}),patch('sys.frozen',False,create=True),patch('matrix_runtime.load_plugin',return_value=None),patch('matrix_runtime.keys',return_value={}):
+                await runtime.heartbeat(process_commands=False)
+            payload=client.post.await_args.kwargs['json']
+            self.assertEqual(payload['capabilities'][flash_sales.TASK],['MY'])
+            self.assertEqual(payload['capabilities'][flash_sales.COLLECT_TASK],['MY'])
+            self.assertTrue(runtime.enabled)
+
     async def test_partial_plugin_preserves_builtin_collection_and_routes_by_site(self):
         from types import SimpleNamespace
         from matrix_runtime import MatrixRuntime
@@ -190,7 +233,10 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_listing_then_collection_opens_product_page_after_import(self):
         await self.check_builtin_listing(['listing.catalog','shop.collect'])
 
-    async def check_builtin_listing(self,tasks):
+    async def test_partial_listing_is_success_and_continues_collection(self):
+        await self.check_builtin_listing(['listing.catalog','shop.collect'],partial=True)
+
+    async def check_builtin_listing(self,tasks,partial=False):
         from types import SimpleNamespace
         from unittest.mock import MagicMock
         from matrix_runtime import MatrixRuntime
@@ -217,7 +263,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             await kwargs['on_upload_ready']()
             await kwargs['before_import']()
             self.assertTrue(any(c.args[0].endswith('/submission') for c in client.post.await_args_list))
-            return {'accepted':list(range(10)),'rejected':[],'receipt':'成功导入10款商品'}
+            return {'accepted_count':6,'imported_count':10,'receipt':'成功导入6款商品'} if partial else {'accepted':list(range(10)),'rejected':[],'receipt':'成功导入10款商品'}
         with tempfile.TemporaryDirectory() as temp:
             host=SimpleNamespace(config={},state={},client=client,current_claim=None)
             runtime=MatrixRuntime(host,temp,lambda c:None,AsyncMock(side_effect=upload))
@@ -265,6 +311,34 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             runtime.upload_collection.assert_awaited_once_with(package)
             self.assertEqual(client.post.await_args_list[-1].kwargs['json']['status'],'succeeded')
             self.assertFalse(any(c.args[0].endswith('/identity') for c in client.post.await_args_list))
+
+
+    async def test_browser_errors_report_actual_sanitized_cause(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from playwright.async_api import Error as BrowserError
+        from matrix_runtime import MatrixRuntime
+        async def post(path,**kwargs):
+            return {'identity':{'site':'MY','environment_id':7,'name':'测试'}} if path.endswith('/environment-target') else {}
+        client=SimpleNamespace(post=AsyncMock(side_effect=post))
+        with tempfile.TemporaryDirectory() as temp:
+            runtime=MatrixRuntime(SimpleNamespace(config={},state={},client=client,current_claim=None),temp,lambda c:None,AsyncMock())
+            runtime.claim={'item':{'id':38,'result':{},'submission':'not_started'},'claim_token':'a'*32,'fencing':1,
+                'tasks':['promotion.flash_sale.renew'],'environment':{'id':7,'site':'MY','name':'测试','container_code':'env-7'}}
+            runtime.progress=AsyncMock();runtime.check_stop=AsyncMock()
+            error=BrowserError('Page.evaluate: TypeError: sdk.indexOf is not a function at https://example.com/sdk.js?msToken=do-not-log Authorization: Bearer hidden-token')
+            runtime.adapter=MagicMock(return_value=SimpleNamespace(renew_flash_sales=AsyncMock(side_effect=error)))
+            page=SimpleNamespace(close=AsyncMock())
+            browser=SimpleNamespace(contexts=[SimpleNamespace(new_page=AsyncMock(return_value=page))],close=AsyncMock())
+            manager=MagicMock();manager.__aenter__=AsyncMock(return_value=SimpleNamespace(chromium=SimpleNamespace(connect_over_cdp=AsyncMock(return_value=browser))));manager.__aexit__=AsyncMock(return_value=False)
+            hub=SimpleNamespace(environments=AsyncMock(return_value=[{'container_code':'env-7'}]),start=AsyncMock(return_value=9222))
+            with patch('matrix_runtime.HubstudioClient',return_value=hub),patch('matrix_runtime.async_playwright',return_value=manager),self.assertLogs('matrix_runtime',level='WARNING') as logs:
+                await runtime.execute()
+            report=client.post.await_args.kwargs['json']
+            self.assertEqual(report['status'],'failed');self.assertIn('sdk.indexOf is not a function',report['message'])
+            for text in [report['message'],*logs.output]:
+                self.assertNotIn('do-not-log',text);self.assertNotIn('hidden-token',text);self.assertNotIn('msToken=',text)
+            browser.close.assert_not_awaited();page.close.assert_not_awaited()
 
 
 class IdentityGuardTests(unittest.IsolatedAsyncioTestCase):
@@ -334,7 +408,12 @@ class ReleaseArchiveTests(unittest.TestCase):
 
 
 class AutomaticUpdateTests(unittest.IsolatedAsyncioTestCase):
-    setUp = PackageTests.setUp
+    def setUp(self):
+        PackageTests.setUp(self)
+        # 升级场景明确从旧版开始，不依赖当前源码发布版本。
+        installed = patch('updater.VERSION', '5.3.0')
+        installed.start(); self.addCleanup(installed.stop)
+
     package = PackageTests.package
 
     def release(self):

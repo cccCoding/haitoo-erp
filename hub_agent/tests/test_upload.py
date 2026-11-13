@@ -476,6 +476,56 @@ class UploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result,{'accepted':list(range(10)),'rejected':[],'receipt':'成功导入10款商品'})
         self.assertGreater(stop.await_count,0)
 
+    async def test_matrix_partial_ready_imports_and_returns_counts(self):
+        from plugins.tiktok import profile
+        _,_,file_input,page=self.controls()
+        page.url=profile('MY')['upload_url']
+        ready=AsyncMock();ready.count.return_value=1;ready.inner_text.return_value='6款商品准备就绪'
+        success=AsyncMock();success.count.return_value=0
+        receipt=AsyncMock();receipt.count.return_value=1;receipt.inner_text.return_value='成功导入6款商品'
+        def text(value,**kwargs):
+            if isinstance(value,re.Pattern):
+                if '准备就绪' in value.pattern:return ready
+                if '成功导入' in value.pattern:return receipt
+            return success
+        page.get_by_text.side_effect=text
+        before=AsyncMock();stop=AsyncMock()
+        with patch.object(self.agent,'async_playwright') as browser:
+            result=await self.agent.upload_and_import(1234,Path(self.temp.name)/'test.xlsx',
+                before_import=before,page=page,site='MY',expected_count=10,
+                upload_url=profile('MY')['upload_url'],check_stop=stop)
+        browser.assert_not_called()
+        page.goto.assert_awaited_once_with(profile('MY')['upload_url'],wait_until='domcontentloaded')
+        file_input.set_input_files.assert_awaited_once()
+        before.assert_awaited_once();page.import_button.click.assert_awaited_once()
+        self.assertEqual(result,{'accepted_count':6,'imported_count':10,'receipt':'成功导入6款商品'})
+        self.assertGreater(stop.await_count,0)
+
+    async def test_partial_receipt_must_match_ready_count(self):
+        from plugins.tiktok import profile
+        _,_,file_input,page=self.controls()
+        page.url=profile('MY')['upload_url']
+        ready=AsyncMock();ready.count.return_value=1;ready.inner_text.return_value='6款商品准备就绪'
+        success=AsyncMock();success.count.return_value=0
+        receipt=AsyncMock();receipt.count.return_value=1;receipt.inner_text.return_value='成功导入5款商品'
+        def text(value,**kwargs):
+            if isinstance(value,re.Pattern):
+                if '准备就绪' in value.pattern:return ready
+                if '成功导入' in value.pattern:return receipt
+            return success
+        page.get_by_text.side_effect=text
+        before=AsyncMock();stop=AsyncMock()
+        with patch.object(self.agent,'async_playwright') as browser:
+            with self.assertRaisesRegex(RuntimeError,"平台受理数量不一致"):
+                result=await self.agent.upload_and_import(1234,Path(self.temp.name)/'test.xlsx',
+                    before_import=before,page=page,site='MY',expected_count=10,
+                    upload_url=profile('MY')['upload_url'],check_stop=stop)
+        browser.assert_not_called()
+        page.goto.assert_awaited_once_with(profile('MY')['upload_url'],wait_until='domcontentloaded')
+        file_input.set_input_files.assert_awaited_once()
+        before.assert_awaited_once();page.import_button.click.assert_awaited_once()
+        self.assertGreater(stop.await_count,0)
+
     async def test_stopped_matrix_upload_never_selects_file(self):
         _,_,file_input,page=self.controls()
         with self.assertRaises(asyncio.CancelledError):

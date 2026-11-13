@@ -193,7 +193,7 @@ defineExpose({refresh})
         <label>成员<select v-model="filters.user_id" @change="filters.agent_id=''"><option value="">全部成员</option><option v-for="m in members" :key="m.id" :value="m.id">{{m.name}}</option></select></label>
         <label>设备<select v-model="filters.agent_id"><option value="">全部设备</option><option v-for="d in filterDevices" :key="d.id" :value="d.id">{{d.name}}</option></select></label>
         <label>站点<select v-model="filters.site"><option value="">全部站点</option><option value="MY">MY</option><option value="unknown">未知站点</option></select></label>
-        <label>任务类型<select v-model="filters.task"><option value="">全部类型</option><option value="shop.collect">店铺采集</option><option value="listing.catalog">自动上品</option></select></label>
+        <label>任务类型<select v-model="filters.task"><option value="">全部类型</option><option value="shop.collect">店铺采集</option><option value="listing.catalog">自动上品</option><option value="promotion.flash_sale.renew">秒杀续期</option></select></label>
         <button class="primary" type="submit" :disabled="busy||loading">{{loading?'统计中…':'查询'}}</button>
       </form>
       <p v-if="statsLoaded&&stats.start" class="mm-range">当前运行统计：{{stats.start}} 至 {{stats.end}} · 按运行创建日期筛选（香港时间）</p>

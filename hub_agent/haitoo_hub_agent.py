@@ -632,8 +632,12 @@ async def upload_and_import(debug_port: int, xlsx_path: Path, before_import=None
             ready = page.get_by_text(re.compile(r"^\s*[1-9]\d*\s*款商品准备就绪\s*$"))
             await wait_upload_control(page, ready, 120_000, check_stop)
             if expected_count is not None:
-                if await ready.count() != 1 or int(re.search(r"\d+", await ready.inner_text()).group()) != expected_count:
-                    raise RuntimeError("平台解析商品数量与固定文件不一致，尚未导入")
+                if await ready.count() != 1:
+                    raise RuntimeError("无法唯一识别平台准备就绪数量，尚未导入")
+                ready_count = int(re.search(r"\d+", await ready.inner_text()).group())
+                if not 0 < ready_count <= expected_count:
+                    raise RuntimeError("平台准备就绪数量超出固定文件范围，尚未导入")
+                await progress(on_progress, 'upload_parsed', f'平台准备就绪 {ready_count} / 导入 {expected_count}，继续导入可用商品')
             import_button = page.get_by_role("button", name=re.compile(r"^(导入|import)$", re.I))
             await wait_upload_control(page, import_button, 30_000, check_stop)
             if await import_button.count() != 1 or not await import_button.is_enabled():
@@ -671,8 +675,11 @@ async def upload_and_import(debug_port: int, xlsx_path: Path, before_import=None
                     raise RuntimeError(f"平台导入回执数量冲突（{sorted(counts)}），预期 {expected_count} 个商品，请人工核对")
                 accepted, text = next(iter(counts.items()))
                 await progress(on_progress, 'listing_receipt', f'导入回执核对：预期 {expected_count} 个商品，平台确认 {accepted} 个商品')
-                if accepted != expected_count:
-                    raise RuntimeError(f"平台受理数量不一致：预期 {expected_count} 个商品，实际 {accepted} 个商品，请人工核对部分提交")
+                if accepted != ready_count:
+                    raise RuntimeError(f"平台受理数量不一致：准备就绪 {ready_count} 个商品，实际 {accepted} 个商品，请人工核对部分提交")
+                if accepted < expected_count:
+                    # 平台仅返回数量，不能据此推断成功商品的文件行号。
+                    return {"accepted_count": accepted, "imported_count": expected_count, "receipt": text[:500]}
                 return {"accepted": list(range(expected_count)), "rejected": [], "receipt": text[:500]}
         except PlaywrightTimeoutError as exc:
             result = "导入结果未知，请核对 TikTok 页面" if import_started else "尚未点击导入，请核对 TikTok 页面"

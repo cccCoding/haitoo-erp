@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {computed,ref,onMounted,nextTick} from 'vue'
 import {dialogFocus as vDialogFocus} from '../dialog-focus'
-import {label,runEnvironmentScope} from './matrix'
+import {listingSummary,label,runEnvironmentScope} from './matrix'
 const props=defineProps<{scope:any;runs:any[];total:number;page:number;loading:boolean;error:string;scrollTop:number}>()
 const emit=defineEmits<{close:[];refresh:[];page:[value:number];scroll:[value:number];open:[run:any,itemId:number|null]}>()
 const list=ref<HTMLElement|null>(null)
@@ -37,7 +37,7 @@ function changePage(value:number){if(list.value)list.value.scrollTop=0;emit('pag
      <div v-if="scope" class="rh-items">
       <div v-for="item in run.items" :key="item.id" class="rh-item">
        <div class="rh-item-line"><span v-if="run.items.length>1" class="rh-environment">{{item.environment_name||`环境 #${item.environment_id}`}}</span><span class="rh-status" :class="item.status">{{label(item.status)}}</span><span class="rh-identity">{{item.shop?`${item.shop.name} / ${item.shop.site||'—'} / ${item.shop.external_id||'按环境归档'}`:'当次尚未识别店铺'}}</span><button v-if="run.items.length>1" class="rh-item-detail" :aria-label="`查看${item.environment_name||'环境'}详情`" @click="emit('open',run,item.id)">详情 →</button></div>
-       <div class="rh-outcomes"><span>采集 <b>{{label(item.collection_status)}}</b></span><span>上品 <b>{{label(item.submission)}}</b></span><span v-if="item.result?.listing">已接受 <b>{{item.result.listing.accepted.length}}</b> · 明确拒绝 <b>{{item.result.listing.rejected.length}}</b></span></div>
+       <div class="rh-outcomes"><span>采集 <b>{{label(item.collection_status)}}</b></span><span>上品 <b>{{label(item.submission)}}</b></span><span v-if="item.result?.listing">{{listingSummary(item.result.listing)}}</span></div>
        <details v-if="item.error" class="rh-failure"><summary><span>{{item.error}}</span><small>展开</small></summary><p>{{item.error}}</p></details>
       </div>
      </div>
