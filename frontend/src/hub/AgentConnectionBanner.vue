@@ -3,7 +3,7 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import axios from 'axios'
 import { probeLocalAgent, type LocalAgentState } from './local-agent'
 
-const props = defineProps<{ token: string }>()
+const props = defineProps<{ token: string; readOnly?: boolean }>()
 const state = ref<LocalAgentState>('checking')
 const checking = ref(false), downloading = ref(''), error = ref('')
 const downloadStarted=ref('')
@@ -49,6 +49,7 @@ async function download(item: Installer) {
 function recheck() {void check(); if (!installers.value.length) void loadInstallers()}
 function focus() {void check()}
 onMounted(() => {
+  if(props.readOnly)return
   void check(); void loadInstallers()
   poll = setInterval(() => {if (document.visibilityState !== 'hidden') void check()}, 5000)
   window.addEventListener('focus', focus)
@@ -66,11 +67,12 @@ onUnmounted(() => {
     <div class="local-agent-row">
       <slot name="navigation"/>
       <div class="local-agent-actions">
-        <span class="local-agent-status" :class="`is-${state}`" role="status" aria-live="polite" aria-label="本机连接器状态">
+        <span v-if="readOnly" class="local-agent-status">用户视角 · 本机连接器检测不适用</span>
+        <span v-else class="local-agent-status" :class="`is-${state}`" role="status" aria-live="polite" aria-label="本机连接器状态">
           <i aria-hidden="true"/>
           {{state==='ready'?'连接器已启动':state==='checking'?'检测连接器…':state==='legacy'?'连接器需更新':'连接器未启动'}}
         </span>
-        <button type="button" class="local-agent-recheck" :disabled="checking" aria-label="重新检测本机连接器" title="重新检测本机连接器" @click="recheck">
+        <button v-if="!readOnly" type="button" class="local-agent-recheck" :disabled="checking" aria-label="重新检测本机连接器" title="重新检测本机连接器" @click="recheck">
           <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M16 7a6.3 6.3 0 1 0 .3 5M16 3.5V7h-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
         <slot/>

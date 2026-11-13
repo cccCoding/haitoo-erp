@@ -3,17 +3,21 @@ import {computed,onMounted,onUnmounted,ref,watch} from 'vue'
 import {useRoute,useRouter} from 'vue-router'
 import axios from 'axios'
 import MatrixDevices from './hub/MatrixDevices.vue'
+import TKMatrix from '../../frontend/src/hub/TKMatrix.vue'
 import ConnectorReleases from './ConnectorReleases.vue'
 import {filterParams,percent,display} from './hub/matrix'
 
-const props=defineProps<{token:string;companies:{id:number;name:string}[]}>()
+const props=defineProps<{token:string;companies:{id:number;name:string;tk_matrix_enabled?:boolean}[]}>()
 const emit=defineEmits<{unauthorized:[]}>()
 const api=axios.create({baseURL:import.meta.env.VITE_API_URL||'http://localhost:8001'})
 const route=useRoute(),router=useRouter()
-const tabs=[{id:'overview',name:'总览统计'},{id:'devices',name:'设备管理'},{id:'releases',name:'连接器版本'}] as const
+const tabs=[{id:'overview',name:'总览统计'},{id:'devices',name:'设备管理'},{id:'user',name:'用户视角'},{id:'releases',name:'连接器版本'}] as const
 type TabId=typeof tabs[number]['id']
 const tab=computed<TabId>(()=>tabs.some(t=>t.id===route.query.tab)?String(route.query.tab) as TabId:'overview')
 const companyId=ref<number|null>(null)
+const enabledCompanies=computed(()=>props.companies.filter(company=>company.tk_matrix_enabled))
+const viewUserId=ref<number|null>(null),viewSession=ref<{token:string;user:any}|null>(null),viewLoading=ref(false),viewError=ref('')
+let viewSeq=0
 const statsLoaded=ref(false)
 const config=ref({enabled:false,listing_enabled:false})
 const busy=ref(false),loading=ref(false),error=ref(''),notice=ref('')
@@ -22,7 +26,6 @@ const connectorReleases=ref<InstanceType<typeof ConnectorReleases>|null>(null)
 const dateString=(d:Date)=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Hong_Kong',year:'numeric',month:'2-digit',day:'2-digit'}).format(d)
 const filters=ref({start:dateString(new Date(Date.now()-6*86400000)),end:dateString(new Date()),user_id:'',agent_id:'',site:'',task:''})
 const stats=ref<any>({current:{},summary:{},by_member:[],daily:[]})
-const companyName=computed(()=>props.companies.find(item=>item.id===companyId.value)?.name||'')
 const filteredDevices=computed(()=>devices.value.filter(d=>!deviceUser.value||String(d.user_id)===String(deviceUser.value)))
 const filterDevices=computed(()=>devices.value.filter(d=>!filters.value.user_id||String(d.user_id)===String(filters.value.user_id)))
 const maxDaily=computed(()=>Math.max(1,...stats.value.daily.map((d:any)=>d.total)))
@@ -85,6 +88,7 @@ async function refreshCompany(){await perform(()=>loadCompanyData(true))}
 async function refreshDevices(){await perform(loadDevices)}
 async function refresh(){
   if(tab.value==='releases'){await connectorReleases.value?.refresh();return}
+  if(tab.value==='user'){await loadMembers();await loadUserView();return}
   if(!companyId.value)return
   if(tab.value==='devices')await perform(loadCompany)
   else await refreshCompany()
@@ -106,28 +110,55 @@ async function command(device:any,kind:string){
     await loadDevices()
   })
 }
-watch(()=>props.companies,companies=>{
+async function loadUserView(){
+  const seq=++viewSeq,id=companyId.value,uid=viewUserId.value
+  viewSession.value=null;viewError.value='';viewLoading.value=false
+  if(!id||!uid)return
+  viewLoading.value=true
+  try{
+    const {data}=await api.post(`${companyBase(id)}/users/${uid}/view`,{},auth())
+    if(seq===viewSeq&&!disposed)viewSession.value=data
+  }catch(e:any){if(seq===viewSeq&&!disposed){if(e.response?.status===401)emit('unauthorized');viewError.value=e.response?.data?.detail||'用户视角加载失败，请重试'}}
+  finally{if(seq===viewSeq)viewLoading.value=false}
+}
+watch(viewUserId,()=>{void loadUserView()})
+watch(enabledCompanies,companies=>{
   if(!companies.some(item=>item.id===companyId.value))companyId.value=companies[0]?.id??null
 },{immediate:true})
 watch(companyId,()=>{
-  resetCompanyData()
+  resetCompanyData();++viewSeq;viewUserId.value=null;viewSession.value=null;viewError.value='';viewLoading.value=false
   if(tab.value==='releases'||!companyId.value)return
   // 切换公司不受上一家公司刷新中的 busy 限制；旧请求由序号丢弃。
   void loadCompanyData(tab.value==='overview').catch(handle)
 })
 watch(tab,value=>{
   if(value==='releases'||!companyId.value)return
+  if(value==='user'){void perform(loadMembers);return}
   if(value==='devices')void perform(loadCompany)
   else if(!statsLoaded.value)void loadCompanyData(true).catch(handle)
 })
 onMounted(()=>{
+  if(companyId.value&&tab.value!=='releases')void loadCompanyData(tab.value==='overview').catch(handle)
   poll=setInterval(()=>{if(tab.value==='devices'&&!busy.value&&!disposed&&companyId.value)void loadDevices().catch(handle)},10000)
 })
-onUnmounted(()=>{disposed=true;if(poll)clearInterval(poll)})
+onUnmounted(()=>{disposed=true;++viewSeq;if(poll)clearInterval(poll)})
 defineExpose({refresh})
 </script>
 <template>
 <section class="matrix-management">
+  <div class="panel mm-company">
+    <div class="mm-company-form">
+      <label>公司总览
+        <select v-model="companyId" :disabled="!enabledCompanies.length">
+          <option v-if="!enabledCompanies.length" :value="null">暂无已开通 TK 矩阵的公司</option>
+          <option v-for="company in enabledCompanies" :key="company.id" :value="company.id">{{company.name}}</option>
+        </select>
+      </label>
+      <label v-if="tab==='user'&&companyId">用户视角
+        <select v-model="viewUserId"><option :value="null">请选择用户</option><option v-for="member in members" :key="member.id" :value="member.id" :disabled="!member.is_active||member.is_expired">{{member.name}} · {{member.user_code||`#${member.id}`}}{{!member.is_active?'（已停用）':member.is_expired?'（已过期）':!member.enabled?'（未授权）':''}}</option></select>
+      </label>
+    </div>
+  </div>
   <nav class="mm-tabs" aria-label="矩阵管理页面">
     <button v-for="item in tabs" :key="item.id" type="button" :class="{active:tab===item.id}" :aria-current="tab===item.id?'page':undefined" @click="setTab(item.id)">{{item.name}}</button>
   </nav>
@@ -137,19 +168,16 @@ defineExpose({refresh})
     <p class="mm-scope-note">连接器版本面向全平台，不随公司筛选；设备统计与设备管理按所选公司隔离。</p>
     <ConnectorReleases ref="connectorReleases" :token="token" @unauthorized="emit('unauthorized')"/>
   </template>
-  <p v-else-if="!companies.length" class="panel mm-empty">暂无公司，请先在公司管理中开通企业。</p>
+  <p v-else-if="!enabledCompanies.length" class="panel mm-empty">暂无已开通 TK 矩阵的公司，请先在公司管理中启用 TK 矩阵。</p>
   <template v-else>
-    <div class="panel mm-company">
-      <div class="mm-company-form">
-        <label>公司
-          <select v-model="companyId">
-            <option v-for="company in companies" :key="company.id" :value="company.id">{{company.name}}</option>
-          </select>
-        </label>
-        <p>当前查看 <b>{{companyName||'—'}}</b> 的矩阵数据；切换公司后统计与设备列表同步更新。</p>
-      </div>
-    </div>
-    <template v-if="tab==='overview'">
+    <template v-if="tab==='user'">
+      <p class="mm-scope-note">按所选用户在 ERP 中的实际权限展示矩阵内容。此视角仅供只读排查，不能修改配置、同步设备或执行任务。</p>
+      <p v-if="viewLoading" class="panel mm-empty" role="status">正在加载用户视角…</p>
+      <div v-else-if="viewError" class="mm-feedback mm-error" role="alert">{{viewError}} <button class="secondary" @click="loadUserView">重新加载用户视角</button></div>
+      <TKMatrix v-else-if="viewSession" :key="`${companyId}-${viewUserId}`" :token="viewSession.token" :user="viewSession.user" read-only tab-query-key="matrix_tab" @unauthorized="viewSession=null;viewError='用户视角会话已失效，请重新加载'"/>
+      <p v-else class="panel mm-empty">请选择用户，查看该用户的 TK 矩阵。</p>
+    </template>
+    <template v-else-if="tab==='overview'">
       <form class="panel mm-filters" @submit.prevent="perform(loadStats)">
         <label>开始日期<input v-model="filters.start" type="date" required/></label>
         <label>结束日期<input v-model="filters.end" type="date" required/></label>

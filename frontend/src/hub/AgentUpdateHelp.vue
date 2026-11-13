@@ -2,7 +2,7 @@
 import {computed,ref,watch,onUnmounted} from 'vue'
 import axios from 'axios'
 import {updateRecovery,platformSteps} from './update-recovery'
-const props=defineProps<{token:string;device?:any;distribution?:string;canRetry?:boolean;busy?:boolean}>()
+const props=defineProps<{token:string;device?:any;distribution?:string;canRetry?:boolean;busy?:boolean;readOnly?:boolean}>()
 const state=computed(()=>props.device?.update_state)
 const recovery=computed(()=>updateRecovery(state.value))
 const channel=computed(()=>state.value?.distribution||props.distribution||'signed')
@@ -52,10 +52,10 @@ onUnmounted(()=>{controller.abort();if(retryTimer)clearTimeout(retryTimer)})
 <section class="agent-update-help" aria-label="连接器更新处理">
  <div class="auh-heading"><strong>{{recovery.needed?'连接器更新未完成':'连接器更新与手动安装'}}</strong><span v-if="state?.target_version">目标版本 {{state.target_version}}</span></div>
  <p>{{recovery.needed?recovery.message:'可查看系统允许步骤和当前可用安装包。网页不能代替 Windows 或 macOS 授予运行许可。'}}</p>
- <div class="auh-actions"><button type="button" :aria-expanded="guidance" @click="show">{{guidance?'收起处理步骤':'查看处理步骤与手动安装包'}}</button><button v-if="recovery.canRetry&&canRetry" type="button" :disabled="busy||retryBusy||requested||!device?.online" @click="retry">{{requested?'已请求重试':retryBusy?'发送中…':'处理后重试更新'}}</button></div>
+ <div class="auh-actions"><button type="button" :aria-expanded="guidance" @click="show">{{guidance?'收起处理步骤':'查看处理步骤与手动安装包'}}</button><button v-if="!readOnly&&recovery.canRetry&&canRetry" type="button" :disabled="busy||retryBusy||requested||!device?.online" @click="retry">{{requested?'已请求重试':retryBusy?'发送中…':'处理后重试更新'}}</button></div>
  <p v-if="requested" role="status">请求已发出；连接器会在收到命令且当前任务结束后重新检查，未处理的系统限制仍可能阻止启动。</p>
  <div v-if="guidance" class="auh-guide"><ol><li v-for="step in platformSteps(device?.platform||'',String(state?.error_code||''))" :key="step">{{step}}</li></ol><p>下载列表显示当前向此设备开放的最新版本，可能与上次失败版本不同。已撤回的版本不再提供。</p><p v-if="channel==='internal'">内部 ZIP 未经商业代码签名／Apple 公证，仍可能需要系统人工确认；更新包继续验证公司的签名和文件摘要。</p>
- <div class="auh-actions"><button type="button" :disabled="loading" @click="load">{{loading?'正在读取…':'刷新安装包'}}</button><button v-for="item in packages" :key="item.id" type="button" :disabled="!!downloading" @click="download(item)">{{downloading===item.filename?'正在获取下载链接…':`下载 ${item.platform==='windows'?'Windows':'macOS'} ${item.arch==='arm64'?'Apple 芯片':'Intel / x64'} ${item.version}${item.distribution==='internal'?'（内部 ZIP）':''}`}}</button></div>
+ <div class="auh-actions"><button type="button" :disabled="loading" @click="load">{{loading?'正在读取…':'刷新安装包'}}</button><button v-for="item in packages" :key="item.id" type="button" :disabled="readOnly||!!downloading" @click="download(item)">{{downloading===item.filename?'正在获取下载链接…':`下载 ${item.platform==='windows'?'Windows':'macOS'} ${item.arch==='arm64'?'Apple 芯片':'Intel / x64'} ${item.version}${item.distribution==='internal'?'（内部 ZIP）':''}`}}</button></div>
  <p v-if="downloadStarted" role="status">已请求浏览器下载 {{downloadStarted}}，请在浏览器下载列表查看进度。若下载失败，请重新点击下载。</p>
  <p v-if="loaded&&!packages.length&&!loading">当前暂无匹配安装包，请联系平台管理员上传或开放对应版本。</p></div><p v-if="error" class="auh-error" role="alert">{{error}}</p>
 </section>

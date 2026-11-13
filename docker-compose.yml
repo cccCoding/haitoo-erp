@@ -336,7 +336,8 @@ services:
 
   admin-web:
     build:
-      context: ./frontend-admin
+      context: .
+      dockerfile: frontend-admin/Dockerfile
       args:
         DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
         VITE_API_URL: ${VITE_API_URL:?请在 .env 中配置 VITE_API_URL}

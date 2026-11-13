@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
 from ..database import get_db
 from ..models import User, Role, HubAgent, Company
-from ..security import current_user
+from ..security import current_user, create_matrix_view_token
 from .api import matrix_admin, config as matrix_config, set_connection as set_device_connection, device_command as run_device_command
 from .installers import installers_impl, installer_download, installer_download_url
 from .models import MatrixMemberPermission, MatrixRun, MatrixItem, MatrixCommand, MatrixAccess, MatrixEnvironment
@@ -166,6 +166,23 @@ def statistics_payload(db, actor, start=None, end=None, user_id=None, agent_id=N
 @platform_router.get("/companies/{company_id}/members")
 def platform_members(company_id:int,q:str=Query("",max_length=200),actor=Depends(platform_actor),db=Depends(get_db)):
     return members_payload(db,actor,q)
+
+
+@platform_router.post("/companies/{company_id}/users/{identity}/view")
+def platform_user_view(company_id:int,identity:int,actor=Depends(platform_actor),db=Depends(get_db)):
+    company = db.get(Company, company_id)
+    s.enabled(db, company_id)
+    if not company.is_active:s.fail("公司已停用",403)
+    user = db.get(User, identity)
+    if not user or user.company_id != company_id or user.role not in permissions.ROLES:
+        s.fail("用户不存在",404)
+    if not user.is_active:s.fail("用户已停用",403)
+    if user.role == Role.SUPPLY_USER and permissions.supply_user_is_expired(user):
+        s.fail("货盘账号使用有效期已到期",403)
+    admin = db.get(User, actor.id)
+    s.audit(db, actor, "user.view", identity, {"read_only": True})
+    db.commit()
+    return {"token": create_matrix_view_token(admin, user), "user": member_view(db, user)}
 
 
 @platform_router.get("/companies/{company_id}/devices")

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from app import main
 from app.hub_v5.api import router
 from app.hub_v5.management import platform_router
-from app.hub_v5.models import MatrixCompany, MatrixAudit, MatrixCommand
+from app.hub_v5.models import MatrixCompany, MatrixAudit, MatrixCommand, MatrixMemberPermission
 from app.hub_v5 import service
 from app.models import HubAgent, User, Role
 from app.security import create_access_token
@@ -101,3 +101,73 @@ class AdminMatrixConfigTests(SupplyFixture, unittest.TestCase):
         self.assertEqual(self.request('GET', '/hub-v5/config').json(), {'enabled': True, 'listing_enabled': True})
         with self.sessions() as db:
             self.assertTrue(service.enabled(db, 1, listing=True).enabled)
+
+    def view_token(self, uid=1):
+        response = self.request('POST', f'/admin/matrix/companies/1/users/{uid}/view', uid=8)
+        self.assertEqual(response.status_code, 200, response.text)
+        return {'Authorization': f"Bearer {response.json()['token']}"}
+
+    def test_user_view_issuance_checks_platform_company_and_user(self):
+        path = '/admin/matrix/companies/1/users/1/view'
+        self.assertEqual(self.request('POST', path, uid=8).status_code, 403)
+        with self.sessions() as db:
+            db.add(MatrixCompany(company_id=1, enabled=True))
+            db.commit()
+        for uid in (1, 2, 5):
+            self.assertEqual(self.request('POST', path, uid=uid).status_code, 403)
+        self.assertEqual(self.request('POST', '/admin/matrix/companies/1/users/5/view', uid=8).status_code, 404)
+        self.view_token()
+        with self.sessions() as db:
+            audit = db.scalars(select(MatrixAudit).where(MatrixAudit.action == 'user.view')).one()
+            self.assertEqual(audit.actor_id, 8)
+            db.get(User, 1).is_active = False
+            db.commit()
+        self.assertEqual(self.request('POST', path, uid=8).status_code, 403)
+
+    def test_user_view_is_read_only_scoped_and_revalidates_permissions(self):
+        with self.sessions() as db:
+            db.add(MatrixCompany(company_id=1, enabled=True))
+            db.add(MatrixMemberPermission(user_id=2, company_id=1, enabled=True))
+            db.add_all([HubAgent(id=i, company_id=company, user_id=uid, name=f'设备{i}',
+                platform='macos', token_hash=str(i)*64) for i, company, uid in ((20,1,1),(21,1,2),(22,2,5))])
+            db.commit()
+        headers = self.view_token(2)
+        response = self.client.get('/hub-v5/agents', headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([row['id'] for row in response.json()], [21])
+        for path in ('/hub-v5/access', '/hub-v5/config', '/hub-v5/environments', '/hub-v5/operations',
+                     '/hub-v5/plans', '/hub-v5/runs', '/hub-v5/shops/metrics', '/supply/strategies', '/supply/catalogs'):
+            response = self.client.get(path, headers=headers)
+            self.assertEqual(response.status_code, 200, (path, response.text))
+        for method, path, payload in (('POST','/hub-v5/agents/21/commands',{'kind':'refresh'}),
+            ('PUT','/hub-v5/config',{'enabled':True,'listing_enabled':True}),
+            ('POST','/hub-v5/operations',{'name':'禁止创建','tasks':['shop.collect']}),
+            ('POST','/supply/strategies',self.strategy_input()),
+            ('GET','/admin/companies',None), ('GET','/supply/users',None)):
+            self.assertEqual(self.client.request(method,path,headers=headers,json=payload).status_code,403,path)
+        with self.sessions() as db:
+            db.get(MatrixMemberPermission, 2).enabled = False
+            db.commit()
+        self.assertFalse(self.client.get('/hub-v5/access', headers=headers).json()['enabled'])
+        self.assertEqual(self.client.get('/hub-v5/environments', headers=headers).status_code, 403)
+        with self.sessions() as db:
+            db.get(User, 8).token_version += 1
+            db.commit()
+        self.assertEqual(self.client.get('/hub-v5/access', headers=headers).status_code, 401)
+
+    def test_user_view_rejects_expired_tokens_and_changed_target(self):
+        from datetime import datetime, timedelta, timezone
+        from jose import jwt
+        from app.config import get_settings
+        with self.sessions() as db:
+            db.add(MatrixCompany(company_id=1, enabled=True))
+            db.commit()
+        headers = self.view_token()
+        payload = jwt.decode(headers['Authorization'][7:], get_settings().secret_key, algorithms=['HS256'])
+        payload['exp'] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        expired = jwt.encode(payload, get_settings().secret_key, algorithm='HS256')
+        self.assertEqual(self.client.get('/hub-v5/access', headers={'Authorization':f'Bearer {expired}'}).status_code,401)
+        with self.sessions() as db:
+            db.get(User, 1).company_id = 2
+            db.commit()
+        self.assertEqual(self.client.get('/hub-v5/access', headers=headers).status_code,403)

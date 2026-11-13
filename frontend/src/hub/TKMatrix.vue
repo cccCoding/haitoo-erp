@@ -12,13 +12,17 @@ import MatrixRunViewer from './MatrixRunViewer.vue'
 import MatrixRunHistory from './MatrixRunHistory.vue'
 import {createRunViewer,formatRunLogs} from './run-viewer'
 import PlanShopSelect from './PlanShopSelect.vue'
-const props=defineProps<{token:string;user:any}>()
+const props=defineProps<{token:string;user:any;readOnly?:boolean;tabQueryKey?:string}>()
 const emit=defineEmits<{unauthorized:[];'access-change':[enabled:boolean]}>()
 const route=useRoute(),router=useRouter()
 const api=axios.create({baseURL:import.meta.env.VITE_API_URL||'http://localhost:8000'})
+api.interceptors.request.use(config=>{
+ if(props.readOnly&&(config.method||'get').toLowerCase()!=='get')throw {response:{status:403,data:{detail:'用户视角仅支持只读查看矩阵内容'}}}
+ return config
+})
 const auth=()=>({headers:{Authorization:`Bearer ${props.token}`}})
-const tab=computed(()=>route.query.tab==='data'?'data':route.query.tab==='automation'?'automation':'environments')
-function setTab(value:string){void router.replace({query:{...route.query,tab:value}})}
+const tab=computed(()=>route.query[props.tabQueryKey||'tab']==='data'?'data':route.query[props.tabQueryKey||'tab']==='automation'?'automation':'environments')
+function setTab(value:string){void router.replace({query:{...route.query,[props.tabQueryKey||'tab']:value}})}
 const devices=ref<any[]>([]),operations=ref<any[]>([]),plans=ref<any[]>([]),strategies=ref<any[]>([]),rows=ref<any[]>([]),runs=ref<any[]>([]),stats=ref<any>({windows:[]})
 const catalogs=ref<any[]>([])
 const listingStrategies=computed(()=>{
@@ -296,10 +300,11 @@ async function checkAccess(){
  if(!data.enabled){devices.value=[];rows.value=[];plans.value=[];operations.value=[];runs.value=[];total.value=0}
  return !previous.enabled&&data.enabled
 }
-const canManageRun=(value:any)=>value&&(access.value.is_admin||value.owner_id===props.user.id)
+const canManageRun=(value:any)=>!props.readOnly&&value&&(access.value.is_admin||value.owner_id===props.user.id)
 watch(()=>props.user.id,()=>{selected.value=[];allFiltered.value=false;void initialize()})
 async function initialize(){try{await checkAccess();if(access.value.enabled)await refresh()}catch(e){handle(e);accessLoaded.value=true}}
 onMounted(()=>{void initialize();poll=setInterval(async()=>{if(polling||busy.value||disposed)return;polling=true;try{const activated=await checkAccess();if(!access.value.enabled)return;if(activated){await refresh();return}await logs();await Promise.all([loadRuns(),loadDevices(),...(dialog.value==='history'&&!historyLoading.value?[loadHistory()]:[])]);if(tab.value==='automation')await loadAutomation();if(tab.value==='data')stats.value=(await api.get('/hub-v5/shops/metrics',{...auth(),params:filterParams(appliedFilters.value)})).data;await loadRows()}catch(e){handle(e)}finally{polling=false}},5000)})
+defineExpose({refresh})
 onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval(poll)})
 </script>
 
@@ -308,7 +313,7 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
   <div v-if="!accessLoaded" class="mx-access-state">正在读取矩阵权限…</div>
   <div v-else-if="!access.enabled" class="mx-access-state"><h2>尚未获得矩阵使用授权</h2><p>请联系公司管理员，为你的账号启用“使用矩阵”。</p><p v-if="error" class="error">{{error}}</p><button @click="initialize">重新检查授权</button></div>
   <template v-else>
-  <AgentConnectionBanner :token="token">
+  <AgentConnectionBanner :token="token" :read-only="readOnly">
     <template #navigation>
       <nav class="mx-tabs" role="tablist" aria-label="矩阵页面">
         <button role="tab" :aria-selected="tab==='environments'" :class="{active:tab==='environments'}" @click="setTab('environments')">环境列表 <b>{{total}}</b></button>
@@ -320,9 +325,9 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
     <button class="mx-device-button" @click="openDevices">设备管理</button>
     <button v-if="canManageRun(current)&&['running','queued'].includes(current.status)" class="mx-danger" :disabled="busy||current.stop_requested" @click="stopCurrent">{{current.stop_requested?'停止请求中':'停止当前运行'}}</button>
   </AgentConnectionBanner>
-  <AgentUpdateHelp v-if="route.query.connector_update_help==='1'" :token="token" :distribution="route.query.distribution==='internal'?'internal':'signed'"/>
+  <AgentUpdateHelp v-if="route.query.connector_update_help==='1'" :token="token" :read-only="readOnly" :distribution="route.query.distribution==='internal'?'internal':'signed'"/>
   <div v-if="devices.some(d=>updateRecovery(d.update_state).needed)" class="mx-notice" role="status">有连接器更新需要人工处理，当前版本和授权保留。<button @click="openDevices">查看设备更新指导</button></div>
-  <div v-if="pairingCode" class="mx-notice mx-pairing" role="status"><p>确认连接此电脑，连接器将同步 HubStudio 环境并接收矩阵任务。</p><button class="primary" :disabled="busy" @click="authorizeConnector">授权此电脑连接器</button></div>
+  <div v-if="pairingCode&&!readOnly" class="mx-notice mx-pairing" role="status"><p>确认连接此电脑，连接器将同步 HubStudio 环境并接收矩阵任务。</p><button class="primary" :disabled="busy" @click="authorizeConnector">授权此电脑连接器</button></div>
   <template v-if="!dialog"><div v-if="feedbackMessage" class="mx-feedback" :class="{'is-error':feedbackSource==='error'}" :role="feedbackSource==='error'?'alert':'status'" aria-live="polite"><span>{{feedbackMessage}}</span><button v-if="feedbackSource==='sync'&&syncHelp" @click="openDevices">前往设备管理</button></div></template>
   <div v-if="configLoaded&&!config.enabled" class="mx-banner">公司矩阵功能尚未启用，请联系平台管理员开启。</div>
   <div v-if="tab==='data'" class="mx-summary mx-data-summary"><b>经营数据总览</b><button :disabled="busy" @click="download">导出 CSV</button><button :disabled="busy" @click="refresh">刷新数据</button></div>
@@ -336,7 +341,7 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
       <select v-model="filters.collected" aria-label="是否采集"><option value="">是否采集：全部</option><option value="true">已采集</option><option value="false">未采集</option></select>
       <div class="mx-filter-actions"><button type="submit" class="primary">筛选</button></div>
     </form>
-    <div v-if="tab==='environments'" class="mx-toolbar"><button class="mx-sync" :disabled="busy||!!syncPending.length" title="同步当前账号已配置团队的所有在线设备" @click="syncEnvironments"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M20 12a8 8 0 1 1-2.3-5.7L20 9"/></svg>{{syncPending.length?'同步中…':'同步环境'}}</button><button :disabled="loading||busy||!total" title="选择当前筛选条件下的全部环境，包含其他分页" @click="selectCurrent">全选当前</button><button @click="selected=[];allFiltered=false">清空选择</button><button type="button" class="mx-hide-names" :aria-pressed="hideAccountNames" @click="hideAccountNames=!hideAccountNames"><span v-if="hideAccountNames" aria-hidden="true">✓</span>隐藏名称</button><button :disabled="!selectedCount||busy||loading" @click="openOverrides">批量设置站点/活跃</button><button class="primary" :disabled="!selectedCount||busy||!config.enabled" @click="openManual">批量执行</button><span class="mx-selected">已选 {{selectedCount}}</span></div>
+    <div v-if="tab==='environments'" class="mx-toolbar"><button class="mx-sync" :disabled="readOnly||busy||!!syncPending.length" title="同步当前账号已配置团队的所有在线设备" @click="syncEnvironments"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M20 12a8 8 0 1 1-2.3-5.7L20 9"/></svg>{{syncPending.length?'同步中…':'同步环境'}}</button><button :disabled="loading||busy||!total" title="选择当前筛选条件下的全部环境，包含其他分页" @click="selectCurrent">全选当前</button><button @click="selected=[];allFiltered=false">清空选择</button><button type="button" class="mx-hide-names" :aria-pressed="hideAccountNames" @click="hideAccountNames=!hideAccountNames"><span v-if="hideAccountNames" aria-hidden="true">✓</span>隐藏名称</button><button :disabled="readOnly||!selectedCount||busy||loading" @click="openOverrides">批量设置站点/活跃</button><button class="primary" :disabled="readOnly||!selectedCount||busy||!config.enabled" @click="openManual">批量执行</button><span class="mx-selected">已选 {{selectedCount}}</span></div>
     <div class="mx-table-wrap" :aria-busy="loading"><table><thead><tr><th v-if="tab==='environments'">选择</th><th v-for="column in identityColumns" :key="column.key" :aria-sort="tab==='data'?sortAria(column.key):undefined"><button v-if="tab==='data'" type="button" class="mx-sort-header" @click="toggleDataSort(column.key)">{{column.label}}<span aria-hidden="true">{{sortIcon(column.key)}}</span></button><template v-else>{{column.label}}</template></th><template v-if="tab==='environments'"><th>店铺</th><th>绑定账号</th><th title="当前上架的产品数量">产品</th><th title="管理订单－全部标签页的订单数量；历史快照显示近7天订单数；尚未采集时显示 —">订单</th><th>活跃</th><th>上品 / 执行</th><th>采集</th></template><template v-else><th v-for="column in dataColumns" :key="column.key" :aria-sort="sortAria(column.key)"><button type="button" class="mx-sort-header" @click="toggleDataSort(column.key)">{{column.label}}<span aria-hidden="true">{{sortIcon(column.key)}}</span></button></th></template><th>操作</th></tr></thead><tbody>
       <tr v-for="row in visibleRows" :key="row.id" :class="{selected:allFiltered||selected.includes(row.id)}"><td v-if="tab==='environments'"><input type="checkbox" :aria-label="`选择环境 ${row.container_code}`" :disabled="busy||loading" :checked="allFiltered||selected.includes(row.id)" @change="toggle(row.id)"/></td><td><b>{{row.name}}</b><small>{{row.container_code}}</small></td><td>{{row.group||'未分组'}}</td><td><span class="mx-tag">{{row.site||'未知'}}</span></td>
       <template v-if="tab==='environments'"><td>{{row.shop?.name||'待识别'}}<small>{{row.shop?.external_id}}</small></td><td>{{row.account_names.map(accountNameText).join(' / ')||'—'}}</td><td :title="row.snapshot?.observed_at">{{display(row.snapshot?.active)}}</td><td :title="row.snapshot?.orders_total!=null?'管理订单－全部标签页显示数量':row.snapshot?.orders==null?'尚未采集订单数据':`近7天订单：${row.snapshot.window_start} — ${row.snapshot.window_end}`">{{display(row.snapshot?.orders_total ?? row.snapshot?.orders)}}</td><td><span :class="{'mx-activity-normal':row.activity_status==='normal','mx-activity-closed':row.activity_status==='closed'}">{{row.activity_status==='normal'?'正常':row.activity_status==='closed'?'封店':'未检测'}}</span></td><td><span class="mx-state" :class="row.latest_item?.status">{{label(row.latest_item?.stage)}}</span><small>{{label(row.latest_item?.submission)}}</small></td><td>{{label(row.latest_item?.collection_status)}}<small v-if="row.snapshot?.stale">数据超过24小时</small></td></template>
@@ -346,11 +351,11 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
     <footer class="mx-pagination"><span>共 {{total}} 个环境</span><label>每页 <select v-model.number="size" @change="page=1;loadRows()"><option :value="25">25</option><option :value="50">50</option><option :value="100">100</option></select></label><button :disabled="page<=1||loading" @click="page--;loadRows()">上一页</button><span>{{page}} / {{pages}}</span><button :disabled="page>=pages||loading" @click="page++;loadRows()">下一页</button></footer>
   </section>
   <div v-if="tab==='automation'" class="mx-automation">
-    <section class="mx-panel mx-auto-panel"><div class="mx-summary mx-operation-heading"><h2>操作方案 <small>{{operations.length}}</small></h2><a class="mx-strategy-link" href="/supply?tab=strategies">管理货盘策略 ↗</a><button class="primary" :disabled="busy||!config.enabled||(!access.collect_enabled&&!access.listing_enabled)" @click="editOperation()">＋ 新建方案</button></div><p class="mx-panel-description">配置操作与货盘策略，供运营计划复用。</p>
-      <div class="mx-auto-table-wrap"><table class="mx-auto-table mx-operation-table"><thead><tr><th>方案名称</th><th>执行操作</th><th>MY 货盘策略</th><th>关联计划</th><th>操作</th></tr></thead><tbody><tr v-for="o in operations" :key="o.id"><td><b :title="o.name">{{o.name}}</b></td><td>{{taskNames(o.tasks)}}</td><td><span :title="strategies.find(s=>s.id===Number(o.strategies.MY))?.name">{{o.tasks.includes('listing.catalog')?(strategies.find(s=>s.id===Number(o.strategies.MY))?.name||'未配置'):'—'}}</span></td><td>{{o.plans.length}} 个</td><td><button class="mx-text-button" :aria-label="`编辑操作方案 ${o.name}`" @click="editOperation(o)">编辑</button></td></tr><tr v-if="!operations.length"><td colspan="5" class="mx-list-empty">暂无操作方案，点击右上角新建。</td></tr></tbody></table></div>
+    <section class="mx-panel mx-auto-panel"><div class="mx-summary mx-operation-heading"><h2>操作方案 <small>{{operations.length}}</small></h2><a v-if="!readOnly" class="mx-strategy-link" href="/supply?tab=strategies">管理货盘策略 ↗</a><button class="primary" :disabled="readOnly||busy||!config.enabled||(!access.collect_enabled&&!access.listing_enabled)" @click="editOperation()">＋ 新建方案</button></div><p class="mx-panel-description">配置操作与货盘策略，供运营计划复用。</p>
+      <div class="mx-auto-table-wrap"><table class="mx-auto-table mx-operation-table"><thead><tr><th>方案名称</th><th>执行操作</th><th>MY 货盘策略</th><th>关联计划</th><th>操作</th></tr></thead><tbody><tr v-for="o in operations" :key="o.id"><td><b :title="o.name">{{o.name}}</b></td><td>{{taskNames(o.tasks)}}</td><td><span :title="strategies.find(s=>s.id===Number(o.strategies.MY))?.name">{{o.tasks.includes('listing.catalog')?(strategies.find(s=>s.id===Number(o.strategies.MY))?.name||'未配置'):'—'}}</span></td><td>{{o.plans.length}} 个</td><td><button class="mx-text-button" :aria-label="`编辑操作方案 ${o.name}`" @click="editOperation(o)">{{readOnly?'查看':'编辑'}}</button></td></tr><tr v-if="!operations.length"><td colspan="5" class="mx-list-empty">暂无操作方案，点击右上角新建。</td></tr></tbody></table></div>
     </section>
-    <section class="mx-panel mx-auto-panel"><div class="mx-summary"><h2>运营计划 <small>{{plans.length}}</small></h2><button class="primary" :disabled="busy||!config.enabled||!operations.length" @click="edit()">＋ 新建计划</button></div><p class="mx-panel-description">固定店铺与执行时间，按计划自动运营。</p>
-      <div class="mx-auto-table-wrap"><table class="mx-auto-table mx-plan-table"><thead><tr><th>计划 / 设备</th><th>操作方案</th><th>店铺</th><th>执行时间（UTC+8）</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="p in plans" :key="p.id"><td><b :title="p.name">{{p.name}}</b><small :title="devices.find(d=>d.id===p.agent_id)?.name">{{devices.find(d=>d.id===p.agent_id)?.name||'设备不可用'}}</small></td><td><span :title="p.operation_name">{{p.operation_name}}</span></td><td>{{p.environment_ids.length}} 个</td><td>每日 {{p.time}}<small>{{p.next_fire_at?`下次 ${timeText(p.next_fire_at)}`:'定时已暂停'}}</small></td><td><span class="mx-status-pill" :class="{enabled:p.scheduled}">{{p.scheduled?'已启用':'已暂停'}}</span><small v-if="p.last_fire">{{({created:'已创建运行',missed:'已错过',skipped_busy:'前次未结束',failed:'预检失败',preparing:'准备中',cancelled_changed:'配置已修改'} as any)[p.last_fire.status]}}</small></td><td><div class="mx-auto-actions"><button :disabled="busy||!config.enabled" @click="preview(p)">立即运行</button><button :disabled="busy||!config.enabled" @click="togglePlan(p)">{{p.scheduled?'暂停':'启用'}}</button><button @click="edit(p)">编辑</button></div></td></tr><tr v-if="!plans.length"><td colspan="6" class="mx-list-empty">{{operations.length?'暂无运营计划，点击右上角新建。':'先在左侧创建操作方案，再添加运营计划。'}}</td></tr></tbody></table></div>
+    <section class="mx-panel mx-auto-panel"><div class="mx-summary"><h2>运营计划 <small>{{plans.length}}</small></h2><button class="primary" :disabled="readOnly||busy||!config.enabled||!operations.length" @click="edit()">＋ 新建计划</button></div><p class="mx-panel-description">固定店铺与执行时间，按计划自动运营。</p>
+      <div class="mx-auto-table-wrap"><table class="mx-auto-table mx-plan-table"><thead><tr><th>计划 / 设备</th><th>操作方案</th><th>店铺</th><th>执行时间（UTC+8）</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="p in plans" :key="p.id"><td><b :title="p.name">{{p.name}}</b><small :title="devices.find(d=>d.id===p.agent_id)?.name">{{devices.find(d=>d.id===p.agent_id)?.name||'设备不可用'}}</small></td><td><span :title="p.operation_name">{{p.operation_name}}</span></td><td>{{p.environment_ids.length}} 个</td><td>每日 {{p.time}}<small>{{p.next_fire_at?`下次 ${timeText(p.next_fire_at)}`:'定时已暂停'}}</small></td><td><span class="mx-status-pill" :class="{enabled:p.scheduled}">{{p.scheduled?'已启用':'已暂停'}}</span><small v-if="p.last_fire">{{({created:'已创建运行',missed:'已错过',skipped_busy:'前次未结束',failed:'预检失败',preparing:'准备中',cancelled_changed:'配置已修改'} as any)[p.last_fire.status]}}</small></td><td><div class="mx-auto-actions"><button :disabled="readOnly||busy||!config.enabled" @click="preview(p)">立即运行</button><button :disabled="readOnly||busy||!config.enabled" @click="togglePlan(p)">{{p.scheduled?'暂停':'启用'}}</button><button @click="edit(p)">{{readOnly?'查看':'编辑'}}</button></div></td></tr><tr v-if="!plans.length"><td colspan="6" class="mx-list-empty">{{operations.length?'暂无运营计划，点击右上角新建。':'先在左侧创建操作方案，再添加运营计划。'}}</td></tr></tbody></table></div>
     </section>
   </div>
   <div v-if="tab!=='data'" class="mx-bottom">
@@ -369,7 +374,7 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
 <div v-if="feedbackMessage" class="mx-feedback" :class="{'is-error':feedbackSource==='error'}" :role="feedbackSource==='error'?'alert':'status'" aria-live="polite"><span>{{feedbackMessage}}</span><button v-if="feedbackSource==='sync'&&syncHelp" @click="openDevices">前往设备管理</button></div>
 <template v-if="dialog==='devices'">
   <p class="mx-devices-intro">这里只显示你自己的电脑。连接 HubStudio 并同步环境后，即可回到环境列表操作。</p>
-  <MatrixDevices :token="token" :user-id="user.id" :devices="devices" :config="config" :busy="busy" @save="saveConnection" @command="command"/>
+  <MatrixDevices :token="token" :user-id="user.id" :devices="devices" :config="config" :busy="busy" :read-only="readOnly" @save="saveConnection" @command="command"/>
 </template>
 <form v-if="dialog==='plan'" class="mx-form" @submit.prevent="savePlan">
 <label>计划名称<input v-model="editor.name" required maxlength="120"/></label>
@@ -378,13 +383,13 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
 <div class="mx-plan-shops"><span>计划执行店铺</span><PlanShopSelect v-model="editor.environment_ids" :options="planShops" :loading="planShopsLoading" :error="planShopsError" @retry="loadPlanShops()"/><small>固定名单，最多 1000 个环境。立即运行和定时执行均使用此名单。</small></div>
 <label>每日执行时间（UTC+8）<input v-model="editor.time" type="time" required/></label><label><input v-model="editor.scheduled" type="checkbox"/>启用每日定时执行</label>
 <p>设备离线或暂停时错过不补跑；同一计划前次未结束则跳过；设备忙时按队列串行执行。暂停计划只停止未来触发。</p>
-<div class="mx-actions"><button class="primary" :disabled="busy||planShopsLoading||!!planShopsError||!editor.operation_id||!editor.environment_ids.length">保存计划</button><button v-if="editing" type="button" class="mx-danger" :disabled="busy" @click="dialog='deletePlan'">删除计划</button></div></form>
+<div class="mx-actions"><button class="primary" :disabled="readOnly||busy||planShopsLoading||!!planShopsError||!editor.operation_id||!editor.environment_ids.length">保存计划</button><button v-if="editing&&!readOnly" type="button" class="mx-danger" :disabled="busy" @click="dialog='deletePlan'">删除计划</button></div></form>
 <template v-if="dialog==='deletePlan'"><p>确定删除运营计划「{{editor.name}}」？未来不再定时触发，已创建的运行和历史记录保留。</p><div class="mx-actions"><button :disabled="busy" @click="dialog='plan'">取消</button><button class="mx-danger" :disabled="busy" @click="deletePlan">确认删除</button></div></template>
 <form v-if="dialog==='operation'" class="mx-form" @submit.prevent="saveOperation">
 <label>操作方案名称<input v-model="operationEditor.name" required maxlength="120"/></label><fieldset><legend>执行任务</legend><label><input v-model="operationEditor.tasks" type="checkbox" value="listing.catalog" :disabled="!access.listing_enabled&&!operationEditor.tasks.includes('listing.catalog')"/>自动上品</label><label><input v-model="operationEditor.tasks" type="checkbox" value="shop.collect" :disabled="!access.collect_enabled&&!operationEditor.tasks.includes('shop.collect')"/>店铺采集</label></fieldset>
-<template v-if="operationEditor.tasks.includes('listing.catalog')"><label>马来西亚跨境货盘策略（MYR）<select v-model="operationEditor.strategies.MY" required><option :value="null">请选择货盘策略</option><option v-for="s in listingStrategies" :key="s.id" :value="s.id">{{s.name}} · {{s.link_count}} 链接 · {{s.sku_count}} SKU · {{s.price}}</option></select></label><a href="/supply?tab=strategies">管理货盘策略 ↗</a></template>
+<template v-if="operationEditor.tasks.includes('listing.catalog')"><label>马来西亚跨境货盘策略（MYR）<select v-model="operationEditor.strategies.MY" required><option :value="null">请选择货盘策略</option><option v-for="s in listingStrategies" :key="s.id" :value="s.id">{{s.name}} · {{s.link_count}} 链接 · {{s.sku_count}} SKU · {{s.price}}</option></select></label><a v-if="!readOnly" href="/supply?tab=strategies">管理货盘策略 ↗</a></template>
 <p v-if="operationEditor.plans?.length">保存后将影响以下计划的未来运行：{{operationEditor.plans.map((p:any)=>p.name).join('、')}}。已创建运行继续使用原参数。</p>
-<div class="mx-actions"><button class="primary" :disabled="busy||!operationEditor.tasks.length">保存操作方案</button><button v-if="operationEditing" type="button" class="mx-danger" :disabled="busy||!!operationEditor.plans?.length" @click="dialog='deleteOperation'">删除操作方案</button></div></form>
+<div class="mx-actions"><button class="primary" :disabled="readOnly||busy||!operationEditor.tasks.length">保存操作方案</button><button v-if="operationEditing&&!readOnly" type="button" class="mx-danger" :disabled="busy||!!operationEditor.plans?.length" @click="dialog='deleteOperation'">删除操作方案</button></div></form>
 <template v-if="dialog==='deleteOperation'"><p>确定删除操作方案「{{operationEditor.name}}」？</p><div class="mx-actions"><button :disabled="busy" @click="dialog='operation'">取消</button><button class="mx-danger" :disabled="busy" @click="deleteOperation">确认删除</button></div></template>
 <form v-if="dialog==='manual'" class="mx-form mx-manual-form" @submit.prevent="submitManual">
 <p class="mx-manual-intro">已选择 <b>{{selectedCount}}</b> 个环境，系统自动分配执行设备。</p>
@@ -540,7 +545,7 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
 .mx-pairing{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .mx-alert{margin:0 0 12px;font-size:12px}
 .mx-backdrop{z-index:70;padding:16px}
-.mx-dialog{display:block;width:min(1000px,calc(100vw - 32px));max-height:90vh;overflow:auto;padding:20px;border-radius:12px;color:#34394c}
+.mx-dialog{display:block;width:min(1000px,calc(100vw - 32px));max-height:90vh;overflow:auto;padding:20px;border-radius:12px;background:#fff;color:#34394c;box-shadow:0 24px 70px #1d16464d}
 .mx-dialog-devices{width:min(800px,calc(100vw - 32px))}
 .mx-dialog>.mx-summary{min-height:0;margin-bottom:16px;padding:0 0 14px}
 .mx-dialog .mx-summary h2{margin:0;font-size:15px}

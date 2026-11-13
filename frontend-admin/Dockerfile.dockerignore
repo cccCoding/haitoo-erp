@@ -1,0 +1,10 @@
+**
+!frontend-admin/
+!frontend-admin/**
+!frontend/
+!frontend/src/
+!frontend/src/**
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.env*

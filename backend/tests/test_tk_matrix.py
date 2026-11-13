@@ -126,6 +126,38 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         self.assertEqual(self.direct_manual_run(another).status_code,409)
         self.assertEqual(self.request('GET','/hub-v5/runs').json()['total'],1)
 
+    def test_platform_user_view_matches_erp_data_and_run_boundaries(self):
+        from app.hub_v5.management import platform_router
+        from app.security import create_access_token
+        self.app.include_router(platform_router)
+        with self.sessions() as db:
+            admin = User(id=8, name='平台管理员', email='matrix-view@example.com', role=Role.SUPER_ADMIN,
+                         password_hash=db.get(User,1).password_hash)
+            db.add(admin)
+            db.commit()
+            self.tokens[8] = create_access_token(admin)
+        run, _ = self.make_run()
+        item, creds = self.claim(run)
+        shop = self.bind(item, creds)
+        _, uploaded = self.upload(item, creds, self.package())
+        self.assertEqual(uploaded.status_code,200,uploaded.text)
+        self.operation(uid=2, name='另一个用户的方案')
+        sessions = {}
+        for uid in (1,2):
+            response=self.request('POST',f'/admin/matrix/companies/1/users/{uid}/view',uid=8)
+            self.assertEqual(response.status_code,200,response.text)
+            sessions[uid]={'Authorization':f"Bearer {response.json()['token']}"}
+            for path in ('/environments','/agents','/plans','/operations','/runs','/shops/metrics'):
+                direct=self.request('GET','/hub-v5'+path,uid=uid)
+                preview=self.client.get('/hub-v5'+path,headers=sessions[uid])
+                self.assertEqual(preview.status_code,direct.status_code,path)
+                self.assertEqual(preview.json(),direct.json(),path)
+        for path in (f"/runs/{run['id']}",f"/runs/{run['id']}/events",f'/shops/{shop}/snapshots'):
+            preview=self.client.get('/hub-v5'+path,headers=sessions[1])
+            self.assertEqual(preview.status_code,200,(path,preview.text))
+            self.assertEqual(preview.json(),self.request('GET','/hub-v5'+path).json())
+            self.assertEqual(self.client.get('/hub-v5'+path,headers=sessions[2]).status_code,404,path)
+
     def test_direct_manual_all_filtered_distributes_all_environments(self):
         second=self.sync(2,[{'container_code':'second-device','name':'第二电脑环境','site':'MY'}],version=1999999999)[0]
         pv=self.direct_manual_preview(all_filtered=True,environment_ids=[])
