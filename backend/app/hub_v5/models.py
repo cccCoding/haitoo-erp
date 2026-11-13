@@ -285,3 +285,46 @@ class ConnectorRelease(Base):
     revision: Mapped[int] = mapped_column(Integer, default=1)
     history: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class MatrixFlashActivity(TenantRow, Base):
+    """完整扫描发现的秒杀活动；忽略提醒不删除活动。"""
+    __tablename__ = "matrix_flash_activities"
+    __table_args__ = (UniqueConstraint("company_id", "environment_id", "external_id", name="uq_matrix_flash_activity"),)
+    environment_id: Mapped[int] = mapped_column(Integer, index=True)
+    external_id: Mapped[str] = mapped_column(String(120))
+    name: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(24))
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    present: Mapped[bool] = mapped_column(Boolean, default=True)
+    ends_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    product_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime)
+    source_item_id: Mapped[int] = mapped_column(Integer, index=True)
+    dismissed_by: Mapped[list] = mapped_column(JSON, default=list)
+
+
+class MatrixFlashRenewal(TenantRow, Base):
+    """一个来源活动最多创建一个后继；所有副作用前持久化意图。"""
+    __tablename__ = "matrix_flash_renewals"
+    __table_args__ = (UniqueConstraint("activity_id", name="uq_matrix_flash_renewal"),)
+    activity_id: Mapped[int] = mapped_column(Integer)
+    item_id: Mapped[int] = mapped_column(Integer, index=True)
+    stage: Mapped[str] = mapped_column(String(32), default="pending")
+    new_activity_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    terminated: Mapped[bool] = mapped_column(Boolean, default=False)
+    evidence: Mapped[str] = mapped_column(String(1000), default="")
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class MatrixFlashSnapshot(TenantRow, Base):
+    """完整扫描的环境级标记，区分未同步与真实空列表。"""
+    __tablename__ = "matrix_flash_snapshots"
+    __table_args__ = (UniqueConstraint("company_id", "environment_id", name="uq_matrix_flash_snapshot"),)
+    environment_id: Mapped[int] = mapped_column(Integer, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime)
+    source_item_id: Mapped[int] = mapped_column(Integer)
+    activity_count: Mapped[int] = mapped_column(Integer)

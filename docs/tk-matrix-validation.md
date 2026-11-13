@@ -155,3 +155,41 @@
 - 本次没有新增数据库迁移，仍以此前平台发布表迁移为前提。未部署腾讯云或更新本机 API 镜像，未生成真实发布包、配置生产密钥或操作真实店铺。Windows／macOS 的实际系统拦截、许可、原生安装和自动更新仍需对应真机验收，不以模拟错误替代系统验收。
 
 - 浏览器收尾已关闭本次命名会话的两个标签页并确认无遗留；两个 Vite 进程按已核对 PID 精确关闭，使用原镜像恢复 web／admin-web，未更新 API 或触发依赖服务。
+
+
+## 2026-11-13：商家秒杀续期开发验证
+
+- 新增能力 `promotion.flash_sale.renew`，默认临期阈值12小时，可调6～36小时，新活动72小时。仅识别“未开始、进行中、已结束、已终止”四种平台状态；“已结束”只生成自然到期候选，“已终止”不自动处理。
+- 批量执行、操作方案、2/4/6小时间隔计划、完整扫描、活动级意图、显式选择到期活动、忽略提醒、人工核对与恢复均已接入。跨设备同一批次的活动提醒等待批次内环境的临期阶段结束。
+- 秒杀专项HTTP与数据库测试12项通过；连接器专项7项通过。连接器完整回归148项通过，其中25项按原测试条件跳过。前端109项通过，运营端与管理端构建通过。
+- 矩阵与秒杀后端合计109项，107项通过；两项原有货盘测试 `test_listing_rejects_insufficient_quota_without_reserving_combinations`、`test_real_supply_workbook_uses_reserved_groups` 失败。已从原始HEAD导出隔离副本复现相同失败，本次未改动配额及货盘实现。[后端回归](../output/tk-matrix-validation/flash-sale-backend.log)、[秒杀专项](../output/tk-matrix-validation/flash-sale-specialized.log)、[连接器](../output/tk-matrix-validation/flash-sale-agent.log)、[前端](../output/tk-matrix-validation/flash-sale-frontend.log)、[原始HEAD失败复现](../output/tk-matrix-validation/flash-sale-existing-quota-failures.log)。
+- 使用独立临时Chrome和合成接口验证运营端与管理端1440/960/390宽度、到期活动默认不勾选、用户确认前不创建运行、阈值范围及秒杀任务筛选参数；未发现浏览器页面错误。截图：[运营配置桌面](../output/playwright/flash-operation-desktop.png)、[运营配置窄屏](../output/playwright/flash-operation-390.png)、[到期确认](../output/playwright/flash-expired-preview.png)、[管理端](../output/playwright/flash-admin-1440.png)。
+- 真实TikTok页面连接仍超时，未终止或发布真实活动，未将fixture视为平台验收。内置执行器不默认声明秒杀能力；须在真实页面核对分页、控件、复制草稿ID和发布结果后，通过签名插件开放。连接器源码版本已更新，尚未制作或发布安装包，未部署腾讯云或应用新数据库迁移。
+- 临时前端fixture已移除，独立Chrome与Vite已关闭，本次停止的本机web和admin-web容器已恢复并确认健康；保留用户原有浏览器窗口与页面。
+
+
+### 源码本机调试补充
+
+用户通过 `HAITOO_LOCAL_DEBUG=1` 和回环 ERP 地址运行源码连接器时，新增内置MY秒杀适配入口，修复已重启仍提示缺少能力的问题。限定源码进程及实际回环客户端，打包程序、关闭调试或远程ERP连接不会通过此入口开放能力；签名插件仍优先。新增地址边界、打包边界及真实心跳请求载荷测试，包与运行时专项35项、秒杀执行器7项通过。需要重启现有源码进程并重新生成预览，尚未执行真实店铺终止或发布。
+
+
+### 真实活动列表扫描排查
+
+运行#30在扫描开始约31秒后报TimeoutError，原因是扫描器使用未核实的表头及控件定位：真实列为“活动名称、状态、开始时间(GMT+8)、结束时间(GMT+8)、类型、操作”，平台活动ID位于行内`data-republish-entry-guide-promotion-id`/`promotion-action-*`属性，分页是带“下一个”标签的列表项。还需等待异步数据行，兼容历史时间`02:7`等未补零分钟。已按真实DOM修正读取、分页及明确错误提示，重复ID和残缺分页仍拒绝保存。
+
+本次只附加到用户已打开的女装3环境，独立临时页调用只读扫描，不调用续期执行函数或ERP写接口。完整24页识别商家秒杀208个：进行中2、已结束157、已终止49、未开始0；默认12小时内临期0个、近72小时已结束1个。读完即关闭临时页，未导航或关闭原有页面。此次确认扫描可用，不代表商品核对、终止、复制、时间编辑及发布链已通过真实平台验收；列表没有商品数量，仍保持未知且阻止无法核对商品时终止活动。
+
+隔离DOM回归12项通过，覆盖真实分列表头、行属性ID、非按钮分页、隐藏表格、重复ID、缺少ID和分钟未补零。[真实只读结果](../output/tk-matrix-validation/flash-sale-live-readonly.json)、[DOM回归](../output/tk-matrix-validation/flash-sale-real-dom-tests.log)、[现场截图](../output/playwright/flash-failed-live-0.png)。本次未调整前端入口布局，行内“秒杀活动”抽屉建议待用户确定后实施。
+
+本次连接器全量回归155项通过，其中25项按原条件跳过；新增隔离DOM浏览器测试已实际执行。[全量回归](../output/tk-matrix-validation/flash-sale-scanner-full-tests.log)。
+
+
+### 店铺秒杀活动入口改造验证
+
+环境列表新增行内“秒杀活动”，数据大屏按“商品明细 · 秒杀活动”顺序显示，两处复用右侧抽屉。顶部没有未忽略到期候选时不显示入口，仅有待办时展示店铺数与活动数提醒。抽屉展示环境编号、完整同步时间、全部及四种状态、分列表头和续期结果；未同步计数显示“—”，完整空扫描才显示0。已结束活动默认不勾选，预览确认前不创建续期运行。
+
+增加独立只读同步任务与环境级完整快照，完整扫描缺失的旧活动不再出现在当前列表，失败或残缺扫描不覆盖旧数据。接口按环境授权校验，来源活动不可续期时不能通过选择接口绕过；只读任务不能记录终止等写阶段。已取得的开始时间持久保存，旧数据缺失不推断。
+
+专项及迁移20项通过；连接器156项通过（25项按原条件跳过），前端109项通过，运营端构建通过。后端全量112项中110项通过，仍仅有此前原始HEAD已复现的两项货盘配额/组合测试失败，本次未改动对应实现。[后端专项](../output/tk-matrix-validation/flash-store-drawer-backend.log)、[连接器](../output/tk-matrix-validation/flash-store-drawer-agent.log)、[前端](../output/tk-matrix-validation/flash-store-drawer-frontend.log)。
+
+独立Chrome与合成接口验证两个行内入口、四状态切换、同步只创建只读运行、已结束活动默认不勾选且必须确认、未同步不显示0、无待办时隐藏顶部入口及有待办时显示店铺范围，1440/960/390视口无页面横向溢出，无浏览器异常。[浏览器结果](../output/tk-matrix-validation/flash-store-drawer-ui.log)、[桌面](../output/playwright/flash-store-drawer-desktop.png)、[手机](../output/playwright/flash-store-drawer-390.png)、[未同步](../output/playwright/flash-store-drawer-unsynced.png)。测试使用隔离fixture，没有向真实店铺提交同步或续期任务；临时浏览器、Vite及fixture已清理，本次暂停的web容器已恢复。

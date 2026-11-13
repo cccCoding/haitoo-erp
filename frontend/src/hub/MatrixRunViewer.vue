@@ -3,13 +3,13 @@ import {computed,ref,watch,nextTick} from 'vue'
 import {dialogFocus as vDialogFocus} from '../dialog-focus'
 import {label,groupRunEvents} from './matrix'
 const props=defineProps<{run:any;events:any[];itemId:number|null;view:'overview'|'logs';loading:boolean;error:string;more:boolean;busy:boolean;fromHistory:boolean;canManage:boolean;resolving:boolean;notice:string}>()
-const emit=defineEmits<{'update:view':[value:'overview'|'logs'];close:[];back:[];select:[id:number|null];refresh:[];copy:[];resolve:[item:any]}>()
+const emit=defineEmits<{'update:view':[value:'overview'|'logs'];close:[];back:[];select:[id:number|null];refresh:[];copy:[];resolve:[item:any];'flash-sales':[id:number]}>()
 const items=computed(()=>props.run.items||[])
 const selectedItems=computed(()=>props.itemId===null?items.value:items.value.filter((item:any)=>item.id===props.itemId))
 const finished=computed(()=>items.value.filter((item:any)=>['succeeded','partial_success','failed','cancelled','permission_revoked','manually_not_submitted'].includes(item.status)).length)
 const groups=computed(()=>groupRunEvents(props.events))
 const scopeName=computed(()=>props.itemId===null?'全部环境':items.value.find((item:any)=>item.id===props.itemId)?.environment_name||`执行项 #${props.itemId}`)
-const taskName=computed(()=>['listing.catalog','shop.collect'].filter(task=>(props.run.tasks||[]).includes(task)).map(task=>task==='listing.catalog'?'自动上品':'店铺采集').join(' + '))
+const taskName=computed(()=>['listing.catalog','promotion.flash_sale.renew','promotion.flash_sale.collect','shop.collect'].filter(task=>(props.run.tasks||[]).includes(task)).map(task=>task==='listing.catalog'?'自动上品':task==='promotion.flash_sale.renew'?'秒杀续期':task==='promotion.flash_sale.collect'?'同步秒杀活动':'店铺采集').join(' + '))
 const time=(value?:string)=>value?new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Hong_Kong',hour12:false}):'—'
 const environment=(id:number|null)=>id===null?'批次事件':items.value.find((item:any)=>item.id===id)?.environment_name||`执行项 #${id}`
 const resolutionPanel=ref<HTMLElement|null>(null)
@@ -55,6 +55,7 @@ const message=(event:any)=>event?.payload?.message||label(event?.payload?.status
      <article v-for="item in selectedItems" :key="item.id" class="rv-result"><div class="rv-result-title"><div><h3>{{item.environment_name||`环境 #${item.environment_id}`}}</h3><p>{{item.shop?`${item.shop.name} / ${item.shop.site} / ${item.shop.external_id||'按环境归档'}`:'当次尚未识别店铺'}}</p></div><span class="rv-status" :class="item.status">{{label(item.status)}}</span></div>
       <dl class="rv-result-fields"><div><dt>当前步骤</dt><dd>{{label(item.stage)}}</dd></div><div><dt>商品提交</dt><dd>{{label(item.submission)}}</dd></div><div><dt>数据采集</dt><dd>{{label(item.collection_status)}}</dd></div></dl>
       <div v-if="item.error" class="rv-failure"><b>异常原因</b><p>{{item.error}}</p></div><p v-if="item.result?.listing" class="rv-listing-result">平台结果：已接受 {{item.result.listing.accepted.length}} · 明确拒绝 {{item.result.listing.rejected.length}}</p>
+      <p v-if="item.result?.flash_sale">秒杀续期：成功 {{item.result.flash_sale.succeeded||0}} · 失败 {{item.result.flash_sale.failed||0}} · 待核对 {{item.result.flash_sale.awaiting_attention||0}} · 跳过 {{item.result.flash_sale.skipped||0}}</p><button v-if="run.tasks?.includes('promotion.flash_sale.renew')" @click="emit('flash-sales',item.id)">查看秒杀活动明细</button>
       <footer class="rv-result-footer"><details class="rv-attempts"><summary>执行尝试 · {{item.attempts?.length||0}} 次</summary><p v-for="attempt in item.attempts" :key="attempt.id">第 {{attempt.number}} 次 · {{label(attempt.status)}} · {{time(attempt.started_at)}}</p><p v-if="!item.attempts?.length">尚未开始执行</p></details><div><button @click="steps(item)">查看步骤 →</button><button v-if="canManage&&['awaiting_attention','failed','partial_success'].includes(item.status)" class="rv-primary" :disabled="busy" @click="emit('resolve',item)">人工核对</button></div></footer>
      </article><p v-if="!selectedItems.length&&!loading&&!error" class="rv-empty">暂无执行环境</p>
     </section>

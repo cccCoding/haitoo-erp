@@ -115,6 +115,49 @@ class MatrixRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 host.config['matrix_collection_validation_sites']=sites
                 self.assertEqual(runtime.capabilities(),{'shop.collect':['MY'],'listing.catalog':['MY']})
 
+    async def test_local_source_debug_exposes_flash_sale_only_for_actual_loopback_client(self):
+        from types import SimpleNamespace
+        from matrix_runtime import MatrixRuntime
+        from plugins import flash_sales
+        with tempfile.TemporaryDirectory() as temp:
+            host=SimpleNamespace(config={},state={},client=SimpleNamespace(base_url='http://127.0.0.1:8001'),current_claim=None)
+            runtime=MatrixRuntime(host,temp,lambda c:None,AsyncMock())
+            with patch.dict('os.environ',{'HAITOO_LOCAL_DEBUG':'1'}),patch('sys.frozen',False,create=True):
+                for endpoint in ('http://127.0.0.1:8001','http://localhost:8001','http://[::1]:8001','https://localhost:8001'):
+                    host.client.base_url=endpoint
+                    self.assertEqual(runtime.capabilities()[flash_sales.TASK],['MY'])
+                    self.assertEqual(runtime.capabilities()[flash_sales.COLLECT_TASK],['MY'])
+                    self.assertIs(runtime.adapter(flash_sales.COLLECT_TASK,'MY'),flash_sales)
+                    self.assertIs(runtime.adapter(flash_sales.TASK,'MY'),flash_sales)
+                for endpoint in ('https://api.haitorok.com','http://127.0.0.1.attacker.invalid:8001','http://user@localhost:8001',None):
+                    host.client.base_url=endpoint
+                    self.assertNotIn(flash_sales.TASK,runtime.capabilities())
+                    with self.assertRaisesRegex(RuntimeError,'不支持'):runtime.adapter(flash_sales.TASK,'MY')
+                host.client.base_url='http://127.0.0.1:8001'
+                with patch('sys.frozen',True,create=True):self.assertNotIn(flash_sales.TASK,runtime.capabilities())
+                with self.assertRaisesRegex(RuntimeError,'仅支持'):runtime.adapter(flash_sales.TASK,'ID')
+                plugin=SimpleNamespace(CAPABILITIES={flash_sales.TASK:['MY']})
+                runtime.plugin=plugin
+                self.assertIs(runtime.adapter(flash_sales.TASK,'MY'),plugin)
+                runtime.plugin=None
+            with patch.dict('os.environ',{'HAITOO_LOCAL_DEBUG':'0'}):
+                self.assertNotIn(flash_sales.TASK,runtime.capabilities())
+
+    async def test_local_debug_heartbeat_reports_flash_sale_capability(self):
+        from types import SimpleNamespace
+        from matrix_runtime import MatrixRuntime
+        from plugins import flash_sales
+        with tempfile.TemporaryDirectory() as temp:
+            client=SimpleNamespace(base_url='http://127.0.0.1:8001',post=AsyncMock(return_value={'enabled':True,'paused':False,'hub_identity':'team'}))
+            host=SimpleNamespace(config={'matrix_hub_identity':'team'},state={'hub_connected':True},client=client,current_claim=None)
+            runtime=MatrixRuntime(host,temp,lambda c:None,AsyncMock())
+            with patch.dict('os.environ',{'HAITOO_LOCAL_DEBUG':'1'}),patch('sys.frozen',False,create=True),patch('matrix_runtime.load_plugin',return_value=None),patch('matrix_runtime.keys',return_value={}):
+                await runtime.heartbeat(process_commands=False)
+            payload=client.post.await_args.kwargs['json']
+            self.assertEqual(payload['capabilities'][flash_sales.TASK],['MY'])
+            self.assertEqual(payload['capabilities'][flash_sales.COLLECT_TASK],['MY'])
+            self.assertTrue(runtime.enabled)
+
     async def test_partial_plugin_preserves_builtin_collection_and_routes_by_site(self):
         from types import SimpleNamespace
         from matrix_runtime import MatrixRuntime
@@ -334,7 +377,12 @@ class ReleaseArchiveTests(unittest.TestCase):
 
 
 class AutomaticUpdateTests(unittest.IsolatedAsyncioTestCase):
-    setUp = PackageTests.setUp
+    def setUp(self):
+        PackageTests.setUp(self)
+        # 升级场景明确从旧版开始，不依赖当前源码发布版本。
+        installed = patch('updater.VERSION', '5.3.0')
+        installed.start(); self.addCleanup(installed.stop)
+
     package = PackageTests.package
 
     def release(self):

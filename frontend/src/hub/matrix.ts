@@ -102,3 +102,6 @@ export function sortMatrixRows<T>(rows:T[],key:string,direction:'asc'|'desc'|nul
   return direction==='asc'?comparison:-comparison
  })
 }
+
+
+Object.assign(statusLabels,{flash_scan:'扫描商家秒杀活动',flash_pending:'待处理',flash_terminate_intent:'准备终止',flash_terminated:'旧活动已终止',flash_copy_intent:'准备复制',flash_draft_confirmed:'草稿已确认',flash_publish_intent:'准备发布',flash_published:'新活动已发布',flash_unknown:'结果待核对',flash_failed:'续期失败',flash_skipped:'已跳过',flash_cancelled:'已取消',flash_attention:'待核对活动',flash_resolved:'人工核对完成'})

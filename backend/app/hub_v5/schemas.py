@@ -30,7 +30,7 @@ class Heartbeat(Input):
     hub_identity: str | None = Field(default=None, min_length=1, max_length=120)
     hub_connected: bool
     local_paused: bool = False
-    capabilities: dict[Literal["shop.collect", "listing.catalog"], list[Literal["MY", "ID"]]] = Field(default_factory=dict)
+    capabilities: dict[Literal["shop.collect", "listing.catalog", "promotion.flash_sale.renew", "promotion.flash_sale.collect"], list[Literal["MY", "ID"]]] = Field(default_factory=dict)
     update_state: dict = Field(default_factory=dict)
 
 
@@ -84,10 +84,15 @@ class BatchOverride(Input):
     reason: str = Field(default="", max_length=500)
 
 
+class FlashRenewalConfig(Input):
+    threshold_hours: int = Field(default=12, ge=6, le=36)
+
+
 class OperationInput(Input):
     name: str = Field(min_length=1, max_length=120)
-    tasks: list[Literal["shop.collect", "listing.catalog"]] = Field(min_length=1, max_length=2)
+    tasks: list[Literal["shop.collect", "listing.catalog", "promotion.flash_sale.renew", "promotion.flash_sale.collect"]] = Field(min_length=1, max_length=4)
     strategies: dict[Literal["MY"], int] = Field(default_factory=dict)
+    flash_sale: FlashRenewalConfig = Field(default_factory=FlashRenewalConfig)
     expected_revision: int | None = Field(default=None, ge=1)
 
     @field_validator("tasks")
@@ -104,6 +109,8 @@ class PlanInput(Input):
     operation_id: int = Field(gt=0)
     environment_ids: list[int] = Field(min_length=1, max_length=1000)
     scheduled: bool = False
+    schedule_mode: Literal["daily", "interval"] = "daily"
+    interval_hours: Literal[2, 4, 6] = 2
     time: str = Field(default="09:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     timezone: str = "Asia/Shanghai"
     expected_revision: int | None = Field(default=None, ge=1)
@@ -156,8 +163,9 @@ class OperationPreviewInput(PreviewInput):
 
 
 class ManualPreviewInput(PreviewInput):
-    tasks: list[Literal["shop.collect", "listing.catalog"]] = Field(min_length=1, max_length=2)
+    tasks: list[Literal["shop.collect", "listing.catalog", "promotion.flash_sale.renew", "promotion.flash_sale.collect"]] = Field(min_length=1, max_length=4)
     strategies: dict[Literal["MY"], int] = Field(default_factory=dict)
+    flash_sale: FlashRenewalConfig = Field(default_factory=FlashRenewalConfig)
 
     @field_validator("tasks", "environment_ids")
     @classmethod
@@ -312,3 +320,59 @@ class DeviceCommand(Input):
 class ReleaseInput(Input):
     manifest: dict
     enabled: bool = False
+
+
+class FlashObservation(Input):
+    external_id: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=255)
+    activity_type: Literal["商家秒杀活动"]
+    status: Literal["ongoing", "expired", "scheduled", "terminated", "unknown"]
+    starts_at: AwareDatetime | None = None
+    ends_at: AwareDatetime
+    product_count: int | None = Field(default=None, ge=0)
+
+
+class FlashScan(AttemptInput):
+    activities: list[FlashObservation] = Field(max_length=5000)
+    complete: Literal[True]
+
+    @field_validator("activities")
+    @classmethod
+    def unique_activities(cls, value):
+        if len({a.external_id for a in value}) != len(value):
+            raise ValueError("活动ID重复，不能保存残缺扫描")
+        return value
+
+
+class FlashStep(AttemptInput):
+    stage: Literal["pending", "terminate_intent", "terminated", "copy_intent", "draft_confirmed", "publish_intent", "published", "unknown", "failed", "skipped"]
+    new_activity_id: str | None = Field(default=None, min_length=1, max_length=120)
+    starts_at: AwareDatetime | None = None
+    ends_at: AwareDatetime | None = None
+    evidence: str = Field(default="", max_length=1000)
+    error: str | None = Field(default=None, max_length=500)
+
+
+class FlashSelection(Input):
+    activity_ids: list[int] = Field(min_length=1, max_length=1000)
+
+    @field_validator("activity_ids")
+    @classmethod
+    def distinct(cls, value):
+        if len(value) != len(set(value)):
+            raise ValueError("不能重复选择活动")
+        return value
+
+
+class FlashResolve(Input):
+    action: Literal["confirm-published", "resume", "cancel"]
+    new_activity_id: str | None = Field(default=None, min_length=1, max_length=120)
+    evidence: str = Field(min_length=1, max_length=1000)
+    # 人工明确核对的平台状态，不能仅点击重试覆盖未知副作用。
+    verified_stage: Literal["pending", "terminated", "draft_confirmed"] | None = None
+    starts_at: AwareDatetime | None = None
+    ends_at: AwareDatetime | None = None
+
+
+class FlashRecheck(AttemptInput):
+    activity: FlashObservation

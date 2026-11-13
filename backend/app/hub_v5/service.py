@@ -206,6 +206,10 @@ def save_operation(db, actor, payload, identity=None):
     if operation and operation.revision != payload.expected_revision: fail("操作方案已修改，请刷新后重试")
     config = payload.model_dump(exclude={"name", "expected_revision"})
     validate_operation(db, actor, config)
+    if operation and set(config["tasks"]) != {"promotion.flash_sale.renew"}:
+        for linked in db.scalars(select(MatrixPlan).where(MatrixPlan.company_id==actor.company_id, MatrixPlan.deleted.is_(False))):
+            if linked.config["operation_id"]==operation.id and linked.config.get("schedule_mode")=="interval":
+                fail("间隔计划只能引用仅含秒杀续期的方案，请先调整关联计划", 422)
     if not operation:
         operation = MatrixOperation(company_id=actor.company_id, owner_id=actor.id, name=payload.name, config=config, revision=1)
         db.add(operation); db.flush()
@@ -232,6 +236,8 @@ def save_plan(db, actor, payload, identity=None):
     if plan and (plan.deleted or payload.expected_revision != plan.revision): fail("运营计划已修改，请刷新后重试")
     operation = get_operation(db, actor, payload.operation_id)
     validate_operation(db, actor, operation.config)
+    if payload.schedule_mode == "interval" and set(operation.config["tasks"]) != {"promotion.flash_sale.renew"}:
+        fail("间隔计划只支持仅含秒杀续期的操作方案", 422)
     agent = db.get(HubAgent, payload.agent_id)
     device = db.get(MatrixDevice, payload.agent_id)
     if not agent or agent.company_id != actor.company_id or agent.user_id != actor.id or not agent.is_active or not device:
@@ -303,7 +309,7 @@ def preview(db, actor, plan_id, payload, operation_id=None, manual_config=None, 
         for task in config["tasks"]:
             if site in MARKETS and site not in device.capabilities.get(task, []):
                 market = {"MY": "马来西亚", "ID": "印尼"}[site]
-                action = {"shop.collect": "店铺采集", "listing.catalog": "自动上品"}[task]
+                action = {"shop.collect": "店铺采集", "listing.catalog": "自动上品", "promotion.flash_sale.renew": "秒杀续期", "promotion.flash_sale.collect":"同步秒杀活动"}[task]
                 errors.append(f"{env.name}：连接器暂未提供{market}站{action}能力，请更新或重启连接器后重试")
         if "listing.catalog" in config["tasks"]:
             enabled(db, actor.company_id, listing=True)
@@ -319,7 +325,7 @@ def preview(db, actor, plan_id, payload, operation_id=None, manual_config=None, 
     db.add(row)
     if commit: db.commit()
     return {"preview_token": raw, "plan_id": plan.id if plan else None, "operation_id": operation.id if operation else None, "operation_name": operation.name if operation else "临时执行", "revision": revision, "environments": summaries, "errors": errors,
-        "strategies": {s: {"name": v["name"], **v["parameters"]} for s,v in strategies.items()}, "tasks": config["tasks"], "agent_id": agent_id}
+        "strategies": {s: {"name": v["name"], **v["parameters"]} for s,v in strategies.items()}, "tasks": config["tasks"], "flash_sale": config.get("flash_sale", {"threshold_hours":12}), "agent_id": agent_id}
 
 
 def create_run(db, actor, plan_id, payload, key, operation_id=None, commit=True, request_context=None):
@@ -346,8 +352,10 @@ def create_run(db, actor, plan_id, payload, key, operation_id=None, commit=True,
         env = db.get(MatrixEnvironment, target["id"])
         access = db.scalar(select(MatrixAccess.id).where(MatrixAccess.agent_id == agent.id, MatrixAccess.environment_id == target["id"], MatrixAccess.available.is_(True)))
         if not env or env.revision != target["revision"] or not access or env.hub_identity != device.hub_identity: fail("环境目录已变化，请重新预览")
+    frozen = copy.deepcopy(pv.payload)
+    if request_context: frozen["batch_key"] = request_context
     run = MatrixRun(company_id=actor.company_id, owner_id=actor.id, agent_id=agent.id, plan_id=plan_id, plan_revision=revision,
-        idempotency_key=key, request_hash=request_hash, frozen=copy.deepcopy(pv.payload))
+        idempotency_key=key, request_hash=request_hash, frozen=frozen)
     db.add(run); db.flush()
     for env in pv.payload["environments"]:
         db.add(MatrixItem(company_id=actor.company_id, run_id=run.id, environment_id=env["id"], agent_id=agent.id))
@@ -356,10 +364,11 @@ def create_run(db, actor, plan_id, payload, key, operation_id=None, commit=True,
     return run_view(db, run)
 
 
-def manual_preview(db, actor, payload):
+def manual_preview(db, actor, payload, selected_flash_ids=None):
     from .schemas import PreviewInput
     guard(db, actor.company_id); enabled(db, actor.company_id)
-    config = {"tasks": payload.tasks, "strategies": payload.strategies if "listing.catalog" in payload.tasks else {}}
+    config = {"tasks": payload.tasks, "strategies": payload.strategies if "listing.catalog" in payload.tasks else {}, "flash_sale": payload.flash_sale.model_dump()}
+    if selected_flash_ids is not None: config["selected_flash_ids"] = selected_flash_ids
     validate_operation(db, actor, config)
     query = environment_query(db, actor, payload.filters.model_dump())
     if not payload.all_filtered: query = query.where(MatrixEnvironment.id.in_(payload.environment_ids))
@@ -522,7 +531,7 @@ def claim(db, agent, item_id):
     event(db, item, "claimed", {"stage": item.stage, **actual_executor})
     db.commit()
     return {"item": item_view(item), "attempt_id": attempt.id, "claim_token": raw, "fencing": attempt.fencing, "environment": target,
-        "tasks": run.frozen["config"]["tasks"], "lease_seconds": 90}
+        "tasks": run.frozen["config"]["tasks"], "config": run.frozen["config"], "lease_seconds": 90}
 
 
 def reject_queued(db, item, message):
@@ -591,8 +600,14 @@ def report(db, agent, item_id, payload):
     item, attempt, run = checked_attempt(db, agent, item_id, payload)
     requested = payload.status
     tasks = run.frozen["config"]["tasks"]
+    from . import flash_sales
+    if flash_sales.has_unresolved(db, item.id): requested = "awaiting_attention"
     if item.submission in {"request_sent", "unknown"}: requested = "awaiting_attention"
     if requested == "succeeded":
+        if any(t in tasks for t in ("promotion.flash_sale.renew","promotion.flash_sale.collect")):
+            if not item.result.get("flash_sale", {}).get("complete"): fail("秒杀续期缺少完整扫描及完成回执")
+            if flash_sales.has_failures(db, item.id):
+                requested = "partial_success" if (item.result["flash_sale"].get("succeeded",0)>0 or item.submission=="confirmed" or item.collection_status=="committed") else "failed"
         if "listing.catalog" in tasks and item.submission != "confirmed": fail("上品缺少持久化确认")
         if "listing.catalog" in tasks and item.result.get("listing", {}).get("rejected"): fail("部分商品被拒绝，不能报告全成功")
         if "shop.collect" in tasks and item.collection_status != "committed": fail("采集数据尚未提交")
@@ -600,7 +615,7 @@ def report(db, agent, item_id, payload):
             from .models import MatrixCollection
             snap = db.scalar(select(MatrixCollection).where(MatrixCollection.item_id == item.id, MatrixCollection.status == "committed").order_by(MatrixCollection.id.desc()))
             if snap and snap.quality.get("optional_errors"): requested = "partial_success"
-    if requested == "partial_success" and not (item.submission == "confirmed" or item.collection_status == "committed"): requested = "failed"
+    if requested == "partial_success" and not (item.submission == "confirmed" or item.collection_status == "committed" or item.result.get("flash_sale", {}).get("complete")): requested = "failed"
     item.status, item.error = requested, payload.message or None
     if requested == "awaiting_attention" and item.submission == "request_sent": item.submission = "unknown"
     item.stage = requested

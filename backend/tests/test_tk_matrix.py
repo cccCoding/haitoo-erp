@@ -1503,7 +1503,7 @@ class MatrixMigrationSQLTests(unittest.TestCase):
         try:
             with engine.begin() as connection:
                 config = alembic_config(connection)
-                self.assertEqual(ScriptDirectory.from_config(config).get_heads(), ['20261111_77'])
+                self.assertEqual(ScriptDirectory.from_config(config).get_heads(), ['20261113_79'])
                 command.upgrade(config, '20261105_69')
                 connection.execute(text("INSERT INTO hub_runtime_locks "
                     "(id, company_id, container_code, task_id) VALUES (1, 1, 'legacy-env', 42)"))
@@ -1515,6 +1515,9 @@ class MatrixMigrationSQLTests(unittest.TestCase):
                 self.assertIn('design_groups', tables)
                 self.assertIn('matrix_allocations', tables)
                 self.assertIn('connector_releases', tables)
+                self.assertIn('matrix_flash_activities', tables)
+                self.assertIn('matrix_flash_renewals', tables)
+                self.assertIn('matrix_flash_snapshots', tables)
                 command.downgrade(config, '20261105_69')
                 self.assertNotIn('matrix_allocations', inspect(connection).get_table_names())
                 self.assertEqual(tuple(connection.execute(text("SELECT container_code, task_id "

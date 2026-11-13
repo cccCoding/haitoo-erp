@@ -33,9 +33,16 @@ def schedule_plan(db, identity, now=None):
     if not permissions.tasks_allowed(db,owner,operation.config["tasks"]):return
     tz=ZoneInfo("Asia/Shanghai")
     local=now.astimezone(tz)
-    hour,minute=map(int,plan.config["time"].split(":"))
-    for day_offset in (-1,0):
-        fire_local=(local+timedelta(days=day_offset)).replace(hour=hour,minute=minute,second=0,microsecond=0)
+    interval=plan.config.get("schedule_mode")=="interval"
+    if interval:
+        if operation.config["tasks"] != ["promotion.flash_sale.renew"]:return
+        hours=plan.config.get("interval_hours",2)
+        if hours not in (2,4,6):return
+        fires=[local.replace(hour=(local.hour//hours)*hours,minute=0,second=0,microsecond=0)]
+    else:
+        hour,minute=map(int,plan.config["time"].split(":"))
+        fires=[(local+timedelta(days=offset)).replace(hour=hour,minute=minute,second=0,microsecond=0) for offset in (-1,0)]
+    for fire_local in fires:
         fire=fire_local.astimezone(timezone.utc).replace(tzinfo=None)
         if fire < plan.updated_at:continue
         if fire>now.replace(tzinfo=None):continue

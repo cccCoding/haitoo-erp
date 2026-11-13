@@ -102,6 +102,12 @@ class RecoveryTests(RecoveryFixture,unittest.TestCase):
 
 
 class InternalPackageTests(RecoveryFixture,unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        RecoveryFixture.setUp(self)
+        # 固定旧版本，确保测试始终执行下载与升级渠道检查。
+        installed = patch('updater.VERSION', '5.3.0')
+        installed.start(); self.addCleanup(installed.stop)
+
     async def test_internal_update_still_checks_files_and_prepares_before_restart(self):
         from types import SimpleNamespace
         manifest=self.release(internal=True)

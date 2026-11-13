@@ -5,17 +5,19 @@ import json
 import logging
 import math
 import os
+import sys
 import time
 import uuid
 from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlsplit,parse_qs
 import httpx
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as BrowserTimeout
 from hubstudio import HubstudioClient
+from runtime_settings import validate_erp_url
 from updater import UpdateManager,VERSION,keys,target,atomic
 from plugin_manager import load_plugin
-from plugins import tiktok
+from plugins import tiktok, flash_sales  # 正式能力由签名插件开放；源码回环调试可使用内置秒杀实现。
 
 logger=logging.getLogger(__name__)
 
@@ -42,6 +44,16 @@ class MatrixRuntime:
 
     def journal(self):return self.root/'journal'/f"{self.claim['item']['id']}.json"
 
+    def local_flash_debug(self):
+        """只对显式开启本机调试的源码进程开放；以实际客户端地址为准。"""
+        if os.environ.get('HAITOO_LOCAL_DEBUG')!='1' or getattr(sys,'frozen',False):return False
+        endpoint=getattr(self.client,'base_url',None)
+        if not isinstance(endpoint,str):return False
+        try:
+            parsed=urlsplit(validate_erp_url(endpoint,local_debug=True))
+        except (RuntimeError,ValueError):return False
+        return parsed.hostname in {'127.0.0.1','localhost','::1'}
+
     def adapter(self,task=None,site=None):
         if task is not None and site != 'MY':
             raise RuntimeError('当前仅支持马来西亚（MY）跨境店，请更新方案和连接器')
@@ -49,11 +61,15 @@ class MatrixRuntime:
         if task=='shop.collect':return tiktok
         if self.plugin and (task is None or site in self.plugin.CAPABILITIES.get(task,[])):
             return self.plugin
+        if task in {flash_sales.TASK,flash_sales.COLLECT_TASK} and self.local_flash_debug():return flash_sales
         if task is None or site in tiktok.CAPABILITIES.get(task,[]):return tiktok
         raise RuntimeError('当前连接器不支持此站点的任务，请更新连接器')
 
     def capabilities(self):
         capabilities={task:list(sites) for task,sites in tiktok.CAPABILITIES.items()}
+        if self.local_flash_debug():
+            capabilities[flash_sales.TASK]=['MY']
+            capabilities[flash_sales.COLLECT_TASK]=['MY']
         if self.plugin:
             for task,sites in self.plugin.CAPABILITIES.items():
                 if task=='shop.collect':continue
@@ -180,9 +196,9 @@ class MatrixRuntime:
                 try:
                     site=claim['environment']['site']
                     # 按任务、站点固定适配器；插件未覆盖的采集站点使用内置实现。
-                    adapter=self.adapter('listing.catalog' if 'listing.catalog' in tasks else 'shop.collect',site)
+                    adapter=self.adapter('listing.catalog' if 'listing.catalog' in tasks else 'promotion.flash_sale.renew' if 'promotion.flash_sale.renew' in tasks else 'promotion.flash_sale.collect' if 'promotion.flash_sale.collect' in tasks else 'shop.collect',site)
                     collector=self.adapter('shop.collect',site) if 'shop.collect' in tasks else None
-                    if 'listing.catalog' not in tasks:
+                    if not set(tasks)&{'listing.catalog','promotion.flash_sale.renew','promotion.flash_sale.collect'}:
                         await tiktok.open_environment(page,site,self.check_stop,self.progress)
                     target=await self.client.post(self.path('environment-target'),json=self.credentials())
                     identity=target['identity']
@@ -232,8 +248,18 @@ class MatrixRuntime:
                         response=await self.client.post(self.path('listing-result'),json={**self.credentials(),**result})
                         listing_confirmed=response['status']=='confirmed'
                         if response.get('partial'):raise RuntimeError('平台部分商品拒绝，请核对明细')
+                    if set(tasks)&{'promotion.flash_sale.renew','promotion.flash_sale.collect'}:
+                        flash_task='promotion.flash_sale.renew' if 'promotion.flash_sale.renew' in tasks else 'promotion.flash_sale.collect'
+                        renewal_adapter=self.adapter(flash_task,site)
+                        async def flash_rpc(suffix,body):
+                            await self.check_stop()
+                            return await self.client.post(self.path('flash-sales/'+suffix),json={**self.credentials(),**body})
+                        execute_flash=renewal_adapter.renew_flash_sales if flash_task=='promotion.flash_sale.renew' else renewal_adapter.collect_flash_sales
+                        result=await execute_flash(page,site,claim.get('config',{}),flash_rpc,self.check_stop,self.progress)
+                        if not result or not result.get('complete'):
+                            raise RuntimeError('秒杀续期存在待核对活动，请查看活动明细')
                     if 'shop.collect' in tasks:
-                        if 'listing.catalog' in tasks:
+                        if set(tasks)&{'listing.catalog','promotion.flash_sale.renew','promotion.flash_sale.collect'}:
                             await tiktok.open_environment(page,site,self.check_stop,self.progress)
                         package=await collector.collect(page,site,identity,self.check_stop,self.progress)
                         journal={**journal,'identity':identity,'collection':package};atomic(journal_path,journal)
@@ -249,9 +275,10 @@ class MatrixRuntime:
             if isinstance(exc,(KeyboardInterrupt,SystemExit)):raise
             if not self.lost_lease:
                 status='awaiting_attention' if submitted and not listing_confirmed else 'partial_success' if listing_confirmed or collection_committed else 'cancelled' if isinstance(exc,asyncio.CancelledError) else 'failed'
-                message=str(exc)[:500] if isinstance(exc,RuntimeError) else '已停止，请查看阶段和平台结果' if isinstance(exc,asyncio.CancelledError) else '执行失败，请查看当前阶段并人工核对'
+                message=('秒杀活动页面控件等待超时，请检查当前活动页及页面结构；查看连接器日志定位具体步骤' if 'promotion.flash_sale.renew' in tasks else '页面控件等待超时，请查看当前阶段和连接器日志') if isinstance(exc,BrowserTimeout) else str(exc)[:500] if isinstance(exc,RuntimeError) else '已停止，请查看阶段和平台结果' if isinstance(exc,asyncio.CancelledError) else '执行失败，请查看当前阶段并人工核对'
                 with suppress(Exception):await self.client.post(self.path('report'),json={**self.credentials(),'status':status,'message':message})
             logger.warning('矩阵环境项结束 item=%s error_type=%s',item['id'],type(exc).__name__)
+            if isinstance(exc,BrowserTimeout):logger.warning('页面控件等待超时 item=%s detail=%s',item['id'],str(exc)[:1500])
 
     async def check_updates(self):
         if self.claim or self.host.current_claim:return False

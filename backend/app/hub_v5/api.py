@@ -369,9 +369,13 @@ def plans(actor=Depends(matrix_user), db=Depends(get_db)):
         fire=db.scalar(select(MatrixFire).where(MatrixFire.plan_id==plan.id).order_by(MatrixFire.fire_at.desc()).limit(1))
         operation = s.get_operation(db, actor, plan.config["operation_id"])
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
-        hour, minute = map(int, plan.config["time"].split(":"))
-        next_fire = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if next_fire <= now: next_fire += timedelta(days=1)
+        if plan.config.get("schedule_mode")=="interval":
+            interval=plan.config.get("interval_hours",2)
+            next_fire=now.replace(hour=(now.hour//interval)*interval,minute=0,second=0,microsecond=0)+timedelta(hours=interval)
+        else:
+            hour, minute = map(int, plan.config["time"].split(":"))
+            next_fire = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if next_fire <= now: next_fire += timedelta(days=1)
         result.append({**s.plan_view(plan), "operation_name": operation.name, "tasks": operation.config["tasks"],
             "next_fire_at": next_fire if plan.config["scheduled"] else None,
             "last_fire":{"status":fire.status,"fire_at":s.instant(fire.fire_at),"run_id":fire.run_id} if fire else None})
@@ -567,6 +571,9 @@ def resolve(identity:int,payload:Resolve,actor=Depends(matrix_user),db=Depends(g
     s.guard(db,actor.company_id)
     item=s.owned(db,MatrixItem,identity,actor);run=s.run_access(db,actor,item.run_id,manage=True)
     if item.status not in {"awaiting_attention","failed","partial_success"}:s.fail("当前状态不能人工处理")
+    from . import flash_sales
+    if "promotion.flash_sale.renew" in run.frozen["config"]["tasks"] and flash_sales.has_unresolved(db,item.id):
+        s.fail("请先在秒杀活动明细中逐项核对未解决的续期，不能整项重试或取消")
     if payload.action=="confirm-submitted":
         if not item.upload_task_id:s.fail("没有可确认的上品文件")
         if item.submission not in {'request_sent','unknown'}:s.fail('仅结果未知的提交可以人工确认，明确未提交项不能改记成功')
@@ -701,3 +708,74 @@ def export(q:str="",site:str="",group:str="",agent_id:int|None=None,status:str="
     s.audit(db,actor,"metrics.export",0,{"count":len(envs)});db.commit()
     filename = f"店铺数据-{datetime.now(ZoneInfo('Asia/Hong_Kong')):%Y-%m-%d}.csv"
     return Response("\ufeff"+output.getvalue(),media_type="text/csv; charset=utf-8",headers={"Content-Disposition":f"attachment; filename*=UTF-8''{quote(filename)}"})
+
+
+# 活动级接口使用当前执行租约；用户到期选择单独冻结预览。
+@router.post("/agent/items/{identity}/flash-sales/scan")
+def flash_scan(identity:int,payload:FlashScan,agent=Depends(agent_auth),db=Depends(get_db)):
+    from . import flash_sales
+    return flash_sales.scan(db,agent,identity,payload)
+
+
+@router.post("/agent/items/{identity}/flash-sales/{renewal_id}/step")
+def flash_step(identity:int,renewal_id:int,payload:FlashStep,agent=Depends(agent_auth),db=Depends(get_db)):
+    from . import flash_sales
+    return flash_sales.step(db,agent,identity,renewal_id,payload)
+
+
+@router.post("/agent/items/{identity}/flash-sales/complete")
+def flash_complete(identity:int,payload:AttemptInput,agent=Depends(agent_auth),db=Depends(get_db)):
+    from . import flash_sales
+    return flash_sales.complete(db,agent,identity,payload)
+
+
+@router.get("/flash-sales/expired")
+def flash_expired(start:AwareDatetime|None=None,end:AwareDatetime|None=None,page:int=Query(1,ge=1),page_size:int=Query(50,ge=1,le=100),actor=Depends(matrix_user),db=Depends(get_db)):
+    from . import flash_sales
+    return flash_sales.candidates(db,actor,start,end,page,page_size)
+
+
+@router.post("/flash-sales/expired/preview")
+def flash_selected(payload:FlashSelection,actor=Depends(matrix_user),db=Depends(get_db)):
+    from . import flash_sales
+    return flash_sales.selection_preview(db,actor,payload)
+
+
+@router.post("/flash-sales/expired/dismiss")
+def flash_dismiss(payload:FlashSelection,actor=Depends(matrix_user),db=Depends(get_db)):
+    from . import flash_sales
+    return flash_sales.dismiss(db,actor,payload)
+
+
+@router.get("/run-items/{identity}/flash-sales")
+def flash_details(identity:int,actor=Depends(matrix_user),db=Depends(get_db)):
+    from . import flash_sales
+    item=s.owned(db,MatrixItem,identity,actor);s.run_access(db,actor,item.run_id)
+    if not db.scalar(s.environment_query(db,actor).where(MatrixEnvironment.id==item.environment_id)):s.fail("环境不可访问",404)
+    return {"items":[flash_sales.view(db,r) for r in flash_sales.rows(db,identity)]}
+
+
+@router.post("/flash-sales/{identity}/resolve")
+def flash_resolve(identity:int,payload:FlashResolve,actor=Depends(matrix_user),db=Depends(get_db)):
+    from . import flash_sales
+    return flash_sales.resolve(db,actor,identity,payload)
+
+
+@router.post("/agent/items/{identity}/flash-sales/{renewal_id}/recheck")
+def flash_recheck(identity:int,renewal_id:int,payload:FlashRecheck,agent=Depends(agent_auth),db=Depends(get_db)):
+    from . import flash_sales
+    return flash_sales.recheck(db,agent,identity,renewal_id,payload)
+
+
+@router.get("/environments/{identity}/flash-sales")
+def environment_flash_sales(identity:int,status:Literal["","ongoing","scheduled","expired","terminated","unknown"]="",
+    start:AwareDatetime|None=None,end:AwareDatetime|None=None,page:int=Query(1,ge=1),page_size:int=Query(50,ge=1,le=100),
+    actor=Depends(matrix_user),db=Depends(get_db)):
+    from . import flash_sales
+    return flash_sales.environment_activities(db,actor,identity,status,start,end,page,page_size)
+
+
+@router.post("/environments/{identity}/flash-sales/sync")
+def sync_flash_sales(identity:int,request:Request,payload:Input,actor=Depends(matrix_user),db=Depends(get_db)):
+    from . import flash_sales
+    return flash_sales.sync_environment(db,actor,identity,request.headers.get("Idempotency-Key"))
