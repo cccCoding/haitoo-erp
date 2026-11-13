@@ -1461,6 +1461,34 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         self.assertEqual(self.request('GET','/hub-v5/admin/devices?user_id=2').status_code,404)
         self.assertTrue(all(d['user_id']==1 for d in self.request('GET','/hub-v5/admin/devices').json()['items']))
 
+    def test_collected_filter_matches_saved_snapshots_across_list_metrics_and_exports(self):
+        own,_=self.make_run();item,creds=self.claim(own);shop=self.bind(item,creds)
+        _,result=self.upload(item,creds,self.package())
+        self.assertEqual(result.status_code,200,result.text)
+        self.sync(1,[{'container_code':'env-1','name':'测试环境','site':'MY'},
+                     {'container_code':'env-empty','name':'未采集环境','site':'MY'}],version=1999999999)
+        self.assertEqual(self.ar('POST',f'/agent/items/{item}/report',json={**creds,'status':'succeeded'}).status_code,200)
+        # 后续运行尚未采集，也不应遮蔽已有快照。
+        self.make_run()
+        for value,name,count in (('true','测试环境',1),('false','未采集环境',0)):
+            with self.subTest(collected=value):
+                params={'collected':value}
+                listed=self.request('GET','/hub-v5/environments',params=params).json()
+                self.assertEqual(listed['total'],1)
+                self.assertEqual(listed['items'][0]['name'],name)
+                metrics=self.request('GET','/hub-v5/shops/metrics',params=params).json()
+                self.assertEqual((metrics['total'],metrics['collected']),(1,count))
+                exported=self.request('GET','/hub-v5/exports',params=params)
+                self.assertEqual(exported.status_code,200,exported.text)
+                records=list(csv.reader(io.StringIO(exported.text.lstrip('\ufeff'))))
+                self.assertEqual(len(records),2)
+                self.assertIn(name,records[1][0])
+        self.assertEqual(self.request('GET','/hub-v5/environments').json()['total'],2)
+        with self.sessions() as db:
+            db.get(MatrixRun,own['id']).owner_id=3;db.commit()
+        self.assertEqual(self.request('GET','/hub-v5/environments',params={'collected':'true'}).json()['total'],0)
+        self.assertEqual(self.request('GET','/hub-v5/environments',params={'collected':'false'}).json()['total'],2)
+
     def test_shared_shop_snapshots_history_and_exports_are_owner_scoped(self):
         own,_=self.make_run();item,creds=self.claim(own);shop=self.bind(item,creds)
         snapshot,result=self.upload(item,creds,self.package())

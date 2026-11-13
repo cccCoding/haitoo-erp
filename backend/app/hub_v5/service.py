@@ -143,6 +143,14 @@ def environment_query(db, actor, filters=None):
     latest = latest.group_by(MatrixItem.environment_id)
     if f.get("status"):
         query = query.where(MatrixEnvironment.id.in_(select(MatrixItem.environment_id).where(MatrixItem.id.in_(latest), MatrixItem.status == f["status"])))
+    if f.get("collected") is not None:
+        # 与列表快照一致：按当前账号已保存的店铺采集结果判断，不受最近运行状态影响。
+        has_snapshot = select(MatrixCollection.id).join(MatrixItem, MatrixItem.id == MatrixCollection.item_id).join(
+            MatrixRun, MatrixRun.id == MatrixItem.run_id).where(
+                MatrixCollection.company_id == actor.company_id, MatrixCollection.shop_id == MatrixEnvironment.shop_id,
+                MatrixCollection.status == "committed", MatrixRun.company_id == actor.company_id,
+                MatrixRun.owner_id == actor.id).exists()
+        query = query.where(has_snapshot if f["collected"] else ~has_snapshot)
     if f.get("collection"):
         condition = MatrixEnvironment.id.in_(select(MatrixItem.environment_id).where(MatrixItem.id.in_(latest), MatrixItem.collection_status == f["collection"]))
         if f["collection"] == "not_requested":

@@ -3,7 +3,7 @@ import {ref,computed,onMounted,onUnmounted,watch,nextTick} from 'vue'
 import {useRoute,useRouter} from 'vue-router'
 import axios from 'axios'
 import {dialogFocus as vDialogFocus} from '../dialog-focus'
-import {label,display,percent,windowBuckets,filterParams,deviceSetup,environmentSyncTargets,sortMatrixRows} from './matrix'
+import {label,display,percent,windowBuckets,filterParams,deviceSetup,environmentSyncTargets,sortMatrixRows,runEnvironmentScope} from './matrix'
 import AgentUpdateHelp from './AgentUpdateHelp.vue'
 import {updateRecovery} from './update-recovery'
 import AgentConnectionBanner from './AgentConnectionBanner.vue'
@@ -31,7 +31,7 @@ const accessLoaded=ref(false),access=ref({enabled:false,collect_enabled:false,li
 const pairingCode=computed(()=>typeof route.query.hub_agent_pair==='string'?route.query.hub_agent_pair:'')
 const config=ref({enabled:false,listing_enabled:false}),total=ref(0),page=ref(1),size=ref(50),loading=ref(false),busy=ref(false),error=ref(''),notice=ref('')
 const groupOptions=ref<string[]>([])
-const filters=ref({q:'',site:'',group:'',ungrouped:false}),selected=ref<number[]>([]),allFiltered=ref(false)
+const filters=ref({q:'',site:'',group:'',ungrouped:false,collected:''}),selected=ref<number[]>([]),allFiltered=ref(false)
 const appliedFilters=ref({...filters.value}),selectedEnvs=new Map<number,any>()
 const hideAccountNames=ref(true)
 const viewer=createRunViewer(async id=>(await api.get(`/hub-v5/runs/${id}`,auth())).data,async(id,params)=>(await api.get(`/hub-v5/runs/${id}/events`,{...auth(),params})).data,()=>emit('unauthorized'))
@@ -333,6 +333,7 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
       <input v-model="filters.q" class="mx-filter-search" aria-label="搜索环境或店铺" placeholder="搜索环境、编号、店铺或账号"/>
       <select :value="filters.ungrouped?'ungrouped':filters.group?`group:${filters.group}`:''" class="mx-filter-group" aria-label="分组" @change="changeGroup"><option value="">全部分组</option><option v-for="group in groupOptions" :key="group" :value="group?`group:${group}`:'ungrouped'">{{group||'未分组'}}</option></select>
       <select v-model="filters.site" class="mx-filter-site" aria-label="站点"><option value="">全部站点</option><option>MY</option><option value="unknown">未知站点</option></select>
+      <select v-model="filters.collected" aria-label="是否采集"><option value="">是否采集：全部</option><option value="true">已采集</option><option value="false">未采集</option></select>
       <div class="mx-filter-actions"><button type="submit" class="primary">筛选</button></div>
     </form>
     <div v-if="tab==='environments'" class="mx-toolbar"><button class="mx-sync" :disabled="busy||!!syncPending.length" title="同步当前账号已配置团队的所有在线设备" @click="syncEnvironments"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M20 12a8 8 0 1 1-2.3-5.7L20 9"/></svg>{{syncPending.length?'同步中…':'同步环境'}}</button><button :disabled="loading||busy||!total" title="选择当前筛选条件下的全部环境，包含其他分页" @click="selectCurrent">全选当前</button><button @click="selected=[];allFiltered=false">清空选择</button><button type="button" class="mx-hide-names" :aria-pressed="hideAccountNames" @click="hideAccountNames=!hideAccountNames"><span v-if="hideAccountNames" aria-hidden="true">✓</span>隐藏名称</button><button :disabled="!selectedCount||busy||loading" @click="openOverrides">批量设置站点/活跃</button><button class="primary" :disabled="!selectedCount||busy||!config.enabled" @click="openManual">批量执行</button><span class="mx-selected">已选 {{selectedCount}}</span></div>
@@ -354,7 +355,7 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
   </div>
   <div v-if="tab!=='data'" class="mx-bottom">
     <section class="mx-panel mx-runs-panel"><div class="mx-summary"><h2>全部运行记录 <small>{{runTotal}}</small></h2><button :disabled="busy" @click="perform(loadRuns)">刷新</button></div>
-      <div class="mx-runs-scroll"><table class="mx-runs-table"><thead><tr><th>运行 / 操作</th><th>设备 / 范围</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody><tr v-for="r in runs" :key="r.id" :class="{'is-current':run?.id===r.id}"><td><b>#{{r.id}} · {{taskNames(r.tasks)}}</b><small>{{r.plan_name||'临时执行'}} · {{r.trigger==='scheduled'?'定时':'手动'}}</small></td><td>{{r.device_name||`设备 #${r.agent_id}`}}<small>{{r.items.length}} 个环境</small></td><td><span class="mx-state" :class="r.status">{{label(r.status)}}</span></td><td>{{timeText(r.created_at)}}</td><td><div class="mx-row-actions"><button :disabled="busy" @click="openRun(r)">详情</button></div></td></tr><tr v-if="!runs.length"><td colspan="5" class="mx-list-empty">暂无运行记录</td></tr></tbody></table></div>
+      <div class="mx-runs-scroll"><table class="mx-runs-table"><thead><tr><th>运行 / 操作</th><th>设备 / 范围</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody><tr v-for="r in runs" :key="r.id" :class="{'is-current':run?.id===r.id}"><td><b>#{{r.id}} · {{taskNames(r.tasks)}}</b><small>{{r.plan_name||'临时执行'}} · {{r.trigger==='scheduled'?'定时':'手动'}}</small></td><td>{{r.device_name||`设备 #${r.agent_id}`}}<small class="mx-run-scope">{{runEnvironmentScope(r.items)}}</small></td><td><span class="mx-state" :class="r.status">{{label(r.status)}}</span></td><td>{{timeText(r.created_at)}}</td><td><div class="mx-row-actions"><button :disabled="busy" @click="openRun(r)">详情</button></div></td></tr><tr v-if="!runs.length"><td colspan="5" class="mx-list-empty">暂无运行记录</td></tr></tbody></table></div>
       <footer class="mx-pagination"><span>共 {{runTotal}} 次运行</span><button :disabled="busy||runPage<=1" @click="runPage--;perform(loadRuns)">上一页</button><span>{{runPage}} / {{runPages}}</span><button :disabled="busy||runPage>=runPages" @click="runPage++;perform(loadRuns)">下一页</button></footer>
     </section>
   </div>
@@ -428,6 +429,7 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
 .mx-runs-scroll{flex:1;overflow:auto;max-height:390px}
 .mx-runs-table{width:100%;border-collapse:collapse}.mx-runs-table th,.mx-runs-table td{padding:12px 14px;font-size:12px;text-align:left;border-bottom:1px solid #edf0f5;white-space:nowrap}
 .mx-runs-table th{font-size:11px;font-weight:500;color:#8a92a2;background:#fafbfe}.mx-runs-table td b{font-size:12px;font-weight:500}.mx-runs-table td small{display:block;margin-top:5px;font-size:11px;color:#8a92a2}
+.mx-runs-table td .mx-run-scope{max-width:480px;white-space:normal;overflow-wrap:anywhere}
 .mx-runs-table tr.is-current{background:#f8f6fd}.mx-runs-table .mx-row-actions{display:flex;gap:10px}.mx-runs-table .mx-row-actions button{min-height:26px;padding:2px 0;border:0;background:transparent;color:#7053c6;font-size:12px}
 .mx-runs-panel .mx-pagination{border-top:1px solid #edf0f5}
 .mx-dialog.mx-dialog-manual{width:min(600px,calc(100vw - 32px))}.mx-dialog.mx-dialog-editor{width:min(680px,calc(100vw - 32px))}.mx-dialog.mx-dialog-preview{width:min(780px,calc(100vw - 32px))}

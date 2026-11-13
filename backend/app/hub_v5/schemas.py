@@ -128,6 +128,7 @@ class EnvironmentFilters(Input):
     executable: Literal["", "ready", "blocked"] = ""
     group: str = Field(default="", max_length=255)
     ungrouped: bool = False
+    collected: bool | None = None
     agent_id: int | None = Field(default=None, gt=0)
     status: str = Field(default="", max_length=32)
     collection: str = Field(default="", max_length=32)

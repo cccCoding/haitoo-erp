@@ -102,3 +102,7 @@ export function sortMatrixRows<T>(rows:T[],key:string,direction:'asc'|'desc'|nul
   return direction==='asc'?comparison:-comparison
  })
 }
+
+export function runEnvironmentScope(items:{environment_name?:string|null;container_code?:string|null;environment_id:number}[]){
+ return items.map(item=>[item.environment_name||`环境 #${item.environment_id}`,item.container_code].filter(Boolean).join(' / ')).join('、')||'—'
+}

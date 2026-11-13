@@ -258,9 +258,9 @@ def plan_environments(agent_id: int = Query(gt=0), actor=Depends(matrix_user), d
 
 
 @router.get("/environments")
-def environments(q: str = "", site: str = "", group: str = "", agent_id: int | None = None, status: str = "", collection: str = "", exact: str = "", executable: str = "", ungrouped: bool = False,
+def environments(q: str = "", site: str = "", group: str = "", agent_id: int | None = None, status: str = "", collection: str = "", exact: str = "", executable: str = "", ungrouped: bool = False, collected: bool | None = None,
     page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100), actor=Depends(matrix_user), db=Depends(get_db)):
-    filters = {"q": q, "site": site, "group": group, "ungrouped": ungrouped, "agent_id": agent_id, "status": status, "collection": collection, "executable": executable, "exact": exact.splitlines() if exact else []}
+    filters = {"q": q, "site": site, "group": group, "ungrouped": ungrouped, "collected": collected, "agent_id": agent_id, "status": status, "collection": collection, "executable": executable, "exact": exact.splitlines() if exact else []}
     query = s.environment_query(db, actor, filters)
     count = db.scalar(select(func.count()).select_from(query.order_by(None).subquery()))
     envs = db.scalars(query.offset((page-1)*page_size).limit(page_size)).all()
@@ -607,8 +607,8 @@ def resolve(identity:int,payload:Resolve,actor=Depends(matrix_user),db=Depends(g
 
 
 @router.get("/shops/metrics")
-def metrics(q:str="",site:str="",group:str="",agent_id:int|None=None,status:str="",collection:str="",exact:str="",executable:str="",ungrouped:bool=False,actor=Depends(matrix_user),db=Depends(get_db)):
-    envs=db.scalars(s.environment_query(db,actor,{"q":q,"site":site,"group":group,"ungrouped":ungrouped,"agent_id":agent_id,"status":status,"collection":collection,"executable":executable,"exact":exact.splitlines() if exact else []}).limit(20001)).all()
+def metrics(q:str="",site:str="",group:str="",agent_id:int|None=None,status:str="",collection:str="",exact:str="",executable:str="",ungrouped:bool=False,collected:bool|None=None,actor=Depends(matrix_user),db=Depends(get_db)):
+    envs=db.scalars(s.environment_query(db,actor,{"q":q,"site":site,"group":group,"ungrouped":ungrouped,"collected":collected,"agent_id":agent_id,"status":status,"collection":collection,"executable":executable,"exact":exact.splitlines() if exact else []}).limit(20001)).all()
     if len(envs)>20000:s.fail("环境数量超过汇总上限",413)
     unique={}
     for env in envs:
@@ -675,10 +675,10 @@ def shop_export(identity:int,q:str="",actor=Depends(matrix_user),db=Depends(get_
 
 
 @router.get("/exports")
-def export(q:str="",site:str="",group:str="",agent_id:int|None=None,status:str="",collection:str="",exact:str="",executable:str="",ungrouped:bool=False,actor=Depends(matrix_user),db=Depends(get_db)):
+def export(q:str="",site:str="",group:str="",agent_id:int|None=None,status:str="",collection:str="",exact:str="",executable:str="",ungrouped:bool=False,collected:bool|None=None,actor=Depends(matrix_user),db=Depends(get_db)):
     output=io.StringIO();writer=csv.writer(output)
     writer.writerow(["环境名 / 编号","分组","站点","在售商品","有浏览","零浏览","动销率","曝光","点击","CTR","GMV","7日访客","违规分","采集时间"])
-    envs=db.scalars(s.environment_query(db,actor,{"q":q,"site":site,"group":group,"ungrouped":ungrouped,"agent_id":agent_id,"status":status,"collection":collection,"executable":executable,"exact":exact.splitlines() if exact else []}).limit(20001)).all()
+    envs=db.scalars(s.environment_query(db,actor,{"q":q,"site":site,"group":group,"ungrouped":ungrouped,"collected":collected,"agent_id":agent_id,"status":status,"collection":collection,"executable":executable,"exact":exact.splitlines() if exact else []}).limit(20001)).all()
     if len(envs)>20000:s.fail("导出超过20000环境",413)
     for env in envs:
         snapshot=s.own_snapshot(db,actor,env.shop_id) if env.shop_id else None

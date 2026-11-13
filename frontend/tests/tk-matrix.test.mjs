@@ -81,3 +81,11 @@ test('matrix sorting supports natural text, timestamps and stable ties',()=>{
  assert.deepEqual(sortMatrixRows(rows,'snapshot.observed_at','asc').map(row=>row.id),[1,2])
  assert.deepEqual(sortMatrixRows(rows,'snapshot.clicks','desc').map(row=>row.id),[1,2])
 })
+
+test('run scope lists frozen environment names and codes with a fallback for missing names',async()=>{
+ const {runEnvironmentScope}=await import('../src/hub/matrix.ts')
+ assert.equal(runEnvironmentScope([{environment_id:1,environment_name:'马来店铺 A',container_code:'env-1'}]),'马来店铺 A / env-1')
+ assert.equal(runEnvironmentScope([{environment_id:1,environment_name:'店铺 A'},{environment_id:2,container_code:'env-2'}]),'店铺 A、环境 #2 / env-2')
+ assert.equal(runEnvironmentScope([]),'—')
+ assert.deepEqual(filterParams({collected:false,q:''}),{collected:false})
+})
