@@ -61,6 +61,7 @@ services:
         DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
     logging: *default-logging
     environment:
+      SKU_USE_LIMIT: ${SKU_USE_LIMIT:-3}
       DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}}
@@ -206,6 +207,7 @@ services:
     logging: *default-logging
     command: python -m app.supply_worker
     environment:
+      SKU_USE_LIMIT: ${SKU_USE_LIMIT:-3}
       DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}}
@@ -236,6 +238,7 @@ services:
     logging: *default-logging
     command: python -m app.supply_count_worker
     environment:
+      SKU_USE_LIMIT: ${SKU_USE_LIMIT:-3}
       DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -253,6 +256,7 @@ services:
     logging: *default-logging
     command: python -m app.hub_v5.worker
     environment:
+      SKU_USE_LIMIT: ${SKU_USE_LIMIT:-3}
       DATABASE_URL: mysql+pymysql://haitoro:${MYSQL_PASSWORD:?请在 .env 中配置 MYSQL_PASSWORD}@mysql:3306/haitoro
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}}

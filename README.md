@@ -198,6 +198,10 @@ API 文档地址为当前环境的 API 域名加 `/docs`。
 
 TikTok Shop 与 Tokopedia 的 Bothplatforms 双平台模板也从“tk本土店”上传。支持运输保险字段的模板会在草稿导出和货盘策略中显示“运输保险（Shipping insurance）”，默认 `Optional`，可改选 `Mandatory`；该保险仅适用于 Tokopedia。草稿下载、现有自动上品和货盘生成均按所选值填写每个 SKU 行，单平台模板不显示此字段。导出保留上传模板中的平台标记。
 
+## 货盘 SKU 使用上限
+
+货盘中同一账号每个 SKU 的累计使用上限由环境配置 `SKU_USE_LIMIT` 控制，默认 `3`，必须为正整数。本机在 `.env.local`、腾讯云在 `.env` 中配置；API、货盘 Worker、素材统计 Worker 和矩阵 Worker 使用同一值。配置在进程启动时加载，修改后需重新创建对应容器；素材数量快照约每五分钟更新。
+
 ## HubStudio 与 TK 矩阵
 
 本机只运行 HubStudio 连接器，不提供本地工作页。连接器首次启动打开 ERP 的“TK 矩阵”页面，由员工使用 ERP 账号明确授权此电脑；系统凭据库只保存电脑令牌。设备连接、Hub 团队身份、环境列表、方案、任务及运行日志统一在 ERP 管理。

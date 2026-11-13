@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     supply_heartbeat_seconds: int = Field(default=15, gt=0)
     supply_lease_seconds: int = Field(default=90, gt=0)
     supply_file_retention_days: int = Field(default=7, gt=0)
+    # 同一账号每个 SKU 的累计使用上限，API 与各 Worker 必须保持一致。
+    sku_use_limit: int = Field(default=3, ge=1, le=2147483647)
 
     @model_validator(mode="after")
     def validate_supply_lease(self):
