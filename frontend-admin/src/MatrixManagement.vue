@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed,onMounted,onUnmounted,ref,watch} from 'vue'
+import {computed,nextTick,onMounted,onUnmounted,ref,watch} from 'vue'
 import {useRoute,useRouter} from 'vue-router'
 import axios from 'axios'
 import MatrixDevices from './hub/MatrixDevices.vue'
@@ -17,6 +17,7 @@ const tab=computed<TabId>(()=>tabs.some(t=>t.id===route.query.tab)?String(route.
 const companyId=ref<number|null>(null)
 const enabledCompanies=computed(()=>props.companies.filter(company=>company.tk_matrix_enabled))
 const viewUserId=ref<number|null>(null),viewSession=ref<{token:string;user:any}|null>(null),viewLoading=ref(false),viewError=ref('')
+const viewUserSelect=ref<HTMLSelectElement|null>(null)
 let viewSeq=0
 const statsLoaded=ref(false)
 const config=ref({enabled:false,listing_enabled:false})
@@ -51,6 +52,14 @@ async function perform(fn:()=>Promise<void>){
   try{await fn()}catch(e){handle(e)}finally{busy.value=false}
 }
 function setTab(value:TabId){notice.value='';error.value='';void router.replace({query:{...route.query,tab:value}})}
+async function openMemberView(identity:number){
+  notice.value='';error.value=''
+  await router.replace({query:{...route.query,tab:'user',matrix_tab:'environments'}})
+  if(viewUserId.value===identity)void loadUserView()
+  else viewUserId.value=identity
+  await nextTick()
+  viewUserSelect.value?.focus()
+}
 function resetCompanyData(){statsSeq++;devicesSeq++;loading.value=false;error.value='';notice.value='';statsLoaded.value=false;stats.value={current:{},summary:{},by_member:[],daily:[]};members.value=[];devices.value=[];deviceUser.value='';filters.value.user_id='';filters.value.agent_id=''}
 async function loadConfig(){
   const id=companyId.value
@@ -155,7 +164,7 @@ defineExpose({refresh})
         </select>
       </label>
       <label v-if="tab==='user'&&companyId">用户视角
-        <select v-model="viewUserId"><option :value="null">请选择用户</option><option v-for="member in members" :key="member.id" :value="member.id" :disabled="!member.is_active||member.is_expired">{{member.name}} · {{member.user_code||`#${member.id}`}}{{!member.is_active?'（已停用）':member.is_expired?'（已过期）':!member.enabled?'（未授权）':''}}</option></select>
+        <select ref="viewUserSelect" v-model="viewUserId"><option :value="null">请选择用户</option><option v-for="member in members" :key="member.id" :value="member.id" :disabled="!member.is_active||member.is_expired">{{member.name}} · {{member.user_code||`#${member.id}`}}{{!member.is_active?'（已停用）':member.is_expired?'（已过期）':!member.enabled?'（未授权）':''}}</option></select>
       </label>
     </div>
   </div>
@@ -202,7 +211,7 @@ defineExpose({refresh})
       </section>
       <section class="panel mm-panel">
         <div class="mm-section-title"><h2>成员执行统计</h2><small>成功率按成功 /（成功 + 失败 + 部分成功）计算；取消不计入分母</small></div>
-        <div class="mm-table-wrap"><table><thead><tr><th>成员</th><th>运行次数</th><th>排队中</th><th>执行中</th><th>成功</th><th>失败</th><th>部分成功</th><th>待人工</th><th>已取消</th><th>成功率</th></tr></thead><tbody><tr v-for="m in stats.by_member" :key="m.user_id"><td>{{m.name}}</td><td>{{m.total}}</td><td>{{m.queued}}</td><td>{{m.running}}</td><td>{{m.succeeded}}</td><td>{{m.failed}}</td><td>{{m.partial_success}}</td><td>{{m.awaiting_attention}}</td><td>{{m.cancelled}}</td><td>{{percent(m.success_rate)}}</td></tr><tr v-if="!stats.by_member.length"><td colspan="10" class="mm-empty">暂无符合筛选条件的运行</td></tr></tbody></table></div>
+        <div class="mm-table-wrap"><table><thead><tr><th>成员</th><th>运行次数</th><th>排队中</th><th>执行中</th><th>成功</th><th>失败</th><th>部分成功</th><th>待人工</th><th>已取消</th><th>成功率</th></tr></thead><tbody><tr v-for="m in stats.by_member" :key="m.user_id"><td><button type="button" class="mm-member-link" :aria-label="`查看 ${m.name} 的用户视角`" @click="openMemberView(m.user_id)">{{m.name}}</button></td><td>{{m.total}}</td><td>{{m.queued}}</td><td>{{m.running}}</td><td>{{m.succeeded}}</td><td>{{m.failed}}</td><td>{{m.partial_success}}</td><td>{{m.awaiting_attention}}</td><td>{{m.cancelled}}</td><td>{{percent(m.success_rate)}}</td></tr><tr v-if="!stats.by_member.length"><td colspan="10" class="mm-empty">暂无符合筛选条件的运行</td></tr></tbody></table></div>
       </section>
     </template>
     <template v-else-if="tab==='devices'">
@@ -255,6 +264,9 @@ defineExpose({refresh})
 .mm-chart-track i{display:block;width:26px;max-width:75%;border-radius:4px 4px 0 0;background:#93b4fd}
 .mm-chart-day span{color:var(--admin-primary);font-size:11px}
 .mm-chart-day small{font-size:10px}
+.mm-member-link{width:auto;min-height:28px;margin:0;padding:2px 0;border:0;border-radius:2px;background:transparent;color:var(--admin-primary);font:inherit;text-align:left;cursor:pointer}
+.mm-member-link:hover{text-decoration:underline}
+.mm-member-link:focus-visible{outline:2px solid var(--admin-primary);outline-offset:3px}
 .mm-table-wrap{max-width:100%;overflow:auto}
 table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:12px}
 th,td{padding:11px 20px;border-bottom:1px solid #eef2f7;text-align:left;line-height:20px}
