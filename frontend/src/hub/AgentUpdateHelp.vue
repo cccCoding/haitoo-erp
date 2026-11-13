@@ -7,7 +7,8 @@ const state=computed(()=>props.device?.update_state)
 const recovery=computed(()=>updateRecovery(state.value))
 const channel=computed(()=>state.value?.distribution||props.distribution||'signed')
 const guidance=ref(false),loading=ref(false),downloading=ref(''),error=ref(''),loaded=ref(false),requested=ref(false)
-type Installer={id:number;platform:string;arch:string;version:string;filename:string;distribution:string}
+const downloadStarted=ref('')
+type Installer={id:number;platform:string;arch:string;version:string;filename:string;size:number;distribution:string}
 const packages=ref<Installer[]>([])
 const api=axios.create({baseURL:import.meta.env.VITE_API_URL||'http://localhost:8000'})
 const retryBusy=ref(false)
@@ -27,10 +28,12 @@ async function show(){guidance.value=!guidance.value;if(guidance.value)await loa
 async function download(item:Installer){
  if(downloading.value)return
  downloading.value=item.filename;error.value=''
+ downloadStarted.value=''
  try{
-  const {data}=await api.get(`/hub-v5/agent-installers/${item.platform}/${item.arch}/file`,{...auth(),params:{release_id:item.id,distribution:item.distribution,agent_id:props.device?.id},responseType:'blob'})
+  const {data}=await api.post(`/hub-v5/agent-installers/${item.platform}/${item.arch}/download-url`,null,{...auth(),params:{release_id:item.id,distribution:item.distribution,agent_id:props.device?.id},})
   if(controller.signal.aborted)return
-  const url=URL.createObjectURL(data),link=document.createElement('a');link.href=url;link.download=item.filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
+  const link=document.createElement('a');link.href=data.url;link.referrerPolicy='no-referrer'
+  document.body.appendChild(link);link.click();link.remove();downloadStarted.value=item.filename
  }catch{if(!controller.signal.aborted)error.value='下载失败，版本可能已撤回。请刷新列表后重试。'}finally{downloading.value=''}
 }
 async function retry(){
@@ -52,7 +55,8 @@ onUnmounted(()=>{controller.abort();if(retryTimer)clearTimeout(retryTimer)})
  <div class="auh-actions"><button type="button" :aria-expanded="guidance" @click="show">{{guidance?'收起处理步骤':'查看处理步骤与手动安装包'}}</button><button v-if="recovery.canRetry&&canRetry" type="button" :disabled="busy||retryBusy||requested||!device?.online" @click="retry">{{requested?'已请求重试':retryBusy?'发送中…':'处理后重试更新'}}</button></div>
  <p v-if="requested" role="status">请求已发出；连接器会在收到命令且当前任务结束后重新检查，未处理的系统限制仍可能阻止启动。</p>
  <div v-if="guidance" class="auh-guide"><ol><li v-for="step in platformSteps(device?.platform||'',String(state?.error_code||''))" :key="step">{{step}}</li></ol><p>下载列表显示当前向此设备开放的最新版本，可能与上次失败版本不同。已撤回的版本不再提供。</p><p v-if="channel==='internal'">内部 ZIP 未经商业代码签名／Apple 公证，仍可能需要系统人工确认；更新包继续验证公司的签名和文件摘要。</p>
- <div class="auh-actions"><button type="button" :disabled="loading" @click="load">{{loading?'正在读取…':'刷新安装包'}}</button><button v-for="item in packages" :key="item.id" type="button" :disabled="!!downloading" @click="download(item)">{{downloading===item.filename?'下载中…':`下载 ${item.platform==='windows'?'Windows':'macOS'} ${item.arch==='arm64'?'Apple 芯片':'Intel / x64'} ${item.version}${item.distribution==='internal'?'（内部 ZIP）':''}`}}</button></div>
+ <div class="auh-actions"><button type="button" :disabled="loading" @click="load">{{loading?'正在读取…':'刷新安装包'}}</button><button v-for="item in packages" :key="item.id" type="button" :disabled="!!downloading" @click="download(item)">{{downloading===item.filename?'正在获取下载链接…':`下载 ${item.platform==='windows'?'Windows':'macOS'} ${item.arch==='arm64'?'Apple 芯片':'Intel / x64'} ${item.version}${item.distribution==='internal'?'（内部 ZIP）':''}`}}</button></div>
+ <p v-if="downloadStarted" role="status">已请求浏览器下载 {{downloadStarted}}，请在浏览器下载列表查看进度。若下载失败，请重新点击下载。</p>
  <p v-if="loaded&&!packages.length&&!loading">当前暂无匹配安装包，请联系平台管理员上传或开放对应版本。</p></div><p v-if="error" class="auh-error" role="alert">{{error}}</p>
 </section>
 </template>

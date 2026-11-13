@@ -25,6 +25,9 @@ class MemoryStorage:
         content = self.objects[Key]
         return {'Body': io.BytesIO(content), 'ContentLength': len(content), 'ETag': hashlib.md5(content).hexdigest()}
 
+    def head_object(self, Bucket, Key):
+        return {'ContentLength': len(self.objects[Key])}
+
     def generate_presigned_url(self, operation, Params, ExpiresIn):
         return 'https://private.example/' + Params['Key']
     def copy_object(self, Bucket, Key, CopySource, CopySourceIfMatch, **kw):
@@ -94,6 +97,59 @@ class InstallerTests(SupplyFixture, unittest.TestCase):
             self.assertEqual(self.request('GET', '/admin/connector-releases', uid=uid).status_code, 403)
         self.assertIn(self.client.get('/hub-v5/agent-installers').status_code, (401, 403))
         self.assertEqual(self.request('GET', '/hub-v5/agent-installers', uid=4).status_code, 403)
+
+    def test_browser_download_link_signs_only_installer_without_reading_file(self):
+        row = self.stage(self.upload().json(), 'stable').json()
+        url = f"/hub-v5/agent-installers/macos/arm64/download-url?release_id={row['id']}"
+        with patch.object(self.storage, 'generate_presigned_url', wraps=self.storage.generate_presigned_url) as sign, \
+             patch.object(self.storage, 'get_object', side_effect=AssertionError('must not proxy file')):
+            response = self.request('POST', url)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['expires_in'], 300)
+        self.assertEqual(response.json()['url'], 'https://private.example/5.2.0/macos/arm64/installer')
+        self.assertIn('no-store', response.headers['cache-control'])
+        self.assertEqual(sign.call_args.args, ('get_object',))
+        self.assertEqual(sign.call_args.kwargs['ExpiresIn'], 300)
+        params = sign.call_args.kwargs['Params']
+        self.assertEqual(params['Bucket'], 'private')
+        self.assertEqual(params['ResponseContentType'], 'application/octet-stream')
+        self.assertIn("attachment; filename*=UTF-8''HaitooHubAgent-", params['ResponseContentDisposition'])
+        self.assertIn('no-store', params['ResponseCacheControl'])
+        self.assertEqual(self.stage(row, 'withdrawn').status_code, 200)
+        with patch.object(self.storage, 'generate_presigned_url') as sign:
+            self.assertEqual(self.request('POST', url).status_code, 404)
+            sign.assert_not_called()
+
+    def test_browser_link_requires_auth_channel_and_visible_test_device(self):
+        row = self.stage(self.upload(self.package(distribution='internal')).json(), 'test', [10]).json()
+        url = f"/hub-v5/agent-installers/macos/arm64/download-url?release_id={row['id']}&distribution=internal&agent_id=10"
+        self.assertEqual(self.request('POST', url).status_code, 200)
+        with patch.object(self.storage, 'generate_presigned_url') as sign:
+            self.assertIn(self.client.post(url).status_code, (401, 403))
+            self.assertEqual(self.request('POST', url, uid=4).status_code, 403)
+            self.assertEqual(self.request('POST', url, uid=5).status_code, 404)
+            self.assertEqual(self.request('POST', url.replace('&agent_id=10', '')).status_code, 404)
+            self.assertEqual(self.request('POST', url.replace('distribution=internal', 'distribution=signed')).status_code, 404)
+            sign.assert_not_called()
+
+    def test_platform_browser_link_is_scoped_to_selected_company(self):
+        from app.hub_v5.management import platform_router
+        self.app.include_router(platform_router)
+        row = self.stage(self.upload().json(), 'test', [10]).json()
+        url = f"/admin/matrix/companies/1/agent-installers/macos/arm64/download-url?release_id={row['id']}&agent_id=10"
+        self.assertEqual(self.request('POST', url, uid=8).status_code, 200)
+        self.assertEqual(self.request('POST', url, uid=1).status_code, 403)
+        self.assertEqual(self.request('POST', url.replace('/companies/1/', '/companies/2/'), uid=8).status_code, 404)
+
+    def test_browser_link_reports_missing_corrupt_or_unavailable_storage(self):
+        self.stage(self.upload().json(), 'stable')
+        url = '/hub-v5/agent-installers/macos/arm64/download-url'
+        with patch.object(self.storage, 'head_object', side_effect=RuntimeError('missing')):
+            self.assertEqual(self.request('POST', url).status_code, 503)
+        with patch.object(self.storage, 'head_object', return_value={'ContentLength': 999}):
+            self.assertEqual(self.request('POST', url).status_code, 502)
+        with patch.object(self.storage, 'generate_presigned_url', side_effect=RuntimeError('unavailable')):
+            self.assertEqual(self.request('POST', url).status_code, 503)
 
     def test_immutable_content_signature_and_missing_installer(self):
         row = self.upload().json(); self.assertEqual(self.upload().json()['id'], row['id'])

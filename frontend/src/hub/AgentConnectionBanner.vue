@@ -6,6 +6,7 @@ import { probeLocalAgent, type LocalAgentState } from './local-agent'
 const props = defineProps<{ token: string }>()
 const state = ref<LocalAgentState>('checking')
 const checking = ref(false), downloading = ref(''), error = ref('')
+const downloadStarted=ref('')
 type Installer = {id: number; platform: 'windows' | 'macos'; arch: string; version: string; filename: string; size: number; distribution:string}
 const installers = ref<Installer[]>([]), packagesLoaded = ref(false)
 const api = axios.create({baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000'})
@@ -31,14 +32,16 @@ async function loadInstallers() {
 async function download(item: Installer) {
   if (downloading.value) return
   downloading.value = item.filename; error.value = ''
+  downloadStarted.value=''
   try {
-    const {data} = await api.get(`/hub-v5/agent-installers/${item.platform}/${item.arch}/file`, {
-      params:{release_id:item.id,distribution:item.distribution}, headers:{Authorization:`Bearer ${props.token}`}, responseType:'blob', signal:requests.signal,
+    const {data} = await api.post(`/hub-v5/agent-installers/${item.platform}/${item.arch}/download-url`,null,{
+      params:{release_id:item.id,distribution:item.distribution}, headers:{Authorization:`Bearer ${props.token}`}, signal:requests.signal,
     })
     if (disposed) return
-    const url = URL.createObjectURL(data), anchor = document.createElement('a')
-    anchor.href = url; anchor.download = item.filename; anchor.click()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    const anchor = document.createElement('a')
+    anchor.href=data.url;anchor.referrerPolicy='no-referrer'
+    document.body.appendChild(anchor);anchor.click();anchor.remove()
+    downloadStarted.value=item.filename
   } catch {
     if (!disposed) error.value = '安装包下载失败，请重试；若尚未提供安装包，请联系管理员。'
   } finally {downloading.value = ''}
@@ -78,11 +81,12 @@ onUnmounted(() => {
         <strong>{{state==='legacy'?'更新连接器以继续使用':'启动连接器以同步本机环境'}}</strong>
         <template v-for="platform in (['windows','macos'] as const)" :key="platform">
           <button v-for="item in installers.filter(i=>i.platform===platform)" :key="item.filename" type="button" :disabled="!!downloading" @click="download(item)">
-            {{downloading===item.filename?'下载中…':`下载 ${platform==='windows'?'Windows':'macOS'} 版${item.arch==='arm64'?(platform==='macos'?'（Apple 芯片）':'（ARM64）'):'（Intel / x64）'}${item.distribution==='internal'?' · 内部 ZIP':''}`}}
+            {{downloading===item.filename?'正在获取下载链接…':`下载 ${platform==='windows'?'Windows':'macOS'} 版${item.arch==='arm64'?(platform==='macos'?'（Apple 芯片）':'（ARM64）'):'（Intel / x64）'}${item.distribution==='internal'?' · 内部 ZIP':''}`}}
           </button>
           <span v-if="packagesLoaded&&!installers.some(i=>i.platform===platform)" class="local-agent-unavailable">{{platform==='windows'?'Windows':'macOS'}} 版暂未提供</span>
         </template>
       </div>
+      <p v-if="downloadStarted" role="status">已请求浏览器下载 {{downloadStarted}}，请在浏览器下载列表查看进度。若下载失败，请重新点击下载。</p>
       <p>安装并启动连接器后，在 ERP 授权此电脑。之后连接器自动检查更新。若已启动仍未检测到，请允许浏览器访问本地网络。</p>
       <p v-if="error" role="alert">{{error}}</p>
     </aside>

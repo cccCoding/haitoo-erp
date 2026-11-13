@@ -72,6 +72,29 @@ def download(row, kind):
         'Content-Disposition': f"attachment; filename*=UTF-8''{quote(filename)}"})
 
 
+def installer_download_link(row):
+    """权限校验后签发短时私有链接；安装包由浏览器直接流式下载。"""
+    info = row.manifest['installer']
+    expires_in = 300
+    try:
+        client, bucket, key = location(row.manifest, 'installer')
+        metadata = client.head_object(Bucket=bucket, Key=key)
+    except Exception:
+        s.fail('发布文件暂不可用，请稍后重试', 503)
+    if metadata.get('ContentLength') != info['size']:
+        s.fail('发布文件大小不一致', 502)
+    try:
+        url = client.generate_presigned_url('get_object', Params={
+            'Bucket': bucket, 'Key': key,
+            'ResponseContentDisposition': f"attachment; filename*=UTF-8''{quote(info['filename'], safe='')}",
+            'ResponseContentType': 'application/octet-stream',
+            'ResponseCacheControl': 'private, no-store',
+        }, ExpiresIn=expires_in)
+    except Exception:
+        s.fail('下载链接暂不可用，请稍后重试', 503)
+    return {'url': url, 'expires_in': expires_in, 'filename': info['filename']}
+
+
 @router.get('/admin/connector-releases')
 def list_releases(actor=Depends(platform_admin), db=Depends(get_db)):
     rows = []

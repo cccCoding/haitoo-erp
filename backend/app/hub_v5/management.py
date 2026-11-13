@@ -9,7 +9,7 @@ from ..database import get_db
 from ..models import User, Role, HubAgent, Company
 from ..security import current_user
 from .api import matrix_admin, config as matrix_config, set_connection as set_device_connection, device_command as run_device_command
-from .installers import installers_impl, installer_download
+from .installers import installers_impl, installer_download, installer_download_url
 from .models import MatrixMemberPermission, MatrixRun, MatrixItem, MatrixCommand, MatrixAccess, MatrixEnvironment
 from .schemas import MemberPermissionInput, ConnectionInput, DeviceCommand
 from . import service as s, permissions
@@ -198,3 +198,9 @@ def platform_installers(company_id:int,distribution:Literal['signed','internal',
 def platform_installer_download(company_id:int,platform:str,arch:str,release_id:int|None=None,
     distribution:Literal["signed","internal"]="signed",agent_id:int|None=None,actor=Depends(platform_actor),db=Depends(get_db)):
     return installer_download(platform,arch,release_id,distribution,agent_id,actor=actor,db=db)
+
+
+@platform_router.post("/companies/{company_id}/agent-installers/{platform}/{arch}/download-url")
+def platform_installer_download_url(company_id:int,platform:str,arch:str,release_id:int|None=None,
+    distribution:Literal["signed","internal"]="signed",agent_id:int|None=None,actor=Depends(platform_actor),db=Depends(get_db)):
+    return installer_download_url(platform,arch,release_id,distribution,agent_id,actor=actor,db=db)

@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 
 from .models import SupplyJob, SupplyJobMaterial
 
-SKU_USE_LIMIT = 3
+SKU_USE_LIMIT = 3000
 QUOTA_VERSION = 1
 INSUFFICIENT_MATERIALS = "同一账号每个 SKU 累计最多使用 3 次，当前筛选条件下剩余素材额度不足，请减少链接数量或补充素材"
 
