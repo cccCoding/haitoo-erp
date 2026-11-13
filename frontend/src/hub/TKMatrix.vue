@@ -476,10 +476,10 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
 .mx-summary span{color:#8a92a2;font-size:12px;line-height:20px}
 .mx-summary button:first-of-type{margin-left:auto}
 .mx-filters{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0;padding:12px 16px 8px}
-.matrix .mx-filters input,.matrix .mx-filters select{display:block;flex:1 1 112px;width:112px;min-width:112px;max-width:none;height:36px;min-height:36px;margin:0;padding:7px 10px;border:1px solid #dfe2eb;border-radius:6px;background:#fff;color:#50586b;font:inherit;font-size:12px;font-weight:400;line-height:20px}
-.matrix .mx-filters .mx-filter-search{flex:1.2 1 134px;min-width:134px;max-width:214px}
-.matrix .mx-filters .mx-filter-group{flex:1 1 120px;min-width:120px;max-width:200px}
-.matrix .mx-filters .mx-filter-site{flex:0 1 160px;min-width:140px}
+/* 筛选控件默认保持紧凑宽度，新增下拉框也不吸收整行剩余空间。 */
+.matrix .mx-filters input,.matrix .mx-filters select{display:block;flex:0 1 144px;width:144px;min-width:0;max-width:144px;height:36px;min-height:36px;margin:0;padding:7px 10px;border:1px solid #dfe2eb;border-radius:6px;background:#fff;color:#50586b;font:inherit;font-size:12px;font-weight:400;line-height:20px}
+.matrix .mx-filters .mx-filter-search{flex-basis:240px;width:240px;max-width:240px}
+.matrix .mx-filters .mx-filter-group{flex-basis:160px;width:160px;max-width:160px}
 .mx-filters input::placeholder{color:#989fac}
 .mx-filters input:focus,.mx-filters select:focus{outline:none;border-color:#9f8ade;box-shadow:0 0 0 2px #6043d412}
 .mx-filter-actions{display:flex;align-items:center;flex:none;gap:8px}
@@ -571,16 +571,16 @@ onUnmounted(()=>{viewer.close();disposed=true;++generation;if(poll)clearInterval
 .mx-preview-env{display:flex;flex-direction:column;gap:8px;max-height:240px;overflow:auto;padding:12px;font-size:12px}
 .mx-state.succeeded{color:#31916a}.mx-state.awaiting_attention,.mx-state.failed{color:#b84a51}.mx-state.running{color:#7762bb}
 @media(max-width:1500px){.mx-cards{grid-template-columns:repeat(4,minmax(0,1fr))}}
-@media(max-width:1100px){.mx-bottom{grid-template-columns:1fr}.matrix .mx-filters .mx-filter-search{max-width:none}.matrix .mx-filters .mx-filter-group{max-width:none}}
+@media(max-width:1100px){.mx-bottom{grid-template-columns:1fr}}
 @media(max-width:700px){
  .mx-automation{grid-template-columns:1fr}
  .matrix.page{padding:12px}
  .mx-tabs{gap:20px}.matrix .mx-tabs button{min-height:40px}
  .mx-device-count{padding-left:8px;font-size:11px}
  .mx-summary{gap:6px 10px;padding:10px 12px}.mx-summary span{font-size:11px}
- .mx-filters{gap:8px;padding:12px 12px 8px}
- .matrix .mx-filters input,.matrix .mx-filters select,.matrix .mx-filters .mx-filter-group,.matrix .mx-filters .mx-filter-site{flex:1 1 calc(50% - 4px);width:calc(50% - 4px);min-width:0;max-width:none}
- .matrix .mx-filters .mx-filter-search{flex-basis:100%;width:100%;min-width:0}
+ .mx-filters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:12px 12px 8px}
+ .matrix .mx-filters input,.matrix .mx-filters select,.matrix .mx-filters .mx-filter-group{width:100%;min-width:0;max-width:none}
+ .matrix .mx-filters .mx-filter-search{grid-column:1/-1;width:100%;min-width:0;max-width:none}
  .mx-filter-actions{width:100%}.mx-filter-actions button{flex:1}
  .mx-toolbar{gap:6px;padding:8px 12px 12px}.mx-toolbar button{font-size:11px;padding:4px 8px}
  .mx-pagination{gap:6px;padding:10px 12px}.mx-pagination>span:first-child{width:100%;margin:0}
