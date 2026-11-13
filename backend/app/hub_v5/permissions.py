@@ -16,7 +16,7 @@ def access(db, user):
     granted = bool(valid and (administrator or row and row.company_id == user.company_id and row.enabled))
     return {"enabled": granted, "collect_enabled": granted,
         "listing_enabled": granted,
-        "view_scope": "company" if administrator else row.view_scope if granted and user.role != Role.SUPPLY_USER else "own",
+        "view_scope": "own",
         "revision": row.revision if row and row.company_id == user.company_id else 0, "is_admin": administrator}
 
 
@@ -33,8 +33,3 @@ def tasks_allowed(db, user, tasks):
 
 def require_tasks(db, user, tasks):
     require_access(db, user)
-
-
-def company_view(db, user):
-    value = access(db, user)
-    return value["enabled"] and value["view_scope"] == "company"

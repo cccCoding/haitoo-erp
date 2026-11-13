@@ -94,8 +94,7 @@ def device_view(db, agent):
 def accessible_ids(db, actor, agent_id=None):
     query = select(MatrixAccess.environment_id).join(HubAgent, HubAgent.id == MatrixAccess.agent_id).where(
         MatrixAccess.available.is_(True), HubAgent.company_id == actor.company_id, HubAgent.is_active.is_(True))
-    if not permissions.company_view(db, actor):
-        query = query.where(HubAgent.user_id == actor.id)
+    query = query.where(HubAgent.user_id == actor.id)
     if agent_id:
         query = query.where(HubAgent.id == agent_id)
     return query
@@ -124,7 +123,7 @@ def environment_query(db, actor, filters=None):
             MatrixAccess.available.is_(True),MatrixAccess.seen_at>utcnow()-timedelta(minutes=5),HubAgent.company_id==actor.company_id,
             HubAgent.is_active.is_(True),HubAgent.last_seen_at>utcnow()-timedelta(seconds=45),MatrixDevice.hub_connected.is_(True),
             MatrixDevice.paused.is_(False),MatrixDevice.local_paused.is_(False),MatrixDevice.hub_identity==MatrixEnvironment.hub_identity,
-            capability,True if actor.role==Role.COMPANY_ADMIN else HubAgent.user_id==actor.id,
+            capability,HubAgent.user_id==actor.id,
             True if not f.get('agent_id') else HubAgent.id==f['agent_id'],
             ~HubAgent.id.in_(select(MatrixItem.agent_id).where(MatrixItem.status=='running')),
             ~HubAgent.id.in_(select(HubUploadTask.agent_id).where(HubUploadTask.status=='running',HubUploadTask.agent_id.is_not(None))),
@@ -140,7 +139,7 @@ def environment_query(db, actor, filters=None):
         values = list(dict.fromkeys(str(x).strip() for x in f["exact"] if str(x).strip()))[:500]
         query = query.where(or_(MatrixEnvironment.name.in_(values), MatrixEnvironment.container_code.in_(values), MatrixEnvironment.serial.in_(values)))
     latest = select(func.max(MatrixItem.id)).join(MatrixRun, MatrixRun.id == MatrixItem.run_id).where(MatrixItem.company_id == actor.company_id)
-    if not permissions.company_view(db, actor): latest = latest.where(MatrixRun.owner_id == actor.id)
+    latest = latest.where(MatrixRun.owner_id == actor.id)
     latest = latest.group_by(MatrixItem.environment_id)
     if f.get("status"):
         query = query.where(MatrixEnvironment.id.in_(select(MatrixItem.environment_id).where(MatrixItem.id.in_(latest), MatrixItem.status == f["status"])))
@@ -152,15 +151,25 @@ def environment_query(db, actor, filters=None):
     return query.order_by(MatrixEnvironment.group_name, MatrixEnvironment.name, MatrixEnvironment.id)
 
 
+def own_snapshot(db, actor, shop_id):
+    # 店铺身份在公司内去重，但采集结果必须按运行所有者隔离。
+    return db.scalar(select(MatrixCollection).join(MatrixItem, MatrixItem.id == MatrixCollection.item_id)
+        .join(MatrixRun, MatrixRun.id == MatrixItem.run_id).where(
+            MatrixCollection.company_id == actor.company_id, MatrixCollection.shop_id == shop_id,
+            MatrixCollection.status == "committed", MatrixRun.company_id == actor.company_id,
+            MatrixRun.owner_id == actor.id)
+        .order_by(MatrixCollection.committed_at.desc(), MatrixCollection.id.desc()).limit(1))
+
+
 def env_view(db, env, actor):
     from .collections import snapshot_view
     agents = db.scalars(select(HubAgent).join(MatrixAccess, MatrixAccess.agent_id == HubAgent.id).where(MatrixAccess.environment_id == env.id,
         MatrixAccess.available.is_(True), HubAgent.company_id == actor.company_id, HubAgent.is_active.is_(True),
-        True if permissions.company_view(db, actor) else HubAgent.user_id == actor.id)).all()
+        HubAgent.user_id == actor.id)).all()
     item = db.scalar(select(MatrixItem).where(MatrixItem.environment_id == env.id,
-        True if permissions.company_view(db, actor) else MatrixItem.run_id.in_(select(MatrixRun.id).where(MatrixRun.owner_id == actor.id))).order_by(MatrixItem.id.desc()).limit(1))
+        MatrixItem.run_id.in_(select(MatrixRun.id).where(MatrixRun.owner_id == actor.id))).order_by(MatrixItem.id.desc()).limit(1))
     shop = db.get(MatrixShop, env.shop_id) if env.shop_id else None
-    snap = db.get(MatrixCollection, shop.snapshot_id) if shop and shop.snapshot_id else None
+    snap = own_snapshot(db, actor, shop.id) if shop else None
     return {"id": env.id, "name": env.name, "container_code": env.container_code, "serial": env.serial, "group": env.group_name,
         "site": env.override_site or env.observed_site, "site_source": "manual" if env.override_site else "observed", "revision": env.revision,
         "activity_status": env.activity_status or ("normal" if snap and snap.header.get("metrics", {}).get("shop_status") == "normal" else "unchecked"),
@@ -398,7 +407,7 @@ def manual_runs(db, actor, payload, key):
 
 def run_access(db, actor, identity, manage=False):
     run = owned(db, MatrixRun, identity, actor)
-    if run.owner_id != actor.id and (actor.role != Role.COMPANY_ADMIN if manage else not permissions.company_view(db, actor)):
+    if run.owner_id != actor.id:
         fail("运行不存在", 404)
     return run
 

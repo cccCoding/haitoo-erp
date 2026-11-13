@@ -125,7 +125,7 @@ def heartbeat(payload: Heartbeat, agent=Depends(agent_auth), db=Depends(get_db))
 def set_connection(identity: int, payload: ConnectionInput, actor=Depends(matrix_user), db=Depends(get_db)):
     s.guard(db, actor.company_id)
     agent = db.get(HubAgent, identity)
-    if not agent or not agent.is_active or agent.company_id != actor.company_id or actor.role != Role.COMPANY_ADMIN and agent.user_id != actor.id:
+    if not agent or not agent.is_active or agent.company_id != actor.company_id or not getattr(actor, "platform_management", False) and agent.user_id != actor.id:
         s.fail("设备不存在", 404)
     device = db.get(MatrixDevice, identity)
     if not device: s.fail("请先启动新版连接器")
@@ -146,7 +146,7 @@ def set_connection(identity: int, payload: ConnectionInput, actor=Depends(matrix
 def device_command(identity: int, payload: DeviceCommand, actor=Depends(matrix_user), db=Depends(get_db)):
     s.guard(db, actor.company_id)
     agent = db.get(HubAgent, identity)
-    if not agent or agent.company_id != actor.company_id or actor.role != Role.COMPANY_ADMIN and agent.user_id != actor.id: s.fail("设备不存在", 404)
+    if not agent or agent.company_id != actor.company_id or not getattr(actor, "platform_management", False) and agent.user_id != actor.id: s.fail("设备不存在", 404)
     device = db.get(MatrixDevice, identity)
     if payload.kind == "revoke":
         admin(actor); agent.is_active = False
@@ -281,9 +281,6 @@ def override(identity: int, payload: Override, actor=Depends(matrix_user), db=De
     env = db.scalar(s.environment_query(db, actor).where(MatrixEnvironment.id == identity))
     if not env: s.fail("环境不存在",404)
     if payload.expected_revision != env.revision: s.fail("环境已修改，请刷新")
-    if actor.role != Role.COMPANY_ADMIN:
-        foreign = db.scalar(select(MatrixAccess.id).join(HubAgent, HubAgent.id == MatrixAccess.agent_id).where(MatrixAccess.environment_id == identity, MatrixAccess.available.is_(True), HubAgent.user_id != actor.id))
-        if foreign: s.fail("共享环境的站点/活跃设置须由管理员操作", 403)
     s.audit(db, actor, "environment.site", identity, {"before":env.override_site,"after":payload.site,"reason":payload.reason})
     env.override_site, env.revision = payload.site, env.revision+1
     db.commit(); return {"revision":env.revision}
@@ -299,9 +296,6 @@ def batch_override(payload: BatchOverride, actor=Depends(matrix_user), db=Depend
     rows=db.scalars(s.environment_query(db,actor).where(MatrixEnvironment.id.in_(expected))).all()
     if len(rows)!=len(expected):s.fail("部分环境已不可访问",404)
     if any(row.revision!=expected[row.id] for row in rows):s.fail("部分环境已修改，整批未保存；请刷新后重新选择")
-    if actor.role!=Role.COMPANY_ADMIN and db.scalar(select(MatrixAccess.id).join(HubAgent,HubAgent.id==MatrixAccess.agent_id).where(
-        MatrixAccess.environment_id.in_(expected),MatrixAccess.available.is_(True),HubAgent.user_id!=actor.id).limit(1)):
-        s.fail("共享环境的站点/活跃设置须由管理员操作",403)
     for row in rows:
         for field in sorted(fields):
             attr = "override_site" if field == "site" else field
@@ -412,13 +406,13 @@ def history_items(db, actor, environment_id):
     # 包括识别店铺前失败的执行，以及同一稳定店铺在其他环境中的执行。
     condition = MatrixItem.environment_id == environment_id
     if env.shop_id: condition = or_(condition, MatrixItem.shop_id == env.shop_id)
-    return select(MatrixItem.id).where(MatrixItem.company_id == actor.company_id, condition)
+    return select(MatrixItem.id).join(MatrixRun, MatrixRun.id == MatrixItem.run_id).where(MatrixItem.company_id == actor.company_id, MatrixRun.owner_id == actor.id, condition)
 
 
 @router.get("/runs")
 def runs(page: int = Query(1,ge=1), page_size: int = Query(20,ge=1,le=50), environment_id: int | None = Query(None,gt=0), actor=Depends(matrix_user), db=Depends(get_db)):
     query = select(MatrixRun).where(MatrixRun.company_id == actor.company_id)
-    if not permissions.company_view(db, actor): query=query.where(MatrixRun.owner_id == actor.id)
+    query=query.where(MatrixRun.owner_id == actor.id)
     item_ids = history_items(db, actor, environment_id) if environment_id else None
     if item_ids is not None:
         query = query.where(MatrixRun.id.in_(select(MatrixItem.run_id).where(MatrixItem.id.in_(item_ids))))
@@ -621,8 +615,8 @@ def metrics(q:str="",site:str="",group:str="",agent_id:int|None=None,status:str=
         if env.shop_id:unique[env.shop_id]=env
     snapshots=[]
     for env in unique.values():
-        shop=db.get(MatrixShop,env.shop_id)
-        if shop.snapshot_id:snapshots.append(c.snapshot_view(db,db.get(MatrixCollection,shop.snapshot_id)))
+        snapshot=s.own_snapshot(db,actor,env.shop_id)
+        if snapshot:snapshots.append(c.snapshot_view(db,snapshot))
     groups={}
     for snap in snapshots:
         if snap["window_start"] is None or snap["window_end"] is None: continue
@@ -648,7 +642,7 @@ def metrics(q:str="",site:str="",group:str="",agent_id:int|None=None,status:str=
 @router.get("/shops/{identity}/snapshots")
 def snapshots(identity:int,page:int=Query(1,ge=1),page_size:int=Query(50,ge=1,le=100),q:str="",actor=Depends(matrix_user),db=Depends(get_db)):
     if not db.scalar(s.environment_query(db,actor).where(MatrixEnvironment.shop_id==identity).limit(1)):s.fail("店铺不存在",404)
-    shop=db.get(MatrixShop,identity);row=db.get(MatrixCollection,shop.snapshot_id) if shop.snapshot_id else None
+    row=s.own_snapshot(db,actor,identity)
     if not row:return {"snapshot":None,"products":[],"total":0}
     values=[p for part in db.scalars(select(MatrixPart).where(MatrixPart.kind=="collection",MatrixPart.parent_id==row.id).order_by(MatrixPart.number)) for p in part.payload if not q or q.casefold() in (p["name"]+p["external_id"]).casefold()]
     return {"snapshot":c.snapshot_view(db,row),"products":values[(page-1)*page_size:page*page_size],"total":len(values)}
@@ -687,8 +681,8 @@ def export(q:str="",site:str="",group:str="",agent_id:int|None=None,status:str="
     envs=db.scalars(s.environment_query(db,actor,{"q":q,"site":site,"group":group,"ungrouped":ungrouped,"agent_id":agent_id,"status":status,"collection":collection,"executable":executable,"exact":exact.splitlines() if exact else []}).limit(20001)).all()
     if len(envs)>20000:s.fail("导出超过20000环境",413)
     for env in envs:
-        shop=db.get(MatrixShop,env.shop_id) if env.shop_id else None
-        snap=c.snapshot_view(db,db.get(MatrixCollection,shop.snapshot_id)) if shop and shop.snapshot_id else {}
+        snapshot=s.own_snapshot(db,actor,env.shop_id) if env.shop_id else None
+        snap=c.snapshot_view(db,snapshot) if snapshot else {}
         observed = snap.get("observed_at")
         collected_at = datetime.fromisoformat(observed.replace("Z", "+00:00")).astimezone(ZoneInfo("Asia/Hong_Kong")).strftime("%Y/%m/%d %H:%M:%S") if observed else "未采集"
         writer.writerow([csv_value(v) for v in [f"{env.name}\n{env.container_code}",env.group_name or "未分组",env.override_site or env.observed_site or "未知",

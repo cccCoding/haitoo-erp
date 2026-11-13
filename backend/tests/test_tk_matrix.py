@@ -1208,6 +1208,52 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         self.assertEqual(result['items'][0]['group'],'')
         self.assertEqual(self.request('GET','/hub-v5/environments',uid=2).json()['groups'],[])
 
+    def test_members_and_supply_users_can_override_accessible_shared_environments(self):
+        shared=self.sync(2,[{'container_code':'env-1','name':'测试环境','site':'MY'}])[0]
+        self.assertEqual(shared,self.env)
+        with self.sessions() as db:
+            db.add(MatrixCompany(company_id=2,enabled=True,listing_enabled=True));db.commit()
+        foreign=self.sync(3,[{'container_code':'foreign-env','name':'其他公司环境','site':'MY'}])[0]
+        with self.sessions() as db:
+            db.add(MatrixMemberPermission(user_id=4,company_id=1,enabled=True,view_scope='own'))
+            db.commit()
+        for uid in (2,4):
+            with self.subTest(uid=uid):
+                with self.sessions() as db:
+                    db.get(HubAgent,2).user_id=uid
+                    revision=db.get(MatrixEnvironment,shared).revision
+                    db.commit()
+                # 同环境仍由管理员电脑访问，成员和货盘用户均可修改。
+                result=self.request('PATCH',f'/hub-v5/environments/{shared}/overrides',uid=uid,
+                    json={'expected_revision':revision,'site':'ID','reason':'核对站点'})
+                self.assertEqual(result.status_code,200,result.text)
+                revision=result.json()['revision']
+                payload={'environments':[{'id':shared,'expected_revision':revision}],'site':'MY','activity_status':'normal'}
+                result=self.request('PATCH','/hub-v5/environments/overrides',uid=uid,json=payload)
+                self.assertEqual(result.status_code,200,result.text)
+                row=self.request('GET','/hub-v5/environments',uid=uid).json()['items'][0]
+                self.assertEqual((row['site'],row['activity_status']),('MY','normal'))
+                self.assertEqual(self.request('PATCH','/hub-v5/environments/overrides',uid=uid,json=payload).status_code,409)
+                # 非本人可见环境仍不可修改，混合批次整批回滚。
+                self.assertEqual(self.request('PATCH',f'/hub-v5/environments/{foreign}/overrides',uid=uid,
+                    json={'expected_revision':1,'site':'ID','reason':'不可访问'}).status_code,404)
+                result=self.request('PATCH','/hub-v5/environments/overrides',uid=uid,json={
+                    'environments':[{'id':shared,'expected_revision':row['revision']},{'id':foreign,'expected_revision':1}],
+                    'activity_status':'closed'})
+                self.assertEqual(result.status_code,404,result.text)
+                with self.sessions() as db:
+                    self.assertEqual(db.get(MatrixEnvironment,shared).activity_status,'normal')
+                    self.assertEqual(db.get(MatrixEnvironment,shared).revision,row['revision'])
+                    self.assertEqual(db.scalar(select(MatrixAudit.actor_id).where(MatrixAudit.subject_id==shared,
+                        MatrixAudit.action=='environment.activity_status').order_by(MatrixAudit.id.desc()).limit(1)),uid)
+        # 同公司但只有别人电脑可见的环境也不可修改。
+        with self.sessions() as db:
+            db.get(MatrixAccess,db.scalar(select(MatrixAccess.id).where(MatrixAccess.agent_id==2,MatrixAccess.environment_id==shared))).available=False
+            revision=db.get(MatrixEnvironment,shared).revision
+            db.commit()
+        self.assertEqual(self.request('PATCH','/hub-v5/environments/overrides',uid=4,json={
+            'environments':[{'id':shared,'expected_revision':revision}],'activity_status':'closed'}).status_code,404)
+
     def test_batch_override_is_atomic_on_revision_conflict(self):
         second=self.sync(1,[{'container_code':'env-1','name':'测试环境','group_name':'分组A','site':'MY'},
             {'container_code':'env-2','name':'第二环境','group_name':'分组A','site':'MY'}],version=1999999999)[1]
@@ -1381,15 +1427,79 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
         with self.sessions() as db:db.get(HubAgent,1).is_active=False;db.commit()
         self.assertEqual(self.request('POST','/hub-agents/register',uid=4,json={'name':'电脑1','platform':'macos'}).status_code,403)
 
-    def test_company_view_is_read_only_for_other_members_runs_and_devices(self):
-        run,_=self.make_run()
-        with self.sessions() as db:db.get(MatrixMemberPermission,2).view_scope='company';db.commit()
-        self.assertEqual(self.request('GET','/hub-v5/environments',uid=2).json()['total'],1)
-        self.assertEqual(self.request('GET',f"/hub-v5/runs/{run['id']}",uid=2).status_code,200)
-        self.assertEqual(self.request('POST',f"/hub-v5/runs/{run['id']}/stop",uid=2,json={}).status_code,404)
-        self.assertEqual(self.request('POST','/hub-v5/agents/1/commands',uid=2,json={'kind':'pause'}).status_code,404)
-        self.assertEqual(self.request('GET','/hub-v5/agents').json()[0]['user_id'],1)
-        self.assertTrue(all(d['user_id']==2 for d in self.request('GET','/hub-v5/agents',uid=2).json()))
+    def test_all_roles_only_see_own_matrix_data_despite_legacy_company_scope(self):
+        own,_=self.make_run()
+        member=self.member_run()
+        with self.sessions() as db:
+            db.get(MatrixMemberPermission,2).view_scope='company'
+            db.add(MatrixMemberPermission(user_id=4,company_id=1,enabled=True,view_scope='company'))
+            db.commit()
+        for uid,visible,hidden in ((1,own,member),(2,member,own),(4,None,own)):
+            with self.subTest(uid=uid):
+                self.assertEqual(self.request('GET','/hub-v5/access',uid=uid).json()['view_scope'],'own')
+                envs=self.request('GET','/hub-v5/environments',uid=uid).json()
+                expected=[visible['items'][0]['environment_id']] if visible else []
+                self.assertEqual([e['id'] for e in envs['items']],expected)
+                self.assertEqual(self.request('GET','/hub-v5/shops/metrics',uid=uid).json()['total'],len(expected))
+                runs=self.request('GET','/hub-v5/runs',uid=uid).json()
+                self.assertEqual([r['id'] for r in runs['items']],[visible['id']] if visible else [])
+                self.assertEqual(runs['total'],int(visible is not None))
+                self.assertTrue(all(p['owner_id']==uid for p in self.request('GET','/hub-v5/plans',uid=uid).json()))
+                for suffix in ('','/events'):
+                    self.assertEqual(self.request('GET',f"/hub-v5/runs/{hidden['id']}{suffix}",uid=uid).status_code,404)
+                self.assertEqual(self.request('POST',f"/hub-v5/runs/{hidden['id']}/stop",uid=uid,json={}).status_code,404)
+                self.assertEqual(self.request('POST',f"/hub-v5/run-items/{hidden['items'][0]['id']}/resolve",uid=uid,json={'action':'retry'}).status_code,404)
+                filtered=self.request('GET','/hub-v5/environments',uid=uid,params={'agent_id':hidden['agent_id']}).json()
+                self.assertEqual(filtered['total'],0)
+        with self.sessions() as db:
+            db.get(HubAgent,8).user_id=4
+            db.get(MatrixRun,member['id']).owner_id=4
+            db.commit()
+        self.assertEqual(self.request('GET','/hub-v5/runs',uid=4).json()['items'][0]['id'],member['id'])
+        self.assertEqual(self.request('GET','/hub-v5/environments',uid=4).json()['total'],1)
+        self.assertEqual(self.request('GET',f"/hub-v5/runs/{member['id']}").status_code,404)
+        self.assertEqual(self.request('GET','/hub-v5/admin/devices?user_id=2').status_code,404)
+        self.assertTrue(all(d['user_id']==1 for d in self.request('GET','/hub-v5/admin/devices').json()['items']))
+
+    def test_shared_shop_snapshots_history_and_exports_are_owner_scoped(self):
+        own,_=self.make_run();item,creds=self.claim(own);shop=self.bind(item,creds)
+        snapshot,result=self.upload(item,creds,self.package())
+        self.assertEqual(result.status_code,200,result.text)
+        member=self.member_run()
+        with self.sessions() as db:
+            member_item=db.get(MatrixItem,member['items'][0]['id'])
+            member_item.shop_id=shop
+            db.get(MatrixEnvironment,member_item.environment_id).shop_id=shop
+            original=db.get(MatrixCollection,snapshot)
+            other=MatrixCollection(company_id=1,item_id=member_item.id,shop_id=shop,content_hash='f'*64,
+                part_count=1,header=copy.deepcopy(original.header),status='committed',committed_at=datetime.utcnow())
+            db.add(other);db.flush()
+            db.add(MatrixPart(kind='collection',parent_id=other.id,number=0,digest='f'*64,payload=[{'external_id':'private','name':'成员私有商品','active':True,'impressions':99,'clicks':9}]))
+            db.get(MatrixShop,shop).snapshot_id=other.id
+            other_id=other.id;db.commit()
+        for uid,expected,impressions in ((1,snapshot,10),(2,other_id,99)):
+            with self.subTest(uid=uid):
+                env=self.request('GET','/hub-v5/environments',uid=uid).json()['items'][0]
+                self.assertEqual(env['snapshot']['id'],expected)
+                self.assertEqual(env['snapshot']['impressions'],impressions)
+                detail=self.request('GET',f'/hub-v5/shops/{shop}/snapshots',uid=uid).json()
+                self.assertEqual(detail['snapshot']['id'],expected)
+                metrics=self.request('GET','/hub-v5/shops/metrics',uid=uid).json()
+                self.assertEqual(metrics['windows'][0]['impressions'],impressions)
+                history=self.request('GET','/hub-v5/runs',uid=uid,params={'environment_id':env['id']}).json()
+                self.assertEqual(history['total'],1)
+                exported=self.request('GET',f'/hub-v5/shops/{shop}/export',uid=uid)
+                self.assertEqual(exported.status_code,200,exported.text)
+                self.assertEqual('成员私有商品' in exported.text,uid==2)
+                exported=self.request('GET','/hub-v5/exports',uid=uid)
+                self.assertEqual(exported.status_code,200,exported.text)
+                self.assertIn(str(impressions),exported.text)
+        # 有环境访问权但未亲自采集时，不回退到其他人的快照。
+        with self.sessions() as db:
+            db.get(MatrixRun,own['id']).owner_id=3;db.commit()
+        self.assertIsNone(self.request('GET',f'/hub-v5/shops/{shop}/snapshots').json()['snapshot'])
+        self.assertEqual(self.request('GET','/hub-v5/shops/metrics').json()['collected'],0)
+        self.assertEqual(self.request('GET',f'/hub-v5/shops/{shop}/export').status_code,404)
 
     def test_revocation_stops_active_runs_but_allows_final_reports_without_releasing_unknown_locks(self):
         run=self.member_run();item,creds=self.claim(run,8)
@@ -1408,7 +1518,7 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
             self.assertEqual(db.get(MatrixRun,run['id']).status,'awaiting_attention')
             self.assertEqual(db.scalar(select(HubRuntimeLock).where(HubRuntimeLock.matrix_item_id==item)).matrix_item_id,item)
 
-    def test_revoked_unknown_submission_can_be_manually_cancelled_without_retrying_or_losing_the_record(self):
+    def test_revoked_unknown_submission_requires_reauthorized_owner_to_resolve(self):
         run=self.member_run();item,creds=self.claim(run,8);shop=self.bind(item,creds,agent=8)
         with self.sessions() as db:
             task=HubUploadTask(company_id=1,created_by=2,agent_id=8,matrix_item_id=item,export_filename='unknown.xlsx',status='awaiting_attention')
@@ -1419,16 +1529,22 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
             db.commit();task_id=task.id
         self.assertEqual(self.request('PUT','/hub-v5/admin/members/2',json={'enabled':False,'expected_revision':1}).status_code,200)
         path=f'/hub-v5/run-items/{item}/resolve'
-        self.assertEqual(self.request('POST',path,json={'action':'cancel','evidence':'平台已经核对没有提交'}).status_code,409)
+        self.assertEqual(self.request('POST',path,json={'action':'confirm-not-submitted','evidence':'管理员不能代为查看处理'}).status_code,404)
+        self.assertEqual(self.request('POST',path,uid=2,json={'action':'confirm-not-submitted','evidence':'未授权不能处理'}).status_code,403)
+        with self.sessions() as db:
+            self.assertEqual(db.get(MatrixItem,item).submission,'unknown')
+            self.assertEqual(db.scalar(select(HubRuntimeLock).where(HubRuntimeLock.company_id==1)).matrix_item_id,item)
+        self.assertEqual(self.request('PUT','/hub-v5/admin/members/2',json={'enabled':True,'expected_revision':2}).status_code,200)
+        self.assertEqual(self.request('POST',path,uid=2,json={'action':'cancel','evidence':'平台已经核对没有提交'}).status_code,409)
         with self.sessions() as db:
             row=db.get(MatrixItem,item);row.result={'listing':{'accepted':[0]}};db.commit()
-        self.assertEqual(self.request('POST',path,json={'action':'confirm-not-submitted','evidence':'平台已经核对没有提交'}).status_code,409)
+        self.assertEqual(self.request('POST',path,uid=2,json={'action':'confirm-not-submitted','evidence':'平台已经核对没有提交'}).status_code,409)
         with self.sessions() as db:db.get(MatrixItem,item).result={};db.commit()
-        result=self.request('POST',path,json={'action':'confirm-not-submitted','evidence':'平台已经核对没有任何商品提交'})
+        result=self.request('POST',path,uid=2,json={'action':'confirm-not-submitted','evidence':'平台已经核对没有任何商品提交'})
         self.assertEqual(result.status_code,200,result.text)
         with self.sessions() as db:
             self.assertEqual(db.get(HubUploadTask,task_id).status,'cancelled')
-            self.assertEqual(db.get(HubUploadTask,task_id).resolved_by,1)
+            self.assertEqual(db.get(HubUploadTask,task_id).resolved_by,2)
             self.assertEqual(db.get(MatrixItem,item).submission,'not_started')
             self.assertEqual(db.scalar(select(MatrixAllocation.state).where(MatrixAllocation.item_id==item)),'released')
             self.assertIsNone(db.scalar(select(HubRuntimeLock).where(HubRuntimeLock.company_id==1)).matrix_item_id)
@@ -1461,12 +1577,13 @@ class MatrixTests(SupplyFixture,unittest.TestCase):
             db.commit()
         endpoint='/hub-v5/admin/statistics?start=2026-11-06&end=2026-11-06'
         response=self.request('GET',endpoint);self.assertEqual(response.status_code,200,response.text)
-        data=response.json();self.assertEqual(data['summary']['total'],4);self.assertAlmostEqual(data['summary']['success_rate'],1/3)
+        data=response.json();self.assertEqual(data['summary']['total'],2);self.assertAlmostEqual(data['summary']['success_rate'],1)
         self.assertEqual(data['current']['environments'],2);self.assertEqual(data['current']['shops'],1)
-        self.assertEqual(data['daily'][0]['total'],4)
-        self.assertEqual(self.request('GET',endpoint+'&user_id=2').json()['summary']['total'],2)
-        self.assertEqual(self.request('GET',endpoint+'&task=shop.collect').json()['summary']['total'],3)
-        self.assertEqual(self.request('GET',endpoint+'&site=MY').json()['summary']['total'],4)
+        self.assertEqual(data['current']['authorized_members'],1)
+        self.assertEqual(data['daily'][0]['total'],2)
+        self.assertEqual(self.request('GET',endpoint+'&user_id=2').status_code,404)
+        self.assertEqual(self.request('GET',endpoint+'&task=shop.collect').json()['summary']['total'],2)
+        self.assertEqual(self.request('GET',endpoint+'&site=MY').json()['summary']['total'],2)
         self.assertEqual(self.request('GET',endpoint+'&agent_id=3').status_code,404)
         self.assertEqual(self.request('GET','/hub-v5/admin/statistics?start=2025-01-01&end=2026-11-06').status_code,422)
 

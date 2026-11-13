@@ -20,6 +20,7 @@ class MemberPermissionInput(Input):
     # 兼容旧客户端；采集和上品权限统一由 enabled 决定。
     collect_enabled: bool = False
     listing_enabled: bool = False
+    # 兼容旧客户端字段；实际数据范围及保存值统一为 own。
     view_scope: Literal["own", "company"] = "own"
     expected_revision: int = Field(ge=0)
 

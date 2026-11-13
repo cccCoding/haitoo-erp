@@ -1,4 +1,4 @@
-"""公司管理员的成员授权、全公司设备与执行统计，以及平台管理员的跨公司设备管理。"""
+"""ERP 成员授权及本人数据；平台后台独立提供公司设备与执行统计。"""
 from collections import Counter, defaultdict
 from types import SimpleNamespace
 from typing import Literal
@@ -25,7 +25,7 @@ def platform_actor(company_id: int, actor=Depends(current_user), db=Depends(get_
     if db.get(Company, company_id) is None:
         s.fail("公司不存在", 404)
     return SimpleNamespace(id=actor.id, company_id=company_id, role=Role.COMPANY_ADMIN,
-        name=actor.name, token_version=actor.token_version, is_active=True)
+        name=actor.name, token_version=actor.token_version, is_active=True, platform_management=True)
 
 
 def member_view(db, user):
@@ -73,7 +73,7 @@ def set_member_permission(db,actor,user,payload):
     row.enabled=payload.enabled
     row.collect_enabled=payload.enabled
     row.listing_enabled=payload.enabled
-    row.view_scope=payload.view_scope if payload.enabled and user.role!=Role.SUPPLY_USER else "own"
+    row.view_scope="own"
     row.revision+=1;row.updated_at=s.utcnow()
     db.flush()
     stopped=[]
@@ -90,7 +90,8 @@ def set_member_permission(db,actor,user,payload):
 
 @router.get("/devices")
 def devices(user_id:int|None=Query(None,gt=0),actor=Depends(matrix_admin),db=Depends(get_db)):
-    return devices_payload(db, actor, user_id)
+    if user_id is not None and user_id != actor.id:s.fail("设备不存在",404)
+    return devices_payload(db, actor, actor.id)
 
 
 def devices_payload(db, actor, user_id=None):
@@ -108,7 +109,11 @@ def devices_payload(db, actor, user_id=None):
 def statistics(start:date|None=None,end:date|None=None,user_id:int|None=Query(None,gt=0),agent_id:int|None=Query(None,gt=0),
     site:Literal["","MY","ID","unknown"]="",task:Literal["","shop.collect","listing.catalog"]="",
     actor=Depends(matrix_admin),db=Depends(get_db)):
-    return statistics_payload(db, actor, start, end, user_id, agent_id, site, task)
+    if user_id is not None and user_id != actor.id:s.fail("筛选对象不存在",404)
+    if agent_id is not None:
+        agent=db.get(HubAgent,agent_id)
+        if not agent or agent.company_id!=actor.company_id or agent.user_id!=actor.id:s.fail("筛选对象不存在",404)
+    return statistics_payload(db, actor, start, end, actor.id, agent_id, site, task)
 
 
 def statistics_payload(db, actor, start=None, end=None, user_id=None, agent_id=None, site="", task=""):
@@ -146,7 +151,9 @@ def statistics_payload(db, actor, start=None, end=None, user_id=None, agent_id=N
         env_query=env_query.where(env_site.is_(None) if site=="unknown" else env_site==site)
     env_count=db.scalar(select(func.count()).select_from(env_query.subquery()))
     shop_count=db.scalar(env_query.with_only_columns(func.count(func.distinct(MatrixEnvironment.shop_id))))
-    people=list(db.scalars(select(User).where(User.company_id==actor.company_id,User.role.in_(permissions.ROLES))))
+    people_query=select(User).where(User.company_id==actor.company_id,User.role.in_(permissions.ROLES))
+    if user_id:people_query=people_query.where(User.id==user_id)
+    people=list(db.scalars(people_query))
     names={u.id:u.name for u in people}
     return {"start":start,"end":end,"summary":totals(statuses),
         "current":{"authorized_members":sum(permissions.access(db,u)['enabled'] for u in people),"devices":len(current_agents),

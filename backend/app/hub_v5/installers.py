@@ -2,8 +2,7 @@
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from typing import Literal
-from ..models import HubAgent, Role
-from .permissions import company_view
+from ..models import HubAgent
 from ..database import get_db
 from .api import matrix_user
 from .connector_releases import TARGETS, applicable, download, installer_download_link
@@ -15,7 +14,7 @@ router = APIRouter(prefix='/hub-v5', tags=['Agent安装包'])
 def visible_agent(db, actor, identity):
     if identity is None:return None
     agent=db.get(HubAgent,identity)
-    if not agent or agent.company_id!=actor.company_id or not (agent.user_id==actor.id or actor.role==Role.COMPANY_ADMIN or company_view(db,actor)):
+    if not agent or agent.company_id!=actor.company_id or not (agent.user_id==actor.id or getattr(actor,"platform_management",False)):
         s.fail('设备不存在',404)
     return agent.id
 
