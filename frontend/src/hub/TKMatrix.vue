@@ -3,7 +3,7 @@ import {ref,computed,onMounted,onUnmounted,watch,nextTick} from 'vue'
 import {useRoute,useRouter} from 'vue-router'
 import axios from 'axios'
 import {dialogFocus as vDialogFocus} from '../dialog-focus'
-import {label,display,percent,windowBuckets,filterParams,deviceSetup,environmentSyncTargets,sortMatrixRows,runEnvironmentScope} from './matrix'
+import {label,display,percent,windowBuckets,filterParams,deviceSetup,environmentSyncTargets,sortMatrixRows,runEnvironmentScope,matrixRequestError} from './matrix'
 import AgentUpdateHelp from './AgentUpdateHelp.vue'
 import {updateRecovery} from './update-recovery'
 import AgentConnectionBanner from './AgentConnectionBanner.vue'
@@ -113,7 +113,7 @@ function productShare(count:number|null|undefined){
 }
 let generation=0,poll:ReturnType<typeof setInterval>|undefined,disposed=false,polling=false
 async function perform(fn:()=>Promise<void>){if(busy.value)return;busy.value=true;error.value='';try{await fn()}catch(e:any){handle(e)}finally{busy.value=false}}
-function handle(e:any){if(e.response?.status===401)emit('unauthorized');error.value=typeof e.response?.data?.detail==='string'?e.response.data.detail:'请求失败，请重试'}
+function handle(e:any){if(e.response?.status===401)emit('unauthorized');error.value=matrixRequestError(e)}
 async function loadRows(){const id=++generation;loading.value=true;try{const {data}=await api.get('/hub-v5/environments',{...auth(),params:{...filterParams(appliedFilters.value),page:page.value,page_size:size.value}});if(disposed||id!==generation)return;rows.value=data.items;total.value=data.total;groupOptions.value=data.groups||[];if(page.value>pages.value){page.value=pages.value;await loadRows()}}catch(e){handle(e)}finally{if(id===generation)loading.value=false}}
 async function loadRuns(){const {data}=await api.get('/hub-v5/runs',{...auth(),params:{page:runPage.value}});runs.value=data.items;runTotal.value=data.total;activeRun.value=data.active;runSummary.value=data.summary||{}}
 async function loadDevices(){

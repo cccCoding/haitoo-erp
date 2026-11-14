@@ -1,6 +1,22 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {display,percent,windowBuckets,filterParams,deviceSetup,sortMatrixRows} from '../src/hub/matrix.ts'
+import {display,percent,windowBuckets,filterParams,deviceSetup,sortMatrixRows,matrixRequestError} from '../src/hub/matrix.ts'
+
+test('matrix request errors show validation fields and reasons without echoing submitted values',()=>{
+ const message=matrixRequestError({response:{status:422,data:{detail:[
+  {type:'extra_forbidden',loc:['body','flash_sale'],msg:'Extra inputs are not permitted',input:{secret:'private-value'}},
+  {type:'int_parsing',loc:['body','environment_ids',0],msg:'Input should be a valid integer',input:'private-value'},
+ ]}}})
+ assert.equal(message,'请求参数校验失败（HTTP 422）：body.flash_sale：Extra inputs are not permitted [extra_forbidden]；body.environment_ids.0：Input should be a valid integer [int_parsing]')
+ assert.equal(message.includes('private-value'),false)
+})
+
+test('matrix request errors preserve business messages and handle missing or malformed details',()=>{
+ assert.equal(matrixRequestError({response:{status:409,data:{detail:'执行预览已过期或配置已修改，请重新预览'}}}),'执行预览已过期或配置已修改，请重新预览')
+ assert.equal(matrixRequestError({response:{status:500,data:'Internal Server Error'}}),'请求失败（HTTP 500），请重试')
+ assert.equal(matrixRequestError({response:{status:422,data:{detail:[null,{},42]}}}),'请求失败（HTTP 422），请重试')
+ for(const error of [null,undefined,new Error('Network Error')])assert.equal(matrixRequestError(error),'请求失败，请重试')
+})
 test('an online connector is not ready when HubStudio or its execution capabilities are missing',()=>{
  const now=Date.now(),config={enabled:true,listing_enabled:false}
  const device={is_active:true,online:true,version:'5.1.0',hub_identity:'team',hub_connected:false,sync_at:null,paused:false,capabilities:{}}

@@ -3,6 +3,27 @@ export const label=(s:string)=>statusLabels[s] || s || '—'
 export const display=(v:unknown)=>v===null || v===undefined ? '—' : typeof v==='number' ? v.toLocaleString('zh-CN') : String(v)
 export const percent=(v:number|null|undefined)=>v===null || v===undefined ? '—' : `${(v*100).toFixed(2)}%`
 export const filterParams=(filters:Record<string,unknown>)=>Object.fromEntries(Object.entries(filters).filter(([,value])=>value!==''&&value!==null&&value!==undefined))
+
+// 展示校验字段和原因，不回显可能包含凭据的 input 或整个响应体。
+export function matrixRequestError(error:unknown):string {
+ const response=(error as {response?:{status?:number;data?:{detail?:unknown}}}|null)?.response
+ const detail=response?.data?.detail
+ if(typeof detail==='string'&&detail.trim())return detail
+ const status=response?.status
+ const suffix=status?`（HTTP ${status}）`:''
+ if(Array.isArray(detail)){
+  const messages=detail.flatMap((issue:unknown)=>{
+   if(typeof issue==='string')return issue.trim()?[issue]:[]
+   if(!issue||typeof issue!=='object')return []
+   const {loc,msg,type}=issue as {loc?:unknown;msg?:unknown;type?:unknown}
+   if(typeof msg!=='string'||!msg.trim())return []
+   const field=Array.isArray(loc)?loc.filter(part=>typeof part==='string'||typeof part==='number').join('.'):''
+   return [`${field?`${field}：`:''}${msg}${typeof type==='string'&&type?` [${type}]`:''}`]
+  })
+  if(messages.length)return `${status===422?'请求参数校验失败':'请求失败'}${suffix}：${messages.join('；')}`
+ }
+ return `请求失败${suffix}，请重试`
+}
 type MatrixDeviceStatus = {is_active:boolean;online:boolean;version:string;hub_identity?:string|null;hub_connected:boolean;sync_at?:string|null;paused:boolean;capabilities?:Record<string,string[]>;permissions?:{enabled:boolean;collect_enabled:boolean;listing_enabled:boolean}}
 export function deviceSetup(device:MatrixDeviceStatus,config:{enabled:boolean;listing_enabled:boolean},now=Date.now()){
  const result=(code:string,title:string,description:string,canSync=false)=>({code,title,description,canSync})
